@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://arctic-qa.local/schemas/item.v1.schema.json",
+  "title": "Arctic QA candidate",
+  "type": "object",
+  "required": ["schema_version", "item_id", "source", "question", "answer", "provenance"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "item_id": {"type": "string", "pattern": "^aqa-[a-f0-9]+$"},
+    "status": {"enum": ["candidate", "candidate_corrected_once", "machine_accepted_unverified", "rejected", "unresolved"]},
+    "task_type": {"enum": ["short_answer", "answer_present_mcq", "answer_absent_mcq"]},
+    "source": {
+      "type": "object",
+      "required": ["source_id", "paper_family_id", "content_hash", "chunk_id", "section_id"]
+    },
+    "question": {"type": "string", "minLength": 1},
+    "answer": {
+      "type": "object",
+      "required": ["text", "evidence_quote", "locator", "scope", "required_question_phrases"]
+    },
+    "provenance": {"type": "object"}
+  },
+  "additionalProperties": true
+}

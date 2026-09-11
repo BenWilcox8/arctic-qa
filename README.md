@@ -1,0 +1,284 @@
+# Arctic QA
+
+Arctic QA builds local, source-supported scientific QA and MCQ records.
+Arctic science is the first domain configuration.
+The project does not claim that Arctic science is underrepresented in model training.
+
+The current implementation is infrastructure only.
+It has not produced a research dataset or evaluated a model.
+The strongest automated output label is `machine_accepted_unverified`.
+
+## Safety boundary
+
+The default data root is `/mnt/crdata/research-abstention`.
+The CLI writes project data only under its `arctic-qa` namespace.
+It refuses the default root when the expected mounted drive is absent or read-only.
+It never uses a root-disk fallback.
+
+The CLI permits a different root only with `--test-mode`.
+Use this option only for tests and disposable fixtures.
+
+The pipeline treats source content as untrusted data.
+Provider prompts tell models not to obey source instructions or call tools.
+
+## Development shell
+
+Enter the pinned Nix shell:
+
+```bash
+nix develop
+```
+
+Run the CLI from the repository:
+
+```bash
+PYTHONPATH=src python -m arctic_qa --help
+PYTHONPATH=src python -m arctic_qa --json doctor
+```
+
+The shell supplies Python, pytest, and `pdftotext`.
+The project does not require a server, vector database, GPU, or parser model.
+
+## Staged workflow
+
+All commands use the mounted default root unless you supply a test root.
+
+### 1. Check the environment
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json doctor
+```
+
+The result reports only whether provider keys are set.
+It never prints key values.
+
+### 2. Discover sources
+
+Look up the two collaborator DOI seeds:
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json discover \
+  --adapter crossref \
+  --doi 10.1111/j.1365-2419.2005.00365.x \
+  --doi 10.1016/j.rsase.2025.101797
+```
+
+The DOI records are discovery seeds.
+They do not receive automatic geographic acceptance.
+
+Run a bounded Crossref query:
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json discover \
+  --adapter crossref \
+  --query "Arctic coastal ecology" \
+  --pages 2 \
+  --per-page 5
+```
+
+Expand references from one DOI:
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json discover \
+  --adapter crossref \
+  --references-of 10.1111/j.1365-2419.2005.00365.x \
+  --max-references 5
+```
+
+Use `--adapter replay --input FILE` when public APIs are unavailable.
+Use `--adapter manual --input FILE` for supplied metadata.
+
+An optional Zotero custody bridge reads `library-originals/catalog.tsv`:
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json discover \
+  --adapter catalog \
+  --input /mnt/crdata/research-abstention/library-originals/catalog.tsv
+```
+
+The command reads public rows only.
+It does not modify the archive or create a second Zotero library.
+
+### 3. Screen geography
+
+Create an evidence file from a study setting or source coordinates:
+
+```json
+{
+  "evidence_kind": "site_coordinates",
+  "latitudes": [71.3],
+  "named_regions": [],
+  "source_locator": "Methods, page 4"
+}
+```
+
+Apply the rule:
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json screen \
+  --source-id SOURCE_ID \
+  --evidence geography.json
+```
+
+The version 1 rule uses 66.56 degrees north and a configurable marine list.
+The marine list is a proposed corpus control.
+It is not a universal definition of Arctic science.
+
+Titles, keywords, affiliations, and collaborator status cannot establish acceptance.
+The default generation queue excludes unresolved, mixed, and subarctic-related records.
+
+### 4. Fetch an original
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json fetch \
+  --source-id SOURCE_ID \
+  --url 'https://publisher.example/article.xml' \
+  --media-type application/xml
+```
+
+The maximum original size is 50 MiB by default.
+The CLI stores each original by SHA-256 and never replaces different content at the same immutable path.
+
+### 5. Extract and chunk
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json extract \
+  --source-id SOURCE_ID \
+  --char-cap 6000 \
+  --overlap-chars 500
+```
+
+Use publisher JATS first.
+Use publisher HTML when JATS is unavailable.
+Use born-digital PDF text as the last authorized fallback.
+
+The extractor retains section IDs, heading paths, pages, block numbers, offsets, object labels, hashes, and warnings.
+Generation prefers prose chunks without table, figure, or equation labels.
+
+### 6. Generate candidates
+
+The versioned role defaults are in `config/roles.v1.json`.
+The strongest profile uses `claude-opus-5` for authoring.
+It uses `gemini-3.1-pro-preview` for independent reconstruction and falsity checks.
+
+The cost-aware profile uses `claude-sonnet-5` and `gemini-3.8-flash`.
+These assignments are unvalidated starting configurations.
+
+Set keys only in the environment or another private supported input:
+
+```bash
+export ANTHROPIC_API_KEY='...'
+export GEMINI_API_KEY='...'
+```
+
+Do not put keys in repository files, command output, manifests, or exports.
+
+Live mode requires credentials and an explicit positive budget:
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json generate \
+  --source-id SOURCE_ID \
+  --run-id pilot-r1 \
+  --arm answer_first \
+  --author-provider claude \
+  --author-model claude-opus-5 \
+  --verifier-provider gemini \
+  --verifier-model gemini-3.1-pro-preview \
+  --budget-mode tokens \
+  --budget-limit 50000 \
+  --reservation 5000
+```
+
+Use `--arm direct_joint` for the required baseline.
+The baseline uses the same reconstruction and acceptance gates.
+
+The pipeline records each call before dispatch.
+A timeout after dispatch creates an `ambiguous_charge` receipt.
+The pipeline does not retry that receipt as a free request.
+
+### 7. Validate candidates
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json validate --item-id ITEM_ID
+```
+
+The default release policy requires executable distractor incompatibility.
+Model-only contradiction has the `model-verified` label and a residual-error notice.
+It does not receive deterministic or certain status.
+
+One item can use one component-only correction after hard gates pass.
+The candidate must fail exactly one declared remediable component gate.
+
+### 8. Export records
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json export \
+  --run-id pilot-r1 \
+  --seed arctic-qa-v1
+```
+
+The export keeps short-answer records as a first-class file.
+An answer-present MCQ requires three accepted distractors.
+An answer-absent form requires four accepted distractors.
+
+The absent form has the `invalid_option_set` label.
+It does not establish model ignorance or absent real-world evidence.
+
+### 9. Resume and inspect status
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json resume --run-id pilot-r1
+PYTHONPATH=src python -m arctic_qa --json status --run-id pilot-r1
+```
+
+Completed calls are reused by run, entity, role, and prompt hash.
+Ambiguous calls require manual charge reconciliation before a retry.
+
+## Smoke workflows
+
+Run the complete offline fake-provider workflow:
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json smoke \
+  --fixture-dir fixtures \
+  --run-id smoke-r1
+```
+
+Add two bounded public Crossref lookups:
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json smoke \
+  --fixture-dir fixtures \
+  --run-id public-smoke-r1 \
+  --public
+```
+
+The fixture is synthetic, CC0, and marked `test_only`.
+Smoke output is infrastructure evidence, not a research result.
+
+## Data layout
+
+The CLI creates these paths under `/mnt/crdata/research-abstention/arctic-qa`:
+
+- `state.sqlite3` contains resumable state and small records.
+- `originals/` contains immutable original objects and retrieval manifests.
+- `parsed/` contains immutable section JSONL.
+- `chunks/` contains immutable chunk JSONL.
+- `manifests/` contains content-addressed source manifests.
+- `runs/` contains run receipts.
+- `replay/` contains public discovery responses for offline replay.
+- `exports/` contains deterministic JSONL exports.
+- `backups/` contains database backups before future schema changes.
+
+Large source text and logs stay on the mounted drive.
+The repository contains only small synthetic fixtures.
+
+## Automated labels
+
+The validator stores separate states for schema, evidence, scope, reconstruction, contradiction, and alternative-answer search.
+It also stores `rejected`, `unresolved`, and `machine_accepted_unverified` outcomes.
+
+The system never emits `CERTAINLY_TRUE` or `CERTAINLY_FALSE`.
+It never converts model votes into a confidence probability.
+
+Read [Method traceability](docs/METHODS.md) for the evidence basis and limits.

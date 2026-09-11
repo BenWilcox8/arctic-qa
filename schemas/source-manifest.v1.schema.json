@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://arctic-qa.local/schemas/source-manifest.v1.schema.json",
+  "title": "Arctic QA source manifest record",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "source_id",
+    "stable_id",
+    "title",
+    "provenance",
+    "paper_family_id",
+    "geography_state",
+    "geography_confidence",
+    "eligibility_state"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "doi": {"type": ["string", "null"]},
+    "geography_state": {"enum": ["core_arctic", "subarctic_related", "mixed", "unresolved", "excluded"]},
+    "eligibility_state": {"enum": ["eligible", "excluded", "pending"]}
+  },
+  "additionalProperties": true
+}

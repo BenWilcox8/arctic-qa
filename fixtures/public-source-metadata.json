@@ -1,0 +1,15 @@
+{
+  "stable_id": "test-only:public-arctic-source-v1",
+  "title": "Synthetic public Arctic extraction fixture",
+  "authors": [{"name": "Arctic QA test suite"}],
+  "published_date": "2026-09-11",
+  "year": 2026,
+  "discipline": "synthetic calibration",
+  "source_version": "fixture-v1",
+  "retrieval_url": "urn:arctic-qa:test-only:public-source-v1",
+  "license": "CC0-1.0",
+  "paper_family_id": "family-test-only-public-arctic-v1",
+  "query": "offline public fixture",
+  "test_only": true,
+  "scientific_result": false
+}

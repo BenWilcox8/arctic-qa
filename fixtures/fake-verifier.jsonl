@@ -1,0 +1,2 @@
+{"role":"reconstructor","response":{"answer":"200 cm","numeric":{"canonical_value":"200","unit":"cm"},"evidence_quote":"The reported water depth was 2.0 m with a source-grounded tolerance of 0.1 m.","ambiguity_label":"one_answer","alternatives":[]}}
+{"role":"falsity_verifier","response":{"source_entailment_model_verified":true,"alternative_answer_search_passed":true,"residual_error":"Model agreement is not proof of scientific truth."}}

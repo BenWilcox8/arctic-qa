@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0.0",
+  "boundary_latitude_north": 66.56,
+  "definition_note": "Conservative project scope. Named marine regions require study-setting evidence.",
+  "arctic_ocean_regions": [
+    "Central Arctic Ocean",
+    "Arctic Ocean",
+    "Beaufort Sea",
+    "East Siberian Sea",
+    "Laptev Sea",
+    "Kara Sea",
+    "Lincoln Sea",
+    "Canada Basin",
+    "Eurasian Basin",
+    "Nansen Basin",
+    "Amundsen Basin",
+    "Makarov Basin"
+  ],
+  "sub_arctic_related": [
+    "Aleutian Islands",
+    "Aleutian Archipelago",
+    "Gulf of Alaska",
+    "Bering Sea",
+    "Kodiak Island",
+    "Hudson Bay",
+    "Labrador Sea",
+    "Norwegian Sea",
+    "northern North Atlantic"
+  ],
+  "boundary_crossing_requires_coordinates": [
+    "Chukchi Sea",
+    "Barents Sea",
+    "Greenland Sea",
+    "Baffin Bay"
+  ]
+}
