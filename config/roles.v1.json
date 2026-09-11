@@ -10,7 +10,8 @@
       "distractor_writer": {"provider": "claude", "model": "claude-opus-5"},
       "correction": {"provider": "claude", "model": "claude-opus-5"},
       "reconstructor": {"provider": "gemini", "model": "gemini-3.1-pro-preview", "lifecycle": "preview"},
-      "falsity_verifier": {"provider": "gemini", "model": "gemini-3.1-pro-preview", "lifecycle": "preview"}
+      "answer_verifier": {"provider": "gemini", "model": "gemini-3.1-pro-preview", "lifecycle": "preview"},
+      "option_verifier": {"provider": "gemini", "model": "gemini-3.1-pro-preview", "lifecycle": "preview"}
     },
     "cost_aware": {
       "extractor": {"provider": "claude", "model": "claude-sonnet-5"},
@@ -19,7 +20,8 @@
       "distractor_writer": {"provider": "claude", "model": "claude-sonnet-5"},
       "correction": {"provider": "claude", "model": "claude-sonnet-5"},
       "reconstructor": {"provider": "gemini", "model": "gemini-3.8-flash", "lifecycle": "stable"},
-      "falsity_verifier": {"provider": "gemini", "model": "gemini-3.8-flash", "lifecycle": "stable"}
+      "answer_verifier": {"provider": "gemini", "model": "gemini-3.8-flash", "lifecycle": "stable"},
+      "option_verifier": {"provider": "gemini", "model": "gemini-3.8-flash", "lifecycle": "stable"}
     }
   }
 }

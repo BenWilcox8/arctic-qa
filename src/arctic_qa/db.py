@@ -11,7 +11,7 @@ from typing import Any, Iterator
 from .util import canonical_json
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 
 SCHEMA = """
@@ -120,6 +120,18 @@ CREATE TABLE IF NOT EXISTS budgets (
     spent_value TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS findings (
+    finding_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    paper_family_id TEXT NOT NULL,
+    chunk_id TEXT NOT NULL,
+    selection_policy_version TEXT NOT NULL,
+    answer_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(run_id, source_id, selection_policy_version)
+);
 CREATE TABLE IF NOT EXISTS candidates (
     item_id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL,
@@ -214,6 +226,56 @@ class Database:
                     self.connection.execute(
                         "ALTER TABLE artifacts_v2 RENAME TO artifacts"
                     )
+                    self.connection.execute("UPDATE schema_info SET version=2")
+            row = self.connection.execute("SELECT version FROM schema_info").fetchone()
+            if row and row[0] == 2:
+                with self.transaction():
+                    self.connection.execute(
+                        """CREATE TABLE IF NOT EXISTS findings (
+                        finding_id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        source_id TEXT NOT NULL,
+                        paper_family_id TEXT NOT NULL,
+                        chunk_id TEXT NOT NULL,
+                        selection_policy_version TEXT NOT NULL,
+                        answer_json TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        UNIQUE(run_id, source_id, selection_policy_version)
+                        )"""
+                    )
+                    self.connection.execute(
+                        "UPDATE schema_info SET version=?", (SCHEMA_VERSION,)
+                    )
+            row = self.connection.execute("SELECT version FROM schema_info").fetchone()
+            if row and row[0] == 3:
+                with self.transaction():
+                    self.connection.execute(
+                        "ALTER TABLE findings RENAME TO findings_v3"
+                    )
+                    self.connection.execute(
+                        """CREATE TABLE findings (
+                        finding_id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        source_id TEXT NOT NULL,
+                        paper_family_id TEXT NOT NULL,
+                        chunk_id TEXT NOT NULL,
+                        selection_policy_version TEXT NOT NULL,
+                        answer_json TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        UNIQUE(run_id, source_id, selection_policy_version)
+                        )"""
+                    )
+                    self.connection.execute(
+                        """INSERT INTO findings
+                        (finding_id,run_id,source_id,paper_family_id,chunk_id,
+                         selection_policy_version,answer_json,status,created_at)
+                        SELECT finding_id,'legacy-unknown',source_id,paper_family_id,
+                               chunk_id,selection_policy_version,answer_json,status,created_at
+                        FROM findings_v3"""
+                    )
+                    self.connection.execute("DROP TABLE findings_v3")
                     self.connection.execute(
                         "UPDATE schema_info SET version=?", (SCHEMA_VERSION,)
                     )

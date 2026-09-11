@@ -177,7 +177,7 @@ The default generation queue excludes unresolved, mixed, and subarctic-related r
 
 The versioned role defaults are in `config/roles.v1.json`.
 The strongest profile uses `claude-opus-5` for authoring.
-It uses `gemini-3.1-pro-preview` for independent reconstruction and falsity checks.
+It uses `gemini-3.1-pro-preview` for independent reconstruction, answer checks, and exact-option checks.
 
 The cost-aware profile uses `claude-sonnet-5` and `gemini-3.8-flash`.
 These assignments are unvalidated starting configurations.
@@ -230,7 +230,18 @@ The CLI refuses a USD request before dispatch when a price is absent.
 An unexpected provider overage is recorded and stops later calls.
 
 Use `--arm direct_joint` for the required baseline.
-The baseline uses the same reconstruction and acceptance gates.
+Each run freezes one proposed finding per paper.
+Both arms use the same finding record, reconstruction, and acceptance gates.
+The pipeline retains a failed finding instead of sampling a replacement.
+
+The reconstructor does not receive the proposed answer.
+It must return source-located evidence, scope, alternatives, and an independently assigned question claim type.
+The answer verifier receives the proposed answer and reconstruction.
+All QA gates run before distractor generation.
+After generation, the verifier receives each exact displayed option in a separate call.
+Each verdict binds to the source, QA, option, prompt, provider, model, and request record.
+Author verification flags have no acceptance authority.
+A scope substitution can remain a valid distractor when it is false for this question, even if it is true in another location or period.
 
 The pipeline records each call before dispatch.
 A response must pass the complete role-specific nested schema before completion.
@@ -246,12 +257,15 @@ PYTHONPATH=src python -m arctic_qa --json validate --item-id ITEM_ID
 The default release policy requires executable distractor incompatibility.
 Nonnumeric deterministic checks use a typed rule on the source-located answer.
 They parse the displayed option and ignore self-asserted allowed or excluded values from a distractor.
+Numeric deterministic checks reject negated or compound displayed assertions because one metadata value cannot bind them safely.
 Model-only contradiction has the `model-verified` label and a residual-error notice.
 It does not receive deterministic or certain status.
 
 One item can use one component-only correction after hard gates pass.
 The candidate must fail exactly one declared remediable component gate.
 An absent or false independent source-entailment result stays unresolved.
+Unsafe version 1 candidates are rejected because they lack exact-option verifier bindings.
+If fewer than three distractors pass, the short-answer item remains accepted and the MCQ is withheld.
 
 ### 8. Export records
 

@@ -74,6 +74,16 @@ class FakeProvider:
             raise ProviderError(
                 f"fake provider expected role {event.get('role')}, received {role}"
             )
+        if any(
+            value not in prompt for value in event.get("require_prompt_contains", [])
+        ):
+            raise ProviderError(
+                f"fake provider prompt for {role} is missing required markers"
+            )
+        if any(value in prompt for value in event.get("forbid_prompt_contains", [])):
+            raise ProviderError(
+                f"fake provider prompt for {role} contains a forbidden marker"
+            )
         kind = event.get("kind", "response")
         if kind == "timeout":
             raise TimeoutError("simulated provider timeout")

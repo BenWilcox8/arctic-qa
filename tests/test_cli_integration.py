@@ -12,6 +12,9 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 FIXTURES = REPO / "fixtures"
+sys.path.insert(0, str(REPO / "src"))
+
+from arctic_qa.util import canonical_json, stable_id  # noqa: E402
 
 
 def cli(
@@ -64,6 +67,37 @@ def write_candidate(tmp_path: Path, payload: dict, name: str) -> Path:
     path = tmp_path / name
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
+
+
+def bind_option_verdicts(item: dict, quote: str, locator: dict) -> None:
+    qa_hash = stable_id("qa", item["question"], canonical_json(item["answer"]))
+    item["option_verdicts"] = []
+    for option in item["distractors"]:
+        option_hash = stable_id("option", qa_hash, option["text"], option["type"])
+        item["option_verdicts"].append(
+            {
+                "source_hash": item["source"]["content_hash"],
+                "qa_hash": qa_hash,
+                "option_hash": option_hash,
+                "option_text": option["text"],
+                "contradiction_established": True,
+                "alternative_answer_search_passed": True,
+                "true_in_different_context": False,
+                "question_admits_option_as_correct": False,
+                "evidence_quote": quote,
+                "locator": locator,
+                "rationale": "Test-only source-bound contradiction.",
+                "provenance": {
+                    "role": "option_verifier",
+                    "provider": "fake",
+                    "requested_model": "fake-verifier",
+                    "returned_model": "fake-verifier",
+                    "request_id": "test-only",
+                    "prompt_version": "test-only",
+                    "prompt_hash": "test-only",
+                },
+            }
+        )
 
 
 def source_locator_for_quote(root: Path, source_id: str, quote: str) -> dict:
@@ -287,6 +321,8 @@ def test_validation_rejects_answer_failures(
         item["reconstruction"]["ambiguity_label"] = "multiple_answers"
     else:
         item["question_claim_type"] = "causal"
+        item["reconstruction"]["question_claim_type"] = "causal"
+        item["answer_verification"]["question_claim_type"] = "causal"
     path = write_candidate(tmp_path, item, f"{mutation}.json")
     result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
     assert result["final_label"] == label
@@ -296,13 +332,13 @@ def test_validation_rejects_answer_failures(
 def test_validation_requires_positive_source_entailment(tmp_path: Path) -> None:
     smoke(tmp_path)
     item = candidate(tmp_path)
-    item["verification"]["source_entailment_model_verified"] = False
+    item["answer_verification"]["source_entailment_model_verified"] = False
     path = write_candidate(tmp_path, item, "failed-entailment.json")
     result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
     assert result["final_label"] == "unresolved"
     assert "source_entailment_not_verified" in result["reasons"]
 
-    item["verification"]["source_entailment_model_verified"] = True
+    item["answer_verification"]["source_entailment_model_verified"] = True
     path = write_candidate(tmp_path, item, "passed-entailment.json")
     control = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
     assert control["final_label"] == "machine_accepted_unverified"
@@ -313,15 +349,16 @@ def test_true_distractors_and_equivalent_units_are_not_false(tmp_path: Path) -> 
     item = candidate(tmp_path)
     item["distractors"][0]["text"] = "2 m"
     item["distractors"][0]["numeric"] = {"canonical_value": "200", "unit": "cm"}
-    item["distractors"][1]["true_under_other_scope"] = True
+    item["option_verdicts"][1]["question_admits_option_as_correct"] = True
     item["distractors"][2]["text"] = "2.0 m"
     item["distractors"][3]["text"] = "None of the above"
     path = write_candidate(tmp_path, item, "true-distractors.json")
     result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
-    assert result["final_label"] == "rejected"
+    assert result["final_label"] == "machine_accepted_unverified"
+    assert result["labels"]["mcq_eligible"] is False
     reasons = [reason for row in result["distractors"] for reason in row["reasons"]]
     assert "distractor_is_equivalent_numeric_answer" in reasons
-    assert "distractor_true_under_other_scope" in reasons
+    assert "option_correct_under_question_interpretation" in reasons
     assert "distractor_matches_answer" in reasons
     assert "forbidden_meta_option" in reasons
 
@@ -330,13 +367,16 @@ def test_numeric_rule_must_match_source_and_displayed_answer(tmp_path: Path) -> 
     smoke(tmp_path)
     item = candidate(tmp_path)
     item["answer"]["numeric_rule"]["canonical_value"] = "999"
+    bind_option_verdicts(
+        item,
+        item["answer"]["evidence_quote"],
+        item["answer"]["locator"],
+    )
     path = write_candidate(tmp_path, item, "unbound-numeric-rule.json")
     result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
     assert result["final_label"] == "rejected"
-    assert all(
-        "source_bound_numeric_rule_missing" in row["reasons"]
-        for row in result["distractors"]
-    )
+    assert result["labels"]["mcq_eligible"] is False
+    assert "source_bound_numeric_rule_missing" in result["reasons"]
 
     control = candidate(tmp_path)
     control_path = write_candidate(tmp_path, control, "bound-numeric-rule.json")
@@ -387,10 +427,11 @@ def test_self_asserted_typed_distractor_rules_are_not_deterministic(
         distractor.update(values)
     path = write_candidate(tmp_path, item, "self-asserted-rules.json")
     result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
-    assert result["final_label"] == "rejected"
+    assert result["final_label"] == "machine_accepted_unverified"
+    assert result["labels"]["mcq_eligible"] is False
     for row in result["distractors"][:3]:
         assert row["deterministic"] is False
-        assert "source_bound_predicate_missing" in row["reasons"]
+        assert "option_verdict_missing_or_stale" in row["reasons"]
 
     control = candidate(tmp_path)
     control_path = write_candidate(tmp_path, control, "numeric-control.json")
@@ -452,9 +493,20 @@ def test_source_bound_typed_distractor_controls(
     item["reconstruction"] = {
         "answer": answer_text,
         "evidence_quote": quote,
+        "locator": locator,
+        "scope": item["answer"]["scope"],
+        "question_claim_type": item["answer"]["claim_type"],
         "ambiguity_label": "one_answer",
         "alternatives": [],
     }
+    item["answer_verification"].update(
+        {
+            "evidence_quote": quote,
+            "locator": locator,
+            "scope": item["answer"]["scope"],
+            "question_claim_type": item["answer"]["claim_type"],
+        }
+    )
     item["distractors"] = []
     for option in options:
         predicate = {"kind": kind}
@@ -468,13 +520,10 @@ def test_source_bound_typed_distractor_controls(
                 "type": kind,
                 "evidence_quote": quote,
                 "locator": locator,
-                "verification": {
-                    "model_verified": True,
-                    "alternative_answer_search_passed": True,
-                },
                 "deterministic": predicate,
             }
         )
+    bind_option_verdicts(item, quote, locator)
     path = write_candidate(tmp_path, item, f"valid-{kind}.json")
     result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
     assert result["final_label"] == "machine_accepted_unverified"
@@ -755,7 +804,7 @@ def test_smoke_resume_does_not_duplicate_calls(tmp_path: Path) -> None:
         count = connection.execute(
             "SELECT COUNT(*) FROM calls WHERE run_id='resume-run'"
         ).fetchone()[0]
-    assert count == 5
+    assert count == 9
 
 
 def test_shared_content_keeps_per_source_provenance(tmp_path: Path) -> None:
@@ -844,3 +893,306 @@ def test_fetch_rejects_local_urls_without_explicit_test_fixture_mode(
     allowed = json.loads(cli(tmp_path, *arguments, "--allow-test-file").stdout)
     assert allowed["media_type"] == "text/html"
     assert allowed["size_bytes"] > 0
+
+
+def test_generation_runs_qa_gates_before_exact_option_verification(
+    tmp_path: Path,
+) -> None:
+    receipt = smoke(tmp_path, "ordered-verification-run")
+    item = candidate(tmp_path)
+    with database(tmp_path) as connection:
+        calls = connection.execute(
+            "SELECT role,prompt_hash,response_json FROM calls WHERE run_id=? ORDER BY rowid",
+            ("ordered-verification-run",),
+        ).fetchall()
+    roles = [row["role"] for row in calls]
+    assert roles[:5] == [
+        "extractor",
+        "question_writer",
+        "reconstructor",
+        "answer_verifier",
+        "distractor_writer",
+    ]
+    assert roles[5:] == ["option_verifier"] * 4
+    assert item["schema_version"] == "2.0.0"
+    assert item["finding_id"]
+    assert len(item["option_verdicts"]) == 4
+    assert all(verdict["option_text"] for verdict in item["option_verdicts"])
+    assert receipt["validation"]["labels"]["mcq_eligible"] is True
+
+
+def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> None:
+    receipt = smoke(tmp_path, "setup-run")
+    source_id = receipt["screen"]["source_id"]
+    events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-verifier.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    events[0]["response"]["alternatives"] = ["another source-supported answer"]
+    verifier = tmp_path / "ambiguous-verifier.jsonl"
+    verifier.write_text(
+        "\n".join(json.dumps(event) for event in events[:2]) + "\n",
+        encoding="utf-8",
+    )
+    command = list(
+        generate_command(
+            source_id,
+            "qa-gate-stop-run",
+            FIXTURES / "fake-author.jsonl",
+        )
+    )
+    command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(verifier)
+    generated = json.loads(cli(tmp_path, *command).stdout)
+    assert generated["status"] == "qa_gate_failed"
+    assert generated["distractors"] == []
+    with database(tmp_path) as connection:
+        roles = [
+            row[0]
+            for row in connection.execute(
+                "SELECT role FROM calls WHERE run_id=? ORDER BY rowid",
+                ("qa-gate-stop-run",),
+            )
+        ]
+    assert roles == [
+        "extractor",
+        "question_writer",
+        "reconstructor",
+        "answer_verifier",
+    ]
+
+
+def test_generation_arms_share_one_frozen_finding(tmp_path: Path) -> None:
+    receipt = smoke(tmp_path, "matched-arm-run")
+    first = candidate(tmp_path)
+    direct_author = tmp_path / "direct-author.jsonl"
+    distractor_event = json.loads(
+        (FIXTURES / "fake-author.jsonl").read_text(encoding="utf-8").splitlines()[2]
+    )
+    direct_author.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "role": "direct_joint",
+                        "response": {
+                            "question": "For the synthetic calibration at 71.3 N, which water depth was reported?",
+                            "answer": first["answer"],
+                        },
+                    }
+                ),
+                json.dumps(distractor_event),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    cli(
+        tmp_path,
+        *generate_command(
+            receipt["screen"]["source_id"],
+            "matched-arm-run",
+            direct_author,
+        ),
+        "--arm",
+        "direct_joint",
+    )
+    with database(tmp_path) as connection:
+        finding_ids = {
+            json.loads(row[0])["finding_id"]
+            for row in connection.execute(
+                "SELECT candidate_json FROM candidates WHERE run_id=?",
+                ("matched-arm-run",),
+            )
+        }
+        finding_count = connection.execute(
+            "SELECT COUNT(*) FROM findings WHERE run_id=?",
+            ("matched-arm-run",),
+        ).fetchone()[0]
+    assert finding_ids == {first["finding_id"]}
+    assert finding_count == 1
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        ("fabricated_reconstruction_quote", "reconstruction_evidence_not_located"),
+        ("stated_alternative", "reconstruction_alternative_answer_present"),
+        ("causal_question", "causal_overclaim"),
+    ],
+)
+def test_reconstruction_and_independent_claim_type_are_enforced(
+    tmp_path: Path, mutation: str, reason: str
+) -> None:
+    smoke(tmp_path)
+    item = candidate(tmp_path)
+    if mutation == "fabricated_reconstruction_quote":
+        item["reconstruction"]["evidence_quote"] = "A fabricated quotation."
+    elif mutation == "stated_alternative":
+        item["reconstruction"]["alternatives"] = ["another supported answer"]
+    else:
+        item["answer_verification"]["question_claim_type"] = "causal"
+        item["reconstruction"]["question_claim_type"] = "causal"
+    path = write_candidate(tmp_path, item, f"{mutation}.json")
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+    assert reason in result["reasons"]
+    assert result["final_label"] in {"rejected", "unresolved"}
+
+
+def test_author_flags_and_hidden_numeric_metadata_cannot_certify_true_options(
+    tmp_path: Path,
+) -> None:
+    smoke(tmp_path)
+    item = candidate(tmp_path)
+    true_paraphrases = [
+        ("The reported depth was 2.0 m.", "5"),
+        ("A depth of 200 cm was reported.", "6"),
+        ("Two metres was reported.", "7"),
+    ]
+    for distractor, (text, hidden_value) in zip(
+        item["distractors"][:3], true_paraphrases, strict=True
+    ):
+        distractor["text"] = text
+        distractor["numeric"] = {"canonical_value": hidden_value, "unit": "m"}
+        distractor["verification"] = {
+            "model_verified": True,
+            "alternative_answer_search_passed": True,
+        }
+    item["distractors"] = item["distractors"][:3]
+    path = write_candidate(tmp_path, item, "true-paraphrase-options.json")
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+    reasons = {reason for row in result["distractors"] for reason in row["reasons"]}
+    assert "numeric_metadata_display_mismatch" in reasons
+    assert result["labels"]["mcq_eligible"] is False
+
+
+def test_author_verification_flags_have_no_acceptance_authority(
+    tmp_path: Path,
+) -> None:
+    smoke(tmp_path)
+    item = candidate(tmp_path)
+    item["option_verdicts"] = []
+    for distractor in item["distractors"]:
+        distractor["verification"] = {
+            "model_verified": True,
+            "alternative_answer_search_passed": True,
+        }
+    path = write_candidate(tmp_path, item, "forged-author-flags.json")
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+    assert result["labels"]["mcq_eligible"] is False
+    assert all(
+        "option_verdict_missing_or_stale" in row["reasons"]
+        for row in result["distractors"]
+    )
+
+
+@pytest.mark.parametrize(
+    "displayed_text",
+    [
+        "The reported depth was not 5.0 m.",
+        "The source measured 2.0 m, not the proposed 5.0 m.",
+    ],
+)
+def test_negated_or_compound_numeric_options_fail_closed(
+    tmp_path: Path, displayed_text: str
+) -> None:
+    smoke(tmp_path)
+    item = candidate(tmp_path)
+    item["distractors"][0]["text"] = displayed_text
+    item["distractors"][0]["numeric"] = {
+        "canonical_value": "5.0",
+        "unit": "m",
+    }
+    item["distractors"] = item["distractors"][:3]
+    item["option_verdicts"] = item["option_verdicts"][:3]
+    path = write_candidate(tmp_path, item, "compound-numeric-option.json")
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+    row = next(
+        value for value in result["distractors"] if value["text"] == displayed_text
+    )
+    assert row["accepted"] is False
+    assert "numeric_display_ambiguous" in row["reasons"]
+    assert result["labels"]["mcq_eligible"] is False
+
+
+def test_truth_in_another_scope_does_not_invalidate_a_scoped_distractor(
+    tmp_path: Path,
+) -> None:
+    smoke(tmp_path)
+    item = candidate(tmp_path)
+    item["option_verdicts"][0]["true_in_different_context"] = True
+    item["option_verdicts"][0]["question_admits_option_as_correct"] = False
+    path = write_candidate(tmp_path, item, "different-scope-truth.json")
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+    row = next(value for value in result["distractors"] if value["text"] == "2.5 m")
+    assert row["accepted"] is True
+    assert row["label"] == "deterministic-contradiction"
+
+
+def test_option_verdict_hashes_are_source_and_display_bound(tmp_path: Path) -> None:
+    smoke(tmp_path)
+    item = candidate(tmp_path)
+    item["option_verdicts"][0]["source_hash"] = "sha256:wrong-source"
+    item["option_verdicts"][1]["option_text"] = "A stale option text."
+    path = write_candidate(tmp_path, item, "stale-option-verdicts.json")
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+    reasons = {reason for row in result["distractors"] for reason in row["reasons"]}
+    assert "option_verdict_source_hash_mismatch" in reasons
+    assert "option_verdict_text_mismatch" in reasons
+    assert result["labels"]["mcq_eligible"] is False
+
+
+def test_unestablished_option_contradiction_is_not_export_eligible(
+    tmp_path: Path,
+) -> None:
+    smoke(tmp_path)
+    item = candidate(tmp_path)
+    item["option_verdicts"][0]["contradiction_established"] = False
+    path = write_candidate(tmp_path, item, "unresolved-option.json")
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+    assert result["labels"]["mcq_eligible"] is True
+    rejected = next(row for row in result["distractors"] if row["text"] == "2.5 m")
+    assert rejected["accepted"] is False
+    assert "option_contradiction_unresolved" in rejected["reasons"]
+
+
+def test_insufficient_options_preserve_accepted_short_answer(tmp_path: Path) -> None:
+    smoke(tmp_path)
+    item = candidate(tmp_path)
+    item["distractors"] = item["distractors"][:2]
+    item["option_verdicts"] = item["option_verdicts"][:2]
+    path = write_candidate(tmp_path, item, "qa-with-two-options.json")
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+    assert result["final_label"] == "machine_accepted_unverified"
+    assert result["labels"]["mcq_eligible"] is False
+    assert "insufficient_verified_distractors" in result["reasons"]
+
+
+def test_unsafe_legacy_candidate_is_rejected(tmp_path: Path) -> None:
+    smoke(tmp_path)
+    item = candidate(tmp_path)
+    item["schema_version"] = "1.0.0"
+    item.pop("option_verdicts", None)
+    path = write_candidate(tmp_path, item, "legacy-candidate.json")
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+    assert result["final_label"] == "rejected"
+    assert "unsafe_legacy_candidate_schema" in result["reasons"]
+
+
+def test_v2_database_migrates_with_recoverable_backup(tmp_path: Path) -> None:
+    namespace = tmp_path / "arctic-qa"
+    namespace.mkdir()
+    with sqlite3.connect(namespace / "state.sqlite3") as connection:
+        connection.execute("CREATE TABLE schema_info (version INTEGER NOT NULL)")
+        connection.execute("INSERT INTO schema_info(version) VALUES (2)")
+    status = json.loads(cli(tmp_path, "status").stdout)
+    assert status["sources"] == 0
+    backups = list((namespace / "backups").glob("state-before-v4-*.sqlite3"))
+    assert len(backups) == 1
+    with database(tmp_path) as connection:
+        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 4
+        finding_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(findings)")
+        }
+    assert "run_id" in finding_columns

@@ -14,6 +14,8 @@ No cited paper establishes that the complete design is optimal.
 | Component-only correction | [MCQG-SRefine](https://aclanthology.org/2025.naacl-long.538.pdf), sections 2.2 through 5 and pages 19 through 20 | Human review found factual errors and information loss. | One correction after hard gates |
 | Typed distractor proposals | [D-GEN](https://aclanthology.org/2025.findings-acl.174.pdf), sections 3.3 through 6.4 | Human review remained necessary in the source study. | Proposal only before strict checks |
 | Distractor validity and plausibility separation | [Feng et al. 2024](https://aclanthology.org/2024.findings-naacl.193.pdf), sections 2 through 4 | The study covers mathematics, not Arctic science. | Separate automated states |
+| Post-generation distractor checking | [Yu et al. 2024](https://aclanthology.org/2024.inlg-main.16.pdf), sections 3.2 through 3.4 and conclusion | The verifier and NLI checks retain reasoning and multiple-correct-option failures. | Verify each exact displayed option and bind the verdict to source and QA hashes |
+| QA and entailment checks | [Fabbri et al. 2022](https://aclanthology.org/2022.naacl-main.187.pdf), sections 5.1 through 7 | The metrics do not detect every factual inconsistency. | Separate answer reconstruction, source entailment, scope, and alternative-answer gates |
 | Source-bounded evidence labels | [QASPER](https://aclanthology.org/2021.naacl-main.365.pdf), sections 2.1 through 4.1 | Paper-relative absence is not world absence. | Exact immutable-source locators |
 | Alternative-evidence search limits | [SciFact-Open](https://aclanthology.org/2022.findings-emnlp.347.pdf), sections 3.1, 5, and 8 | An incomplete pool cannot prove absence. | Reject unresolved alternatives |
 | No target-adaptive retention | [AutoBencher](https://arxiv.org/html/2407.08351v1), section 4.1 and appendix A | Adaptive search can select model-specific weaknesses. | Fixed corpus eligibility before generation |
@@ -33,6 +35,8 @@ This control adapts the frozen-manifest method in the project study.
 The author and verifier use separate calls.
 Provider separation can reduce one source of correlated error.
 It cannot guarantee independence or factual truth.
+The initial matched-arm policy freezes one proposed finding per paper and run.
+Both arms use that finding, and a failed finding remains in the rejection record.
 
 The role defaults reflect vendor capabilities recorded on 2026-09-11.
 They are not winners of an Arctic QA evaluation.
@@ -42,4 +46,8 @@ A false or absent source-entailment result stops acceptance.
 Nonnumeric deterministic distractor rules are derived from the source-located answer record.
 A distractor cannot create its own allowed or excluded set.
 Numeric values, units, and tolerance must resolve in the answer and source quote.
+Each post-generation verdict binds to the source hash, QA hash, displayed option hash, prompt, provider, model, and request record.
+Author verification flags do not control acceptance.
+Truth at a different location or time does not invalidate a distractor when the question fixes its scope.
+Negated and compound numeric assertions fail closed because one metadata value cannot bind them safely.
 A future authorized audit can add a stronger review label without blocking this production workflow.

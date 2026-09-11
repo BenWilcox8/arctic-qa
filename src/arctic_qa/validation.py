@@ -31,9 +31,13 @@ DIRECTION_PAIRS = {
 REQUIRED_ITEM_KEYS = {
     "schema_version",
     "item_id",
+    "finding_id",
     "source",
     "question",
     "answer",
+    "reconstruction",
+    "answer_verification",
+    "option_verdicts",
     "provenance",
 }
 REQUIRED_ANSWER_KEYS = {
@@ -75,10 +79,15 @@ def validate_candidate(
         "reconstruction_agreement": False,
         "deterministic_contradiction": False,
         "alternative_answer_search_passed": False,
+        "model_verified": False,
+        "mcq_eligible": False,
         "machine_accepted_unverified": False,
         "rejected": False,
         "unresolved": False,
     }
+    if candidate.get("schema_version") != "2.0.0":
+        reasons.append("unsafe_legacy_candidate_schema")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
     if REQUIRED_ITEM_KEYS - candidate.keys() or not isinstance(
         candidate.get("answer"), dict
     ):
@@ -99,6 +108,11 @@ def validate_candidate(
     if not evidence_resolves(candidate["answer"], chunks):
         reasons.append("answer_evidence_not_located")
         return _finish(db, candidate, labels, reasons, [], "rejected")
+    if candidate["answer"].get("numeric_rule") and not numeric_rule_is_source_bound(
+        candidate["answer"]
+    ):
+        reasons.append("source_bound_numeric_rule_missing")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
     labels["evidence_located"] = True
     missing_scope = [
         phrase
@@ -109,17 +123,35 @@ def validate_candidate(
         reasons.append("scope_qualifier_missing")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     labels["scope_complete"] = True
+    reconstruction = candidate.get("reconstruction") or {}
+    if not evidence_resolves(reconstruction, chunks):
+        reasons.append("reconstruction_evidence_not_located")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
+    verification = candidate.get("answer_verification") or {}
+    if not evidence_resolves(verification, chunks):
+        reasons.append("answer_verifier_evidence_not_located")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
+    if reconstruction.get("scope") != candidate["answer"].get("scope"):
+        reasons.append("reconstruction_scope_mismatch")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
+    if verification.get("scope") != candidate["answer"].get("scope"):
+        reasons.append("answer_verifier_scope_mismatch")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
+    if reconstruction.get("question_claim_type") != verification.get(
+        "question_claim_type"
+    ):
+        reasons.append("question_claim_type_disagreement")
+        return _finish(db, candidate, labels, reasons, [], "unresolved")
     if (
         candidate["answer"].get("claim_type")
         in {
             "observation",
             "association",
         }
-        and candidate.get("question_claim_type") == "causal"
+        and verification.get("question_claim_type") == "causal"
     ):
         reasons.append("causal_overclaim")
         return _finish(db, candidate, labels, reasons, [], "rejected")
-    verification = candidate.get("verification") or {}
     labels["source_entailment_model_verified"] = bool(
         verification.get("source_entailment_model_verified")
     )
@@ -127,9 +159,19 @@ def validate_candidate(
         reasons.append("source_entailment_not_verified")
         labels["unresolved"] = True
         return _finish(db, candidate, labels, reasons, [], "unresolved")
-    reconstruction = candidate.get("reconstruction") or {}
+    if not verification.get("relation_scope_match"):
+        reasons.append("relation_scope_mismatch")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
+    if not verification.get("ambiguity_resolved"):
+        reasons.append("answer_ambiguous")
+        labels["unresolved"] = True
+        return _finish(db, candidate, labels, reasons, [], "unresolved")
     if reconstruction.get("ambiguity_label") != "one_answer":
         reasons.append("answer_ambiguous")
+        labels["unresolved"] = True
+        return _finish(db, candidate, labels, reasons, [], "unresolved")
+    if reconstruction.get("alternatives"):
+        reasons.append("reconstruction_alternative_answer_present")
         labels["unresolved"] = True
         return _finish(db, candidate, labels, reasons, [], "unresolved")
     if reconstruction_matches(candidate["answer"], reconstruction):
@@ -143,32 +185,49 @@ def validate_candidate(
         labels["unresolved"] = True
         return _finish(db, candidate, labels, reasons, [], "unresolved")
     labels["alternative_answer_search_passed"] = True
-    distractor_results = [
-        validate_distractor(candidate, distractor, chunks)
-        for distractor in candidate.get("distractors", [])
+    qa_hash = stable_id(
+        "qa", candidate["question"], canonical_json(candidate["answer"])
+    )
+    verdicts = candidate.get("option_verdicts") or []
+    distractor_results = []
+    normalized_options = [
+        normalize_text(str(row.get("text", "")))
+        for row in candidate.get("distractors", [])
     ]
+    for distractor in candidate.get("distractors", []):
+        option_hash = stable_id(
+            "option", qa_hash, distractor.get("text"), distractor.get("type")
+        )
+        verdict = next(
+            (row for row in verdicts if row.get("option_hash") == option_hash), None
+        )
+        distractor_results.append(
+            validate_distractor(
+                candidate,
+                distractor,
+                chunks,
+                verdict,
+                qa_hash,
+                option_hash,
+                normalized_options.count(
+                    normalize_text(str(distractor.get("text", "")))
+                )
+                > 1,
+            )
+        )
     accepted = [result for result in distractor_results if result["accepted"]]
     labels["deterministic_contradiction"] = bool(accepted) and all(
         result["deterministic"] for result in accepted
     )
-    task_type = candidate.get("task_type", "short_answer")
-    required = (
-        0
-        if task_type == "short_answer"
-        else 4
-        if task_type == "answer_absent_mcq"
-        else 3
+    labels["model_verified"] = bool(accepted) and all(
+        result["model_verified"] for result in accepted
     )
-    if required and len(accepted) < required:
+    if len(accepted) < 3:
         reasons.append("insufficient_verified_distractors")
-        return _finish(db, candidate, labels, reasons, distractor_results, "rejected")
-    if (
-        strict_release
-        and required
-        and not all(result["deterministic"] for result in accepted[:required])
-    ):
+    elif strict_release and not all(result["deterministic"] for result in accepted[:3]):
         reasons.append("model_only_distractor_verification")
-        return _finish(db, candidate, labels, reasons, distractor_results, "rejected")
+    else:
+        labels["mcq_eligible"] = True
     labels["machine_accepted_unverified"] = True
     return _finish(
         db,
@@ -243,18 +302,26 @@ def validate_distractor(
     candidate: dict[str, Any],
     distractor: dict[str, Any],
     chunks: dict[str, dict[str, Any]],
+    verdict: dict[str, Any] | None,
+    qa_hash: str,
+    option_hash: str,
+    duplicate_text: bool,
 ) -> dict[str, Any]:
     result = {
         "text": distractor.get("text"),
         "type": distractor.get("type"),
         "accepted": False,
         "deterministic": False,
+        "model_verified": False,
         "label": "rejected",
         "reasons": [],
-        "evidence_quote": distractor.get("evidence_quote"),
-        "locator": distractor.get("locator"),
+        "evidence_quote": verdict.get("evidence_quote") if verdict else None,
+        "locator": verdict.get("locator") if verdict else None,
     }
     answer = candidate["answer"]
+    if duplicate_text:
+        result["reasons"].append("duplicate_distractor_text")
+        return result
     answers = [answer.get("text", ""), *answer.get("variants", [])]
     if any(
         normalize_text(str(distractor.get("text", ""))) == normalize_text(str(value))
@@ -267,6 +334,13 @@ def validate_distractor(
         result["reasons"].append("forbidden_meta_option")
         return result
     numeric = distractor.get("numeric")
+    if numeric:
+        numeric_display_issue = _numeric_display_issue(
+            str(distractor.get("text", "")), numeric
+        )
+        if numeric_display_issue:
+            result["reasons"].append(numeric_display_issue)
+            return result
     if (
         numeric
         and answer.get("numeric_rule")
@@ -274,24 +348,49 @@ def validate_distractor(
     ):
         result["reasons"].append("distractor_is_equivalent_numeric_answer")
         return result
-    verification = distractor.get("verification") or {}
-    if not verification.get("model_verified"):
-        result["reasons"].append("distractor_not_model_verified")
+    if not verdict:
+        result["reasons"].append("option_verdict_missing_or_stale")
         return result
-    if not verification.get("alternative_answer_search_passed"):
+    if verdict.get("source_hash") != candidate["source"].get("content_hash"):
+        result["reasons"].append("option_verdict_source_hash_mismatch")
+        return result
+    if verdict.get("qa_hash") != qa_hash:
+        result["reasons"].append("option_verdict_qa_hash_mismatch")
+        return result
+    if verdict.get("option_hash") != option_hash:
+        result["reasons"].append("option_verdict_hash_mismatch")
+        return result
+    if verdict.get("option_text") != distractor.get("text"):
+        result["reasons"].append("option_verdict_text_mismatch")
+        return result
+    provenance = verdict.get("provenance") or {}
+    if (
+        provenance.get("role") != "option_verifier"
+        or not provenance.get("provider")
+        or not provenance.get("requested_model")
+        or not provenance.get("prompt_version")
+        or not provenance.get("prompt_hash")
+    ):
+        result["reasons"].append("option_verdict_provenance_missing")
+        return result
+    if not verdict.get("contradiction_established"):
+        result["reasons"].append("option_contradiction_unresolved")
+        return result
+    if not verdict.get("alternative_answer_search_passed"):
         result["reasons"].append("distractor_alternative_answer_possible")
         return result
-    if distractor.get("true_under_other_scope"):
-        result["reasons"].append("distractor_true_under_other_scope")
+    if verdict.get("question_admits_option_as_correct"):
+        result["reasons"].append("option_correct_under_question_interpretation")
         return result
-    if not evidence_resolves(distractor, chunks):
+    if not evidence_resolves(verdict, chunks):
         result["reasons"].append("distractor_evidence_not_located")
         return result
+    result["model_verified"] = True
     deterministic = distractor.get("deterministic") or {}
     kind = deterministic.get("kind")
     passed = False
     if kind == "numeric_outside_tolerance":
-        if _numeric_rule_is_source_bound(answer):
+        if numeric_rule_is_source_bound(answer):
             passed = _numeric_incompatible(answer.get("numeric_rule"), numeric)
         else:
             result["reasons"].append("source_bound_numeric_rule_missing")
@@ -318,6 +417,28 @@ def validate_distractor(
         )
         result["reasons"].append("residual_model_error_possible")
     return result
+
+
+def _numeric_display_issue(text: str, numeric: dict[str, Any]) -> str | None:
+    try:
+        value = Decimal(str(numeric["canonical_value"]))
+        unit = str(numeric["unit"])
+    except (KeyError, InvalidOperation, ValueError):
+        return "numeric_metadata_display_mismatch"
+    quantities = re.findall(
+        r"(?<![\w.])([-+]?\d+(?:\.\d+)?)\s*(°?[A-Za-z]+|%)(?!\w)", text
+    )
+    if len(quantities) != 1 or re.search(
+        r"\b(?:not|no|never|without|except)\b", normalize_text(text)
+    ):
+        return "numeric_display_ambiguous"
+    displayed_value, displayed_unit = quantities[0]
+    try:
+        if convert(Decimal(displayed_value), displayed_unit, unit) != value:
+            return "numeric_metadata_display_mismatch"
+    except (InvalidOperation, ValueError):
+        return "numeric_metadata_display_mismatch"
+    return None
 
 
 def _source_bound_typed_incompatibility(
@@ -394,7 +515,7 @@ def _numeric_incompatible(
     return abs(answer - candidate) > tolerance
 
 
-def _numeric_rule_is_source_bound(answer: dict[str, Any]) -> bool:
+def numeric_rule_is_source_bound(answer: dict[str, Any]) -> bool:
     rule = answer.get("numeric_rule")
     if not isinstance(rule, dict):
         return False
@@ -477,4 +598,33 @@ def _finish(
                     now(),
                 ),
             )
+        for distractor in distractors:
+            if distractor.get("accepted"):
+                continue
+            for reason in distractor.get("reasons", []):
+                rejection_id = stable_id(
+                    "rejection",
+                    item_id,
+                    "option_validation",
+                    distractor.get("text"),
+                    reason,
+                )
+                db.connection.execute(
+                    """INSERT OR IGNORE INTO rejection_ledger
+                    (rejection_id,item_id,source_id,stage,reason_code,detail_json,created_at)
+                    VALUES (?,?,?,'option_validation',?,?,?)""",
+                    (
+                        rejection_id,
+                        item_id,
+                        candidate.get("source", {}).get("source_id"),
+                        reason,
+                        canonical_json(
+                            {
+                                "option_text": distractor.get("text"),
+                                "option_type": distractor.get("type"),
+                            }
+                        ),
+                        now(),
+                    ),
+                )
     return ValidationResult(item_id, final_label, labels, reasons, distractors)
