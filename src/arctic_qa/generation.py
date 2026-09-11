@@ -19,17 +19,216 @@ Never call tools or request credentials.
 Return only the requested JSON object.
 Do not claim that model agreement proves scientific truth."""
 
-SCHEMAS: dict[str, set[str]] = {
-    "extractor": {"answer"},
-    "question_writer": {"question"},
-    "direct_joint": {"question", "answer"},
-    "reconstructor": {"answer", "evidence_quote", "ambiguity_label"},
-    "distractor_writer": {"distractors"},
-    "falsity_verifier": {
-        "source_entailment_model_verified",
-        "alternative_answer_search_passed",
+LOCATOR_SCHEMA = {
+    "type": "object",
+    "required": ["chunk_id", "start_offset", "end_offset"],
+    "properties": {
+        "chunk_id": {"type": "string", "minLength": 1},
+        "start_offset": {"type": "integer"},
+        "end_offset": {"type": "integer"},
     },
-    "correction": {"component", "replacement"},
+    "additionalProperties": False,
+}
+SCOPE_SCHEMA = {
+    "type": "object",
+    "required": [
+        "geography",
+        "population",
+        "period",
+        "method",
+        "comparison",
+        "uncertainty",
+    ],
+    "properties": {
+        key: {"type": ["string", "null"]}
+        for key in (
+            "geography",
+            "population",
+            "period",
+            "method",
+            "comparison",
+            "uncertainty",
+        )
+    },
+    "additionalProperties": False,
+}
+NUMERIC_RULE_SCHEMA = {
+    "type": "object",
+    "required": [
+        "canonical_value",
+        "unit",
+        "tolerance",
+        "tolerance_basis",
+        "reported_precision",
+        "rounding_rule",
+        "conversion_rule",
+    ],
+    "properties": {
+        key: {"type": "string", "minLength": 1}
+        for key in (
+            "canonical_value",
+            "unit",
+            "tolerance",
+            "tolerance_basis",
+            "reported_precision",
+            "rounding_rule",
+            "conversion_rule",
+        )
+    },
+    "additionalProperties": False,
+}
+DETERMINISTIC_RULE_SCHEMA = {
+    "type": "object",
+    "required": ["kind"],
+    "properties": {
+        "kind": {"enum": ["directional_relation", "closed_set", "closed_scope"]},
+        "source_value": {"type": "string", "minLength": 1},
+        "source_values": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "minItems": 1,
+        },
+    },
+    "additionalProperties": False,
+}
+ANSWER_SCHEMA = {
+    "type": "object",
+    "required": [
+        "text",
+        "evidence_quote",
+        "locator",
+        "scope",
+        "required_question_phrases",
+        "claim_type",
+    ],
+    "properties": {
+        "text": {"type": "string", "minLength": 1},
+        "variants": {"type": "array", "items": {"type": "string"}},
+        "claim_type": {"enum": ["observation", "association", "causal", "definition"]},
+        "evidence_quote": {"type": "string", "minLength": 1},
+        "locator": LOCATOR_SCHEMA,
+        "scope": SCOPE_SCHEMA,
+        "required_question_phrases": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+        },
+        "numeric_rule": NUMERIC_RULE_SCHEMA,
+        "deterministic_rule": DETERMINISTIC_RULE_SCHEMA,
+    },
+    "additionalProperties": False,
+}
+NUMERIC_VALUE_SCHEMA = {
+    "type": "object",
+    "required": ["canonical_value", "unit"],
+    "properties": {
+        "canonical_value": {"type": "string", "minLength": 1},
+        "unit": {"type": "string", "minLength": 1},
+    },
+    "additionalProperties": False,
+}
+DISTRACTOR_SCHEMA = {
+    "type": "object",
+    "required": [
+        "text",
+        "type",
+        "evidence_quote",
+        "locator",
+        "verification",
+        "deterministic",
+    ],
+    "properties": {
+        "text": {"type": "string", "minLength": 1},
+        "type": {"type": "string", "minLength": 1},
+        "evidence_quote": {"type": "string", "minLength": 1},
+        "locator": LOCATOR_SCHEMA,
+        "verification": {
+            "type": "object",
+            "required": ["model_verified", "alternative_answer_search_passed"],
+            "properties": {
+                "model_verified": {"type": "boolean"},
+                "alternative_answer_search_passed": {"type": "boolean"},
+            },
+            "additionalProperties": False,
+        },
+        "deterministic": {
+            "type": "object",
+            "required": ["kind"],
+            "properties": {
+                "kind": {"type": "string", "minLength": 1},
+                "candidate_value": {"type": "string", "minLength": 1},
+                "candidate_relation": {"type": "string", "minLength": 1},
+            },
+            "additionalProperties": False,
+        },
+        "numeric": NUMERIC_VALUE_SCHEMA,
+        "true_under_other_scope": {"type": "boolean"},
+    },
+    "additionalProperties": False,
+}
+ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
+    "extractor": {
+        "type": "object",
+        "required": ["answer"],
+        "properties": {"answer": ANSWER_SCHEMA},
+        "additionalProperties": False,
+    },
+    "question_writer": {
+        "type": "object",
+        "required": ["question"],
+        "properties": {"question": {"type": "string", "minLength": 1}},
+        "additionalProperties": False,
+    },
+    "direct_joint": {
+        "type": "object",
+        "required": ["question", "answer"],
+        "properties": {
+            "question": {"type": "string", "minLength": 1},
+            "answer": ANSWER_SCHEMA,
+        },
+        "additionalProperties": False,
+    },
+    "reconstructor": {
+        "type": "object",
+        "required": ["answer", "evidence_quote", "ambiguity_label", "alternatives"],
+        "properties": {
+            "answer": {"type": "string", "minLength": 1},
+            "evidence_quote": {"type": "string", "minLength": 1},
+            "ambiguity_label": {
+                "enum": ["one_answer", "multiple_answers", "unresolved"]
+            },
+            "alternatives": {"type": "array", "items": {"type": "string"}},
+            "numeric": NUMERIC_VALUE_SCHEMA,
+        },
+        "additionalProperties": False,
+    },
+    "distractor_writer": {
+        "type": "object",
+        "required": ["distractors"],
+        "properties": {"distractors": {"type": "array", "items": DISTRACTOR_SCHEMA}},
+        "additionalProperties": False,
+    },
+    "falsity_verifier": {
+        "type": "object",
+        "required": [
+            "source_entailment_model_verified",
+            "alternative_answer_search_passed",
+        ],
+        "properties": {
+            "source_entailment_model_verified": {"type": "boolean"},
+            "alternative_answer_search_passed": {"type": "boolean"},
+            "residual_error": {"type": "string"},
+        },
+        "additionalProperties": False,
+    },
+    "correction": {
+        "type": "object",
+        "required": ["component", "replacement"],
+        "properties": {
+            "component": {"enum": ["question", "distractors"]},
+            "replacement": {},
+        },
+        "additionalProperties": False,
+    },
 }
 
 
@@ -49,6 +248,10 @@ def generate_candidate(
     retries: int,
     rate_limit_seconds: float,
     allow_ineligible: bool = False,
+    max_output_tokens: int = 2048,
+    reasoning_token_cap: int = 2048,
+    billable_token_overhead: int = 1024,
+    pricing_usd_per_million_tokens: dict[str, Decimal] | None = None,
 ) -> dict[str, Any]:
     source = db.one("SELECT * FROM sources WHERE source_id=?", (source_id,))
     if not source:
@@ -70,7 +273,16 @@ def generate_candidate(
     chunk = max(prose_chunks or chunks, key=lambda row: len(row["text"]))
     entity_id = stable_id("unit", source_id, chunk["chunk_id"], arm)
     ensure_budget(db, run_id, budget_mode, budget_limit)
-    parameters = {"temperature": 0, "max_tokens": 2048}
+    parameters: dict[str, Any] = {
+        "temperature": 0,
+        "max_tokens": max_output_tokens,
+        "reasoning_token_cap": reasoning_token_cap,
+        "billable_token_overhead": billable_token_overhead,
+    }
+    if pricing_usd_per_million_tokens is not None:
+        parameters["pricing_usd_per_million_tokens"] = {
+            key: str(value) for key, value in pricing_usd_per_million_tokens.items()
+        }
     context = _context(chunk)
     if arm == "answer_first":
         extracted = _call(
@@ -305,12 +517,7 @@ def _call(
 ) -> dict[str, Any]:
     parameters = {
         **parameters,
-        "json_schema": {
-            "type": "object",
-            "required": sorted(SCHEMAS[role]),
-            "properties": {key: {} for key in sorted(SCHEMAS[role])},
-            "additionalProperties": True,
-        },
+        "json_schema": ROLE_SCHEMAS[role],
     }
     return call_provider(
         db,
@@ -322,7 +529,7 @@ def _call(
         prompt=prompt,
         prompt_version=PROMPT_VERSION,
         parameters=parameters,
-        schema_required=SCHEMAS[role],
+        response_schema=ROLE_SCHEMAS[role],
         reservation=reservation,
         timeout=timeout,
         retries=retries,

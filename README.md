@@ -99,7 +99,42 @@ PYTHONPATH=src python -m arctic_qa --json discover \
 The command reads public rows only.
 It does not modify the archive or create a second Zotero library.
 
-### 3. Screen geography
+### 3. Fetch an original
+
+Final geographic screening needs source-bound evidence.
+Fetch and extract the source before you mark it eligible.
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json fetch \
+  --source-id SOURCE_ID \
+  --url 'https://publisher.example/article.xml' \
+  --media-type application/xml
+```
+
+Production fetch accepts HTTPS only.
+It checks every redirect and the final URL.
+Tests can read one explicit file URL only with global `--test-mode` and `--allow-test-file`.
+
+The maximum original size is 50 MiB by default.
+The CLI stores each original by SHA-256 and never replaces different content at the same immutable path.
+
+### 4. Extract and chunk
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json extract \
+  --source-id SOURCE_ID \
+  --char-cap 6000 \
+  --overlap-chars 500
+```
+
+Use publisher JATS first.
+Use publisher HTML when JATS is unavailable.
+Use born-digital PDF text as the last authorized fallback.
+
+The extractor retains section IDs, heading paths, pages, block numbers, offsets, object labels, hashes, and warnings.
+Generation prefers prose chunks without table, figure, or equation labels.
+
+### 5. Screen geography
 
 Create an evidence file from a study setting or source coordinates:
 
@@ -108,7 +143,14 @@ Create an evidence file from a study setting or source coordinates:
   "evidence_kind": "site_coordinates",
   "latitudes": [71.3],
   "named_regions": [],
-  "source_locator": "Methods, page 4"
+  "source_content_hash": "SOURCE_SHA256",
+  "evidence_quote": "Exact study-setting text from the extracted chunk.",
+  "locator": {
+    "chunk_id": "CHUNK_ID",
+    "start_offset": 120,
+    "end_offset": 177
+  },
+  "site_coverage": "complete"
 }
 ```
 
@@ -125,35 +167,11 @@ The marine list is a proposed corpus control.
 It is not a universal definition of Arctic science.
 
 Titles, keywords, affiliations, and collaborator status cannot establish acceptance.
+The hash, chunk, offsets, and quote must resolve against stored content.
+Latitude values outside minus 90 through 90 are invalid.
+Mixed core and noncore site sets are excluded even when the input omits a mixed label.
+Partial site coverage stays pending.
 The default generation queue excludes unresolved, mixed, and subarctic-related records.
-
-### 4. Fetch an original
-
-```bash
-PYTHONPATH=src python -m arctic_qa --json fetch \
-  --source-id SOURCE_ID \
-  --url 'https://publisher.example/article.xml' \
-  --media-type application/xml
-```
-
-The maximum original size is 50 MiB by default.
-The CLI stores each original by SHA-256 and never replaces different content at the same immutable path.
-
-### 5. Extract and chunk
-
-```bash
-PYTHONPATH=src python -m arctic_qa --json extract \
-  --source-id SOURCE_ID \
-  --char-cap 6000 \
-  --overlap-chars 500
-```
-
-Use publisher JATS first.
-Use publisher HTML when JATS is unavailable.
-Use born-digital PDF text as the last authorized fallback.
-
-The extractor retains section IDs, heading paths, pages, block numbers, offsets, object labels, hashes, and warnings.
-Generation prefers prose chunks without table, figure, or equation labels.
 
 ### 6. Generate candidates
 
@@ -186,13 +204,36 @@ PYTHONPATH=src python -m arctic_qa --json generate \
   --verifier-model gemini-3.1-pro-preview \
   --budget-mode tokens \
   --budget-limit 50000 \
-  --reservation 5000
+  --reservation 5000 \
+  --max-output-tokens 2048 \
+  --reasoning-token-cap 2048 \
+  --billable-token-overhead 1024
 ```
+
+The user reservation is only a floor.
+It cannot reduce the computed bound.
+Before dispatch, the CLI calculates a UTF-8 byte upper bound for the full input.
+The bound also includes output, reasoning, billable overhead, and all retry attempts.
+This bound is conservative because one input token cannot contain less than one encoded byte.
+The reasoning floor equals the output cap.
+The billable-overhead floor is 1,024 tokens.
+
+USD mode also needs all three configured prices:
+
+```text
+--input-price-per-million PRICE
+--output-price-per-million PRICE
+--reasoning-price-per-million PRICE
+```
+
+The CLI refuses a USD request before dispatch when a price is absent.
+An unexpected provider overage is recorded and stops later calls.
 
 Use `--arm direct_joint` for the required baseline.
 The baseline uses the same reconstruction and acceptance gates.
 
 The pipeline records each call before dispatch.
+A response must pass the complete role-specific nested schema before completion.
 A timeout after dispatch creates an `ambiguous_charge` receipt.
 The pipeline does not retry that receipt as a free request.
 
@@ -203,11 +244,14 @@ PYTHONPATH=src python -m arctic_qa --json validate --item-id ITEM_ID
 ```
 
 The default release policy requires executable distractor incompatibility.
+Nonnumeric deterministic checks use a typed rule on the source-located answer.
+They parse the displayed option and ignore self-asserted allowed or excluded values from a distractor.
 Model-only contradiction has the `model-verified` label and a residual-error notice.
 It does not receive deterministic or certain status.
 
 One item can use one component-only correction after hard gates pass.
 The candidate must fail exactly one declared remediable component gate.
+An absent or false independent source-entailment result stays unresolved.
 
 ### 8. Export records
 

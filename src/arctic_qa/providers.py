@@ -13,7 +13,12 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .db import Database, now
-from .errors import AmbiguousChargeError, BudgetError, ProviderError
+from .errors import (
+    AmbiguousChargeError,
+    BudgetError,
+    BudgetOverageError,
+    ProviderError,
+)
 from .util import canonical_json, redact, stable_id
 
 
@@ -240,6 +245,9 @@ def ensure_budget(db: Database, run_id: str, mode: str, limit_value: Decimal) ->
             VALUES (?,?,?,'0','0',?)""",
             (run_id, mode, str(limit_value), now()),
         )
+    existing = db.one("SELECT mode,limit_value FROM budgets WHERE run_id=?", (run_id,))
+    if existing["mode"] != mode or Decimal(existing["limit_value"]) != limit_value:
+        raise BudgetError("A resumed run must keep its original budget mode and limit.")
 
 
 def _reserve(db: Database, run_id: str, amount: Decimal) -> None:
@@ -287,7 +295,7 @@ def call_provider(
     prompt: str,
     prompt_version: str,
     parameters: dict[str, Any],
-    schema_required: set[str],
+    response_schema: dict[str, Any],
     reservation: Decimal,
     timeout: float,
     retries: int,
@@ -318,9 +326,13 @@ def call_provider(
         raise AmbiguousChargeError(
             f"The prior {role} request has an ambiguous charge receipt. Manual reconciliation is required."
         )
+    budget_mode = db.one("SELECT mode FROM budgets WHERE run_id=?", (run_id,))["mode"]
+    attempt_bound = _request_bound(budget_mode, system, prompt, parameters, reservation)
+    total_bound = attempt_bound * Decimal(retries + 1)
+    _reserve(db, run_id, total_bound)
+    spent = Decimal("0")
     for attempt in range(1, retries + 2):
         call_id = stable_id("call", run_id, entity_id, role, prompt_hash, attempt)
-        _reserve(db, run_id, reservation)
         with db.transaction():
             db.connection.execute(
                 """INSERT INTO calls
@@ -338,27 +350,22 @@ def call_provider(
                     prompt_hash,
                     canonical_json(parameters),
                     attempt,
-                    str(reservation),
+                    str(attempt_bound),
                     now(),
                 ),
             )
+        result: ProviderResult | None = None
         try:
             result = provider.invoke(role, system, prompt, parameters, timeout)
-            if not isinstance(result.payload, dict):
-                raise ValueError("structured response must be a JSON object")
-            missing = schema_required - result.payload.keys()
-            if missing:
-                raise ValueError(
-                    f"structured response is missing fields: {sorted(missing)}"
-                )
+            _validate_schema(result.payload, response_schema)
         except urllib.error.HTTPError as error:
-            _settle(db, run_id, reservation, Decimal("0"))
             status = "retryable" if error.code == 429 else "failed"
             _update_call_error(db, call_id, status, f"HTTP_{error.code}", str(error))
             if error.code == 429 and attempt <= retries:
                 if rate_limit_seconds:
                     time.sleep(rate_limit_seconds)
                 continue
+            _settle(db, run_id, total_bound, spent)
             raise ProviderError(f"provider HTTP error {error.code}") from error
         except TimeoutError as error:
             with db.transaction():
@@ -370,12 +377,23 @@ def call_provider(
                 "The provider request timed out after dispatch. The reserved budget remains held."
             ) from error
         except (json.JSONDecodeError, ValueError) as error:
-            _settle(db, run_id, reservation, Decimal("0"))
-            _update_call_error(
-                db, call_id, "retryable", "MALFORMED_RESPONSE", str(error)
-            )
+            charged = _reported_usage(result, budget_mode) or attempt_bound
+            spent += charged
+            status = "retryable" if attempt <= retries else "failed"
+            _update_call_error(db, call_id, status, "MALFORMED_RESPONSE", str(error))
+            with db.transaction():
+                db.connection.execute(
+                    "UPDATE calls SET input_tokens=?,output_tokens=?,actual_cost_usd=? WHERE call_id=?",
+                    (
+                        result.input_tokens if result else None,
+                        result.output_tokens if result else None,
+                        str(charged),
+                        call_id,
+                    ),
+                )
             if attempt <= retries:
                 continue
+            _settle(db, run_id, total_bound, spent)
             raise ProviderError(
                 "The provider returned invalid structured JSON."
             ) from error
@@ -388,42 +406,24 @@ def call_provider(
             raise AmbiguousChargeError(
                 "The provider request ended without a confirmed charge state."
             ) from error
-        budget_mode = db.one("SELECT mode FROM budgets WHERE run_id=?", (run_id,))[
-            "mode"
-        ]
-        if budget_mode == "tokens":
-            if result.input_tokens is None or result.output_tokens is None:
-                _update_call_error(
-                    db,
-                    call_id,
-                    "failed",
-                    "UNKNOWN_TOKEN_USAGE",
-                    "provider did not return token usage",
-                )
-                raise BudgetError(
-                    "The provider did not return token usage for token-budget mode."
-                )
-            actual = Decimal(result.input_tokens + result.output_tokens)
-        else:
-            actual = result.actual_cost_usd
+        actual = _reported_usage(result, budget_mode)
         if actual is None:
-            if budget_mode != "tokens":
-                _update_call_error(
-                    db,
-                    call_id,
-                    "failed",
-                    "UNKNOWN_PRICE",
-                    "provider did not return cost",
-                )
-                raise BudgetError(
-                    "The provider price is unknown. Use explicit token-budget mode or configured pricing."
-                )
-        _settle(db, run_id, reservation, actual)
+            spent += attempt_bound
+            _settle(db, run_id, total_bound, spent)
+            code = "UNKNOWN_TOKEN_USAGE" if budget_mode == "tokens" else "UNKNOWN_COST"
+            _update_call_error(
+                db, call_id, "failed", code, "provider did not return billable usage"
+            )
+            raise BudgetError("The provider did not return billable usage.")
+        spent += actual
+        overage = actual > attempt_bound or spent > total_bound
+        _settle(db, run_id, total_bound, spent)
         with db.transaction():
             db.connection.execute(
-                """UPDATE calls SET status='completed',completed_at=?,returned_model=?,request_id=?,
+                """UPDATE calls SET status=?,completed_at=?,returned_model=?,request_id=?,
                 input_tokens=?,output_tokens=?,actual_cost_usd=?,response_json=? WHERE call_id=?""",
                 (
+                    "budget_overage" if overage else "completed",
                     now(),
                     result.returned_model,
                     result.request_id,
@@ -434,10 +434,71 @@ def call_provider(
                     call_id,
                 ),
             )
+        if overage:
+            raise BudgetOverageError(
+                "Reported provider usage exceeded the conservative pre-dispatch bound. Further calls are stopped."
+            )
         if rate_limit_seconds:
             time.sleep(rate_limit_seconds)
         return result
     raise ProviderError("provider retries were exhausted")
+
+
+def _request_bound(
+    mode: str,
+    system: str,
+    prompt: str,
+    parameters: dict[str, Any],
+    user_floor: Decimal,
+) -> Decimal:
+    try:
+        maximum_output = Decimal(str(parameters["max_tokens"]))
+        configured_reasoning = Decimal(str(parameters.get("reasoning_token_cap", 0)))
+        configured_overhead = Decimal(
+            str(parameters.get("billable_token_overhead", 1024))
+        )
+    except Exception as error:
+        raise BudgetError("A numeric provider usage cap is required.") from error
+    if maximum_output <= 0 or configured_reasoning < 0 or configured_overhead < 0:
+        raise BudgetError("Provider usage caps must be nonnegative.")
+    reasoning = max(configured_reasoning, maximum_output)
+    overhead = max(configured_overhead, Decimal("1024"))
+    request_bytes = len(
+        canonical_json(
+            {"system": system, "prompt": prompt, "parameters": parameters}
+        ).encode("utf-8")
+    )
+    input_token_bound = Decimal(request_bytes) + overhead
+    token_bound = input_token_bound + maximum_output + reasoning
+    if mode == "tokens":
+        return max(user_floor, token_bound)
+    pricing = parameters.get("pricing_usd_per_million_tokens")
+    required_prices = {"input", "output", "reasoning"}
+    if not isinstance(pricing, dict) or required_prices - pricing.keys():
+        raise BudgetError(
+            "USD mode requires configured input, output, and reasoning prices before dispatch."
+        )
+    try:
+        cost_bound = (
+            input_token_bound * Decimal(str(pricing["input"]))
+            + maximum_output * Decimal(str(pricing["output"]))
+            + reasoning * Decimal(str(pricing["reasoning"]))
+        ) / Decimal("1000000")
+    except Exception as error:
+        raise BudgetError("Configured provider prices must be numeric.") from error
+    if cost_bound < 0:
+        raise BudgetError("Configured provider prices cannot be negative.")
+    return max(user_floor, cost_bound)
+
+
+def _reported_usage(result: ProviderResult | None, mode: str) -> Decimal | None:
+    if result is None:
+        return None
+    if mode == "tokens":
+        if result.input_tokens is None or result.output_tokens is None:
+            return None
+        return Decimal(result.input_tokens + result.output_tokens)
+    return result.actual_cost_usd
 
 
 def _update_call_error(
@@ -455,6 +516,50 @@ def _json_object(text: str) -> str:
     if value.startswith("```"):
         value = re.sub(r"^```(?:json)?\s*|\s*```$", "", value, flags=re.I)
     return value
+
+
+def _validate_schema(value: Any, schema: dict[str, Any], path: str = "$") -> None:
+    expected = schema.get("type")
+    if expected:
+        expected_types = expected if isinstance(expected, list) else [expected]
+        predicates = {
+            "object": lambda item: isinstance(item, dict),
+            "array": lambda item: isinstance(item, list),
+            "string": lambda item: isinstance(item, str),
+            "integer": lambda item: (
+                isinstance(item, int) and not isinstance(item, bool)
+            ),
+            "number": lambda item: (
+                isinstance(item, (int, float)) and not isinstance(item, bool)
+            ),
+            "boolean": lambda item: isinstance(item, bool),
+            "null": lambda item: item is None,
+        }
+        if not any(predicates[kind](value) for kind in expected_types):
+            raise ValueError(f"{path} must have type {expected}")
+    if "enum" in schema and value not in schema["enum"]:
+        raise ValueError(f"{path} must be one of {schema['enum']}")
+    if "const" in schema and value != schema["const"]:
+        raise ValueError(f"{path} must equal {schema['const']}")
+    if isinstance(value, str) and len(value) < schema.get("minLength", 0):
+        raise ValueError(f"{path} is shorter than the minimum length")
+    if isinstance(value, dict):
+        missing = set(schema.get("required", [])) - value.keys()
+        if missing:
+            raise ValueError(f"{path} is missing fields: {sorted(missing)}")
+        properties = schema.get("properties", {})
+        for key, subschema in properties.items():
+            if key in value:
+                _validate_schema(value[key], subschema, f"{path}.{key}")
+        if schema.get("additionalProperties") is False:
+            extras = value.keys() - properties.keys()
+            if extras:
+                raise ValueError(f"{path} has unexpected fields: {sorted(extras)}")
+    if isinstance(value, list):
+        if len(value) < schema.get("minItems", 0):
+            raise ValueError(f"{path} has too few items")
+        for index, item in enumerate(value):
+            _validate_schema(item, schema.get("items", {}), f"{path}[{index}]")
 
 
 def _replace(value: Any, old: str, new: str) -> Any:

@@ -23,7 +23,7 @@ from .discovery import (
 )
 from .errors import ArcticQAError
 from .exporting import export_run
-from .extraction import extract_source
+from .extraction import extract_source, load_chunks
 from .generation import generate_candidate
 from .manifests import write_source_manifest
 from .paths import DEFAULT_DATA_ROOT, DataPaths
@@ -89,6 +89,11 @@ def parser() -> argparse.ArgumentParser:
     fetch.add_argument("--media-type")
     fetch.add_argument("--max-bytes", type=int, default=50 * 1024 * 1024)
     fetch.add_argument("--timeout", type=float, default=30)
+    fetch.add_argument(
+        "--allow-test-file",
+        action="store_true",
+        help="Permit an explicit file URL only together with global --test-mode.",
+    )
 
     extract = commands.add_parser(
         "extract", help="Extract sections and chunks from one stored source."
@@ -118,6 +123,12 @@ def parser() -> argparse.ArgumentParser:
     generate.add_argument("--budget-mode", choices=("usd", "tokens"), default="tokens")
     generate.add_argument("--budget-limit", type=Decimal)
     generate.add_argument("--reservation", type=Decimal, default=Decimal("100"))
+    generate.add_argument("--max-output-tokens", type=int, default=2048)
+    generate.add_argument("--reasoning-token-cap", type=int, default=2048)
+    generate.add_argument("--billable-token-overhead", type=int, default=1024)
+    generate.add_argument("--input-price-per-million", type=Decimal)
+    generate.add_argument("--output-price-per-million", type=Decimal)
+    generate.add_argument("--reasoning-price-per-million", type=Decimal)
     generate.add_argument("--timeout", type=float, default=60)
     generate.add_argument("--retries", type=int, default=1)
     generate.add_argument("--rate-limit-seconds", type=float, default=0)
@@ -274,7 +285,10 @@ def _discover(args, paths: DataPaths, db: Database) -> dict[str, Any]:
 
 def _screen(args, paths: DataPaths, db: Database) -> dict[str, Any]:
     result = screen_source(
-        db, args.source_id, json.loads(args.evidence.read_text(encoding="utf-8"))
+        db,
+        args.source_id,
+        json.loads(args.evidence.read_text(encoding="utf-8")),
+        paths.namespace,
     )
     result["manifest"] = write_source_manifest(db, paths.namespace)
     return result
@@ -289,6 +303,7 @@ def _fetch(args, paths: DataPaths, db: Database) -> dict[str, Any]:
         max_bytes=args.max_bytes,
         timeout=args.timeout,
         media_type=args.media_type,
+        allow_file=bool(args.test_mode and args.allow_test_file),
     )
     result["manifest"] = write_source_manifest(db, paths.namespace)
     return result
@@ -321,7 +336,29 @@ def _generate(args, paths: DataPaths, db: Database) -> dict[str, Any]:
         raise ValueError(
             "--allow-ineligible is available only with fake or replay providers"
         )
+    if not 0 <= args.retries <= 5:
+        raise ValueError("--retries must be between 0 and 5")
+    if args.timeout <= 0 or args.rate_limit_seconds < 0:
+        raise ValueError("timeout must be positive and rate limit must be nonnegative")
     limit = args.budget_limit if args.budget_limit is not None else Decimal("100000")
+    prices = (
+        args.input_price_per_million,
+        args.output_price_per_million,
+        args.reasoning_price_per_million,
+    )
+    if any(value is not None for value in prices) and not all(
+        value is not None for value in prices
+    ):
+        raise ValueError("all three provider price fields must be supplied together")
+    if args.budget_mode == "usd" and any(
+        value is not None and value <= 0 for value in prices
+    ):
+        raise ValueError("USD provider price fields must be positive")
+    pricing = (
+        {"input": prices[0], "output": prices[1], "reasoning": prices[2]}
+        if all(value is not None for value in prices)
+        else None
+    )
     return generate_candidate(
         db,
         paths.namespace,
@@ -337,6 +374,10 @@ def _generate(args, paths: DataPaths, db: Database) -> dict[str, Any]:
         retries=args.retries,
         rate_limit_seconds=args.rate_limit_seconds,
         allow_ineligible=args.allow_ineligible,
+        max_output_tokens=args.max_output_tokens,
+        reasoning_token_cap=args.reasoning_token_cap,
+        billable_token_overhead=args.billable_token_overhead,
+        pricing_usd_per_million_tokens=pricing,
     )
 
 
@@ -429,16 +470,6 @@ def _smoke(args, paths: DataPaths, db: Database) -> dict[str, Any]:
         "public_fixture",
     )
     db.upsert_source(fixture)
-    screen = screen_source(
-        db,
-        fixture["source_id"],
-        {
-            "evidence_kind": "site_coordinates",
-            "latitudes": [71.3],
-            "named_regions": [],
-            "test_only": True,
-        },
-    )
     body = (fixture_dir / "public-source.html").read_bytes()
     stored = store_original(
         db,
@@ -450,6 +481,32 @@ def _smoke(args, paths: DataPaths, db: Database) -> dict[str, Any]:
     )
     extracted = extract_source(
         db, paths.namespace, fixture["source_id"], char_cap=2000, overlap_chars=100
+    )
+    evidence_quote = "The complete study site was at 71.3 N."
+    evidence_chunk = next(
+        row
+        for row in load_chunks(db, paths.namespace, fixture["source_id"])
+        if evidence_quote in row["text"]
+    )
+    evidence_start = evidence_chunk["text"].index(evidence_quote)
+    screen = screen_source(
+        db,
+        fixture["source_id"],
+        {
+            "evidence_kind": "site_coordinates",
+            "latitudes": [71.3],
+            "named_regions": [],
+            "source_content_hash": stored["sha256"],
+            "evidence_quote": evidence_quote,
+            "locator": {
+                "chunk_id": evidence_chunk["chunk_id"],
+                "start_offset": evidence_start,
+                "end_offset": evidence_start + len(evidence_quote),
+            },
+            "site_coverage": "complete",
+            "test_only": True,
+        },
+        paths.namespace,
     )
     author = make_provider("fake", "claude-opus-5", fixture_dir / "fake-author.jsonl")
     verifier = make_provider(
@@ -464,7 +521,7 @@ def _smoke(args, paths: DataPaths, db: Database) -> dict[str, Any]:
         author=author,
         verifier=verifier,
         budget_mode="tokens",
-        budget_limit=Decimal("10000"),
+        budget_limit=Decimal("100000"),
         reservation=Decimal("100"),
         timeout=1,
         retries=1,

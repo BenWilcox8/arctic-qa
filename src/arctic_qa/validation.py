@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -122,6 +123,10 @@ def validate_candidate(
     labels["source_entailment_model_verified"] = bool(
         verification.get("source_entailment_model_verified")
     )
+    if not labels["source_entailment_model_verified"]:
+        reasons.append("source_entailment_not_verified")
+        labels["unresolved"] = True
+        return _finish(db, candidate, labels, reasons, [], "unresolved")
     reconstruction = candidate.get("reconstruction") or {}
     if reconstruction.get("ambiguity_label") != "one_answer":
         reasons.append("answer_ambiguous")
@@ -286,33 +291,19 @@ def validate_distractor(
     kind = deterministic.get("kind")
     passed = False
     if kind == "numeric_outside_tolerance":
-        passed = _numeric_incompatible(answer.get("numeric_rule"), numeric)
-    elif kind == "unique_categorical":
-        allowed = {
-            normalize_text(str(value))
-            for value in deterministic.get("allowed_values", [])
-        }
-        correct = normalize_text(str(deterministic.get("correct_value", "")))
-        proposed = normalize_text(str(deterministic.get("candidate_value", "")))
-        passed = (
-            correct in allowed
-            and proposed not in allowed
-            and proposed == normalize_text(str(distractor.get("text", "")))
-        )
-    elif kind == "directional_contradiction":
-        correct = normalize_text(str(deterministic.get("correct_relation", "")))
-        proposed = normalize_text(str(deterministic.get("candidate_relation", "")))
-        passed = (correct, proposed) in DIRECTION_PAIRS or (
-            proposed,
-            correct,
-        ) in DIRECTION_PAIRS
-    elif kind in {"scope_excluded", "unique_entity"}:
-        proposed = normalize_text(str(deterministic.get("candidate_value", "")))
-        excluded = {
-            normalize_text(str(value))
-            for value in deterministic.get("excluded_values", [])
-        }
-        passed = bool(proposed) and proposed in excluded
+        if _numeric_rule_is_source_bound(answer):
+            passed = _numeric_incompatible(answer.get("numeric_rule"), numeric)
+        else:
+            result["reasons"].append("source_bound_numeric_rule_missing")
+    elif kind in {
+        "unique_categorical",
+        "directional_contradiction",
+        "scope_excluded",
+        "unique_entity",
+    }:
+        passed = _source_bound_typed_incompatibility(answer, distractor)
+        if not passed:
+            result["reasons"].append("source_bound_predicate_missing")
     if passed:
         result.update(
             {
@@ -327,6 +318,60 @@ def validate_distractor(
         )
         result["reasons"].append("residual_model_error_possible")
     return result
+
+
+def _source_bound_typed_incompatibility(
+    answer: dict[str, Any], distractor: dict[str, Any]
+) -> bool:
+    rule = answer.get("deterministic_rule")
+    proposed_rule = distractor.get("deterministic") or {}
+    if not isinstance(rule, dict) or not isinstance(proposed_rule, dict):
+        return False
+    source_text = normalize_text(str(answer.get("evidence_quote", "")))
+    answer_text = normalize_text(str(answer.get("text", "")))
+    option_text = normalize_text(str(distractor.get("text", "")))
+    kind = proposed_rule.get("kind")
+    proposed = normalize_text(str(proposed_rule.get("candidate_value", "")))
+    if kind == "directional_contradiction":
+        if rule.get("kind") != "directional_relation":
+            return False
+        correct = normalize_text(str(rule.get("source_value", "")))
+        proposed = normalize_text(str(proposed_rule.get("candidate_relation", "")))
+        if not correct or not proposed:
+            return False
+        if correct not in answer_text or correct not in source_text:
+            return False
+        option_relations = {
+            value
+            for pair in DIRECTION_PAIRS
+            for value in pair
+            if value in option_text.split()
+        }
+        return (
+            len(option_relations) == 1
+            and proposed in option_relations
+            and ((correct, proposed) in DIRECTION_PAIRS)
+        )
+    if kind not in {"unique_categorical", "scope_excluded", "unique_entity"}:
+        return False
+    required_rule_kind = "closed_scope" if kind == "scope_excluded" else "closed_set"
+    if rule.get("kind") != required_rule_kind:
+        return False
+    allowed = {
+        normalize_text(str(value))
+        for value in rule.get("source_values", [])
+        if normalize_text(str(value))
+    }
+    closure_terms = {"only", "sole", "solely", "exclusively"}
+    return bool(
+        allowed
+        and answer_text in allowed
+        and all(value in source_text for value in allowed)
+        and closure_terms.intersection(source_text.split())
+        and proposed
+        and proposed == option_text
+        and proposed not in allowed
+    )
 
 
 def _numeric_incompatible(
@@ -347,6 +392,41 @@ def _numeric_incompatible(
     except (KeyError, InvalidOperation, ValueError):
         return False
     return abs(answer - candidate) > tolerance
+
+
+def _numeric_rule_is_source_bound(answer: dict[str, Any]) -> bool:
+    rule = answer.get("numeric_rule")
+    if not isinstance(rule, dict):
+        return False
+    try:
+        answer_value = Decimal(str(rule["canonical_value"]))
+        tolerance = Decimal(str(rule["tolerance"]))
+        unit = str(rule["unit"])
+        tolerance_basis = normalize_text(str(rule["tolerance_basis"]))
+    except (KeyError, InvalidOperation, ValueError):
+        return False
+    evidence = str(answer.get("evidence_quote", ""))
+    displayed = str(answer.get("text", ""))
+    return bool(
+        tolerance >= 0
+        and tolerance_basis
+        and tolerance_basis in normalize_text(evidence)
+        and _contains_quantity(displayed, answer_value, unit)
+        and _contains_quantity(evidence, answer_value, unit)
+        and _contains_quantity(evidence, tolerance, unit)
+    )
+
+
+def _contains_quantity(text: str, expected: Decimal, expected_unit: str) -> bool:
+    for value, unit in re.findall(
+        r"(?<![\w.])([-+]?\d+(?:\.\d+)?)\s*(°?[A-Za-z]+|%)(?!\w)", text
+    ):
+        try:
+            if convert(Decimal(value), unit, expected_unit) == expected:
+                return True
+        except (InvalidOperation, ValueError):
+            continue
+    return False
 
 
 def _finish(

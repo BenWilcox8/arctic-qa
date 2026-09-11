@@ -2,16 +2,27 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .db import Database, now
+from .errors import SourceURLError
 from .util import atomic_json, atomic_write, sha256_bytes, stable_id
 
 
 USER_AGENT = "arctic-qa/0.1 (source retrieval, no crawler)"
+
+
+class SafeHTTPSRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        _validate_url(new_url, allow_file=False)
+        return super().redirect_request(
+            request, file_pointer, code, message, headers, new_url
+        )
 
 
 def fetch_source(
@@ -23,10 +34,12 @@ def fetch_source(
     max_bytes: int = 50 * 1024 * 1024,
     timeout: float = 30,
     media_type: str | None = None,
+    allow_file: bool = False,
 ) -> dict[str, Any]:
     source = db.one("SELECT * FROM sources WHERE source_id=?", (source_id,))
     if not source:
         raise ValueError(f"unknown source: {source_id}")
+    _validate_url(url, allow_file=allow_file)
     if (
         source.get("access_state") == "stored"
         and source.get("retrieval_url") == url
@@ -51,7 +64,8 @@ def fetch_source(
             "Accept": "application/pdf,application/xml,text/html,*/*;q=0.1",
         },
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    opener = urllib.request.build_opener(SafeHTTPSRedirectHandler())
+    with opener.open(request, timeout=timeout) as response:
         declared = response.headers.get("Content-Length")
         if declared and int(declared) > max_bytes:
             raise ValueError(f"source exceeds maximum size of {max_bytes} bytes")
@@ -60,7 +74,20 @@ def fetch_source(
             raise ValueError(f"source exceeds maximum size of {max_bytes} bytes")
         detected_type = media_type or response.headers.get_content_type()
         final_url = response.geturl()
+        _validate_url(final_url, allow_file=allow_file)
     return store_original(db, namespace, source_id, body, detected_type, final_url)
+
+
+def _validate_url(url: str, *, allow_file: bool) -> None:
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme == "file" and allow_file:
+        if parsed.netloc not in {"", "localhost"} or not parsed.path:
+            raise SourceURLError("Test file URL must name a local absolute path.")
+        return
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise SourceURLError("Source retrieval requires an HTTPS URL.")
+    if parsed.username is not None or parsed.password is not None:
+        raise SourceURLError("Source URLs cannot contain credentials.")
 
 
 def store_original(

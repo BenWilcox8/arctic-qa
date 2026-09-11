@@ -16,9 +16,17 @@ class BudgetError(ArcticQAError):
     code = "BUDGET_EXHAUSTED"
 
 
+class BudgetOverageError(BudgetError):
+    code = "BUDGET_OVERAGE"
+
+
 class ProviderError(ArcticQAError):
     code = "PROVIDER_ERROR"
 
 
 class AmbiguousChargeError(ProviderError):
     code = "AMBIGUOUS_CHARGE"
+
+
+class SourceURLError(ArcticQAError):
+    code = "SOURCE_URL_NOT_ALLOWED"

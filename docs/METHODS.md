@@ -22,6 +22,10 @@ No cited paper establishes that the complete design is optimal.
 The geography rule uses 66.56 degrees north and a reviewed marine allowlist.
 This rule comes from the captain requirement and project configuration.
 It is not a research result or a universal Arctic definition.
+The implementation binds each geographic decision to a stored content hash and an exact extracted chunk locator.
+Each latitude and named region must occur in the quoted study-setting text.
+The quote must also state complete scope.
+The implementation rejects invalid coordinates and computes mixed site scope.
 
 The source manifest freezes identities, versions, hashes, geography decisions, and rights fields.
 This control adapts the frozen-manifest method in the project study.
@@ -34,4 +38,8 @@ The role defaults reflect vendor capabilities recorded on 2026-09-11.
 They are not winners of an Arctic QA evaluation.
 
 Machine acceptance stops at `machine_accepted_unverified`.
+A false or absent source-entailment result stops acceptance.
+Nonnumeric deterministic distractor rules are derived from the source-located answer record.
+A distractor cannot create its own allowed or excluded set.
+Numeric values, units, and tolerance must resolve in the answer and source quote.
 A future authorized audit can add a stronger review label without blocking this production workflow.
