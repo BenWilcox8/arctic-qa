@@ -159,6 +159,10 @@ Each resume reruns deterministic eligibility validation against the frozen full 
 Saved job state and validation fields have no acceptance authority.
 Completed receipts are reused only after the broker validates that each immutable event remains present in its ledger.
 Ambiguous receipts stop the scheduler.
+Do not replay an ambiguous request.
+The `reconcile-usage` command can settle one saved omitted-zero usage response after an independent review and supervisor release.
+It preserves all original receipts and writes a new immutable reconciliation receipt.
+See [the shared model broker guide](SHARED_MODEL_BROKER.md) for the exact command and rules.
 An immutable-event failure republishes broker status with `halted` set to `true` and `integrity_valid` set to `false`.
 The broker observer updates streaming progress to bind that halted status.
 

@@ -351,6 +351,30 @@ def parser() -> argparse.ArgumentParser:
     stream.add_argument("--ledger-config-transition-file", type=Path)
     stream.add_argument("--credential-file", type=Path)
     stream.add_argument("--prior-construction-spend-usd", type=Decimal)
+
+    reconcile = commands.add_parser(
+        "reconcile-usage",
+        help="Settle one saved response that proves an omitted thought count is zero.",
+    )
+    reconcile.add_argument("--request-key", required=True)
+    reconcile.add_argument(
+        "--streaming-budget-policy-file",
+        type=Path,
+        default=Path("config/streaming-dataset-budget-policy-v1.json"),
+    )
+    reconcile.add_argument(
+        "--price-config-file",
+        type=Path,
+        default=Path("config/gemini-eligibility-v1.json"),
+    )
+    reconcile.add_argument("--execution-gate-file", type=Path, required=True)
+    reconcile.add_argument("--shared-ledger-file", type=Path, required=True)
+    reconcile.add_argument("--model-receipts-dir", type=Path, required=True)
+    reconcile.add_argument("--ledger-config-transition-file", type=Path)
+    reconcile.add_argument("--credential-file", type=Path, required=True)
+    reconcile.add_argument(
+        "--prior-construction-spend-usd", type=Decimal, required=True
+    )
     return root
 
 
@@ -467,6 +491,8 @@ def main(argv: list[str] | None = None) -> int:
                     credential_file=args.credential_file,
                 ),
             )
+        if args.command == "reconcile-usage":
+            return _emit(args, _reconcile_usage(args))
         paths, db = _open(args)
         try:
             handler = globals()[f"_{args.command}"]
@@ -520,6 +546,24 @@ def _doctor(args) -> dict[str, Any]:
         {"status": "ok", "mounted_writable": True, "namespace": str(paths.namespace)}
     )
     return result
+
+
+def _reconcile_usage(args) -> dict[str, Any]:
+    broker = SharedGeminiBroker(
+        policy_file=args.streaming_budget_policy_file.resolve(),
+        price_config_file=args.price_config_file.resolve(),
+        execution_gate_file=args.execution_gate_file.resolve(),
+        ledger_file=args.shared_ledger_file.resolve(),
+        receipts_dir=args.model_receipts_dir.resolve(),
+        credential_file=args.credential_file.resolve(),
+        prior_construction_spend_usd=args.prior_construction_spend_usd,
+        config_transition_file=(
+            args.ledger_config_transition_file.resolve()
+            if args.ledger_config_transition_file
+            else None
+        ),
+    )
+    return broker.reconcile_omitted_thought_usage(args.request_key)
 
 
 def _discover(args, paths: DataPaths, db: Database) -> dict[str, Any]:

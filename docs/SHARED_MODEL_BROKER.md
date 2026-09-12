@@ -159,11 +159,55 @@ An unknown provider outcome reserves the full amount and stops the broker.
 
 Do not retry an ambiguous request.
 
+The provider can omit `thoughtsTokenCount` when its value is zero.
+
+The broker uses zero only when the other three token counts are nonnegative integers.
+
+The total must equal the sum of the prompt and candidate counts.
+
+All other missing or inconsistent usage values cause an ambiguous charge.
+
 The broker writes an immutable response event before it settles a successful request.
 
 After a crash, it uses that event to complete the ledger and final receipt.
 
 If no response event exists, it treats the interrupted request as an ambiguous charge.
+
+## Usage reconciliation
+
+Use reconciliation only for a saved response with the exact omitted-zero pattern.
+
+The reconciliation needs a private gate for the reviewed repair commit.
+
+It does not read the credential or call the provider.
+
+It writes `<request-key>.usage-reconciliation.json` as a new immutable receipt.
+
+This receipt binds the two original receipt hashes, request identity, configuration hashes, normalized usage, cost, gate, commit, and review.
+
+The broker does not replace the submitted, received, or ambiguous receipt.
+
+The broker updates the ledger atomically under the existing operation and ledger locks.
+
+The update moves the exact reservation from ambiguous funds and adds the computed cost to spent funds.
+
+The broker removes the halt only when no ambiguous or in-flight request remains.
+
+Repeated reconciliation returns the existing result without a ledger change or provider call.
+
+Use this command after an independent PASS and supervisor release:
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json reconcile-usage \
+  --request-key REQUEST_SHA256 \
+  --execution-gate-file /PRIVATE/DIRECTORY/reconciliation-gate.json \
+  --shared-ledger-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
+  --model-receipts-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/model-receipts \
+  --credential-file /PRIVATE/DIRECTORY/gemini.key \
+  --prior-construction-spend-usd KNOWN_VALUE
+```
+
+The command accepts `--ledger-config-transition-file` when the first configuration transition still needs application.
 
 Use `status()` for the live page and scheduler state.
 

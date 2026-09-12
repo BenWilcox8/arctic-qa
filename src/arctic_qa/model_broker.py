@@ -41,6 +41,22 @@ CONFIG_TRANSITION_FIELDS = {
     "reason",
     "authorized_at_utc",
 }
+USAGE_RECONCILIATION_FIELDS = {
+    "schema",
+    "request_key",
+    "received_receipt_sha256",
+    "ambiguous_receipt_sha256",
+    "config_transition_sha256",
+    "price_config_sha256",
+    "normalized_usage",
+    "actual_cost_usd",
+    "ledger_sha256_before",
+    "gate_sha256",
+    "integrated_code_commit",
+    "review_record",
+    "review_record_sha256",
+    "reconciled_at_utc",
+}
 
 
 def _now() -> str:
@@ -50,6 +66,40 @@ def _now() -> str:
 def _read(path: Path) -> Any:
     with path.open(encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _normalized_usage(response: Any) -> dict[str, Any]:
+    usage = response.get("usageMetadata") if isinstance(response, dict) else None
+    if not isinstance(usage, dict):
+        raise ValueError("provider usage is absent")
+    normalized = dict(usage)
+    if "thoughtsTokenCount" not in normalized:
+        prompt = normalized.get("promptTokenCount")
+        candidates = normalized.get("candidatesTokenCount")
+        total = normalized.get("totalTokenCount")
+        values = (prompt, candidates, total)
+        if (
+            any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+                for value in values
+            )
+            or total != prompt + candidates
+        ):
+            raise ValueError("provider usage cannot prove zero thinking tokens")
+        normalized["thoughtsTokenCount"] = 0
+    names = (
+        "promptTokenCount",
+        "candidatesTokenCount",
+        "thoughtsTokenCount",
+        "totalTokenCount",
+    )
+    values = [normalized.get(name) for name in names]
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in values
+    ) or values[3] != sum(values[:3]):
+        raise ValueError("provider usage is inconsistent")
+    return normalized
 
 
 def _money(value: Any, name: str, *, positive: bool = False) -> Decimal:
@@ -674,6 +724,13 @@ class SharedGeminiBroker:
             transition_events_by_config.setdefault(target_hash, set()).add(
                 sha256_file(path)
             )
+        reconciliation_events: dict[str, tuple[Path, dict[str, Any]]] = {}
+        for path in self.receipts_dir.glob("*.usage-reconciliation.json"):
+            event = self._read_usage_reconciliation(path)
+            request_key = event["request_key"]
+            if request_key in reconciliation_events:
+                raise ValueError("multiple usage reconciliation events exist")
+            reconciliation_events[request_key] = (path, event)
         for path in self.receipts_dir.iterdir():
             match = re.fullmatch(
                 r"([a-f0-9]{64})(?:\.(?:submitted|received))?\.json", path.name
@@ -749,14 +806,43 @@ class SharedGeminiBroker:
             final = _read(final_path)
             if any(final.get(name) != request.get(name) for name in base_fields):
                 raise ValueError("an immutable final event changed request identity")
-            if final.get("state") != state:
-                raise ValueError("an immutable final event changed request state")
-            if state == "completed" and (
-                _money(final.get("actual_cost_usd"), "final actual cost")
-                != _money(request.get("actual_cost_usd"), "ledger actual cost")
-                or final.get("usage") != request.get("usage")
-            ):
-                raise ValueError("an immutable final event changed cost or usage")
+            reconciliation = reconciliation_events.pop(request_key, None)
+            reconciliation_sha256 = request.get("usage_reconciliation_sha256")
+            if reconciliation_sha256 is not None:
+                if state != "completed" or reconciliation is None:
+                    raise ValueError("a usage reconciliation event is absent")
+                reconciliation_path, event = reconciliation
+                received_path = self.receipts_dir / f"{request_key}.received.json"
+                if (
+                    not re.fullmatch(r"[a-f0-9]{64}", reconciliation_sha256)
+                    or sha256_file(reconciliation_path) != reconciliation_sha256
+                    or final.get("state") != "ambiguous_charge"
+                    or not received_path.is_file()
+                    or event["received_receipt_sha256"] != sha256_file(received_path)
+                    or event["ambiguous_receipt_sha256"] != sha256_file(final_path)
+                    or event["config_transition_sha256"]
+                    != request.get("config_transition_sha256")
+                    or event["price_config_sha256"]
+                    != request.get("price_config_sha256")
+                    or event["normalized_usage"] != request.get("usage")
+                    or _money(event["actual_cost_usd"], "reconciled actual cost")
+                    != _money(request.get("actual_cost_usd"), "ledger actual cost")
+                ):
+                    raise ValueError("a usage reconciliation event changed")
+            else:
+                if reconciliation is not None and state != "ambiguous_charge":
+                    raise ValueError("an unapplied usage reconciliation event exists")
+                if final.get("state") != state:
+                    raise ValueError("an immutable final event changed request state")
+                if state == "completed" and (
+                    _money(final.get("actual_cost_usd"), "final actual cost")
+                    != _money(request.get("actual_cost_usd"), "ledger actual cost")
+                    or final.get("usage") != request.get("usage")
+                ):
+                    raise ValueError("an immutable final event changed cost or usage")
+
+        if reconciliation_events:
+            raise ValueError("a usage reconciliation event lacks a ledger request")
 
         accepted_events: dict[str, str] = {}
         for path in self.receipts_dir.glob("accepted-*.json"):
@@ -777,6 +863,60 @@ class SharedGeminiBroker:
             accepted_events[family_id] = item_id
         if accepted_events != ledger["accepted_families"]:
             raise ValueError("the accepted-item ledger differs from immutable events")
+
+    def _read_usage_reconciliation(self, path: Path) -> dict[str, Any]:
+        event = _read(path)
+        if not isinstance(event, dict) or set(event) != USAGE_RECONCILIATION_FIELDS:
+            raise ValueError("a usage reconciliation event changed")
+        request_key = event.get("request_key")
+        if (
+            event.get("schema") != "shared-paid-call-usage-reconciliation-v1"
+            or not isinstance(request_key, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", request_key)
+            or path.name != f"{request_key}.usage-reconciliation.json"
+        ):
+            raise ValueError("a usage reconciliation event changed")
+        for field in (
+            "received_receipt_sha256",
+            "ambiguous_receipt_sha256",
+            "price_config_sha256",
+            "ledger_sha256_before",
+            "gate_sha256",
+            "review_record_sha256",
+        ):
+            if not re.fullmatch(r"[a-f0-9]{64}", str(event.get(field) or "")):
+                raise ValueError("a usage reconciliation event changed")
+        transition = event.get("config_transition_sha256")
+        if transition is not None and not re.fullmatch(
+            r"[a-f0-9]{64}", str(transition)
+        ):
+            raise ValueError("a usage reconciliation event changed")
+        usage = _normalized_usage({"usageMetadata": event.get("normalized_usage")})
+        if usage != event["normalized_usage"] or usage["thoughtsTokenCount"] != 0:
+            raise ValueError("a usage reconciliation event changed")
+        actual = _cost(
+            self.config,
+            usage["promptTokenCount"],
+            usage["candidatesTokenCount"] + usage["thoughtsTokenCount"],
+        )
+        if _money(event.get("actual_cost_usd"), "reconciled cost") != actual:
+            raise ValueError("a usage reconciliation event changed")
+        review_path = Path(str(event.get("review_record") or "")).resolve()
+        if (
+            not str(event.get("integrated_code_commit") or "").strip()
+            or not review_path.is_file()
+            or event["review_record_sha256"] != sha256_file(review_path)
+        ):
+            raise ValueError("a usage reconciliation review changed")
+        try:
+            reconciled = datetime.fromisoformat(
+                str(event["reconciled_at_utc"]).replace("Z", "+00:00")
+            )
+        except ValueError as error:
+            raise ValueError("a usage reconciliation time changed") from error
+        if reconciled.tzinfo is None:
+            raise ValueError("a usage reconciliation time changed")
+        return event
 
     def _validate_ledger(self, ledger: dict[str, Any]) -> None:
         required = {
@@ -1281,6 +1421,175 @@ class SharedGeminiBroker:
             self._commit_ledger(ledger)
         return self.status()
 
+    def reconcile_omitted_thought_usage(self, request_key: str) -> dict[str, Any]:
+        """Settle one saved response whose exact token total proves zero thoughts."""
+        if not re.fullmatch(r"[a-f0-9]{64}", request_key):
+            raise ValueError("the reconciled request key is invalid")
+        operation = self._operation_lock_file.open("a+")
+        try:
+            fcntl.flock(operation, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            operation.close()
+            raise ValueError("another paid broker operation is active") from error
+        try:
+            with self._lock_file.open("a+") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                ledger = self._validated_ledger()
+                request = ledger["requests"].get(request_key)
+                if request is None:
+                    raise ValueError("the reconciled request does not exist")
+                reconciliation_path = (
+                    self.receipts_dir / f"{request_key}.usage-reconciliation.json"
+                )
+                if request.get("usage_reconciliation_sha256") is not None:
+                    event = self._read_usage_reconciliation(reconciliation_path)
+                    return {
+                        "schema": "shared-paid-call-usage-reconciliation-result-v1",
+                        "request_key": request_key,
+                        "applied": False,
+                        "actual_cost_usd": event["actual_cost_usd"],
+                        "reconciliation_receipt": str(reconciliation_path),
+                        "reconciliation_receipt_sha256": sha256_file(
+                            reconciliation_path
+                        ),
+                    }
+                if request.get("state") != "ambiguous_charge":
+                    raise ValueError("the request does not have an ambiguous charge")
+                if (
+                    ledger.get("halted") is not True
+                    or ledger.get("halt_reason") != "ambiguous_generation_charge"
+                ):
+                    raise ValueError("the ambiguous-charge halt state changed")
+
+                final_path = self.receipts_dir / f"{request_key}.json"
+                received_path = self.receipts_dir / f"{request_key}.received.json"
+                final = _read(final_path)
+                received = _read(received_path)
+                if (
+                    final.get("state") != "ambiguous_charge"
+                    or final.get("error") != "KeyError: 'thoughtsTokenCount'"
+                    or received.get("state") != "response_received"
+                    or final.get("response") != received.get("response")
+                ):
+                    raise ValueError(
+                        "the ambiguous response is not the omitted-thoughts case"
+                    )
+                raw_usage = received["response"].get("usageMetadata")
+                if (
+                    not isinstance(raw_usage, dict)
+                    or "thoughtsTokenCount" in raw_usage
+                    or any(
+                        field not in raw_usage
+                        for field in (
+                            "promptTokenCount",
+                            "candidatesTokenCount",
+                            "totalTokenCount",
+                        )
+                    )
+                ):
+                    raise ValueError(
+                        "the saved usage does not omit only the thought-token value"
+                    )
+                usage = _normalized_usage(received["response"])
+                actual = _cost(
+                    self.config,
+                    usage["promptTokenCount"],
+                    usage["candidatesTokenCount"] + usage["thoughtsTokenCount"],
+                )
+                reserved = _money(
+                    request.get("reserved_usd"), "reconciled reservation", positive=True
+                )
+                if actual > reserved:
+                    raise ValueError("the reconciled cost exceeds the reservation")
+
+                gate = _validate_gate(self.execution_gate_file, request["phase"])
+                review_path = Path(gate["review_record"]).resolve()
+                if not review_path.is_file() or gate.get(
+                    "review_record_sha256"
+                ) != sha256_file(review_path):
+                    raise ValueError("the usage reconciliation review is invalid")
+                event = {
+                    "schema": "shared-paid-call-usage-reconciliation-v1",
+                    "request_key": request_key,
+                    "received_receipt_sha256": sha256_file(received_path),
+                    "ambiguous_receipt_sha256": sha256_file(final_path),
+                    "config_transition_sha256": request.get("config_transition_sha256"),
+                    "price_config_sha256": request.get(
+                        "price_config_sha256", ledger["price_config_sha256"]
+                    ),
+                    "normalized_usage": usage,
+                    "actual_cost_usd": str(actual),
+                    "ledger_sha256_before": sha256_file(self.ledger_file),
+                    "gate_sha256": sha256_file(self.execution_gate_file),
+                    "integrated_code_commit": gate["integrated_code_commit"],
+                    "review_record": str(review_path),
+                    "review_record_sha256": gate["review_record_sha256"],
+                    "reconciled_at_utc": _now(),
+                }
+                if reconciliation_path.is_file():
+                    existing = self._read_usage_reconciliation(reconciliation_path)
+                    comparison = dict(event)
+                    comparison["reconciled_at_utc"] = existing["reconciled_at_utc"]
+                    if existing != comparison:
+                        raise ValueError("the usage reconciliation event changed")
+                    event = existing
+                else:
+                    atomic_json(reconciliation_path, event, immutable=True)
+                reconciliation_sha256 = sha256_file(reconciliation_path)
+
+                ledger["ambiguous_reserved_usd"] = str(
+                    _money(ledger["ambiguous_reserved_usd"], "ambiguous") - reserved
+                )
+                ledger["spent_usd"] = str(_money(ledger["spent_usd"], "spent") + actual)
+                stage = ledger["stages"][request["stage"]]
+                paper = ledger["papers"][request["family_id"]]
+                for row in (stage, paper):
+                    row["ambiguous_usd"] = str(
+                        _money(row["ambiguous_usd"], "ambiguous") - reserved
+                    )
+                    row["spent_usd"] = str(_money(row["spent_usd"], "spent") + actual)
+                    row["input_tokens"] += usage["promptTokenCount"]
+                    row["output_tokens"] += usage["candidatesTokenCount"]
+                    row["thinking_tokens"] += usage["thoughtsTokenCount"]
+                if request["phase"] == "live_test":
+                    live = ledger["live_test_papers"][request["family_id"]]
+                    live["ambiguous_usd"] = str(
+                        _money(live["ambiguous_usd"], "live ambiguous") - reserved
+                    )
+                    live["spent_usd"] = str(
+                        _money(live["spent_usd"], "live spent") + actual
+                    )
+                request.update(
+                    {
+                        "state": "completed",
+                        "actual_cost_usd": str(actual),
+                        "usage": usage,
+                        "usage_reconciliation_sha256": reconciliation_sha256,
+                        "reconciled_at_utc": event["reconciled_at_utc"],
+                    }
+                )
+                unresolved = any(
+                    row.get("state") == "ambiguous_charge"
+                    for row in ledger["requests"].values()
+                )
+                if not unresolved and int(ledger["inflight"]) == 0:
+                    ledger["halted"] = False
+                    ledger["halt_reason"] = None
+                ledger["updated_at_utc"] = _now()
+                self._validate_ledger(ledger)
+                self._validate_immutable_events(ledger)
+                self._commit_ledger(ledger)
+                return {
+                    "schema": "shared-paid-call-usage-reconciliation-result-v1",
+                    "request_key": request_key,
+                    "applied": True,
+                    "actual_cost_usd": str(actual),
+                    "reconciliation_receipt": str(reconciliation_path),
+                    "reconciliation_receipt_sha256": reconciliation_sha256,
+                }
+        finally:
+            operation.close()
+
     def _halt(self, reason: str) -> None:
         with self._lock_file.open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -1608,22 +1917,17 @@ class SharedGeminiBroker:
     def _completed_receipt(
         self, submitted: dict[str, Any], response: Any
     ) -> tuple[dict[str, Any], Decimal | None, dict[str, int] | None]:
-        usage = response.get("usageMetadata") if isinstance(response, dict) else None
         try:
-            if not isinstance(usage, dict):
-                raise ValueError("provider usage is absent")
-            names = (
-                "promptTokenCount",
-                "candidatesTokenCount",
-                "thoughtsTokenCount",
-                "totalTokenCount",
-            )
-            values = [usage[name] for name in names]
-            if any(
-                isinstance(value, bool) or not isinstance(value, int) or value < 0
-                for value in values
-            ) or values[3] != sum(values[:3]):
-                raise ValueError("provider usage is inconsistent")
+            usage = _normalized_usage(response)
+            values = [
+                usage[name]
+                for name in (
+                    "promptTokenCount",
+                    "candidatesTokenCount",
+                    "thoughtsTokenCount",
+                    "totalTokenCount",
+                )
+            ]
             actual = _cost(self.config, values[0], values[1] + values[2])
             if actual > _money(submitted["reserved_usd"], "reservation", positive=True):
                 raise ValueError("provider usage exceeds the reservation")

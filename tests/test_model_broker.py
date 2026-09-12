@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from arctic_qa.cli import main as cli_main
 from arctic_qa.model_broker import SharedGeminiBroker, broker_request_key
 from arctic_qa.providers import GeminiProvider, ProviderError, make_provider
 from arctic_qa.util import canonical_json, sha256_bytes, sha256_file
@@ -54,13 +55,45 @@ class Transport:
             return {"totalTokens": 100}
         if self.failure == "generate":
             raise TimeoutError("outcome unknown")
+        missing_thoughts = self.failure in {
+            "missing_thoughts",
+            "missing_thoughts_inconsistent",
+        }
         return {
             "candidates": [{"content": {"parts": [{"text": "{}"}]}}],
             "usageMetadata": {
                 "promptTokenCount": 100,
                 "candidatesTokenCount": 10,
-                "thoughtsTokenCount": 5,
-                "totalTokenCount": 115,
+                **({} if missing_thoughts else {"thoughtsTokenCount": 5}),
+                "totalTokenCount": (
+                    111
+                    if self.failure == "missing_thoughts_inconsistent"
+                    else 110
+                    if missing_thoughts
+                    else 115
+                ),
+            },
+        }
+
+
+class CapturedZeroThoughtUsageTransport(Transport):
+    def post(self, model: str, method: str, body: dict) -> dict:
+        self.methods.append(method)
+        if method == "countTokens":
+            return {"totalTokens": 14059}
+        return {
+            "candidates": [
+                {
+                    "content": {"parts": [{"text": "{}"}]},
+                    "finishReason": "STOP",
+                }
+            ],
+            "modelVersion": "gemini-3.8-flash",
+            "responseId": "captured-response-id",
+            "usageMetadata": {
+                "promptTokenCount": 14059,
+                "candidatesTokenCount": 1355,
+                "totalTokenCount": 15414,
             },
         }
 
@@ -139,8 +172,9 @@ def execute(
     source=None,
     phase="live_test",
     run_id="run-1",
+    body=None,
 ):
-    body = payload()
+    body = body or payload()
     family = family or f"family-{paper}"
     source = source or f"source-{paper}"
     key = broker_request_key(
@@ -180,6 +214,235 @@ def test_missing_credential_does_not_create_a_request_state(tmp_path: Path):
     ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
     assert ledger["requests"] == {}
     assert ledger["count_requests"] == 0
+
+
+def test_omitted_zero_thought_usage_settles_from_exact_total(tmp_path: Path):
+    values = fixture(tmp_path, transport=Transport("missing_thoughts"))
+
+    receipt = execute(values["broker"])
+
+    assert receipt["state"] == "completed"
+    assert receipt["usage"] == {
+        "promptTokenCount": 100,
+        "candidatesTokenCount": 10,
+        "thoughtsTokenCount": 0,
+        "totalTokenCount": 110,
+    }
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    assert ledger["halted"] is False
+    assert ledger["ambiguous_reserved_usd"] == "0"
+
+
+def test_captured_omitted_zero_thought_usage_settles_without_replay(tmp_path: Path):
+    transport = CapturedZeroThoughtUsageTransport()
+    values = fixture(tmp_path, transport=transport)
+    body = payload()
+    body["generationConfig"]["maxOutputTokens"] = 8192
+
+    receipt = execute(values["broker"], body=body)
+
+    assert receipt["state"] == "completed"
+    assert receipt["actual_cost_usd"] == "0.015626"
+    assert receipt["usage"]["thoughtsTokenCount"] == 0
+    assert transport.methods == ["countTokens", "generateContent"]
+
+
+def test_omitted_thought_usage_without_exact_total_remains_ambiguous(
+    tmp_path: Path,
+):
+    transport = Transport("missing_thoughts_inconsistent")
+    values = fixture(tmp_path, transport=transport)
+
+    receipt = execute(values["broker"])
+
+    assert receipt["state"] == "ambiguous_charge"
+    assert receipt["error"] == (
+        "ValueError: provider usage cannot prove zero thinking tokens"
+    )
+    assert values["broker"].status()["ambiguous_reserved_usd"] == "0.003825"
+    with pytest.raises(ValueError, match="halted"):
+        execute(values["broker"], paper="p2")
+    assert transport.methods == ["countTokens", "generateContent"]
+
+
+def test_reconciliation_preserves_ambiguous_receipt_and_never_replays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    transport = CapturedZeroThoughtUsageTransport()
+    values = fixture(tmp_path, transport=transport)
+
+    def legacy_classification(submitted: dict, response: dict):
+        return (
+            {
+                **submitted,
+                "state": "ambiguous_charge",
+                "error": "KeyError: 'thoughtsTokenCount'",
+                "response": response,
+                "live_call_made": True,
+                "completed_at_utc": "2026-09-12T17:24:41Z",
+            },
+            None,
+            None,
+        )
+
+    monkeypatch.setattr(values["broker"], "_completed_receipt", legacy_classification)
+    body = payload()
+    body["generationConfig"]["maxOutputTokens"] = 8192
+    receipt = execute(values["broker"], body=body)
+    request_key = receipt["request_key"]
+    final_path = tmp_path / "receipts" / f"{request_key}.json"
+    received_path = tmp_path / "receipts" / f"{request_key}.received.json"
+    original_final = final_path.read_bytes()
+    original_received = received_path.read_bytes()
+
+    review = tmp_path / "usage-review.md"
+    review.write_text("The usage repair passed independent review.\n", encoding="utf-8")
+    gate = json.loads(values["gate"].read_text(encoding="utf-8"))
+    gate.update(
+        {
+            "integrated_code_commit": "usage-repair-commit",
+            "review_record": str(review),
+            "review_record_sha256": sha256_file(review),
+        }
+    )
+    write_json(values["gate"], gate)
+
+    result = values["broker"].reconcile_omitted_thought_usage(request_key)
+
+    assert result["applied"] is True
+    assert result["actual_cost_usd"] == "0.015626"
+    assert final_path.read_bytes() == original_final
+    assert received_path.read_bytes() == original_received
+    reconciliation_path = (
+        tmp_path / "receipts" / f"{request_key}.usage-reconciliation.json"
+    )
+    assert reconciliation_path.is_file()
+    reconciliation = json.loads(reconciliation_path.read_text(encoding="utf-8"))
+    assert reconciliation["ambiguous_receipt_sha256"] == sha256_file(final_path)
+    assert reconciliation["received_receipt_sha256"] == sha256_file(received_path)
+    assert reconciliation["normalized_usage"]["thoughtsTokenCount"] == 0
+
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    assert ledger["spent_usd"] == "0.015626"
+    assert ledger["ambiguous_reserved_usd"] == "0.000000"
+    assert ledger["halted"] is False
+    assert ledger["requests"][request_key]["state"] == "completed"
+    assert transport.methods == ["countTokens", "generateContent"]
+
+    resumed = SharedGeminiBroker(
+        policy_file=ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
+        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=transport,
+    )
+    repeated = resumed.reconcile_omitted_thought_usage(request_key)
+    assert repeated["applied"] is False
+    assert (
+        reconciliation_path.read_bytes()
+        == canonical_json(reconciliation).encode() + b"\n"
+    )
+    assert transport.methods == ["countTokens", "generateContent"]
+
+    assert (
+        cli_main(
+            [
+                "--json",
+                "reconcile-usage",
+                "--request-key",
+                request_key,
+                "--execution-gate-file",
+                str(values["gate"]),
+                "--shared-ledger-file",
+                str(values["ledger"]),
+                "--model-receipts-dir",
+                str(tmp_path / "receipts"),
+                "--credential-file",
+                str(tmp_path / "private" / "gemini.key"),
+                "--prior-construction-spend-usd",
+                "0",
+            ]
+        )
+        == 0
+    )
+    cli_result = json.loads(capsys.readouterr().out)
+    assert cli_result["applied"] is False
+
+    reconciliation["actual_cost_usd"] = "0.000001"
+    write_json(reconciliation_path, reconciliation)
+    with pytest.raises(ValueError, match="usage reconciliation event changed"):
+        SharedGeminiBroker(
+            policy_file=ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
+            price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+            execution_gate_file=values["gate"],
+            ledger_file=values["ledger"],
+            receipts_dir=tmp_path / "receipts",
+            credential_file=tmp_path / "private" / "gemini.key",
+            prior_construction_spend_usd=Decimal("0"),
+            transport=transport,
+        )
+    assert (tmp_path / ".shared-ledger.json.integrity-halt.json").is_file()
+    assert transport.methods == ["countTokens", "generateContent"]
+
+
+def test_reconciliation_resumes_after_event_write_before_ledger_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    transport = Transport("missing_thoughts")
+    values = fixture(tmp_path, transport=transport)
+
+    def legacy_classification(submitted: dict, response: dict):
+        return (
+            {
+                **submitted,
+                "state": "ambiguous_charge",
+                "error": "KeyError: 'thoughtsTokenCount'",
+                "response": response,
+                "live_call_made": True,
+                "completed_at_utc": "2026-09-12T17:24:41Z",
+            },
+            None,
+            None,
+        )
+
+    monkeypatch.setattr(values["broker"], "_completed_receipt", legacy_classification)
+    receipt = execute(values["broker"])
+    request_key = receipt["request_key"]
+    review = tmp_path / "usage-review.md"
+    review.write_text("The usage repair passed independent review.\n", encoding="utf-8")
+    gate = json.loads(values["gate"].read_text(encoding="utf-8"))
+    gate.update(
+        {
+            "integrated_code_commit": "usage-repair-commit",
+            "review_record": str(review),
+            "review_record_sha256": sha256_file(review),
+        }
+    )
+    write_json(values["gate"], gate)
+    original_commit = values["broker"]._commit_ledger
+
+    def crash_commit(ledger: dict):
+        raise OSError("simulated reconciliation ledger crash")
+
+    monkeypatch.setattr(values["broker"], "_commit_ledger", crash_commit)
+    with pytest.raises(OSError, match="simulated reconciliation ledger crash"):
+        values["broker"].reconcile_omitted_thought_usage(request_key)
+
+    reconciliation_path = (
+        tmp_path / "receipts" / f"{request_key}.usage-reconciliation.json"
+    )
+    assert reconciliation_path.is_file()
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    assert ledger["requests"][request_key]["state"] == "ambiguous_charge"
+
+    monkeypatch.setattr(values["broker"], "_commit_ledger", original_commit)
+    result = values["broker"].reconcile_omitted_thought_usage(request_key)
+    assert result["applied"] is True
+    assert values["broker"].status()["halted"] is False
+    assert transport.methods == ["countTokens", "generateContent"]
 
 
 def test_all_stages_share_one_durable_ledger(tmp_path: Path):
