@@ -48,8 +48,10 @@ It records a missing discipline as `unclassified` and does not guess a subject f
 
 Live mode is disabled in the checked-in execution gate.
 The exact integrated commit needs an independent review pass before the gate can change.
+After an explicit pass of the complete integrated revision, current supervisor authorization permits a private gate and a tiny canary.
+No new captain permission is required at that point.
 
-After that separate authorization, use one of these phases:
+After that review gate passes, use one of these phases:
 
 - `live_test`
 - `away_production`
