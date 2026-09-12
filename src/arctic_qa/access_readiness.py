@@ -593,6 +593,30 @@ def _xml_has_article_body(body: bytes) -> bool:
     )
 
 
+def _identity_resolves_source(
+    candidate: dict[str, Any], extracted_text: str, source_body: bytes, media_type: str
+) -> bool:
+    """Check identity without treating an XML reference list as article metadata."""
+    if media_type not in {"application/xml", "text/xml"}:
+        return _identity_resolves(candidate, extracted_text)
+    try:
+        root = ET.fromstring(source_body.decode("utf-8", errors="replace"))
+    except ET.ParseError:
+        return False
+    parents = {child: parent for parent in root.iter() for child in parent}
+    for node in list(root.iter()):
+        if node.tag.rsplit("}", 1)[-1].casefold() in {
+            "ref-list",
+            "reference-list",
+            "bibliography",
+        }:
+            parent = parents.get(node)
+            if parent is not None:
+                parent.remove(node)
+    identity_text = " ".join(root.itertext())
+    return _identity_resolves(candidate, identity_text)
+
+
 def _reuse(candidate: dict[str, Any], source_run: Path | None) -> dict[str, Any] | None:
     if source_run is None or not source_run.is_dir():
         return None
@@ -616,7 +640,9 @@ def _reuse(candidate: dict[str, Any], source_run: Path | None) -> dict[str, Any]
         media_type = str(row.get("media_type") or "").casefold()
         if (
             len(extracted_text) < MIN_EXTRACTED_TEXT_CHARS
-            or not _identity_resolves(candidate, extracted_text)
+            or not _identity_resolves_source(
+                candidate, extracted_text, source.read_bytes(), media_type
+            )
             or (
                 media_type in {"application/xml", "text/xml"}
                 and not _xml_has_article_body(source.read_bytes())
@@ -678,7 +704,12 @@ def _reuse_access(
             row.get("identity_verified") is not True
             or extraction.stat().st_size < MIN_EXTRACTED_TEXT_CHARS
             or coverage.get("article_body_recognized") is not True
-            or not _identity_resolves(candidate, extracted_text)
+            or not _identity_resolves_source(
+                candidate,
+                extracted_text,
+                source.read_bytes(),
+                str(row.get("media_type") or "").casefold(),
+            )
         ):
             return None
     return {
@@ -846,7 +877,7 @@ def _process(
         extraction = output_dir / "extracted" / digest[:2] / digest / "text.txt"
         extraction_bytes = text.encode()
         extraction_hash = sha256_bytes(extraction_bytes)
-        identity = _identity_resolves(candidate, text)
+        identity = _identity_resolves_source(candidate, text, body, media)
         if media == "application/pdf" and len(text.strip()) < 200:
             state, reason = "OCR_required", "pdf_text_is_too_short"
         elif not recognized_xml_body:
@@ -888,7 +919,9 @@ def _process(
             },
             "identity_verified": identity,
             "media_type": media,
-            "new_bytes": len(body),
+            "source_bytes": len(body),
+            "extraction_bytes": len(extraction_bytes),
+            "new_bytes": len(body) + len(extraction_bytes),
             "attempts": attempts,
             "_source_body": body,
             "_extraction_body": extraction_bytes,
@@ -931,10 +964,16 @@ def _persist_artifacts(
     stored = dict(item)
     source_body = stored.pop("_source_body", None)
     extraction_body = stored.pop("_extraction_body", None)
+    expected_bytes = (len(source_body) if source_body is not None else 0) + (
+        len(extraction_body) if extraction_body is not None else 0
+    )
+    if expected_bytes != item_bytes:
+        raise ValueError("article-access durable artifact byte count changed")
     if source_body is not None:
         if not isinstance(source_body, bytes):
             raise ValueError("article-access source body is not bytes")
-        if len(source_body) != item_bytes:
+        source_bytes = int(stored.get("source_bytes", len(source_body)))
+        if len(source_body) != source_bytes:
             raise ValueError("article-access source byte count changed")
         if sha256_bytes(source_body) != stored.get("source_content_hash"):
             raise ValueError("article-access source body hash changed")

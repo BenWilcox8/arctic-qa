@@ -1,0 +1,9 @@
+{
+  "schema": "streaming-live-execution-gate-v1",
+  "live_generation_enabled": false,
+  "allowed_phase": null,
+  "integrated_code_commit": null,
+  "independent_review_verdict": "pending",
+  "review_record": null,
+  "message": "Live generation remains disabled until the integrated offline review passes."
+}

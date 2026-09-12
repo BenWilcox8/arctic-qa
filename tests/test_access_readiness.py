@@ -253,6 +253,33 @@ def test_identity_uses_exact_doi_and_ignores_reference_only_mentions():
     )
 
 
+def test_xml_reference_list_doi_does_not_verify_article_identity(tmp_path: Path):
+    target = candidate()
+    target["doi"] = "10.1234/example"
+    target["title"] = "The target Arctic scientific article"
+
+    def fetcher(url, **kwargs):
+        body = (
+            b"<article><front><article-title>A different study</article-title></front>"
+            b"<body><p>Substantive unrelated evidence. "
+            + b"More evidence. "
+            * 180
+            + b"</p></body><back><ref-list><ref>10.1234/example</ref>"
+            b"</ref-list></back></article>"
+        )
+        return {
+            "state": "downloaded",
+            "body": body,
+            "media_type": "application/xml",
+            "final_url": url,
+            "checked_at_utc": "2026-09-12T00:00:00Z",
+        }
+
+    result = _process(target, manifest(tmp_path), tmp_path, fetcher, HostPacer(0))
+    assert result["access_state"] == "identity_pending"
+    assert result["identity_verified"] is False
+
+
 def test_new_byte_cap_precedes_durable_source_writes(tmp_path: Path):
     def fetcher(url, **kwargs):
         body = (
@@ -276,6 +303,10 @@ def test_new_byte_cap_precedes_durable_source_writes(tmp_path: Path):
     extraction = Path(result["extraction_path"])
     assert not source.exists()
     assert not extraction.exists()
+
+    assert result["new_bytes"] == len(result["_source_body"]) + len(
+        result["_extraction_body"]
+    )
 
     with pytest.raises(ValueError, match="before source write"):
         _persist_artifacts(
