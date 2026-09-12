@@ -20,16 +20,22 @@ def export_run(
     for row in rows:
         candidate = json.loads(row["candidate_json"])
         validation = db.one(
-            "SELECT * FROM validation_events WHERE item_id=? ORDER BY created_at DESC LIMIT 1",
+            """SELECT * FROM validation_events
+            WHERE item_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1""",
             (candidate["item_id"],),
         )
         if not validation or validation["label"] != "machine_accepted_unverified":
+            continue
+        validation_details = json.loads(validation["details_json"])
+        if validation_details.get("candidate_hash") != stable_id(
+            "candidate-payload", row["candidate_json"]
+        ):
             continue
         candidate["release_label"] = "machine_accepted_unverified"
         short_answers.append(_short_answer(candidate))
         accepted = [
             item
-            for item in json.loads(validation["details_json"])["distractors"]
+            for item in validation_details["distractors"]
             if item["accepted"] and item["deterministic"]
         ]
         if len(accepted) >= 3:

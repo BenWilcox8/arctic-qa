@@ -396,6 +396,7 @@ def _validate(args, paths: DataPaths, db: Database) -> dict[str, Any]:
         paths.namespace,
         candidate,
         strict_release=not args.allow_model_only_distractors,
+        persist=bool(args.item_id),
     ).as_dict()
 
 

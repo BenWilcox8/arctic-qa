@@ -69,35 +69,69 @@ def write_candidate(tmp_path: Path, payload: dict, name: str) -> Path:
     return path
 
 
-def bind_option_verdicts(item: dict, quote: str, locator: dict) -> None:
+def bind_option_verdicts(
+    item: dict, quote: str, locator: dict, *, receipt_root: Path | None = None
+) -> None:
     qa_hash = stable_id("qa", item["question"], canonical_json(item["answer"]))
     item["option_verdicts"] = []
     for option in item["distractors"]:
         option_hash = stable_id("option", qa_hash, option["text"], option["type"])
+        payload = {
+            "contradiction_established": True,
+            "alternative_answer_search_passed": True,
+            "true_in_different_context": False,
+            "question_admits_option_as_correct": False,
+            "evidence_quote": quote,
+            "locator": locator,
+            "rationale": "Test-only source-bound contradiction.",
+        }
+        prompt_hash = stable_id("test-prompt", option_hash)
+        request_id = stable_id("test-request", option_hash)
         item["option_verdicts"].append(
             {
                 "source_hash": item["source"]["content_hash"],
                 "qa_hash": qa_hash,
                 "option_hash": option_hash,
                 "option_text": option["text"],
-                "contradiction_established": True,
-                "alternative_answer_search_passed": True,
-                "true_in_different_context": False,
-                "question_admits_option_as_correct": False,
-                "evidence_quote": quote,
-                "locator": locator,
-                "rationale": "Test-only source-bound contradiction.",
+                **payload,
                 "provenance": {
                     "role": "option_verifier",
                     "provider": "fake",
                     "requested_model": "fake-verifier",
                     "returned_model": "fake-verifier",
-                    "request_id": "test-only",
+                    "request_id": request_id,
                     "prompt_version": "test-only",
-                    "prompt_hash": "test-only",
+                    "prompt_hash": prompt_hash,
                 },
             }
         )
+        if receipt_root is not None:
+            run_id = item["provenance"]["run_id"]
+            entity_id = stable_id(
+                "option-verdict",
+                stable_id(
+                    "unit", item["finding_id"], item["provenance"]["generation_arm"]
+                ),
+                option_hash,
+            )
+            with database(receipt_root) as connection:
+                connection.execute(
+                    """INSERT INTO calls
+                    (call_id,run_id,entity_id,role,provider,requested_model,
+                     returned_model,prompt_version,prompt_hash,parameters_json,
+                     request_id,attempt,status,response_json,started_at,completed_at)
+                    VALUES (?,?,?,'option_verifier','fake','fake-verifier',
+                            'fake-verifier','test-only',?, '{}',?,1,'completed',?,
+                            'test-only','test-only')""",
+                    (
+                        stable_id("test-call", run_id, entity_id),
+                        run_id,
+                        entity_id,
+                        prompt_hash,
+                        request_id,
+                        canonical_json(payload),
+                    ),
+                )
 
 
 def source_locator_for_quote(root: Path, source_id: str, quote: str) -> dict:
@@ -118,6 +152,79 @@ def source_locator_for_quote(root: Path, source_id: str, quote: str) -> dict:
                 "end_offset": start + len(quote),
             }
     raise AssertionError(f"quote not found in extracted chunks: {quote}")
+
+
+def sync_option_receipt(root: Path, item: dict, index: int) -> None:
+    verdict = item["option_verdicts"][index]
+    payload = {
+        key: verdict[key]
+        for key in (
+            "contradiction_established",
+            "alternative_answer_search_passed",
+            "true_in_different_context",
+            "question_admits_option_as_correct",
+            "evidence_quote",
+            "locator",
+            "rationale",
+        )
+    }
+    provenance = verdict["provenance"]
+    with database(root) as connection:
+        cursor = connection.execute(
+            """UPDATE calls SET response_json=?
+            WHERE run_id=? AND role='option_verifier' AND provider=?
+              AND requested_model=? AND prompt_hash=? AND status='completed'""",
+            (
+                canonical_json(payload),
+                item["provenance"]["run_id"],
+                provenance["provider"],
+                provenance["requested_model"],
+                provenance["prompt_hash"],
+            ),
+        )
+        assert cursor.rowcount == 1
+
+
+def bind_qa_verification_receipts(root: Path, item: dict) -> None:
+    run_id = item["provenance"]["run_id"]
+    entity_id = stable_id(
+        "unit", item["finding_id"], item["provenance"]["generation_arm"]
+    )
+    calls = {}
+    for role, record in (
+        ("reconstructor", item["reconstruction"]),
+        ("answer_verifier", item["answer_verification"]),
+    ):
+        prompt_hash = stable_id("test-qa-prompt", entity_id, role, record)
+        request_id = stable_id("test-qa-request", entity_id, role)
+        calls[role] = {
+            "role": role,
+            "provider": "fake",
+            "requested_model": "fake-verifier",
+            "returned_model": "fake-verifier",
+            "request_id": request_id,
+            "prompt_version": "test-only",
+            "prompt_hash": prompt_hash,
+        }
+        with database(root) as connection:
+            connection.execute(
+                """INSERT INTO calls
+                (call_id,run_id,entity_id,role,provider,requested_model,
+                 returned_model,prompt_version,prompt_hash,parameters_json,
+                 request_id,attempt,status,response_json,started_at,completed_at)
+                VALUES (?,?,?,?,'fake','fake-verifier','fake-verifier',
+                        'test-only',?,'{}',?,1,'completed',?,'test-only','test-only')""",
+                (
+                    stable_id("test-qa-call", run_id, entity_id, role),
+                    run_id,
+                    entity_id,
+                    role,
+                    prompt_hash,
+                    request_id,
+                    canonical_json(record),
+                ),
+            )
+    item["provenance"]["verification_calls"] = calls
 
 
 def author_script(tmp_path: Path, prefix: dict) -> Path:
@@ -350,6 +457,7 @@ def test_true_distractors_and_equivalent_units_are_not_false(tmp_path: Path) -> 
     item["distractors"][0]["text"] = "2 m"
     item["distractors"][0]["numeric"] = {"canonical_value": "200", "unit": "cm"}
     item["option_verdicts"][1]["question_admits_option_as_correct"] = True
+    sync_option_receipt(tmp_path, item, 1)
     item["distractors"][2]["text"] = "2.0 m"
     item["distractors"][3]["text"] = "None of the above"
     path = write_candidate(tmp_path, item, "true-distractors.json")
@@ -442,7 +550,14 @@ def test_self_asserted_typed_distractor_rules_are_not_deterministic(
 
 
 @pytest.mark.parametrize(
-    ("kind", "quote", "answer_text", "answer_rule", "options"),
+    (
+        "kind",
+        "quote",
+        "answer_text",
+        "answer_rule",
+        "options",
+        "expected_deterministic",
+    ),
     [
         (
             "unique_categorical",
@@ -450,6 +565,19 @@ def test_self_asserted_typed_distractor_rules_are_not_deterministic(
             "gravel",
             {"kind": "closed_set", "source_values": ["gravel"]},
             ["sand", "silt", "clay"],
+            True,
+        ),
+        (
+            "unique_categorical",
+            "The only reported substrate category was gravel.",
+            "gravel",
+            {"kind": "closed_set", "source_values": ["gravel"]},
+            [
+                "The substrate was not sand.",
+                "The substrate was not silt.",
+                "The substrate was not clay.",
+            ],
+            False,
         ),
         (
             "directional_contradiction",
@@ -457,6 +585,7 @@ def test_self_asserted_typed_distractor_rules_are_not_deterministic(
             "increased",
             {"kind": "directional_relation", "source_value": "increased"},
             ["decreased", "the response decreased", "a decreased response"],
+            True,
         ),
         (
             "scope_excluded",
@@ -464,6 +593,7 @@ def test_self_asserted_typed_distractor_rules_are_not_deterministic(
             "central basin",
             {"kind": "closed_scope", "source_values": ["central basin"]},
             ["outer basin", "southern shelf", "river delta"],
+            True,
         ),
     ],
 )
@@ -474,6 +604,7 @@ def test_source_bound_typed_distractor_controls(
     answer_text: str,
     answer_rule: dict,
     options: list[str],
+    expected_deterministic: bool,
 ) -> None:
     smoke(tmp_path)
     item = candidate(tmp_path)
@@ -507,6 +638,7 @@ def test_source_bound_typed_distractor_controls(
             "question_claim_type": item["answer"]["claim_type"],
         }
     )
+    bind_qa_verification_receipts(tmp_path, item)
     item["distractors"] = []
     for option in options:
         predicate = {"kind": kind}
@@ -523,11 +655,19 @@ def test_source_bound_typed_distractor_controls(
                 "deterministic": predicate,
             }
         )
-    bind_option_verdicts(item, quote, locator)
+    bind_option_verdicts(item, quote, locator, receipt_root=tmp_path)
     path = write_candidate(tmp_path, item, f"valid-{kind}.json")
     result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
     assert result["final_label"] == "machine_accepted_unverified"
-    assert all(row["deterministic"] for row in result["distractors"])
+    assert all(row["deterministic"] for row in result["distractors"]) is (
+        expected_deterministic
+    )
+    if not expected_deterministic:
+        assert result["labels"]["mcq_eligible"] is False
+        assert all(
+            "displayed_assertion_negated" in row["reasons"]
+            for row in result["distractors"]
+        )
 
 
 def test_malformed_json_and_429_retry_are_recorded(tmp_path: Path) -> None:
@@ -1014,6 +1154,76 @@ def test_generation_arms_share_one_frozen_finding(tmp_path: Path) -> None:
     assert finding_count == 1
 
 
+def test_second_source_version_cannot_select_another_family_finding(
+    tmp_path: Path,
+) -> None:
+    first = smoke(tmp_path, "family-finding-run")
+    family_id = candidate(tmp_path)["source"]["paper_family_id"]
+    stable_source_id = "test-only:public-arctic-source-version-b"
+    source_id = stable_id("src", stable_source_id)
+    metadata = tmp_path / "source-version-b.json"
+    metadata.write_text(
+        json.dumps(
+            [
+                {
+                    "stable_id": stable_source_id,
+                    "title": "Synthetic public Arctic extraction fixture, version B",
+                    "published_date": "2026-09-11",
+                    "year": 2026,
+                    "discipline": "synthetic calibration",
+                    "paper_family_id": family_id,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cli(tmp_path, "discover", "--adapter", "manual", "--input", str(metadata))
+    cli(
+        tmp_path,
+        "fetch",
+        "--source-id",
+        source_id,
+        "--url",
+        (FIXTURES / "public-source.html").as_uri(),
+        "--media-type",
+        "text/html",
+        "--allow-test-file",
+    )
+    cli(tmp_path, "extract", "--source-id", source_id)
+    quote = "The complete study site was at 71.3 N."
+    locator = source_locator_for_quote(tmp_path, source_id, quote)
+    with database(tmp_path) as connection:
+        content_hash = connection.execute(
+            "SELECT content_hash FROM sources WHERE source_id=?", (source_id,)
+        ).fetchone()[0]
+    evidence = write_candidate(
+        tmp_path,
+        {
+            "evidence_kind": "site_coordinates",
+            "latitudes": [71.3],
+            "named_regions": [],
+            "source_content_hash": content_hash,
+            "evidence_quote": quote,
+            "locator": locator,
+            "site_coverage": "complete",
+            "test_only": True,
+        },
+        "source-version-b-screen.json",
+    )
+    cli(tmp_path, "screen", "--source-id", source_id, "--evidence", str(evidence))
+
+    rejected = cli(
+        tmp_path,
+        *generate_command(
+            source_id, "family-finding-run", FIXTURES / "fake-author.jsonl"
+        ),
+        expected=2,
+    )
+    error = json.loads(rejected.stderr)
+    assert "already has a frozen finding" in error["message"]
+    assert first["item_id"]
+
+
 @pytest.mark.parametrize(
     ("mutation", "reason"),
     [
@@ -1092,6 +1302,7 @@ def test_author_verification_flags_have_no_acceptance_authority(
     [
         "The reported depth was not 5.0 m.",
         "The source measured 2.0 m, not the proposed 5.0 m.",
+        "The depth was 5.0 m, or the reported substrate was gravel.",
     ],
 )
 def test_negated_or_compound_numeric_options_fail_closed(
@@ -1123,6 +1334,7 @@ def test_truth_in_another_scope_does_not_invalidate_a_scoped_distractor(
     item = candidate(tmp_path)
     item["option_verdicts"][0]["true_in_different_context"] = True
     item["option_verdicts"][0]["question_admits_option_as_correct"] = False
+    sync_option_receipt(tmp_path, item, 0)
     path = write_candidate(tmp_path, item, "different-scope-truth.json")
     result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
     row = next(value for value in result["distractors"] if value["text"] == "2.5 m")
@@ -1143,12 +1355,91 @@ def test_option_verdict_hashes_are_source_and_display_bound(tmp_path: Path) -> N
     assert result["labels"]["mcq_eligible"] is False
 
 
+@pytest.mark.parametrize("forgery", ["source", "receipt", "qa_receipt"])
+def test_validation_rejects_unstored_source_or_verifier_provenance(
+    tmp_path: Path, forgery: str
+) -> None:
+    smoke(tmp_path)
+    item = candidate(tmp_path)
+    if forgery == "source":
+        item["source"]["content_hash"] = "forged-source-hash"
+        for verdict in item["option_verdicts"]:
+            verdict["source_hash"] = "forged-source-hash"
+        expected_reason = "source_manifest_mismatch"
+    elif forgery == "receipt":
+        for verdict in item["option_verdicts"]:
+            verdict["provenance"].update(
+                {
+                    "provider": "invented-provider",
+                    "requested_model": "invented-model",
+                    "prompt_hash": "invented-prompt-hash",
+                }
+            )
+        expected_reason = "option_verdict_call_receipt_missing"
+    else:
+        item["provenance"].pop("verification_calls", None)
+        expected_reason = "qa_verification_call_receipt_missing"
+    path = write_candidate(tmp_path, item, f"forged-{forgery}.json")
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+    assert result["labels"]["mcq_eligible"] is False
+    if forgery == "source":
+        assert result["final_label"] == "rejected"
+        assert expected_reason in result["reasons"]
+    elif forgery == "receipt":
+        assert all(expected_reason in row["reasons"] for row in result["distractors"])
+    else:
+        assert result["final_label"] == "rejected"
+        assert expected_reason in result["reasons"]
+
+
+def test_external_candidate_validation_cannot_change_stored_candidate_status(
+    tmp_path: Path,
+) -> None:
+    smoke(tmp_path)
+    item = candidate(tmp_path)
+    item["source"]["content_hash"] = "forged-source-hash"
+    path = write_candidate(tmp_path, item, "candidate-id-alias.json")
+    validation = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+    assert validation["final_label"] == "rejected"
+
+    status = json.loads(cli(tmp_path, "status").stdout)
+    assert status["candidates"] == [
+        {"count": 1, "status": "machine_accepted_unverified"}
+    ]
+
+
+def test_identical_content_in_separate_runs_has_separate_candidate_identity(
+    tmp_path: Path,
+) -> None:
+    first = smoke(tmp_path, "identity-run-a")
+    generated = json.loads(
+        cli(
+            tmp_path,
+            *generate_command(
+                first["screen"]["source_id"],
+                "identity-run-b",
+                FIXTURES / "fake-author.jsonl",
+            ),
+        ).stdout
+    )
+    assert generated["item_id"] != first["item_id"]
+
+    validation = json.loads(
+        cli(tmp_path, "validate", "--item-id", generated["item_id"]).stdout
+    )
+    assert validation["final_label"] == "machine_accepted_unverified"
+    exported = json.loads(cli(tmp_path, "export", "--run-id", "identity-run-b").stdout)
+    assert exported["short_answer_count"] == 1
+    assert exported["mcq_count"] == 2
+
+
 def test_unestablished_option_contradiction_is_not_export_eligible(
     tmp_path: Path,
 ) -> None:
     smoke(tmp_path)
     item = candidate(tmp_path)
     item["option_verdicts"][0]["contradiction_established"] = False
+    sync_option_receipt(tmp_path, item, 0)
     path = write_candidate(tmp_path, item, "unresolved-option.json")
     result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
     assert result["labels"]["mcq_eligible"] is True
@@ -1188,11 +1479,15 @@ def test_v2_database_migrates_with_recoverable_backup(tmp_path: Path) -> None:
         connection.execute("INSERT INTO schema_info(version) VALUES (2)")
     status = json.loads(cli(tmp_path, "status").stdout)
     assert status["sources"] == 0
-    backups = list((namespace / "backups").glob("state-before-v4-*.sqlite3"))
+    backups = list((namespace / "backups").glob("state-before-v5-*.sqlite3"))
     assert len(backups) == 1
     with database(tmp_path) as connection:
-        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 4
+        assert connection.execute("SELECT version FROM schema_info").fetchone()[0] == 5
         finding_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(findings)")
         }
+        finding_indexes = {
+            row[1] for row in connection.execute("PRAGMA index_list(findings)")
+        }
     assert "run_id" in finding_columns
+    assert "sqlite_autoindex_findings_2" in finding_indexes

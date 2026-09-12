@@ -230,16 +230,18 @@ The CLI refuses a USD request before dispatch when a price is absent.
 An unexpected provider overage is recorded and stops later calls.
 
 Use `--arm direct_joint` for the required baseline.
-Each run freezes one proposed finding per paper.
+Each run freezes one proposed finding per paper family.
 Both arms use the same finding record, reconstruction, and acceptance gates.
 The pipeline retains a failed finding instead of sampling a replacement.
+If another source version in that family requests generation, the command stops and identifies the source version that owns the frozen finding.
 
 The reconstructor does not receive the proposed answer.
 It must return source-located evidence, scope, alternatives, and an independently assigned question claim type.
 The answer verifier receives the proposed answer and reconstruction.
 All QA gates run before distractor generation.
 After generation, the verifier receives each exact displayed option in a separate call.
-Each verdict binds to the source, QA, option, prompt, provider, model, and request record.
+Each answer-verification and option-verification record must resolve to its completed call receipt.
+Each option verdict binds to the stored source, QA, displayed option, prompt, provider, model, request, and response payload.
 Author verification flags have no acceptance authority.
 A scope substitution can remain a valid distractor when it is false for this question, even if it is true in another location or period.
 
@@ -256,10 +258,14 @@ PYTHONPATH=src python -m arctic_qa --json validate --item-id ITEM_ID
 
 The default release policy requires executable distractor incompatibility.
 Nonnumeric deterministic checks use a typed rule on the source-located answer.
-They parse the displayed option and ignore self-asserted allowed or excluded values from a distractor.
-Numeric deterministic checks reject negated or compound displayed assertions because one metadata value cannot bind them safely.
+They reject negated or disjunctive displayed assertions and ignore self-asserted allowed or excluded values from a distractor.
+Numeric deterministic checks reject negated, multi-quantity, or disjunctive displayed assertions because one metadata value cannot bind them safely.
 Model-only contradiction has the `model-verified` label and a residual-error notice.
 It does not receive deterministic or certain status.
+
+Candidate IDs include the run ID, so identical content from separate runs has a separate stored record.
+`validate --candidate FILE` validates an external payload without changing stored candidate status or writing a release validation event.
+Stored validation events include the exact candidate payload hash, and export requires that hash to match.
 
 One item can use one component-only correction after hard gates pass.
 The candidate must fail exactly one declared remediable component gate.

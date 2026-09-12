@@ -35,8 +35,9 @@ This control adapts the frozen-manifest method in the project study.
 The author and verifier use separate calls.
 Provider separation can reduce one source of correlated error.
 It cannot guarantee independence or factual truth.
-The initial matched-arm policy freezes one proposed finding per paper and run.
+The initial matched-arm policy freezes one proposed finding per paper family and run.
 Both arms use that finding, and a failed finding remains in the rejection record.
+Generation from a second source version in the same family stops instead of selecting another finding.
 
 The role defaults reflect vendor capabilities recorded on 2026-09-11.
 They are not winners of an Arctic QA evaluation.
@@ -46,8 +47,13 @@ A false or absent source-entailment result stops acceptance.
 Nonnumeric deterministic distractor rules are derived from the source-located answer record.
 A distractor cannot create its own allowed or excluded set.
 Numeric values, units, and tolerance must resolve in the answer and source quote.
-Each post-generation verdict binds to the source hash, QA hash, displayed option hash, prompt, provider, model, and request record.
+Each answer-verification and post-generation option-verification claim must match a completed call receipt and its stored response.
+Each option verdict also binds to the stored source hash, QA hash, displayed option hash, prompt, provider, model, and request record.
 Author verification flags do not control acceptance.
 Truth at a different location or time does not invalidate a distractor when the question fixes its scope.
-Negated and compound numeric assertions fail closed because one metadata value cannot bind them safely.
+Negated text assertions fail closed because a surface value does not represent their truth conditions.
+Negated, multi-quantity, and disjunctive numeric assertions also fail closed because one metadata value cannot bind them safely.
+A run-specific candidate ID prevents identical content in another run from losing its candidate record.
+External candidate-file validation cannot change stored state.
+Stored validation events and exports bind to the exact candidate payload hash.
 A future authorized audit can add a stronger review label without blocking this production workflow.

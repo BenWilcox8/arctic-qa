@@ -11,7 +11,7 @@ from typing import Any, Iterator
 from .util import canonical_json
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 SCHEMA = """
@@ -130,7 +130,7 @@ CREATE TABLE IF NOT EXISTS findings (
     answer_json TEXT NOT NULL,
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    UNIQUE(run_id, source_id, selection_policy_version)
+    UNIQUE(run_id, paper_family_id, selection_policy_version)
 );
 CREATE TABLE IF NOT EXISTS candidates (
     item_id TEXT PRIMARY KEY,
@@ -244,9 +244,7 @@ class Database:
                         UNIQUE(run_id, source_id, selection_policy_version)
                         )"""
                     )
-                    self.connection.execute(
-                        "UPDATE schema_info SET version=?", (SCHEMA_VERSION,)
-                    )
+                    self.connection.execute("UPDATE schema_info SET version=4")
             row = self.connection.execute("SELECT version FROM schema_info").fetchone()
             if row and row[0] == 3:
                 with self.transaction():
@@ -276,6 +274,46 @@ class Database:
                         FROM findings_v3"""
                     )
                     self.connection.execute("DROP TABLE findings_v3")
+                    self.connection.execute("UPDATE schema_info SET version=4")
+            row = self.connection.execute("SELECT version FROM schema_info").fetchone()
+            if row and row[0] == 4:
+                duplicate = self.connection.execute(
+                    """SELECT run_id,paper_family_id,selection_policy_version,
+                              COUNT(*) AS count
+                    FROM findings
+                    GROUP BY run_id,paper_family_id,selection_policy_version
+                    HAVING COUNT(*) > 1
+                    ORDER BY run_id,paper_family_id,selection_policy_version
+                    LIMIT 1"""
+                ).fetchone()
+                if duplicate:
+                    raise RuntimeError(
+                        "cannot migrate findings with duplicate paper-family policy "
+                        f"rows: run={duplicate[0]}, family={duplicate[1]}, "
+                        f"policy={duplicate[2]}, count={duplicate[3]}"
+                    )
+                with self.transaction():
+                    self.connection.execute(
+                        "ALTER TABLE findings RENAME TO findings_v4"
+                    )
+                    self.connection.execute(
+                        """CREATE TABLE findings (
+                        finding_id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        source_id TEXT NOT NULL,
+                        paper_family_id TEXT NOT NULL,
+                        chunk_id TEXT NOT NULL,
+                        selection_policy_version TEXT NOT NULL,
+                        answer_json TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        UNIQUE(run_id,paper_family_id,selection_policy_version)
+                        )"""
+                    )
+                    self.connection.execute(
+                        "INSERT INTO findings SELECT * FROM findings_v4"
+                    )
+                    self.connection.execute("DROP TABLE findings_v4")
                     self.connection.execute(
                         "UPDATE schema_info SET version=?", (SCHEMA_VERSION,)
                     )

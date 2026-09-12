@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -68,7 +69,12 @@ class ValidationResult:
 
 
 def validate_candidate(
-    db: Database, namespace, candidate: dict[str, Any], *, strict_release: bool = True
+    db: Database,
+    namespace,
+    candidate: dict[str, Any],
+    *,
+    strict_release: bool = True,
+    persist: bool = True,
 ) -> ValidationResult:
     reasons: list[str] = []
     labels = {
@@ -84,6 +90,7 @@ def validate_candidate(
         "machine_accepted_unverified": False,
         "rejected": False,
         "unresolved": False,
+        "_persist_validation": persist,
     }
     if candidate.get("schema_version") != "2.0.0":
         reasons.append("unsafe_legacy_candidate_schema")
@@ -97,6 +104,16 @@ def validate_candidate(
         reasons.append("answer_schema_invalid")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     labels["schema_valid"] = True
+    source_record = db.one(
+        "SELECT source_id,paper_family_id,content_hash FROM sources WHERE source_id=?",
+        (candidate.get("source", {}).get("source_id"),),
+    )
+    if not source_record or any(
+        candidate["source"].get(key) != source_record[key]
+        for key in ("source_id", "paper_family_id", "content_hash")
+    ):
+        reasons.append("source_manifest_mismatch")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
     try:
         chunks = {
             row["chunk_id"]: row
@@ -185,6 +202,9 @@ def validate_candidate(
         labels["unresolved"] = True
         return _finish(db, candidate, labels, reasons, [], "unresolved")
     labels["alternative_answer_search_passed"] = True
+    if not _qa_verification_receipts_match(db, candidate):
+        reasons.append("qa_verification_call_receipt_missing")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
     qa_hash = stable_id(
         "qa", candidate["question"], canonical_json(candidate["answer"])
     )
@@ -203,6 +223,7 @@ def validate_candidate(
         )
         distractor_results.append(
             validate_distractor(
+                db,
                 candidate,
                 distractor,
                 chunks,
@@ -299,6 +320,7 @@ def convert(value: Decimal, source_unit: str, target_unit: str) -> Decimal:
 
 
 def validate_distractor(
+    db: Database,
     candidate: dict[str, Any],
     distractor: dict[str, Any],
     chunks: dict[str, dict[str, Any]],
@@ -334,6 +356,11 @@ def validate_distractor(
         result["reasons"].append("forbidden_meta_option")
         return result
     numeric = distractor.get("numeric")
+    if not numeric:
+        display_issue = _text_display_issue(str(distractor.get("text", "")))
+        if display_issue:
+            result["reasons"].append(display_issue)
+            return result
     if numeric:
         numeric_display_issue = _numeric_display_issue(
             str(distractor.get("text", "")), numeric
@@ -372,6 +399,11 @@ def validate_distractor(
         or not provenance.get("prompt_hash")
     ):
         result["reasons"].append("option_verdict_provenance_missing")
+        return result
+    if not _option_verdict_receipt_matches(
+        db, candidate, verdict, option_hash, provenance
+    ):
+        result["reasons"].append("option_verdict_call_receipt_missing")
         return result
     if not verdict.get("contradiction_established"):
         result["reasons"].append("option_contradiction_unresolved")
@@ -419,6 +451,109 @@ def validate_distractor(
     return result
 
 
+def _option_verdict_receipt_matches(
+    db: Database,
+    candidate: dict[str, Any],
+    verdict: dict[str, Any],
+    option_hash: str,
+    provenance: dict[str, Any],
+) -> bool:
+    candidate_provenance = candidate.get("provenance") or {}
+    run_id = candidate_provenance.get("run_id")
+    arm = candidate_provenance.get("generation_arm")
+    finding_id = candidate.get("finding_id")
+    if not all(isinstance(value, str) and value for value in (run_id, arm, finding_id)):
+        return False
+    entity_id = stable_id(
+        "option-verdict", stable_id("unit", finding_id, arm), option_hash
+    )
+    receipt = db.one(
+        """SELECT * FROM calls
+        WHERE run_id=? AND entity_id=? AND role='option_verifier'
+          AND provider=? AND requested_model=? AND prompt_version=?
+          AND prompt_hash=? AND status='completed'
+        ORDER BY attempt DESC LIMIT 1""",
+        (
+            run_id,
+            entity_id,
+            provenance.get("provider"),
+            provenance.get("requested_model"),
+            provenance.get("prompt_version"),
+            provenance.get("prompt_hash"),
+        ),
+    )
+    if not receipt or not receipt.get("response_json"):
+        return False
+    if provenance.get("returned_model") != receipt.get("returned_model"):
+        return False
+    if provenance.get("request_id") != receipt.get("request_id"):
+        return False
+    try:
+        response = json.loads(receipt["response_json"])
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return all(response.get(key) == verdict.get(key) for key in response)
+
+
+def _qa_verification_receipts_match(db: Database, candidate: dict[str, Any]) -> bool:
+    provenance = candidate.get("provenance") or {}
+    run_id = provenance.get("run_id")
+    arm = provenance.get("generation_arm")
+    finding_id = candidate.get("finding_id")
+    calls = provenance.get("verification_calls") or {}
+    if not all(isinstance(value, str) and value for value in (run_id, arm, finding_id)):
+        return False
+    entity_id = stable_id("unit", finding_id, arm)
+    records = {
+        "reconstructor": candidate.get("reconstruction"),
+        "answer_verifier": candidate.get("answer_verification"),
+    }
+    for role, record in records.items():
+        call = calls.get(role) or {}
+        if call.get("role") != role:
+            return False
+        receipt = db.one(
+            """SELECT * FROM calls
+            WHERE run_id=? AND entity_id=? AND role=? AND provider=?
+              AND requested_model=? AND prompt_version=? AND prompt_hash=?
+              AND status='completed'
+            ORDER BY attempt DESC LIMIT 1""",
+            (
+                run_id,
+                entity_id,
+                role,
+                call.get("provider"),
+                call.get("requested_model"),
+                call.get("prompt_version"),
+                call.get("prompt_hash"),
+            ),
+        )
+        if not receipt or not receipt.get("response_json"):
+            return False
+        if call.get("returned_model") != receipt.get("returned_model"):
+            return False
+        if call.get("request_id") != receipt.get("request_id"):
+            return False
+        try:
+            response = json.loads(receipt["response_json"])
+        except (TypeError, json.JSONDecodeError):
+            return False
+        if canonical_json(response) != canonical_json(record):
+            return False
+    return True
+
+
+def _text_display_issue(text: str) -> str | None:
+    normalized = normalize_text(text)
+    if re.search(r"\b(?:not|no|never|without|except|unless|neither|nor)\b", normalized):
+        return "displayed_assertion_negated"
+    if ";" in text or re.search(
+        r"\b(?:or|either|and|but|although|though|while|whereas|if)\b", normalized
+    ):
+        return "displayed_assertion_compound"
+    return None
+
+
 def _numeric_display_issue(text: str, numeric: dict[str, Any]) -> str | None:
     try:
         value = Decimal(str(numeric["canonical_value"]))
@@ -428,8 +563,13 @@ def _numeric_display_issue(text: str, numeric: dict[str, Any]) -> str | None:
     quantities = re.findall(
         r"(?<![\w.])([-+]?\d+(?:\.\d+)?)\s*(°?[A-Za-z]+|%)(?!\w)", text
     )
-    if len(quantities) != 1 or re.search(
-        r"\b(?:not|no|never|without|except)\b", normalize_text(text)
+    if (
+        len(quantities) != 1
+        or ";" in text
+        or re.search(
+            r"\b(?:not|no|never|without|except|unless|neither|nor|or|either|and|but|although|though|while|whereas|if)\b",
+            normalize_text(text),
+        )
     ):
         return "numeric_display_ambiguous"
     displayed_value, displayed_unit = quantities[0]
@@ -559,10 +699,23 @@ def _finish(
     final_label: str,
 ) -> ValidationResult:
     item_id = candidate.get("item_id", stable_id("invalid", canonical_json(candidate)))
+    persist = labels.pop("_persist_validation", True)
     labels["rejected"] = final_label == "rejected"
     labels["unresolved"] = final_label == "unresolved"
+    if not persist:
+        return ValidationResult(item_id, final_label, labels, reasons, distractors)
+    candidate_json = canonical_json(candidate)
+    candidate_hash = stable_id("candidate-payload", candidate_json)
+    stored = db.one("SELECT candidate_json FROM candidates WHERE item_id=?", (item_id,))
+    if not stored or stored["candidate_json"] != candidate_json:
+        labels["rejected"] = True
+        labels["machine_accepted_unverified"] = False
+        labels["mcq_eligible"] = False
+        final_label = "rejected"
+        if "stored_candidate_payload_mismatch" not in reasons:
+            reasons.append("stored_candidate_payload_mismatch")
     event_id = stable_id(
-        "validation", item_id, final_label, labels, reasons, distractors
+        "validation", item_id, candidate_hash, final_label, labels, reasons, distractors
     )
     with db.transaction():
         db.connection.execute(
@@ -574,11 +727,17 @@ def _finish(
                 item_id,
                 final_label,
                 canonical_json(reasons),
-                canonical_json({"labels": labels, "distractors": distractors}),
+                canonical_json(
+                    {
+                        "candidate_hash": candidate_hash,
+                        "labels": labels,
+                        "distractors": distractors,
+                    }
+                ),
                 now(),
             ),
         )
-        if db.one("SELECT item_id FROM candidates WHERE item_id=?", (item_id,)):
+        if stored and stored["candidate_json"] == candidate_json:
             db.connection.execute(
                 "UPDATE candidates SET status=?,updated_at=? WHERE item_id=?",
                 (final_label, now(), item_id),

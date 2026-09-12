@@ -323,10 +323,16 @@ def generate_candidate(
             key: str(value) for key, value in pricing_usd_per_million_tokens.items()
         }
     existing_finding = db.one(
-        "SELECT * FROM findings WHERE run_id=? AND source_id=? AND selection_policy_version=?",
-        (run_id, source_id, FINDING_POLICY_VERSION),
+        """SELECT * FROM findings
+        WHERE run_id=? AND paper_family_id=? AND selection_policy_version=?""",
+        (run_id, source["paper_family_id"], FINDING_POLICY_VERSION),
     )
     if existing_finding:
+        if existing_finding["source_id"] != source_id:
+            raise ValueError(
+                "paper family already has a frozen finding from source "
+                f"{existing_finding['source_id']}"
+            )
         answer = json.loads(existing_finding["answer_json"])
         finding_id = existing_finding["finding_id"]
         chunk = next(
@@ -410,28 +416,27 @@ def generate_candidate(
         arm_answer_proposal = joint["answer"]
     else:
         raise ValueError(f"unknown generation arm: {arm}")
-    reconstruction = _call(
+    reconstruction_prompt = (
+        context
+        + "\nQUESTION\n"
+        + str(question)
+        + "\nReconstruct the answer. The proposed answer is hidden."
+    )
+    reconstruction_result = _call_result(
         db,
         verifier,
         run_id,
         entity_id,
         "reconstructor",
-        context
-        + "\nQUESTION\n"
-        + str(question)
-        + "\nReconstruct the answer. The proposed answer is hidden.",
+        reconstruction_prompt,
         parameters,
         reservation,
         timeout,
         retries,
         rate_limit_seconds,
     )
-    answer_verification = _call(
-        db,
-        verifier,
-        run_id,
-        entity_id,
-        "answer_verifier",
+    reconstruction = reconstruction_result.payload
+    answer_verification_prompt = (
         context
         + "\nQUESTION\n"
         + str(question)
@@ -439,13 +444,22 @@ def generate_candidate(
         + canonical_json(answer)
         + "\nRECONSTRUCTION\n"
         + canonical_json(reconstruction)
-        + "\nVerify entailment, relation, scope, ambiguity, alternatives, evidence, and the question claim type.",
+        + "\nVerify entailment, relation, scope, ambiguity, alternatives, evidence, and the question claim type."
+    )
+    answer_verification_result = _call_result(
+        db,
+        verifier,
+        run_id,
+        entity_id,
+        "answer_verifier",
+        answer_verification_prompt,
         parameters,
         reservation,
         timeout,
         retries,
         rate_limit_seconds,
     )
+    answer_verification = answer_verification_result.payload
     qa_gate_reasons = _qa_gate_reasons(
         chunk, question, answer, reconstruction, answer_verification
     )
@@ -526,7 +540,7 @@ def generate_candidate(
                 }
             )
     item_id = stable_id(
-        "aqa", source_id, source["paper_family_id"], arm, question, answer
+        "aqa", run_id, source_id, source["paper_family_id"], arm, question, answer
     )
     candidate = {
         "schema_version": "2.0.0",
@@ -560,6 +574,20 @@ def generate_candidate(
             "author_model": author.model,
             "verifier_provider": verifier.name,
             "verifier_model": verifier.model,
+            "verification_calls": {
+                "reconstructor": _call_provenance(
+                    verifier,
+                    reconstruction_result,
+                    "reconstructor",
+                    reconstruction_prompt,
+                ),
+                "answer_verifier": _call_provenance(
+                    verifier,
+                    answer_verification_result,
+                    "answer_verifier",
+                    answer_verification_prompt,
+                ),
+            },
             "family_overlap_disclosure": "Construction roles can overlap future evaluated families. Record overlap during evaluation.",
             "method_status": "proposed_unvalidated",
             "policy_ablation_metadata": {
@@ -587,6 +615,20 @@ def generate_candidate(
             ),
         )
     return candidate
+
+
+def _call_provenance(
+    provider: Provider, result: ProviderResult, role: str, prompt: str
+) -> dict[str, Any]:
+    return {
+        "role": role,
+        "provider": provider.name,
+        "requested_model": provider.model,
+        "returned_model": result.returned_model,
+        "request_id": result.request_id,
+        "prompt_version": PROMPT_VERSION,
+        "prompt_hash": stable_id("prompt", SYSTEM, prompt, PROMPT_VERSION),
+    }
 
 
 def apply_one_correction(
