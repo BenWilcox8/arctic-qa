@@ -171,6 +171,8 @@ def test_prepare_smoke_resume_and_access_outcomes(tmp_path: Path) -> None:
         "attempted": 5,
         "retrieved": 4,
         "full_text_retrieved": 1,
+        "full_text_reviewed": 0,
+        "full_text_review_pending": 1,
         "eligible": 0,
         "excluded": 0,
         "pending": 5,
@@ -401,6 +403,8 @@ def test_exact_quote_and_overall_eligibility_rules(tmp_path: Path) -> None:
     assert receipt["counts"]["excluded"] == 1
     assert receipt["counts"]["pending"] == 4
     assert receipt["counts"]["unattempted"] == 1
+    assert receipt["counts"]["full_text_reviewed"] == 1
+    assert receipt["counts"]["full_text_review_pending"] == 0
     assert receipt["decision_method_counts"] == {
         "codex-native-semantic-source-review-v1": 1
     }
@@ -414,3 +418,20 @@ def test_exact_quote_and_overall_eligibility_rules(tmp_path: Path) -> None:
     replay = run_fixture(tmp_path, "decide", calls=calls, decisions_file=mixed_excluded)
     assert replay["idempotent_replay"] is True
     assert len(list((tmp_path / "run").glob("source-screening-overlay-r*.json"))) == 1
+
+
+def test_incomplete_full_text_review_keeps_pass_paused(tmp_path: Path) -> None:
+    calls: list[str] = []
+    run_fixture(tmp_path, "continue", calls=calls)
+    decisions = tmp_path / "empty-decisions.json"
+    write_json(decisions, {"schema": "source-decision-proposals-v1", "decisions": []})
+
+    receipt = run_fixture(tmp_path, "decide", calls=calls, decisions_file=decisions)
+
+    assert receipt["state"] == "paused"
+    assert receipt["counts"]["full_text_retrieved"] == 1
+    assert receipt["counts"]["full_text_reviewed"] == 0
+    assert receipt["counts"]["full_text_review_pending"] == 1
+    progress = json.loads((tmp_path / "run" / "progress.json").read_text())
+    assert progress["state"] == "paused"
+    assert "review is incomplete" in progress["message"]

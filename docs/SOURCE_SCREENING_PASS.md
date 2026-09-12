@@ -19,6 +19,8 @@ The `progress.json` file shows a live observation.
 It is not completion proof.
 The `decide` action writes a versioned overlay and a durable run receipt.
 Hash-checked pointer files identify the current revision.
+The receipt stays paused while any retrieved full text lacks a semantic decision.
+The counts keep full-text retrieval and full-text review separate.
 
 ## Run sequence
 
@@ -73,3 +75,4 @@ Run the final action with the normal arguments and this additional option:
 
 The command retains unreviewed and pending records in the final overlay.
 It does not turn access failure into exclusion.
+It completes only when each retrieved full text has a named semantic decision.

@@ -468,7 +468,7 @@ class CorpusArtifacts:
         if (
             overlay.get("schema") != "source-screening-overlay-v1"
             or receipt.get("schema") != "source-screening-run-receipt-v1"
-            or receipt.get("state") != "completed"
+            or receipt.get("state") not in {"paused", "completed"}
             or receipt.get("overlay_sha256") != sha256_file(overlay_file)
         ):
             raise ValueError("the source-pass receipt or overlay is invalid")
@@ -733,10 +733,12 @@ class CorpusArtifacts:
             receipt_file = self._source_pointed_file("run-receipt-current.json")
             if receipt_file is not None:
                 receipt = _read_json(receipt_file)
-                if (
-                    receipt.get("schema") != "source-screening-run-receipt-v1"
-                    or receipt.get("state") != "completed"
-                ):
+                if receipt.get(
+                    "schema"
+                ) != "source-screening-run-receipt-v1" or receipt.get("state") not in {
+                    "paused",
+                    "completed",
+                }:
                     raise ValueError("the source-pass receipt is invalid")
                 progress_file = self._source_progress_file()
                 progress = (
@@ -744,19 +746,33 @@ class CorpusArtifacts:
                     if progress_file and progress_file.is_file()
                     else {}
                 )
+                counts = dict(receipt.get("counts") or {})
+                reviewed = sum(
+                    int(value)
+                    for value in (receipt.get("decision_method_counts") or {}).values()
+                )
+                counts.setdefault("full_text_reviewed", reviewed)
+                counts.setdefault(
+                    "full_text_review_pending",
+                    max(int(counts.get("full_text_retrieved") or 0) - reviewed, 0),
+                )
+                state = receipt.get("state")
                 return {
                     **absent,
                     "telemetry": "observed",
-                    "state": "completed",
+                    "state": state,
                     "run_id": receipt.get("run_id"),
                     "policy_id": receipt.get("policy_id"),
                     "producer_code_commit": receipt.get("producer_code_commit"),
                     "started_at_utc": progress.get("started_at_utc"),
-                    "updated_at_utc": receipt.get("completed_at_utc"),
+                    "updated_at_utc": receipt.get("completed_at_utc")
+                    or receipt.get("recorded_at_utc"),
                     "completed_at_utc": receipt.get("completed_at_utc"),
-                    "counts": receipt.get("counts") or {},
+                    "counts": counts,
                     "overlay_revision": receipt.get("overlay_revision"),
-                    "message": "The durable source-pass receipt is complete.",
+                    "message": "The durable source-pass receipt is complete."
+                    if state == "completed"
+                    else "Source retrieval is complete, but retrieved full-text review is incomplete.",
                 }
             progress_file = self._source_progress_file()
             if progress_file is None or not progress_file.is_file():

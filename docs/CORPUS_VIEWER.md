@@ -52,6 +52,8 @@ The optional source run directory contains live progress and versioned completio
 The viewer follows hash-checked pointers to the current source overlay and receipt.
 It refreshes its cache when a pointer or progress record changes.
 It does not expose stored source files or extracted text.
+It reports full-text retrieval and semantic review as separate counts.
+Prepared, paused, and completed states clearly report that no process is running.
 
 ## Stage completion
 

@@ -131,6 +131,8 @@ def write_source_revision(
         "attempted": 1,
         "retrieved": 1,
         "full_text_retrieved": 1,
+        "full_text_reviewed": 1,
+        "full_text_review_pending": 0,
         "eligible": int(eligibility == "eligible"),
         "excluded": int(eligibility == "excluded"),
         "pending": 0,

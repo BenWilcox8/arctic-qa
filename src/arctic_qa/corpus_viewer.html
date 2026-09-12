@@ -309,7 +309,7 @@
         const data = await fetchJson('/api/state');
         const process = data.progress;
         if (process.telemetry === 'observed') {
-          $('process-title').textContent = process.state === 'not_running' ? 'No corpus processing is running' : `Corpus processing: ${label(process.state)}`;
+          $('process-title').textContent = ['not_running', 'prepared', 'paused', 'completed'].includes(process.state) ? 'No corpus processing is running' : `Corpus processing: ${label(process.state)}`;
         } else {
           $('process-title').textContent = 'Corpus process telemetry is not available';
         }
@@ -328,7 +328,7 @@
         setBadge($('source-pass-state'), sourcePass.state || sourcePass.telemetry);
         $('source-pass-detail').textContent = sourcePass.message;
         $('source-pass-run-meta').textContent = `Run ${sourcePass.run_id || 'not selected'} | Policy ${sourcePass.policy_id || 'not selected'} | Processed ${formatNumber(sourcePass.counts?.processed)} of ${formatNumber(sourcePass.counts?.selected)} | Started ${dateText(sourcePass.started_at_utc)} | Completed ${dateText(sourcePass.completed_at_utc)} | Producer ${sourcePass.producer_code_commit || 'not available'}`;
-        const sourceCountOrder = ['attempted', 'retrieved', 'full_text_retrieved', 'eligible', 'excluded', 'pending', 'unattempted'];
+        const sourceCountOrder = ['attempted', 'retrieved', 'full_text_retrieved', 'full_text_reviewed', 'full_text_review_pending', 'eligible', 'excluded', 'pending', 'unattempted'];
         $('source-pass-counts').replaceChildren(...sourceCountOrder.map((name) => {
           const box = document.createElement('div'); box.className = 'count';
           box.append(text('span', label(name)), text('strong', formatNumber(data.source_pass_counts?.[name]))); return box;

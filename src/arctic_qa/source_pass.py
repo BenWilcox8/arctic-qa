@@ -274,12 +274,25 @@ def _counts(
             row.get("access_state") == "retrieved_full_text"
             for row in receipts.values()
         ),
+        "full_text_reviewed": 0,
+        "full_text_review_pending": sum(
+            row.get("access_state") == "retrieved_full_text"
+            for row in receipts.values()
+        ),
         "eligible": 0,
         "excluded": 0,
         "pending": 0,
         "unattempted": manifest["selection_size"] - attempted,
     }
     if records is not None:
+        counts["full_text_reviewed"] = sum(
+            row.get("access_state") == "retrieved_full_text"
+            and bool(row.get("decision_method_version"))
+            for row in records
+        )
+        counts["full_text_review_pending"] = (
+            counts["full_text_retrieved"] - counts["full_text_reviewed"]
+        )
         counts["eligible"] = sum(
             row.get("scientific_eligibility") == "eligible" for row in records
         )
@@ -999,14 +1012,17 @@ def apply_source_decisions(
         name: _file_record(Path(record["path"]))
         for name, record in manifest["inputs"].items()
     }
-    completed_at = _now()
+    recorded_at = _now()
+    review_complete = overlay["counts"]["full_text_review_pending"] == 0
+    state = "completed" if review_complete else "paused"
     receipt = {
         "schema": RECEIPT_SCHEMA,
-        "state": "completed",
+        "state": state,
         "run_id": manifest["run_id"],
         "policy_id": manifest["policy_id"],
         "producer_code_commit": manifest["producer_code_commit"],
-        "completed_at_utc": completed_at,
+        "recorded_at_utc": recorded_at,
+        "completed_at_utc": recorded_at if review_complete else None,
         "selection_size": manifest["selection_size"],
         "selection_keys_sha256": manifest["selection_keys_sha256"],
         "overlay_revision": revision,
@@ -1042,11 +1058,13 @@ def apply_source_decisions(
     old_progress = _read_json(output_dir / "progress.json")
     progress = _progress_payload(
         manifest,
-        "completed",
+        state,
         receipts,
-        "The bounded source pass is complete under its durable receipt.",
+        "The bounded source pass is complete under its durable receipt."
+        if review_complete
+        else "Source retrieval is complete, but retrieved full-text review is incomplete.",
         started_at=old_progress.get("started_at_utc"),
-        completed_at=completed_at,
+        completed_at=recorded_at if review_complete else None,
         records=records,
     )
     progress["overlay_revision"] = revision
