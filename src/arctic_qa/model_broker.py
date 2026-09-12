@@ -1376,6 +1376,47 @@ class SharedGeminiBroker:
             ledger = self._validated_ledger()
             return self._status_payload(ledger)
 
+    def effective_receipt(self, request_key: str) -> dict[str, Any]:
+        """Read a final receipt through validated reconciliation custody."""
+        if not re.fullmatch(r"[a-f0-9]{64}", request_key):
+            raise ValueError("the paid-call request key is invalid")
+        with self._lock_file.open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            ledger = self._validated_ledger()
+            request = ledger["requests"].get(request_key)
+            if request is None:
+                raise ValueError("the paid-call request does not exist")
+            final_path = self.receipts_dir / f"{request_key}.json"
+            final = _read(final_path)
+            reconciliation_sha256 = request.get("usage_reconciliation_sha256")
+            if reconciliation_sha256 is None:
+                return final
+
+            reconciliation_path = (
+                self.receipts_dir / f"{request_key}.usage-reconciliation.json"
+            )
+            received_path = self.receipts_dir / f"{request_key}.received.json"
+            reconciliation = self._read_usage_reconciliation(reconciliation_path)
+            received = _read(received_path)
+            if (
+                request.get("state") != "completed"
+                or sha256_file(reconciliation_path) != reconciliation_sha256
+                or reconciliation["received_receipt_sha256"]
+                != sha256_file(received_path)
+                or reconciliation["ambiguous_receipt_sha256"] != sha256_file(final_path)
+            ):
+                raise ValueError("the reconciled paid-call receipt changed")
+            return {
+                **final,
+                "state": "completed",
+                "response": received["response"],
+                "usage": request["usage"],
+                "actual_cost_usd": request["actual_cost_usd"],
+                "usage_reconciliation_sha256": reconciliation_sha256,
+                "received_receipt_sha256": reconciliation["received_receipt_sha256"],
+                "ambiguous_receipt_sha256": reconciliation["ambiguous_receipt_sha256"],
+            }
+
     def record_accepted(self, *, family_id: str, item_id: str) -> dict[str, Any]:
         if not family_id or not item_id:
             raise ValueError("accepted item identity is missing")

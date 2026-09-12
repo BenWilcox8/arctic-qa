@@ -162,6 +162,10 @@ Ambiguous receipts stop the scheduler.
 Do not replay an ambiguous request.
 The `reconcile-usage` command can settle one saved omitted-zero usage response after an independent review and supervisor release.
 It preserves all original receipts and writes a new immutable reconciliation receipt.
+After settlement, the provider adapter can resume the same eligibility job from an authenticated in-memory receipt view.
+The view binds the reconciliation event, both original receipt hashes, settled usage, and settled cost.
+The local ambiguous call entry becomes complete only after the saved JSON passes schema validation.
+This resume path does not call token counting or generation, including after a process restart.
 See [the shared model broker guide](SHARED_MODEL_BROKER.md) for the exact command and rules.
 An immutable-event failure republishes broker status with `halted` set to `true` and `integrity_valid` set to `false`.
 The broker observer updates streaming progress to bind that halted status.

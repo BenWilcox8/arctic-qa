@@ -138,11 +138,7 @@ class BrokerProvider:
             raise ValueError(
                 f"the generation role has no broker stage: {role}"
             ) from error
-        self.broker.status()
-        receipt_path = self.broker.receipts_dir / f"{request_key}.json"
-        if not receipt_path.is_file():
-            raise ValueError("the broker receipt is missing")
-        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt = self.broker.effective_receipt(request_key)
         _validate_receipt(
             receipt,
             request_key=request_key,
@@ -154,6 +150,51 @@ class BrokerProvider:
             model=self.model,
         )
         return receipt, _provider_result(receipt, self.model)
+
+    def resume_reconciled(
+        self,
+        role: str,
+        system: str,
+        prompt: str,
+        parameters: dict[str, Any],
+        timeout: float,
+    ) -> ProviderResult:
+        """Resume only from an authenticated reconciliation without transport."""
+        if (
+            self.paper_id is None
+            or self.family_id is None
+            or self.source_version_id is None
+        ):
+            raise ValueError("the broker provider is not bound to a paper")
+        if timeout <= 0:
+            raise ValueError("the provider timeout must be positive")
+        try:
+            stage = ROLE_STAGES[role]
+        except KeyError as error:
+            raise ValueError(
+                f"the generation role has no broker stage: {role}"
+            ) from error
+        payload = _request_payload(system, prompt, parameters, self.broker.config)
+        request_key = broker_request_key(
+            model=self.model,
+            run_id=self.invocation_run_id,
+            stage=stage,
+            paper_id=self.paper_id,
+            family_id=self.family_id,
+            source_version_id=self.source_version_id,
+            payload=payload,
+        )
+        reconciliation_path = (
+            self.broker.receipts_dir / f"{request_key}.usage-reconciliation.json"
+        )
+        if not reconciliation_path.is_file():
+            raise AmbiguousChargeError("the broker request has no usage reconciliation")
+        _, result = self.read_receipt(
+            request_key=request_key,
+            role=role,
+            request_sha256=sha256_bytes(canonical_json(payload).encode()),
+        )
+        return result
 
 
 def _request_payload(

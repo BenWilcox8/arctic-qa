@@ -305,7 +305,10 @@ def call_provider(
         """SELECT call_id FROM calls WHERE run_id=? AND entity_id=? AND role=? AND prompt_hash=? AND status='ambiguous_charge' LIMIT 1""",
         (run_id, entity_id, role, prompt_hash),
     )
-    if ambiguous:
+    resume_reconciled = getattr(provider, "resume_reconciled", None)
+    if ambiguous and not (
+        getattr(provider, "externally_metered", False) and callable(resume_reconciled)
+    ):
         raise AmbiguousChargeError(
             f"The prior {role} request has an ambiguous charge receipt. Manual reconciliation is required."
         )
@@ -325,6 +328,7 @@ def call_provider(
             timeout=timeout,
             retries=retries,
             rate_limit_seconds=rate_limit_seconds,
+            resume_ambiguous=ambiguous is not None,
         )
     budget_mode = db.one("SELECT mode FROM budgets WHERE run_id=?", (run_id,))["mode"]
     attempt_bound = _request_bound(budget_mode, system, prompt, parameters, reservation)
@@ -480,12 +484,16 @@ def _call_externally_metered(
     timeout: float,
     retries: int,
     rate_limit_seconds: float,
+    resume_ambiguous: bool,
 ) -> ProviderResult:
     if retries != 0 or rate_limit_seconds != 0:
         raise ValueError("the shared broker does not permit local retries or pacing")
     call_id = stable_id("call", run_id, entity_id, role, prompt_hash, 1)
     existing = db.one("SELECT status FROM calls WHERE call_id=?", (call_id,))
-    if existing and existing["status"] not in {"started", "failed"}:
+    allowed_existing = {"started", "failed"}
+    if resume_ambiguous:
+        allowed_existing.add("ambiguous_charge")
+    if existing and existing["status"] not in allowed_existing:
         raise ProviderError("The shared-broker call journal has an invalid state.")
     if not existing:
         with db.transaction():
@@ -508,7 +516,15 @@ def _call_externally_metered(
                 ),
             )
     try:
-        result = provider.invoke(role, system, prompt, parameters, timeout)
+        if resume_ambiguous:
+            resume = getattr(provider, "resume_reconciled", None)
+            if not callable(resume):
+                raise AmbiguousChargeError(
+                    "The shared-broker call has no safe reconciliation path."
+                )
+            result = resume(role, system, prompt, parameters, timeout)
+        else:
+            result = provider.invoke(role, system, prompt, parameters, timeout)
         _validate_schema(result.payload, response_schema)
     except AmbiguousChargeError as error:
         _update_call_error(
@@ -538,7 +554,8 @@ def _call_externally_metered(
     with db.transaction():
         db.connection.execute(
             """UPDATE calls SET status='completed',completed_at=?,returned_model=?,
-            request_id=?,input_tokens=?,output_tokens=?,actual_cost_usd=?,response_json=?
+            request_id=?,input_tokens=?,output_tokens=?,actual_cost_usd=?,response_json=?,
+            error_code=NULL,error_text=NULL
             WHERE call_id=?""",
             (
                 now(),

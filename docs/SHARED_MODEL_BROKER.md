@@ -195,6 +195,22 @@ The broker removes the halt only when no ambiguous or in-flight request remains.
 
 Repeated reconciliation returns the existing result without a ledger change or provider call.
 
+After reconciliation, `effective_receipt()` validates the ledger and every immutable event under the ledger lock.
+
+It keeps the original ambiguous receipt unchanged.
+
+It creates an in-memory completed view from the immutable received response and reconciled usage.
+
+The view binds the reconciliation-event hash and both original receipt hashes.
+
+The provider adapter uses this view only for the exact existing request key.
+
+If the local call journal has an ambiguous entry, the adapter requires its explicit no-transport resume method.
+
+The resume updates that journal entry only after the saved JSON passes schema validation.
+
+A process restart does not cause another token-count or generation request.
+
 Use this command after an independent PASS and supervisor release:
 
 ```bash

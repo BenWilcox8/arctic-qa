@@ -14,6 +14,7 @@ import pytest
 from arctic_qa import cli as cli_module
 from arctic_qa.broker_provider import BrokerProvider
 from arctic_qa.db import Database
+from arctic_qa.errors import AmbiguousChargeError
 from arctic_qa.generation import ROLE_SCHEMAS
 from arctic_qa.model_broker import SharedGeminiBroker
 from arctic_qa.paths import DataPaths
@@ -353,6 +354,15 @@ class LowThinkingStructuredTransport(ScriptedBrokerTransport):
         return super().post(model, method, body)
 
 
+class OmittedZeroThoughtStreamingTransport(ScriptedBrokerTransport):
+    def _response(self, model: str, payload: dict, request_id: str | None) -> dict:
+        response = super()._response(model, payload, request_id)
+        usage = response["usageMetadata"]
+        del usage["thoughtsTokenCount"]
+        usage["totalTokenCount"] = 110
+        return response
+
+
 def shared_broker(tmp_path: Path, transport: ScriptedBrokerTransport):
     gate = tmp_path / "broker-gate.json"
     write_json(
@@ -656,6 +666,99 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
         sum(job.get("execution_authority") == "shared_gemini_broker" for job in jobs)
         == 1
     )
+
+
+def test_streaming_resumes_reconciled_eligibility_after_process_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    access, eligibility = streaming_fixture(tmp_path)
+    (eligibility / "jobs" / "fixture-job.json").unlink()
+    inputs = broker_eligibility_inputs(tmp_path)
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+    transport = OmittedZeroThoughtStreamingTransport()
+    broker = shared_broker(tmp_path, transport)
+    provider = BrokerProvider(
+        broker=broker,
+        phase="live_test",
+        invocation_run_id="reconciled-eligibility",
+    )
+    arguments = {
+        "db": database,
+        "namespace": paths.namespace,
+        "run_id": "reconciled-eligibility",
+        "campaign_id": "reconciled-eligibility-campaign",
+        "access_run_dir": access,
+        "eligibility_run_dir": eligibility,
+        "max_papers": 1,
+        **inputs,
+    }
+
+    def legacy_classification(submitted: dict, response: dict):
+        return (
+            {
+                **submitted,
+                "state": "ambiguous_charge",
+                "error": "KeyError: 'thoughtsTokenCount'",
+                "response": response,
+                "live_call_made": True,
+                "completed_at_utc": "2026-09-12T17:24:41Z",
+            },
+            None,
+            None,
+        )
+
+    monkeypatch.setattr(broker, "_completed_receipt", legacy_classification)
+    with pytest.raises(AmbiguousChargeError):
+        run_stream(author=provider, verifier=provider, **arguments)
+    assert transport.methods == ["countTokens", "generateContent"]
+
+    ledger = json.loads((tmp_path / "shared-ledger.json").read_text())
+    request_key = next(iter(ledger["requests"]))
+    review = tmp_path / "usage-review.md"
+    review.write_text("The usage repair passed independent review.\n", encoding="utf-8")
+    gate_path = tmp_path / "broker-gate.json"
+    gate = json.loads(gate_path.read_text())
+    gate.update(
+        {
+            "integrated_code_commit": "usage-repair-commit",
+            "review_record": str(review),
+            "review_record_sha256": sha256_file(review),
+        }
+    )
+    write_json(gate_path, gate)
+    broker.reconcile_omitted_thought_usage(request_key)
+
+    restarted_broker = SharedGeminiBroker(
+        policy_file=REPO / "config" / "streaming-dataset-budget-policy-v1.json",
+        price_config_file=REPO / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=gate_path,
+        ledger_file=tmp_path / "shared-ledger.json",
+        receipts_dir=tmp_path / "model-receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=transport,
+    )
+    restarted_provider = BrokerProvider(
+        broker=restarted_broker,
+        phase="live_test",
+        invocation_run_id="reconciled-eligibility",
+    )
+    result = run_stream(
+        author=restarted_provider,
+        verifier=restarted_provider,
+        **arguments,
+    )
+
+    assert result["counts"]["accepted_base_questions"] == 1
+    assert transport.methods.count("generateContent") == 10
+    status = restarted_broker.status()
+    assert status["generation_submissions"] == 10
+    assert status["stages"]["eligibility"]["submissions"] == 1
+    assert database.one(
+        "SELECT status,error_code,error_text FROM calls WHERE role='eligibility'"
+    ) == {"status": "completed", "error_code": None, "error_text": None}
 
 
 def test_low_thinking_counterfactual_completes_the_structured_stream(
