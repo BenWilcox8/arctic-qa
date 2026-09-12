@@ -526,6 +526,24 @@ def test_reviewed_config_transition_preserves_spend_and_immutable_custody(
     )
     new_receipt = execute(restarted, paper="p2")
     assert new_receipt["price_config_sha256"] == sha256_file(active_config)
+    assert new_receipt["config_transition_sha256"] == sha256_file(transition_events[0])
+
+    replay_transport = Transport()
+    replayed = SharedGeminiBroker(
+        policy_file=ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
+        price_config_file=active_config,
+        execution_gate_file=values["gate"],
+        ledger_file=ledger,
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=replay_transport,
+    )
+    replay_status = replayed.status()
+    assert replay_status["generation_submissions"] == 2
+    with pytest.raises(ValueError, match="request key already exists"):
+        execute(replayed, paper="p2")
+    assert replay_transport.methods == []
 
     changed_event = json.loads(transition_events[0].read_text(encoding="utf-8"))
     changed_event["authorization"]["unreviewed_field"] = True
@@ -606,6 +624,248 @@ def test_transition_with_wrong_ledger_hash_creates_no_event(tmp_path: Path):
         )
 
     assert list((tmp_path / "receipts").glob("config-transition-*.json")) == []
+
+
+def test_forged_transition_event_cannot_authorize_restart_or_submit(
+    tmp_path: Path,
+):
+    values = fixture(tmp_path, transport=Transport())
+    assert execute(values["broker"])["state"] == "completed"
+    active_config = tmp_path / "active-price-config.json"
+    active_config.write_bytes(
+        (ROOT / "config" / "gemini-eligibility-v1.json").read_bytes() + b"\n"
+    )
+    identity = tmp_path / ".shared-ledger.json.identity.json"
+    initial_config_hash = json.loads(identity.read_text(encoding="utf-8"))[
+        "price_config_sha256"
+    ]
+    authorization = {
+        "schema": "shared-paid-call-config-transition-v1",
+        "ledger_file": str(values["ledger"].resolve()),
+        "from_price_config_sha256": initial_config_hash,
+        "to_price_config_sha256": sha256_file(active_config),
+        "expected_ledger_sha256": "0" * 64,
+        "expected_identity_sha256": sha256_file(identity),
+        "execution_gate_sha256": "1" * 64,
+        "integrated_code_commit": "not-reviewed",
+        "review_record": str(tmp_path / "review-does-not-exist.md"),
+        "review_record_sha256": "2" * 64,
+        "reason": "Forged direct receipt event.",
+        "authorized_at_utc": "2026-09-12T09:00:00Z",
+    }
+    authorization_hash = sha256_bytes(canonical_json(authorization).encode())
+    event = tmp_path / "receipts" / f"config-transition-{authorization_hash}.json"
+    write_json(
+        event,
+        {
+            "schema": "shared-paid-call-config-transition-event-v1",
+            "authorization": authorization,
+            "transition_authorization_sha256": authorization_hash,
+            "applied_at_utc": "2026-09-12T09:01:00Z",
+        },
+    )
+    forged_transport = Transport()
+
+    transition_error = None
+    try:
+        resumed = SharedGeminiBroker(
+            policy_file=ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
+            price_config_file=active_config,
+            execution_gate_file=values["gate"],
+            ledger_file=values["ledger"],
+            receipts_dir=tmp_path / "receipts",
+            credential_file=tmp_path / "private" / "absent.key",
+            prior_construction_spend_usd=Decimal("0"),
+            transport=forged_transport,
+        )
+        execute(resumed, paper="p2")
+    except ValueError as error:
+        transition_error = error
+
+    assert forged_transport.methods == []
+    assert transition_error is not None
+    assert "transition" in str(transition_error)
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    assert ledger["generation_submissions"] == 1
+    assert len(ledger["requests"]) == 1
+
+
+def test_unreviewed_transition_event_stops_before_provider_submission(
+    tmp_path: Path,
+):
+    values = fixture(tmp_path, transport=Transport())
+    assert execute(values["broker"])["state"] == "completed"
+    active_config = tmp_path / "active-price-config.json"
+    active_config.write_bytes(
+        (ROOT / "config" / "gemini-eligibility-v1.json").read_bytes() + b"\n"
+    )
+    identity = tmp_path / ".shared-ledger.json.identity.json"
+    gate = json.loads(values["gate"].read_text(encoding="utf-8"))
+    authorization = {
+        "schema": "shared-paid-call-config-transition-v1",
+        "ledger_file": str(values["ledger"].resolve()),
+        "from_price_config_sha256": json.loads(identity.read_text(encoding="utf-8"))[
+            "price_config_sha256"
+        ],
+        "to_price_config_sha256": sha256_file(active_config),
+        "expected_ledger_sha256": sha256_file(values["ledger"]),
+        "expected_identity_sha256": sha256_file(identity),
+        "execution_gate_sha256": sha256_file(values["gate"]),
+        "integrated_code_commit": gate["integrated_code_commit"],
+        "review_record": gate["review_record"],
+        "review_record_sha256": None,
+        "reason": "Unreviewed direct receipt event.",
+        "authorized_at_utc": "2026-09-12T09:00:00Z",
+    }
+    authorization_hash = sha256_bytes(canonical_json(authorization).encode())
+    write_json(
+        tmp_path / "receipts" / f"config-transition-{authorization_hash}.json",
+        {
+            "schema": "shared-paid-call-config-transition-event-v1",
+            "authorization": authorization,
+            "transition_authorization_sha256": authorization_hash,
+            "applied_at_utc": "2026-09-12T09:01:00Z",
+        },
+    )
+    unreviewed_transport = Transport()
+
+    with pytest.raises(ValueError, match="transition review is invalid"):
+        SharedGeminiBroker(
+            policy_file=ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
+            price_config_file=active_config,
+            execution_gate_file=values["gate"],
+            ledger_file=values["ledger"],
+            receipts_dir=tmp_path / "receipts",
+            credential_file=tmp_path / "private" / "absent.key",
+            prior_construction_spend_usd=Decimal("0"),
+            transport=unreviewed_transport,
+        )
+
+    assert unreviewed_transport.methods == []
+
+
+def test_forged_transition_event_cannot_replace_request_anchor(tmp_path: Path):
+    values = fixture(tmp_path, transport=Transport())
+    assert execute(values["broker"])["state"] == "completed"
+    active_config = tmp_path / "active-price-config.json"
+    active_config.write_bytes(
+        (ROOT / "config" / "gemini-eligibility-v1.json").read_bytes() + b"\n"
+    )
+    transition = reviewed_transition(tmp_path, values, active_config)
+    transitioned = SharedGeminiBroker(
+        policy_file=ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
+        price_config_file=active_config,
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=Transport(),
+        config_transition_file=transition,
+    )
+    assert execute(transitioned, paper="p2")["state"] == "completed"
+
+    original_event = next((tmp_path / "receipts").glob("config-transition-*.json"))
+    forged_event = json.loads(original_event.read_text(encoding="utf-8"))
+    forged_event["authorization"]["expected_ledger_sha256"] = "0" * 64
+    forged_event["authorization"]["review_record"] = str(
+        tmp_path / "review-does-not-exist.md"
+    )
+    forged_hash = sha256_bytes(canonical_json(forged_event["authorization"]).encode())
+    forged_event["transition_authorization_sha256"] = forged_hash
+    forged_path = original_event.with_name(f"config-transition-{forged_hash}.json")
+    original_event.rename(forged_path)
+    write_json(forged_path, forged_event)
+    forged_transport = Transport()
+
+    transition_error = None
+    try:
+        restarted = SharedGeminiBroker(
+            policy_file=ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
+            price_config_file=active_config,
+            execution_gate_file=values["gate"],
+            ledger_file=values["ledger"],
+            receipts_dir=tmp_path / "receipts",
+            credential_file=tmp_path / "private" / "absent.key",
+            prior_construction_spend_usd=Decimal("0"),
+            transport=forged_transport,
+        )
+        execute(restarted, paper="p3")
+    except ValueError as error:
+        transition_error = error
+
+    assert forged_transport.methods == []
+    assert transition_error is not None
+    assert "transition" in str(transition_error)
+
+
+def test_extra_transition_event_stops_active_broker_before_submission(
+    tmp_path: Path,
+):
+    values = fixture(tmp_path, transport=Transport())
+    assert execute(values["broker"])["state"] == "completed"
+    active_config = tmp_path / "active-price-config.json"
+    active_config.write_bytes(
+        (ROOT / "config" / "gemini-eligibility-v1.json").read_bytes() + b"\n"
+    )
+    transition = reviewed_transition(tmp_path, values, active_config)
+    active_transport = Transport()
+    transitioned = SharedGeminiBroker(
+        policy_file=ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
+        price_config_file=active_config,
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=active_transport,
+        config_transition_file=transition,
+    )
+    original_event = next((tmp_path / "receipts").glob("config-transition-*.json"))
+    extra_event = json.loads(original_event.read_text(encoding="utf-8"))
+    extra_event["authorization"]["reason"] = "Crafted second transition event."
+    extra_hash = sha256_bytes(canonical_json(extra_event["authorization"]).encode())
+    extra_event["transition_authorization_sha256"] = extra_hash
+    write_json(
+        original_event.with_name(f"config-transition-{extra_hash}.json"),
+        extra_event,
+    )
+
+    with pytest.raises(ValueError, match="multiple applied price configuration"):
+        execute(transitioned, paper="p2")
+
+    assert active_transport.methods == []
+
+
+def test_transition_review_is_rechecked_before_first_submission(tmp_path: Path):
+    values = fixture(tmp_path, transport=Transport())
+    assert execute(values["broker"])["state"] == "completed"
+    active_config = tmp_path / "active-price-config.json"
+    active_config.write_bytes(
+        (ROOT / "config" / "gemini-eligibility-v1.json").read_bytes() + b"\n"
+    )
+    transition = reviewed_transition(tmp_path, values, active_config)
+    active_transport = Transport()
+    transitioned = SharedGeminiBroker(
+        policy_file=ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
+        price_config_file=active_config,
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=active_transport,
+        config_transition_file=transition,
+    )
+    gate = json.loads(values["gate"].read_text(encoding="utf-8"))
+    Path(gate["review_record"]).write_text(
+        "The review record changed.\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="transition review is invalid"):
+        execute(transitioned, paper="p2")
+
+    assert active_transport.methods == []
 
 
 def test_transition_does_not_apply_to_an_unsettled_ledger(tmp_path: Path):

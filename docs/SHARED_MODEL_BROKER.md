@@ -80,9 +80,17 @@ It does not change the existing ledger, identity record, request receipts, spend
 
 Later starts can use the immutable event without the original transition file.
 
+Before the first transitioned request, each restart validates the embedded ledger snapshot, gate, and review record again.
+
+Each transitioned request binds its ledger record and immutable receipts to the exact transition event hash.
+
+Later restarts require this binding before they accept a historical transition.
+
+A replaced event or an additional matching event causes an integrity halt.
+
 The status record reports the initial hash, the active hash, and the transition event hash.
 
-Each new request receipt records the active price configuration hash.
+Each new request receipt records the active price configuration hash and its transition event hash.
 
 An absent, altered, or unreviewed transition stops the broker before it reads the credential.
 

@@ -96,6 +96,10 @@ The transition must bind the current ledger, identity record, private gate, exac
 
 The broker applies the transition without resetting prior spend or submission counts.
 
+The first transitioned request binds its ledger record and receipts to the exact transition event.
+
+Each restart rejects an unreviewed, replaced, additional, or incorrectly bound event before provider submission.
+
 See [the shared model broker guide](SHARED_MODEL_BROKER.md) for the required fields.
 
 The broker checks the gate before it reads the credential.

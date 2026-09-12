@@ -422,6 +422,7 @@ The output caps stay unchanged.
 See [the structured-output budget correction](docs/GEMINI_STRUCTURED_OUTPUT_BUDGET.md).
 If the central ledger predates this revision, use a reviewed configuration transition.
 The transition preserves the initial identity, spend, submission counts, and immutable receipts.
+Each transitioned request binds its receipts to the exact reviewed transition event.
 See [the shared model broker guide](docs/SHARED_MODEL_BROKER.md).
 An unknown transmitted outcome keeps its full reservation.
 The adapter never retries that ambiguous job automatically.

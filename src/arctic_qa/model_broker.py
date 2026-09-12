@@ -425,7 +425,24 @@ class SharedGeminiBroker:
                 != authorization_hash
             ):
                 raise ValueError("the price configuration transition file changed")
-            self._config_transition_sha256 = sha256_file(event_path)
+            active_requests = [
+                request
+                for request in ledger["requests"].values()
+                if request.get("price_config_sha256") == active_hash
+            ]
+            event_hash = sha256_file(event_path)
+            if active_requests and any(
+                request.get("config_transition_sha256") != event_hash
+                for request in active_requests
+            ):
+                raise ValueError(
+                    "a paid-call request lacks its authorized config transition"
+                )
+            if not active_requests:
+                self._validate_transition_authorization(
+                    authorization, identity=identity, ledger=ledger
+                )
+            self._config_transition_sha256 = event_hash
             self._config_transition_event_path = event_path
             return
         if self.config_transition_file is None:
@@ -584,7 +601,7 @@ class SharedGeminiBroker:
             ledger = _read(self.ledger_file)
             self._validate_ledger(ledger)
             self._validate_immutable_events(ledger)
-            self._validate_active_transition_event()
+            self._validate_active_transition_event(ledger)
             return ledger
         except Exception as error:
             self._record_integrity_halt(error)
@@ -593,7 +610,7 @@ class SharedGeminiBroker:
                 f"the shared paid-call ledger failed integrity validation: {error}"
             ) from error
 
-    def _validate_active_transition_event(self) -> None:
+    def _validate_active_transition_event(self, ledger: dict[str, Any]) -> None:
         path = self._config_transition_event_path
         if path is None:
             return
@@ -603,6 +620,32 @@ class SharedGeminiBroker:
             raise ValueError("the applied price configuration transition changed")
         event = self._read_transition_event(path)
         authorization = event["authorization"]
+        identity = _read(self._identity_file)
+        initial_hash = identity["price_config_sha256"]
+        matching_paths = []
+        for candidate_path in self.receipts_dir.glob("config-transition-*.json"):
+            candidate = self._read_transition_event(candidate_path)
+            candidate_authorization = candidate["authorization"]
+            if (
+                candidate_authorization["ledger_file"] == str(self.ledger_file)
+                and candidate_authorization["from_price_config_sha256"] == initial_hash
+                and candidate_authorization["to_price_config_sha256"]
+                == self.active_price_config_sha256
+            ):
+                matching_paths.append(candidate_path)
+        if len(matching_paths) > 1:
+            raise ValueError("multiple applied price configuration transitions exist")
+        if matching_paths != [path]:
+            raise ValueError("the applied price configuration transition changed")
+        active_requests = [
+            request
+            for request in ledger["requests"].values()
+            if request.get("price_config_sha256") == self.active_price_config_sha256
+        ]
+        if not active_requests:
+            self._validate_transition_authorization(
+                authorization, identity=identity, ledger=ledger
+            )
         if (
             authorization["ledger_file"] != str(self.ledger_file)
             or authorization["to_price_config_sha256"]
@@ -614,6 +657,7 @@ class SharedGeminiBroker:
 
     def _validate_immutable_events(self, ledger: dict[str, Any]) -> None:
         allowed_config_hashes = {ledger["price_config_sha256"]}
+        transition_events_by_config: dict[str, set[str]] = {}
         for path in self.receipts_dir.glob("config-transition-*.json"):
             event = self._read_transition_event(path)
             authorization = event["authorization"]
@@ -625,7 +669,11 @@ class SharedGeminiBroker:
                 != sha256_file(self._identity_file)
             ):
                 raise ValueError("the applied price configuration transition changed")
-            allowed_config_hashes.add(authorization["to_price_config_sha256"])
+            target_hash = authorization["to_price_config_sha256"]
+            allowed_config_hashes.add(target_hash)
+            transition_events_by_config.setdefault(target_hash, set()).add(
+                sha256_file(path)
+            )
         for path in self.receipts_dir.iterdir():
             match = re.fullmatch(
                 r"([a-f0-9]{64})(?:\.(?:submitted|received))?\.json", path.name
@@ -645,13 +693,27 @@ class SharedGeminiBroker:
             "model",
             "gate_sha256",
             "price_config_sha256",
+            "config_transition_sha256",
         )
         for request_key, request in ledger["requests"].items():
-            if request.get(
+            request_config_hash = request.get(
                 "price_config_sha256", ledger["price_config_sha256"]
-            ) not in (allowed_config_hashes):
+            )
+            if request_config_hash not in allowed_config_hashes:
                 raise ValueError(
                     "a paid-call request uses an unauthorized price config"
+                )
+            transition_hash = request.get("config_transition_sha256")
+            if request_config_hash == ledger["price_config_sha256"]:
+                if transition_hash is not None:
+                    raise ValueError(
+                        "an initial-config request has a transition binding"
+                    )
+            elif transition_hash not in transition_events_by_config.get(
+                request_config_hash, set()
+            ):
+                raise ValueError(
+                    "a paid-call request lacks its authorized config transition"
                 )
             submitted_path = self.receipts_dir / f"{request_key}.submitted.json"
             final_path = self.receipts_dir / f"{request_key}.json"
@@ -796,6 +858,14 @@ class SharedGeminiBroker:
                 or not re.fullmatch(r"[a-f0-9]{64}", request_config_hash)
             ):
                 raise ValueError("a paid-call request has an invalid price config hash")
+            transition_hash = request.get("config_transition_sha256")
+            if transition_hash is not None and (
+                not isinstance(transition_hash, str)
+                or not re.fullmatch(r"[a-f0-9]{64}", transition_hash)
+            ):
+                raise ValueError(
+                    "a paid-call request has an invalid config transition hash"
+                )
             if request["stage"] not in STAGES:
                 raise ValueError("a paid-call request has an unsupported stage")
             binding = ledger["family_bindings"].get(request["family_id"])
@@ -1685,6 +1755,7 @@ class SharedGeminiBroker:
             "model": self.config["model"],
             "gate_sha256": sha256_file(self.execution_gate_file),
             "price_config_sha256": self.active_price_config_sha256,
+            "config_transition_sha256": self._config_transition_sha256,
         }
         operation = self._operation_lock_file.open("a+")
         try:
