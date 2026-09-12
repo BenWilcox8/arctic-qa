@@ -251,7 +251,7 @@ class CorpusArtifacts:
                     receipt.get("state") == "verified-stored-not-accepted"
                     and identity.get("type") == "doi"
                     and doi
-                    and re.fullmatch(r"[23456789A-HJ-NP-Z]{8}", key)
+                    and re.fullmatch(r"[A-Z0-9]{8}", key)
                 ):
                     links[doi] = f"zotero://select/library/items/{key}"
             except (OSError, ValueError, TypeError):

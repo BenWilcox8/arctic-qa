@@ -142,10 +142,21 @@ def test_real_counts_and_known_screening_states(
         {"q": ["10.1002/2014jg002883"], "page_size": ["10"]}
     )["records"][0]
     assert included["eligibility"] == "eligible"
-    assert included["zotero_url"].endswith("S6XA9S9S")
     assert excluded["eligibility"] == "excluded"
     assert access_pending["pending_reason"] == "access-pending"
     assert geography_pending["pending_reason"] == "geography-pending"
+    imported_items = {
+        "10.1002/2013eo100006": "TMEMXQHI",
+        "10.1002/2013jc009342": "VXZRRIKF",
+        "10.1002/2014jg002883": "7YGWAGRY",
+        "10.1002/2013jg002587": "BSS7IXN9",
+        "10.1002/2013jd021234": "S6XA9S9S",
+    }
+    for doi, item_key in imported_items.items():
+        record = real_artifacts.candidates({"q": [doi], "page_size": ["10"]})[
+            "records"
+        ][0]
+        assert record["zotero_url"] == f"zotero://select/library/items/{item_key}"
 
 
 def test_real_filters_and_bounded_pagination(real_artifacts: CorpusArtifacts) -> None:
