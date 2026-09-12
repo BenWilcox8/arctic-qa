@@ -13,6 +13,7 @@ from arctic_qa.access_readiness import (
     _persist_artifacts,
     _process,
     _public_url,
+    _request_url,
     _receipts,
     _reuse_access,
 )
@@ -36,6 +37,15 @@ def test_public_url_accepts_http_and_rejects_private_resolution():
         _public_url("https://name:secret@example.org/article", public_resolver)
     with pytest.raises(ValueError, match="HTTP or HTTPS"):
         _public_url("file:///tmp/source.pdf", public_resolver)
+
+
+def test_request_url_encodes_spaces_and_rejects_control_characters():
+    assert (
+        _request_url("https://example.org/a file.pdf?filename=Arctic Study.pdf")
+        == "https://example.org/a%20file.pdf?filename=Arctic%20Study.pdf"
+    )
+    with pytest.raises(ValueError, match="control character"):
+        _request_url("https://example.org/source.pdf\nX-Injected: value")
 
 
 def test_connection_uses_only_the_validated_public_address():

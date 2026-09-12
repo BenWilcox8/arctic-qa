@@ -366,6 +366,19 @@ def _public_url(url: str, resolver: Callable[..., Any] = socket.getaddrinfo) -> 
     _public_addresses(url, resolver)
 
 
+def _request_url(url: str) -> str:
+    """Encode source paths without accepting hidden HTTP control characters."""
+    if any(ord(character) < 32 or ord(character) == 127 for character in url):
+        raise ValueError("source URL contains a control character")
+    parsed = urllib.parse.urlsplit(url)
+    path = urllib.parse.quote(parsed.path, safe="/%:@!$&'()*+,;=-._~")
+    query = urllib.parse.quote(parsed.query, safe="%=&?/:;+,@!$'()*[]-._~")
+    fragment = urllib.parse.quote(parsed.fragment, safe="%=&?/:;+,@!$'()*[]-._~")
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, path, query, fragment)
+    )
+
+
 class _PinnedHTTPConnection(http.client.HTTPConnection):
     def connect(self) -> None:
         parsed = urllib.parse.urlsplit(f"http://{self.host}")
@@ -419,6 +432,7 @@ class PublicRedirectHandler(urllib.request.HTTPRedirectHandler):
             raise urllib.error.HTTPError(
                 new_url, code, "redirect limit exceeded", headers, file_pointer
             )
+        new_url = _request_url(new_url)
         _public_url(new_url)
         redirected = super().redirect_request(
             request, file_pointer, code, message, headers, new_url
@@ -465,6 +479,7 @@ def fetch_public(
     maximum_retry_after: int,
     pacer: HostPacer,
 ) -> dict[str, Any]:
+    url = _request_url(url)
     _public_url(url)
     last: dict[str, Any] = {}
     for attempt in range(1, 4):
@@ -536,7 +551,13 @@ def fetch_public(
             )
             pacer.cool_down(url, delay)
             return last
-        except (OSError, TimeoutError, urllib.error.URLError, ValueError) as error:
+        except (
+            OSError,
+            TimeoutError,
+            urllib.error.URLError,
+            ValueError,
+            http.client.InvalidURL,
+        ) as error:
             last = {
                 "state": "retryable_error",
                 "reason_code": "transport_or_url_error",
