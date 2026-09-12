@@ -1473,6 +1473,110 @@ def test_streaming_skips_pending_access_before_next_ready_paper(
     assert progress["counts"]["full_text_ready"] == 1
 
 
+def test_streaming_records_invalid_finding_and_advances_to_next_paper(
+    tmp_path: Path,
+) -> None:
+    access, eligibility = streaming_fixture(tmp_path)
+    ready_path = access / "items" / "item-000001.json"
+    ready = json.loads(ready_path.read_text(encoding="utf-8"))
+    ready["position"] = 2
+    write_json(ready_path, ready)
+    rejected = {
+        **ready,
+        "position": 1,
+        "candidate_key": "test-only:invalid-finding",
+        "title": "Synthetic source with an invalid finding response",
+    }
+    write_json(access / "items" / "item-000000.json", rejected)
+    manifest_path = access / "run-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["target_total"] = 2
+    manifest["selection"] = [
+        {
+            "position": 1,
+            "candidate_key": rejected["candidate_key"],
+            "subgroup": "test_only",
+            "authors": ["Arctic QA test suite"],
+            "year": 2026,
+        },
+        {
+            "position": 2,
+            "candidate_key": ready["candidate_key"],
+            "subgroup": "test_only",
+            "authors": ["Arctic QA test suite"],
+            "year": 2026,
+        },
+    ]
+    write_json(manifest_path, manifest)
+
+    eligibility_path = eligibility / "jobs" / "fixture-job.json"
+    rejected_eligibility = json.loads(eligibility_path.read_text(encoding="utf-8"))
+    rejected_eligibility["job_key"] = "fixture-invalid-finding"
+    rejected_eligibility["candidate_key"] = rejected["candidate_key"]
+    rejected_eligibility["parsed_response"]["request_id"] = rejected_eligibility[
+        "job_key"
+    ]
+    write_json(
+        eligibility / "jobs" / "fixture-invalid-finding.json",
+        rejected_eligibility,
+    )
+
+    author_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-author.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    invalid_extractor = json.loads(json.dumps(author_events[0]))
+    invalid_extractor["response"]["answer"]["evidence_quote"] = (
+        "This generated sentence is absent from the source."
+    )
+    invalid_extractor["response"]["answer"]["locator"]["start_offset"] = 0
+    invalid_extractor["response"]["answer"]["locator"]["end_offset"] = 1
+    author_script = tmp_path / "invalid-finding-then-valid-author.jsonl"
+    author_script.write_text(
+        "\n".join(
+            json.dumps(event) for event in [invalid_extractor, *author_events]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        tmp_path,
+        "stream",
+        "--run-id",
+        "stream-invalid-finding-continues",
+        "--access-run-dir",
+        str(access),
+        "--eligibility-run-dir",
+        str(eligibility),
+        "--author-script",
+        str(author_script),
+        "--verifier-script",
+        str(FIXTURES / "fake-verifier.jsonl"),
+        "--max-papers",
+        "2",
+    )
+
+    assert result["counts"]["processed"] == 2
+    assert result["counts"]["generation_rejected"] == 1
+    assert result["counts"]["accepted_base_questions"] == 1
+    assert result["paper_results"][0] == {
+        "candidate_key": "test-only:invalid-finding",
+        "disposition": "generation_rejected",
+        "reason_codes": ["finding_evidence_not_located"],
+        "source_id": stable_id("src", "test-only:invalid-finding"),
+    }
+    rejection_path = tmp_path / "arctic-qa" / result["export"]["files"][
+        "rejections"
+    ]
+    rejections = [json.loads(line) for line in rejection_path.read_text().splitlines()]
+    assert [row["reason_code"] for row in rejections] == [
+        "finding_evidence_not_located"
+    ]
+
+
 def test_streaming_cli_reports_the_eligibility_rejection_reason(
     tmp_path: Path,
 ) -> None:

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .db import Database, now
+from .errors import CandidateRejectedError
 from .extraction import load_chunks
 from .providers import (
     Provider,
@@ -379,8 +380,9 @@ def generate_candidate(
             None,
         )
         if chunk is None or not _record_resolves(answer, chunk):
-            raise ValueError(
-                "the selected finding does not resolve to one source chunk"
+            raise CandidateRejectedError(
+                "finding_evidence_not_located",
+                "the selected finding does not resolve to one source chunk",
             )
         finding_id = stable_id(
             "finding", run_id, source_id, chunk["chunk_id"], canonical_json(answer)

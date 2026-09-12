@@ -12,6 +12,14 @@ class ValidationError(ArcticQAError):
     code = "VALIDATION_ERROR"
 
 
+class CandidateRejectedError(ValidationError):
+    """A model proposal failed a deterministic construction gate."""
+
+    def __init__(self, reason_code: str, message: str):
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
 class BudgetError(ArcticQAError):
     code = "BUDGET_EXHAUSTED"
 
