@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Gemini eligibility result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["criteria", "overall", "reason_codes", "sufficient_context"],
+  "properties": {
+    "criteria": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["published_primary_findings", "stable_identity_version", "study_geography", "access_rights_evidence", "correction_retraction_coverage"],
+      "properties": {
+        "published_primary_findings": {"$ref": "#/$defs/criterion"},
+        "stable_identity_version": {"$ref": "#/$defs/criterion"},
+        "study_geography": {"$ref": "#/$defs/criterion"},
+        "access_rights_evidence": {"$ref": "#/$defs/criterion"},
+        "correction_retraction_coverage": {"$ref": "#/$defs/criterion"}
+      }
+    },
+    "overall": {"enum": ["eligible", "excluded", "uncertain"]},
+    "reason_codes": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+    "sufficient_context": {"type": "boolean"}
+  },
+  "$defs": {
+    "criterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision", "evidence"],
+      "properties": {
+        "decision": {"enum": ["yes", "no", "unknown", "not_applicable"]},
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["locator", "quote"],
+            "properties": {"locator": {"type": "string"}, "quote": {"type": "string"}}
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "schema": "gemini-eligibility-config-v1",
+  "config_id": "arctic-gemini-eligibility-r1-config-v1",
+  "model": "gemini-3.8-flash",
+  "fallback_model": null,
+  "api_base": "https://generativelanguage.googleapis.com/v1beta",
+  "api_key_environment_variable": "GEMINI_API_KEY",
+  "maximum_input_tokens": 1048576,
+  "maximum_output_tokens": 8192,
+  "thinking_level": "medium",
+  "project_budget_usd": "1000.00",
+  "input_usd_per_million_tokens": "0.75",
+  "output_usd_per_million_tokens_including_thinking": "3.75",
+  "price_valid_from": "2026-09-12",
+  "price_valid_through": "2026-12-31",
+  "price_source": "https://ai.google.dev/gemini-api/docs/pricing",
+  "model_source": "https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash",
+  "structured_output_source": "https://ai.google.dev/gemini-api/docs/structured-output",
+  "token_count_source": "https://ai.google.dev/api/tokens"
+}

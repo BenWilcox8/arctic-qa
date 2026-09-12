@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .access_readiness import run_access_readiness
 from .corpus_viewer import serve_corpus_viewer
 from .db import Database
 from .discovery import (
@@ -26,6 +27,7 @@ from .errors import ArcticQAError
 from .exporting import export_run
 from .extraction import extract_source, load_chunks
 from .generation import generate_candidate
+from .gemini_eligibility import run_gemini_eligibility
 from .manifests import write_source_manifest
 from .metadata_prefilter import run_metadata_prefilter
 from .paths import DEFAULT_DATA_ROOT, DataPaths
@@ -71,6 +73,8 @@ def parser() -> argparse.ArgumentParser:
     viewer.add_argument("--zotero-receipts-dir", type=Path)
     viewer.add_argument("--metadata-run-dir", type=Path)
     viewer.add_argument("--source-run-dir", type=Path)
+    viewer.add_argument("--access-run-dir", type=Path)
+    viewer.add_argument("--gemini-run-dir", type=Path)
     viewer.add_argument("--host", default="127.0.0.1")
     viewer.add_argument("--port", type=int, default=8787)
     viewer.add_argument("--stale-after-seconds", type=int, default=86400)
@@ -106,6 +110,52 @@ def parser() -> argparse.ArgumentParser:
     source_pass.add_argument("--code-commit", required=True)
     source_pass.add_argument("--viewer-progress-file", type=Path)
     source_pass.add_argument("--decisions-file", type=Path)
+
+    access = commands.add_parser(
+        "article-access", help="Prepare or continue the frozen article access queue."
+    )
+    access.add_argument(
+        "--action",
+        choices=("prepare", "smoke10", "smoke100", "continue", "status"),
+        required=True,
+    )
+    access.add_argument("--queue-file", type=Path, required=True)
+    access.add_argument("--candidates-file", type=Path, required=True)
+    access.add_argument("--protocol-file", type=Path, required=True)
+    access.add_argument("--policy-file", type=Path, required=True)
+    access.add_argument("--output-dir", type=Path, required=True)
+    access.add_argument("--run-id", required=True)
+    access.add_argument("--code-commit", required=True)
+    access.add_argument("--reuse-source-run-dir", type=Path)
+    access.add_argument("--max-items", type=int)
+    access.add_argument("--max-network-seconds", type=int)
+    access.add_argument("--max-new-bytes", type=int)
+
+    gemini = commands.add_parser(
+        "gemini-eligibility", help="Prepare or operate bounded Gemini eligibility jobs."
+    )
+    gemini.add_argument(
+        "--action",
+        choices=("doctor", "dry-run", "run", "resume", "pause", "status"),
+        required=True,
+    )
+    gemini.add_argument("--access-run-dir", type=Path, required=True)
+    gemini.add_argument("--run-dir", type=Path, required=True)
+    gemini.add_argument(
+        "--config-file", type=Path, default=Path("config/gemini-eligibility-v1.json")
+    )
+    gemini.add_argument(
+        "--prompt-file",
+        type=Path,
+        default=Path("config/gemini-eligibility-prompt-v1.txt"),
+    )
+    gemini.add_argument(
+        "--schema-file",
+        type=Path,
+        default=Path("schemas/gemini-eligibility.v1.schema.json"),
+    )
+    gemini.add_argument("--policy-file", type=Path, required=True)
+    gemini.add_argument("--max-cost-usd", type=Decimal, required=True)
 
     discover = commands.add_parser(
         "discover", help="Discover and deduplicate source metadata."
@@ -236,6 +286,8 @@ def main(argv: list[str] | None = None) -> int:
                 zotero_receipts_dir=args.zotero_receipts_dir,
                 metadata_run_dir=args.metadata_run_dir,
                 source_run_dir=args.source_run_dir,
+                access_run_dir=args.access_run_dir,
+                gemini_run_dir=args.gemini_run_dir,
                 host=args.host,
                 port=args.port,
                 stale_after_seconds=args.stale_after_seconds,
@@ -271,6 +323,38 @@ def main(argv: list[str] | None = None) -> int:
                     code_commit=args.code_commit,
                     viewer_progress_file=args.viewer_progress_file,
                     decisions_file=args.decisions_file,
+                ),
+            )
+        if args.command == "article-access":
+            return _emit(
+                args,
+                run_access_readiness(
+                    action=args.action,
+                    queue_file=args.queue_file,
+                    candidates_file=args.candidates_file,
+                    protocol_file=args.protocol_file,
+                    policy_file=args.policy_file,
+                    output_dir=args.output_dir,
+                    run_id=args.run_id,
+                    code_commit=args.code_commit,
+                    reuse_source_run_dir=args.reuse_source_run_dir,
+                    max_items=args.max_items,
+                    max_network_seconds=args.max_network_seconds,
+                    max_new_bytes=args.max_new_bytes,
+                ),
+            )
+        if args.command == "gemini-eligibility":
+            return _emit(
+                args,
+                run_gemini_eligibility(
+                    action=args.action,
+                    access_run_dir=args.access_run_dir,
+                    run_dir=args.run_dir,
+                    config_file=args.config_file,
+                    prompt_file=args.prompt_file,
+                    schema_file=args.schema_file,
+                    policy_file=args.policy_file,
+                    max_cost_usd=args.max_cost_usd,
                 ),
             )
         paths, db = _open(args)

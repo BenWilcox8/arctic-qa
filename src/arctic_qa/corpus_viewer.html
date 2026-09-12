@@ -76,6 +76,7 @@
     .count strong { display: block; font-size: clamp(1.25rem, 2.6vw, 1.8rem); margin-top: .18rem; }
     .summary-label { color: var(--muted); font-size: .78rem; font-weight: 700; letter-spacing: .04em; margin: 1rem 0 .45rem; text-transform: uppercase; }
     .metadata-panel, .source-panel { margin-bottom: 1rem; }
+    .operations-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
     .metadata-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
     .metadata-head p { color: var(--muted); margin: .3rem 0 0; }
     .metadata-counts, .source-counts { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .55rem; margin-top: .9rem; }
@@ -114,6 +115,7 @@
       .counts, .metadata-counts, .source-counts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .stages { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .readiness { grid-column: 1 / -1; }
+      .operations-grid { grid-template-columns: 1fr; }
       .filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .filters .search { grid-column: 1 / -1; }
       .filter-action { align-self: end; }
@@ -166,11 +168,28 @@
 
     <section class="panel source-panel" aria-labelledby="source-pass-title">
       <div class="metadata-head">
-        <div><h2 id="source-pass-title">Bounded source eligibility pass</h2><p id="source-pass-detail">Loading source-pass state...</p><div class="meta" id="source-pass-run-meta"></div></div>
+        <div><h2 id="source-pass-title">Historical native-agent pilot</h2><p id="source-pass-detail">Loading historical pilot state...</p><div class="meta" id="source-pass-run-meta"></div></div>
         <span class="badge" id="source-pass-state">Loading</span>
       </div>
       <div class="source-counts" id="source-pass-counts" aria-label="Bounded source-pass counts"></div>
     </section>
+
+    <div class="operations-grid">
+      <section class="panel" aria-labelledby="access-title">
+        <div class="metadata-head">
+          <div><h2 id="access-title">Full article access readiness</h2><p id="access-detail">Loading access state...</p><div class="meta" id="access-meta"></div></div>
+          <span class="badge" id="access-state">Loading</span>
+        </div>
+        <div class="source-counts" id="access-counts"></div>
+      </section>
+      <section class="panel" aria-labelledby="gemini-title">
+        <div class="metadata-head">
+          <div><h2 id="gemini-title">Gemini eligibility</h2><p id="gemini-detail">Loading Gemini state...</p><div class="meta" id="gemini-meta"></div></div>
+          <span class="badge" id="gemini-state">Loading</span>
+        </div>
+        <div class="source-counts" id="gemini-counts"></div>
+      </section>
+    </div>
 
     <div class="grid">
       <article class="panel readiness">
@@ -208,6 +227,8 @@
         <div class="field"><label for="eligibility">Eligibility</label><select id="eligibility" name="eligibility"><option value="all">All states</option><option value="unreviewed">Unreviewed</option><option value="pending">Pending</option><option value="eligible">Eligible</option><option value="excluded">Excluded</option></select></div>
         <div class="field"><label for="pending_reason">Pending reason</label><select id="pending_reason" name="pending_reason"><option value="all">All reasons</option><option value="unreviewed">Unreviewed</option><option value="access-pending">Access pending</option><option value="geography-pending">Geography pending</option><option value="other-pending">Other pending</option></select></div>
         <div class="field"><label for="metadata_disposition">Metadata disposition</label><select id="metadata_disposition" name="metadata_disposition"><option value="all">All dispositions</option><option value="priority_seed">Priority seed</option><option value="retained_article_type">Retained article type</option><option value="flagged_nonresearch_type">Flagged nonresearch type</option><option value="unresolved_missing_type">Unresolved missing type</option><option value="unresolved_mixed_type">Unresolved mixed type</option><option value="unresolved_other_type">Unresolved other type</option></select></div>
+        <div class="field"><label for="access_readiness">Access readiness</label><select id="access_readiness" name="access_readiness"><option value="all">All states</option><option value="not_checked">Not checked</option><option value="full_text_ready">Ready for eligibility</option><option value="working_landing_page_only">Landing page only</option><option value="access_pending">Access pending</option><option value="retryable_error">Retryable error</option><option value="extraction_pending">Extraction pending</option><option value="OCR_required">OCR required</option><option value="identity_pending">Identity pending</option><option value="no_source_found">No source found</option></select></div>
+        <div class="field"><label for="gemini_status">Gemini decision</label><select id="gemini_status" name="gemini_status"><option value="all">All states</option><option value="not_started">Not started</option><option value="eligible">Eligible</option><option value="excluded">Excluded</option><option value="uncertain">Uncertain</option><option value="screening_error">Validation error</option><option value="too_large_not_ready">Too large</option></select></div>
         <div class="field"><label for="page_size">Rows per page</label><select id="page_size" name="page_size"><option>10</option><option selected>25</option><option>50</option><option>100</option></select></div>
         <button class="filter-action" type="submit">Apply</button>
       </form>
@@ -263,6 +284,8 @@
         const row = document.createElement('tr');
         const status = document.createElement('td'); status.dataset.label = 'Source state';
         const badge = text('span', label(record.eligibility), `badge ${record.eligibility}`); status.append(badge);
+        status.append(text('div', `Access: ${label(record.access_readiness_state)}`, 'subtle'));
+        status.append(text('div', `Gemini: ${label(record.gemini_status)}`, 'subtle'));
         if (record.pending_reason) status.append(text('div', label(record.pending_reason), 'subtle'));
         if (record.source_geography) status.append(text('div', `Geography: ${label(record.source_geography)}`, 'subtle'));
         if (record.source_pass_position) status.append(text('div', `Source pass item ${formatNumber(record.source_pass_position)}`, 'subtle'));
@@ -333,6 +356,19 @@
           const box = document.createElement('div'); box.className = 'count';
           box.append(text('span', label(name)), text('strong', formatNumber(data.source_pass_counts?.[name]))); return box;
         }));
+        const access = data.access_readiness;
+        setBadge($('access-state'), access.state || access.telemetry);
+        $('access-detail').textContent = access.message;
+        $('access-meta').textContent = `Run ${access.run_id || 'not selected'} | Target ${formatNumber(access.counts?.target)} | Updated ${dateText(access.updated_at_utc)}`;
+        const accessOrder = ['checked', 'working_links', 'full_text_ready', 'access_pending', 'retryable_error', 'unchecked'];
+        $('access-counts').replaceChildren(...accessOrder.map((name) => { const box = document.createElement('div'); box.className = 'count'; box.append(text('span', label(name)), text('strong', formatNumber(data.access_counts?.[name]))); return box; }));
+        const gemini = data.gemini_screening;
+        setBadge($('gemini-state'), gemini.state || gemini.telemetry);
+        $('gemini-detail').textContent = gemini.message || 'Gemini eligibility screening is not started.';
+        const budget = gemini.budget || {};
+        $('gemini-meta').textContent = `Model ${gemini.model || 'not configured'} | Fallback none | Allocation USD ${budget.run_allocation_usd || 'not set'} | Reserved USD ${budget.reserved_usd || '0'} | Spent USD ${budget.spent_usd || '0'} | Updated ${dateText(gemini.updated_at_utc)}`;
+        const geminiOrder = ['queued', 'completed', 'eligible', 'excluded', 'uncertain', 'screening_error'];
+        $('gemini-counts').replaceChildren(...geminiOrder.map((name) => { const box = document.createElement('div'); box.className = 'count'; box.append(text('span', label(name)), text('strong', formatNumber(data.gemini_counts?.[name]))); return box; }));
         setBadge($('discovery-verdict'), data.readiness.metadata_discovery.verdict);
         $('discovery-condition').textContent = data.readiness.metadata_discovery.completion_condition;
         setBadge($('prefilter-verdict'), data.readiness.metadata_prefilter.verdict);

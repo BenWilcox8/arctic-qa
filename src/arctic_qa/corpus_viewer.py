@@ -28,8 +28,32 @@ PENDING_FILTERS = {
     "other-pending",
 }
 PAGE_SIZES = {10, 25, 50, 100}
+ACCESS_FILTERS = {
+    "all",
+    "not_checked",
+    "checking",
+    "working_landing_page_only",
+    "download_available",
+    "full_text_ready",
+    "access_pending",
+    "retryable_error",
+    "extraction_pending",
+    "OCR_required",
+    "identity_pending",
+    "no_source_found",
+}
+GEMINI_FILTERS = {
+    "all",
+    "not_started",
+    "queued",
+    "eligible",
+    "excluded",
+    "uncertain",
+    "screening_error",
+    "too_large_not_ready",
+}
 METADATA_DISPOSITION_FILTERS = {"all", *DISPOSITIONS}
-CACHE_SCHEMA_VERSION = "corpus-view-cache-v3"
+CACHE_SCHEMA_VERSION = "corpus-view-cache-v4"
 SCHEMA = """
 CREATE TABLE candidates (
     candidate_key TEXT PRIMARY KEY,
@@ -65,7 +89,13 @@ CREATE TABLE candidates (
     source_pass_run_id TEXT,
     source_pass_position INTEGER,
     source_decision_method TEXT,
-    source_limitations_json TEXT
+    source_limitations_json TEXT,
+    access_readiness_state TEXT NOT NULL DEFAULT 'not_checked',
+    access_readiness_reason TEXT,
+    access_checked_at TEXT,
+    access_final_url TEXT,
+    gemini_status TEXT NOT NULL DEFAULT 'not_started',
+    gemini_decision TEXT
 );
 CREATE INDEX candidates_title_search ON candidates(title_search);
 CREATE INDEX candidates_doi ON candidates(doi);
@@ -138,6 +168,8 @@ class CorpusArtifacts:
         zotero_receipts_dir: Path | None = None,
         metadata_run_dir: Path | None = None,
         source_run_dir: Path | None = None,
+        access_run_dir: Path | None = None,
+        gemini_run_dir: Path | None = None,
         stale_after_seconds: int = 86400,
         process_stale_after_seconds: int = 300,
     ) -> None:
@@ -157,6 +189,8 @@ class CorpusArtifacts:
         )
         self.metadata_run_dir = metadata_run_dir.resolve() if metadata_run_dir else None
         self.source_run_dir = source_run_dir.resolve() if source_run_dir else None
+        self.access_run_dir = access_run_dir.resolve() if access_run_dir else None
+        self.gemini_run_dir = gemini_run_dir.resolve() if gemini_run_dir else None
         self.stale_after_seconds = stale_after_seconds
         self.process_stale_after_seconds = process_stale_after_seconds
         self.run_dir = self.corpus_root / "ledgers" / f"run-{run_id}"
@@ -228,6 +262,25 @@ class CorpusArtifacts:
             _file_fingerprint(self._source_progress_file()),
             _file_fingerprint(self._source_pointer_file("overlay-current.json")),
             _file_fingerprint(self._source_pointer_file("run-receipt-current.json")),
+            _file_fingerprint(
+                self.access_run_dir / "progress.json" if self.access_run_dir else None
+            ),
+            _file_fingerprint(
+                self.access_run_dir / "access-overlay.ndjson"
+                if self.access_run_dir
+                else None
+            ),
+            _file_fingerprint(
+                self.gemini_run_dir / "progress.json" if self.gemini_run_dir else None
+            ),
+            _file_fingerprint(
+                self.gemini_run_dir / "budget-ledger.json"
+                if self.gemini_run_dir
+                else None
+            ),
+            _directory_fingerprint(
+                self.gemini_run_dir / "jobs" if self.gemini_run_dir else None
+            ),
         ]
         return hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
@@ -413,7 +466,10 @@ class CorpusArtifacts:
                 metadata_flags_json=NULL,metadata_title_terms_json=NULL,
                 metadata_policy_id=NULL,metadata_run_id=NULL,source_geography=NULL,
                 source_pass_run_id=NULL,source_pass_position=NULL,
-                source_decision_method=NULL,source_limitations_json=NULL"""
+                source_decision_method=NULL,source_limitations_json=NULL,
+                access_readiness_state='not_checked',access_readiness_reason=NULL,
+                access_checked_at=NULL,access_final_url=NULL,
+                gemini_status='not_started',gemini_decision=NULL"""
             )
             for item in screening:
                 decision = str(item.get("decision") or "pending")
@@ -448,11 +504,59 @@ class CorpusArtifacts:
                 )
             self._apply_metadata_overlay(connection)
             self._apply_source_overlay(connection, links)
+            self._apply_access_overlay(connection)
+            self._apply_gemini_overlay(connection)
             connection.execute(
                 "INSERT OR REPLACE INTO cache_meta (key,value) VALUES ('overlay_fingerprint',?)",
                 (fingerprint,),
             )
             connection.commit()
+
+    def _apply_access_overlay(self, connection: sqlite3.Connection) -> None:
+        path = (
+            self.access_run_dir / "access-overlay.ndjson"
+            if self.access_run_dir
+            else None
+        )
+        if path is None or not path.is_file():
+            return
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                item = json.loads(line)
+                state = item.get("access_state")
+                if state not in ACCESS_FILTERS - {"all"}:
+                    raise ValueError("the access-readiness state is unsupported")
+                cursor = connection.execute(
+                    """UPDATE candidates SET access_readiness_state=?,access_readiness_reason=?,
+                    access_checked_at=?,access_final_url=? WHERE candidate_key=?""",
+                    (
+                        state,
+                        item.get("reason_code"),
+                        item.get("checked_at_utc"),
+                        _safe_external_url(item.get("final_url")),
+                        item.get("candidate_key"),
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("an access-readiness key does not match discovery")
+
+    def _apply_gemini_overlay(self, connection: sqlite3.Connection) -> None:
+        jobs = self.gemini_run_dir / "jobs" if self.gemini_run_dir else None
+        if jobs is None or not jobs.is_dir():
+            return
+        for path in jobs.glob("*.json"):
+            item = _read_json(path)
+            validation = item.get("validation") or {}
+            decision = (
+                validation.get("decision") if validation.get("valid") else "uncertain"
+            )
+            status = decision if item.get("state") == "completed" else "screening_error"
+            connection.execute(
+                "UPDATE candidates SET gemini_status=?,gemini_decision=? WHERE candidate_key=?",
+                (status, decision, item.get("candidate_key")),
+            )
 
     def _apply_source_overlay(
         self, connection: sqlite3.Connection, links: dict[str, str]
@@ -830,6 +934,26 @@ class CorpusArtifacts:
                 "Source-pass receipt",
                 self._source_pointer_file("run-receipt-current.json"),
             ),
+            (
+                "Access-readiness progress",
+                self.access_run_dir / "progress.json" if self.access_run_dir else None,
+            ),
+            (
+                "Access-readiness overlay",
+                self.access_run_dir / "access-overlay.ndjson"
+                if self.access_run_dir
+                else None,
+            ),
+            (
+                "Gemini progress",
+                self.gemini_run_dir / "progress.json" if self.gemini_run_dir else None,
+            ),
+            (
+                "Gemini budget ledger",
+                self.gemini_run_dir / "budget-ledger.json"
+                if self.gemini_run_dir
+                else None,
+            ),
         ]
         rows = []
         for label, path in paths:
@@ -848,11 +972,70 @@ class CorpusArtifacts:
             )
         return rows
 
+    def _stage_record(
+        self, directory: Path | None, schema: str, absent_message: str
+    ) -> dict[str, Any]:
+        absent = {
+            "telemetry": "absent",
+            "state": "not_started",
+            "counts": {},
+            "message": absent_message,
+        }
+        if directory is None or not (directory / "progress.json").is_file():
+            return absent
+        try:
+            value = _read_json(directory / "progress.json")
+            if value.get("schema") != schema:
+                raise ValueError("unsupported progress schema")
+            updated = datetime.fromisoformat(
+                str(value["updated_at_utc"]).replace("Z", "+00:00")
+            )
+            age = (datetime.now(UTC) - updated.astimezone(UTC)).total_seconds()
+            telemetry = (
+                "stale"
+                if age > self.process_stale_after_seconds
+                and value.get("state") == "running"
+                else "observed"
+            )
+            if telemetry == "stale":
+                return {
+                    **absent,
+                    **value,
+                    "telemetry": telemetry,
+                    "last_observed_state": value.get("state"),
+                    "state": None,
+                    "message": "The progress record is stale. Current state is unknown.",
+                }
+            return {**absent, **value, "telemetry": telemetry}
+        except (
+            OSError,
+            ValueError,
+            KeyError,
+            json.JSONDecodeError,
+            TypeError,
+        ) as error:
+            return {
+                **absent,
+                "telemetry": "invalid",
+                "state": None,
+                "message": f"Progress record error: {error}",
+            }
+
     def state(self) -> dict[str, Any]:
         self.refresh()
         artifacts = self._artifact_rows()
         metadata = self._metadata_progress()
         source_pass = self._source_progress()
+        access = self._stage_record(
+            self.access_run_dir,
+            "article-access-progress-v1",
+            "No article-access run is selected.",
+        )
+        gemini = self._stage_record(
+            self.gemini_run_dir,
+            "gemini-eligibility-progress-v1",
+            "Gemini eligibility screening is not started.",
+        )
         process = self._progress()
         if (
             metadata.get("state") == "completed"
@@ -892,6 +1075,26 @@ class CorpusArtifacts:
                 "completed_at_utc": source_pass.get("completed_at_utc"),
                 "source_counts": source_pass.get("counts") or {},
             }
+        if access.get("telemetry") == "observed" and access.get("state") in {
+            "running",
+            "paused",
+            "error",
+            "completed",
+        }:
+            process = {
+                "schema": "corpus-progress-v1",
+                "telemetry": "observed",
+                "state": access.get("state"),
+                "stage": "article_access_readiness",
+                "updated_at_utc": access.get("updated_at_utc"),
+                "message": access.get("message"),
+                "run_id": access.get("run_id"),
+                "policy_id": access.get("policy_id"),
+                "processed": (access.get("counts") or {}).get("checked"),
+                "total": (access.get("counts") or {}).get("target"),
+                "started_at_utc": access.get("started_at_utc"),
+                "completed_at_utc": access.get("completed_at_utc"),
+            }
         available_dates = [
             row["updated_at_utc"]
             for row in artifacts
@@ -921,6 +1124,8 @@ class CorpusArtifacts:
             "progress": process,
             "metadata_processing": metadata,
             "source_pass": source_pass,
+            "access_readiness": access,
+            "gemini_screening": gemini,
             "artifacts": artifacts,
             "data_revision": self._small_fingerprint or self._base_fingerprint(),
             "readiness": {
@@ -980,6 +1185,8 @@ class CorpusArtifacts:
         payload["counts"] = {key: int(counts[key] or 0) for key in counts.keys()}
         payload["metadata_counts"] = metadata.get("disposition_counts") or {}
         payload["source_pass_counts"] = source_pass.get("counts") or {}
+        payload["access_counts"] = access.get("counts") or {}
+        payload["gemini_counts"] = gemini.get("counts") or {}
         payload["protocol"] = {
             "protocol_id": protocol.get("protocol_id"),
             "frozen_at_utc": protocol.get("frozen_at_utc"),
@@ -1024,34 +1231,26 @@ class CorpusArtifacts:
             {
                 "id": "source_retrieval",
                 "name": "3. Source retrieval",
-                "state": source_pass.get("state")
-                if source_pass.get("state")
-                in {"running", "paused", "error", "completed"}
-                else "partial",
+                "state": access.get("state")
+                if access.get("state") in {"running", "paused", "error", "completed"}
+                else "not_started",
                 "detail": (
-                    f"Bounded pass {source_pass.get('run_id')}: "
-                    f"{(source_pass.get('counts') or {}).get('retrieved', 0)} retrieved and "
-                    f"{(source_pass.get('counts') or {}).get('unattempted', 0)} unattempted. "
+                    f"Frozen target: {(access.get('counts') or {}).get('target', 0)}. "
+                    f"Checked {(access.get('counts') or {}).get('checked', 0)}. "
+                    f"Ready {(access.get('counts') or {}).get('full_text_ready', 0)}. "
                     "Missing access remains separate from scientific exclusion."
-                    if source_pass.get("run_id")
-                    else f"{int(counts['retrieved'] or 0)} selected sources have verified original PDFs. Missing access remains pending."
                 ),
             },
             {
                 "id": "eligibility_screening",
                 "name": "4. Scientific eligibility",
-                "state": source_pass.get("state")
-                if source_pass.get("state")
-                in {"running", "paused", "error", "completed"}
-                else "partial",
+                "state": gemini.get("state")
+                if gemini.get("state") in {"running", "paused", "error", "completed"}
+                else "not_started",
                 "detail": (
-                    f"Source pass: {(source_pass.get('counts') or {}).get('eligible', 0)} eligible, "
-                    f"{(source_pass.get('counts') or {}).get('excluded', 0)} excluded, "
-                    f"{(source_pass.get('counts') or {}).get('pending', 0)} pending, and "
-                    f"{(source_pass.get('counts') or {}).get('unattempted', 0)} unattempted. "
-                    "Geography is one separate criterion."
-                    if source_pass.get("run_id")
-                    else f"{int(counts['eligible'] or 0)} eligible, {int(counts['excluded'] or 0)} excluded, {int(counts['pending'] or 0)} pending, and {int(counts['unreviewed'] or 0)} unreviewed."
+                    f"Gemini model: {gemini.get('model') or 'not configured'}. "
+                    f"Queued {(gemini.get('counts') or {}).get('queued', 0)}. "
+                    "The historical native-agent pass is a pilot, not Gemini output."
                 ),
             },
             {
@@ -1073,12 +1272,18 @@ class CorpusArtifacts:
         eligibility = (parameters.get("eligibility") or ["all"])[0]
         pending = (parameters.get("pending_reason") or ["all"])[0]
         metadata_disposition = (parameters.get("metadata_disposition") or ["all"])[0]
+        access_readiness = (parameters.get("access_readiness") or ["all"])[0]
+        gemini_status = (parameters.get("gemini_status") or ["all"])[0]
         if eligibility not in ELIGIBILITY_FILTERS:
             raise ValueError("unsupported eligibility filter")
         if pending not in PENDING_FILTERS:
             raise ValueError("unsupported pending-reason filter")
         if metadata_disposition not in METADATA_DISPOSITION_FILTERS:
             raise ValueError("unsupported metadata-disposition filter")
+        if access_readiness not in ACCESS_FILTERS:
+            raise ValueError("unsupported access-readiness filter")
+        if gemini_status not in GEMINI_FILTERS:
+            raise ValueError("unsupported Gemini-status filter")
         try:
             page = max(1, int((parameters.get("page") or ["1"])[0]))
             page_size = int((parameters.get("page_size") or ["25"])[0])
@@ -1108,6 +1313,12 @@ class CorpusArtifacts:
         if metadata_disposition != "all":
             where.append("metadata_disposition=?")
             values.append(metadata_disposition)
+        if access_readiness != "all":
+            where.append("access_readiness_state=?")
+            values.append(access_readiness)
+        if gemini_status != "all":
+            where.append("gemini_status=?")
+            values.append(gemini_status)
         clause = " WHERE " + " AND ".join(where) if where else ""
         with self._lock, sqlite3.connect(self.database) as connection:
             connection.row_factory = sqlite3.Row
@@ -1125,6 +1336,8 @@ class CorpusArtifacts:
                 metadata_title_terms_json,metadata_policy_id,metadata_run_id
                 ,source_geography,source_pass_run_id,source_pass_position,
                 source_decision_method,source_limitations_json
+                ,access_readiness_state,access_readiness_reason,access_checked_at,
+                access_final_url,gemini_status,gemini_decision
                 FROM candidates{clause}
                 ORDER BY CASE eligibility WHEN 'eligible' THEN 0 WHEN 'excluded' THEN 1
                 WHEN 'pending' THEN 2 ELSE 3 END, title_search, candidate_key
@@ -1156,6 +1369,8 @@ class CorpusArtifacts:
                 "eligibility": eligibility,
                 "pending_reason": pending,
                 "metadata_disposition": metadata_disposition,
+                "access_readiness": access_readiness,
+                "gemini_status": gemini_status,
             },
         }
 
@@ -1252,6 +1467,8 @@ def serve_corpus_viewer(
     zotero_receipts_dir: Path | None,
     metadata_run_dir: Path | None,
     source_run_dir: Path | None,
+    access_run_dir: Path | None,
+    gemini_run_dir: Path | None,
     host: str,
     port: int,
     stale_after_seconds: int,
@@ -1267,6 +1484,8 @@ def serve_corpus_viewer(
         zotero_receipts_dir=zotero_receipts_dir,
         metadata_run_dir=metadata_run_dir,
         source_run_dir=source_run_dir,
+        access_run_dir=access_run_dir,
+        gemini_run_dir=gemini_run_dir,
         stale_after_seconds=stale_after_seconds,
         process_stale_after_seconds=process_stale_after_seconds,
     )
@@ -1292,6 +1511,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--zotero-receipts-dir", type=Path)
     parser.add_argument("--metadata-run-dir", type=Path)
     parser.add_argument("--source-run-dir", type=Path)
+    parser.add_argument("--access-run-dir", type=Path)
+    parser.add_argument("--gemini-run-dir", type=Path)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--stale-after-seconds", type=int, default=86400)
@@ -1305,6 +1526,8 @@ def main(argv: list[str] | None = None) -> int:
         zotero_receipts_dir=args.zotero_receipts_dir,
         metadata_run_dir=args.metadata_run_dir,
         source_run_dir=args.source_run_dir,
+        access_run_dir=args.access_run_dir,
+        gemini_run_dir=args.gemini_run_dir,
         host=args.host,
         port=args.port,
         stale_after_seconds=args.stale_after_seconds,
