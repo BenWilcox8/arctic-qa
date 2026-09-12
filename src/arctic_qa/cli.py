@@ -348,6 +348,7 @@ def parser() -> argparse.ArgumentParser:
     )
     stream.add_argument("--shared-ledger-file", type=Path)
     stream.add_argument("--model-receipts-dir", type=Path)
+    stream.add_argument("--ledger-config-transition-file", type=Path)
     stream.add_argument("--credential-file", type=Path)
     stream.add_argument("--prior-construction-spend-usd", type=Decimal)
     return root
@@ -773,6 +774,11 @@ def _stream(args, paths: DataPaths, db: Database) -> dict[str, Any]:
             ),
             credential_file=args.credential_file.resolve(),
             prior_construction_spend_usd=args.prior_construction_spend_usd,
+            config_transition_file=(
+                args.ledger_config_transition_file.resolve()
+                if args.ledger_config_transition_file
+                else None
+            ),
         )
         author = verifier = BrokerProvider(
             broker=broker,

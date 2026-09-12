@@ -85,9 +85,18 @@ PYTHONPATH=src python -m arctic_qa --json stream \
   --prior-construction-spend-usd KNOWN_VALUE \
   --shared-ledger-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
   --model-receipts-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/model-receipts \
+  --ledger-config-transition-file /PRIVATE/DIRECTORY/config-transition.json \
   --progress-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/progress.json \
   --max-papers 20
 ```
+
+Use `--ledger-config-transition-file` only when an existing ledger has a different initial configuration hash.
+
+The transition must bind the current ledger, identity record, private gate, exact code revision, and independent review record.
+
+The broker applies the transition without resetting prior spend or submission counts.
+
+See [the shared model broker guide](SHARED_MODEL_BROKER.md) for the required fields.
 
 The broker checks the gate before it reads the credential.
 It has no automatic retry, model fallback, or budget reset.

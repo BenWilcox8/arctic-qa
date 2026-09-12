@@ -42,6 +42,48 @@ The constructor creates the first ledger and its immutable identity record.
 
 Later constructors require both files and require the same frozen inputs.
 
+## Reviewed price configuration transition
+
+The immutable identity record keeps the hash of the initial price configuration.
+
+Do not replace this record or reset the ledger after a reviewed configuration change.
+
+If the active configuration hash differs, provide `config_transition_file` when you construct the broker.
+
+The CLI option is `--ledger-config-transition-file`.
+
+The transition file must use the `shared-paid-call-config-transition-v1` schema.
+
+It must contain these fields:
+
+- `ledger_file`
+- `from_price_config_sha256`
+- `to_price_config_sha256`
+- `expected_ledger_sha256`
+- `expected_identity_sha256`
+- `execution_gate_sha256`
+- `integrated_code_commit`
+- `review_record`
+- `review_record_sha256`
+- `reason`
+- `authorized_at_utc`
+
+The broker validates the ledger and all prior receipts before it applies the transition.
+
+It also validates the private gate and the exact independent review record.
+
+The broker writes one immutable `config-transition-*.json` event in the receipt directory.
+
+It does not change the existing ledger, identity record, request receipts, spend, or submission counts during this operation.
+
+Later starts can use the immutable event without the original transition file.
+
+The status record reports the initial hash, the active hash, and the transition event hash.
+
+Each new request receipt records the active price configuration hash.
+
+An absent, altered, or unreviewed transition stops the broker before it reads the credential.
+
 Create the request key from the exact request identity.
 
 The request identity does not use the run ID.
