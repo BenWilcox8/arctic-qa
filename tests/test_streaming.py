@@ -15,6 +15,7 @@ from arctic_qa import cli as cli_module
 from arctic_qa.broker_provider import BrokerProvider
 from arctic_qa.db import Database
 from arctic_qa.errors import AmbiguousChargeError
+from arctic_qa.exporting import export_run
 from arctic_qa.generation import ROLE_SCHEMAS
 from arctic_qa.model_broker import SharedGeminiBroker
 from arctic_qa.paths import DataPaths
@@ -55,6 +56,39 @@ def run_cli(root: Path, *arguments: str, expected: int = 0) -> dict:
     )
     assert result.returncode == expected, result.stderr or result.stdout
     return json.loads(result.stdout if expected == 0 else result.stderr)
+
+
+def test_export_identity_changes_with_rejection_content(tmp_path: Path) -> None:
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+
+    with database.transaction():
+        database.connection.execute(
+            """INSERT INTO rejection_ledger
+            (rejection_id,item_id,source_id,stage,reason_code,detail_json,created_at)
+            VALUES ('rejection-one',NULL,NULL,'scientific_eligibility',
+                    'first_reason','{}','2026-09-12T00:00:00Z')"""
+        )
+    first = export_run(database, paths.namespace, "campaign", seed="fixed")
+    first_rejections = Path(paths.namespace / first["files"]["rejections"]).read_bytes()
+
+    with database.transaction():
+        database.connection.execute(
+            """INSERT INTO rejection_ledger
+            (rejection_id,item_id,source_id,stage,reason_code,detail_json,created_at)
+            VALUES ('rejection-two',NULL,NULL,'scientific_eligibility',
+                    'second_reason','{}','2026-09-12T00:00:01Z')"""
+        )
+    second = export_run(database, paths.namespace, "campaign", seed="fixed")
+
+    assert second["export_id"] != first["export_id"]
+    assert first["rejection_count"] == 1
+    assert second["rejection_count"] == 2
+    assert first["file_sha256"]["rejections"] == sha256(first_rejections).hexdigest()
+    assert Path(paths.namespace / first["files"]["rejections"]).read_bytes() == (
+        first_rejections
+    )
 
 
 def streaming_fixture(tmp_path: Path) -> tuple[Path, Path]:
@@ -503,8 +537,11 @@ def test_streaming_cli_moves_one_eligible_paper_to_validated_export(
     assert progress["run_manifest_sha256"] == sha256_file(run_manifest)
     assert progress["counts"] == {
         "full_text_ready": 1,
+        "eligibility_completed": 1,
         "eligible": 1,
-        "rejected": 0,
+        "excluded": 0,
+        "unresolved": 0,
+        "generation_rejected": 0,
         "accepted_qa": 1,
     }
     assert progress["recent_papers"] == [
@@ -730,6 +767,15 @@ def test_streaming_advances_after_uncertain_brokered_eligibility(
     progress = json.loads(
         (paths.namespace / "streaming-dataset-r1" / "progress.json").read_text()
     )
+    assert progress["counts"] == {
+        "full_text_ready": 2,
+        "eligibility_completed": 2,
+        "eligible": 0,
+        "excluded": 1,
+        "unresolved": 1,
+        "generation_rejected": 0,
+        "accepted_qa": 0,
+    }
     assert progress["recent_papers"][0]["final_state"] == "unresolved"
     assert progress["recent_papers"][0]["final_reason"] == (
         "evidence_unmatched_or_ambiguous:study_geography"

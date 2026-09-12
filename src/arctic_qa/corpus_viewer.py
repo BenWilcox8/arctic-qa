@@ -682,6 +682,40 @@ class CorpusArtifacts:
                     or len(progress.get("recent_papers", [])) > 100
                 ):
                     raise ValueError("the streaming progress record is invalid")
+                counts = dict(progress["counts"])
+                if (
+                    "rejected" in counts
+                    and not {
+                        "excluded",
+                        "unresolved",
+                    }
+                    <= counts.keys()
+                ):
+                    legacy_count = int(counts.pop("rejected"))
+                    recent = progress.get("recent_papers", [])
+                    excluded = sum(
+                        row.get("final_state") == "rejected" for row in recent
+                    )
+                    unresolved = sum(
+                        row.get("final_state") == "unresolved" for row in recent
+                    )
+                    generation_rejected = sum(
+                        row.get("final_state") == "generation_rejected"
+                        for row in recent
+                    )
+                    if excluded + unresolved + generation_rejected == legacy_count:
+                        counts["eligibility_completed"] = (
+                            int(counts.get("eligible", 0)) + excluded + unresolved
+                        )
+                        counts["excluded"] = excluded
+                        counts["unresolved"] = unresolved
+                        counts["generation_rejected"] = generation_rejected
+                    else:
+                        counts["legacy_rejected_or_unresolved"] = legacy_count
+                        counts.setdefault("excluded", 0)
+                        counts.setdefault("unresolved", 0)
+                        counts.setdefault("generation_rejected", 0)
+                progress = {**progress, "counts": counts}
                 result = {**progress, "telemetry": "observed"}
             policy = None
             if (
@@ -1313,8 +1347,8 @@ class CorpusArtifacts:
                 "queued": int(current_counts.get("queued", 0)),
                 "completed": int(current_counts.get("eligibility_completed", 0)),
                 "eligible": int(current_counts.get("eligible", 0)),
-                "excluded": int(current_counts.get("rejected", 0)),
-                "uncertain": int(current_counts.get("uncertain", 0)),
+                "excluded": int(current_counts.get("excluded", 0)),
+                "uncertain": int(current_counts.get("unresolved", 0)),
                 "screening_error": int(current_counts.get("screening_error", 0)),
                 "too_large_not_ready": int(
                     current_counts.get("too_large_not_ready", 0)

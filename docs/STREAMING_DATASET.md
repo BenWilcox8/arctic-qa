@@ -32,11 +32,21 @@ The default progress file is:
 `DATA_ROOT/arctic-qa/streaming-dataset-r1/progress.json`
 
 It uses the `streaming-dataset-progress-v1` schema.
-The file contains the full-text-ready, eligible, rejected, and accepted-QA counts.
+The file contains separate scientific eligibility and QA counts.
+`full_text_ready` counts all ready records in the selected access artifact.
+`eligibility_completed` counts records processed in the current invocation.
+`eligible` counts deterministic eligible results.
+`excluded` counts deterministic scientific exclusions.
+`unresolved` counts records without a valid eligibility decision.
+`generation_rejected` counts downstream QA candidates that failed validation.
+`accepted_qa` counts accepted base questions.
+An unresolved record never increments `excluded`.
 It keeps at most 100 recent paper records.
 For a brokered run, it also contains `broker_status_sha256` and `budget_policy_sha256`.
 The broker refreshes those custody hashes after each durable ledger change.
 After export, `dataset_metadata_sha256` binds the progress record to the export manifest.
+Each export ID binds the SHA-256 value of every emitted JSONL file.
+Thus, changed rejection content creates a new immutable export directory.
 The progress and export manifest use the campaign ID as their shared `run_id`.
 The progress record keeps the command run ID separately as `invocation_run_id`.
 It also binds `run_manifest_sha256` to an immutable invocation manifest.

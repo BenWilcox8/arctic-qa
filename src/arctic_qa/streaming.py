@@ -114,19 +114,32 @@ def run_stream(
                 item.get("access_state") == "full_text_ready"
                 for item in access_items.values()
             ),
+            "eligibility_completed": 0
+            if verifier_broker is not None
+            else sum(
+                (item.get("validation") or {}).get("decision")
+                in {"eligible", "excluded", "uncertain"}
+                for item in eligibility_jobs.values()
+            ),
             "eligible": 0
             if verifier_broker is not None
             else sum(
                 (item.get("validation") or {}).get("decision") == "eligible"
                 for item in eligibility_jobs.values()
             ),
-            "rejected": 0
+            "excluded": 0
             if verifier_broker is not None
             else sum(
-                (item.get("validation") or {}).get("decision")
-                in {"excluded", "uncertain"}
+                (item.get("validation") or {}).get("decision") == "excluded"
                 for item in eligibility_jobs.values()
             ),
+            "unresolved": 0
+            if verifier_broker is not None
+            else sum(
+                (item.get("validation") or {}).get("decision") == "uncertain"
+                for item in eligibility_jobs.values()
+            ),
+            "generation_rejected": 0,
             "accepted_qa": _accepted_count(db, campaign_id),
         },
     )
@@ -210,10 +223,24 @@ def run_stream(
                     ),
                 )
                 progress.set_count(
-                    "rejected",
+                    "eligibility_completed",
                     sum(
                         (item.get("validation") or {}).get("decision")
-                        in {"excluded", "uncertain"}
+                        in {"eligible", "excluded", "uncertain"}
+                        for item in eligibility_jobs.values()
+                    ),
+                )
+                progress.set_count(
+                    "excluded",
+                    sum(
+                        (item.get("validation") or {}).get("decision") == "excluded"
+                        for item in eligibility_jobs.values()
+                    ),
+                )
+                progress.set_count(
+                    "unresolved",
+                    sum(
+                        (item.get("validation") or {}).get("decision") == "uncertain"
                         for item in eligibility_jobs.values()
                     ),
                 )
@@ -250,6 +277,9 @@ def run_stream(
         if verifier_broker is not None:
             trusted_eligibility_decisions[candidate_key] = decision
             progress.set_count(
+                "eligibility_completed", len(trusted_eligibility_decisions)
+            )
+            progress.set_count(
                 "eligible",
                 sum(
                     value == "eligible"
@@ -257,9 +287,16 @@ def run_stream(
                 ),
             )
             progress.set_count(
-                "rejected",
+                "excluded",
                 sum(
-                    value in {"excluded", "uncertain"}
+                    value == "excluded"
+                    for value in trusted_eligibility_decisions.values()
+                ),
+            )
+            progress.set_count(
+                "unresolved",
+                sum(
+                    value == "uncertain"
                     for value in trusted_eligibility_decisions.values()
                 ),
             )
@@ -389,7 +426,7 @@ def run_stream(
         else:
             counts["generation_rejected"] += 1
             disposition = "generation_rejected"
-            progress.increment("rejected")
+            progress.increment("generation_rejected")
         paper_results.append(
             {
                 "candidate_key": candidate_key,

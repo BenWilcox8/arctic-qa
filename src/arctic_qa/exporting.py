@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .db import Database
-from .util import atomic_json, atomic_write, jsonl_bytes, stable_id
+from .util import atomic_json, atomic_write, jsonl_bytes, sha256_bytes, stable_id
 
 
 def export_run(
@@ -51,31 +51,7 @@ def export_run(
         candidate = json.loads(row["candidate_json"])
         candidate["release_label"] = "incomplete_non_mcq"
         incomplete_short_answers.append(_short_answer(candidate))
-    export_id = stable_id(
-        "export",
-        run_id,
-        seed,
-        [row["item_id"] for row in rows],
-        [row["item_id"] for row in incomplete_rows],
-    )
-    destination = namespace / "exports" / export_id
-    files = {
-        "short_answer": destination / "short_answer.jsonl",
-        "incomplete_short_answer": destination / "incomplete_short_answer.jsonl",
-        "mcq": destination / "mcq.jsonl",
-        "rejections": destination / "rejections.jsonl",
-    }
-    atomic_write(files["short_answer"], jsonl_bytes(short_answers), immutable=True)
-    atomic_write(
-        files["incomplete_short_answer"],
-        jsonl_bytes(incomplete_short_answers),
-        immutable=True,
-    )
-    atomic_write(
-        files["mcq"],
-        jsonl_bytes(sorted(mcqs, key=lambda row: row["item_id"])),
-        immutable=True,
-    )
+    mcqs = sorted(mcqs, key=lambda row: row["item_id"])
     rejections = [
         {
             "rejection_id": row["rejection_id"],
@@ -86,7 +62,28 @@ def export_run(
         }
         for row in db.rows("SELECT * FROM rejection_ledger ORDER BY rejection_id")
     ]
-    atomic_write(files["rejections"], jsonl_bytes(rejections), immutable=True)
+    payloads = {
+        "short_answer": jsonl_bytes(short_answers),
+        "incomplete_short_answer": jsonl_bytes(incomplete_short_answers),
+        "mcq": jsonl_bytes(mcqs),
+        "rejections": jsonl_bytes(rejections),
+    }
+    payload_sha256 = {name: sha256_bytes(data) for name, data in payloads.items()}
+    export_id = stable_id(
+        "export",
+        run_id,
+        seed,
+        payload_sha256,
+    )
+    destination = namespace / "exports" / export_id
+    files = {
+        "short_answer": destination / "short_answer.jsonl",
+        "incomplete_short_answer": destination / "incomplete_short_answer.jsonl",
+        "mcq": destination / "mcq.jsonl",
+        "rejections": destination / "rejections.jsonl",
+    }
+    for name, path in files.items():
+        atomic_write(path, payloads[name], immutable=True)
     manifest = {
         "schema_version": "1.0.0",
         "export_id": export_id,
@@ -98,6 +95,7 @@ def export_run(
         "mcq_count": len(mcqs),
         "rejection_count": len(rejections),
         "files": {key: str(path.relative_to(namespace)) for key, path in files.items()},
+        "file_sha256": payload_sha256,
     }
     atomic_json(destination / "manifest.json", manifest, immutable=True)
     return manifest

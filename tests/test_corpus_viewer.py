@@ -807,18 +807,29 @@ def test_streaming_budget_and_progress_are_bounded_and_read_only(
             "updated_at_utc": datetime.now(UTC).isoformat(),
             "message": "Paused at the offline gate.",
             "counts": {
-                "full_text_ready": 1,
-                "eligible": 1,
-                "rejected": 0,
-                "accepted_qa": 1,
+                "full_text_ready": 4,
+                "eligible": 0,
+                "rejected": 4,
+                "accepted_qa": 0,
             },
             "recent_papers": [
                 {
-                    "paper_id": "<paper>",
-                    "title": "<script>unsafe</script>",
+                    "paper_id": "excluded-paper",
+                    "title": "Excluded paper",
                     "current_stage": "completed",
-                    "final_reason": "accepted",
-                }
+                    "final_state": "rejected",
+                    "final_reason": "excluded_study_geography",
+                },
+                *[
+                    {
+                        "paper_id": f"unresolved-paper-{number}",
+                        "title": "<script>unsafe</script>",
+                        "current_stage": "completed",
+                        "final_state": "unresolved",
+                        "final_reason": "evidence_unmatched_or_ambiguous",
+                    }
+                    for number in range(3)
+                ],
             ],
             "broker_status_sha256": sha256_file(status),
             "budget_policy_sha256": sha256_file(policy),
@@ -834,12 +845,23 @@ def test_streaming_budget_and_progress_are_bounded_and_read_only(
         streaming_progress_file=progress,
         dataset_metadata_file=metadata,
     )
-    streaming = artifacts.state()["streaming_pipeline"]
+    state = artifacts.state()
+    streaming = state["streaming_pipeline"]
     assert streaming["state"] == "paused"
     assert streaming["broker"]["stages"]["eligibility"]["input_tokens"] == 100
     assert streaming["broker"]["papers"][0]["paper_id"] == "<paper>"
     assert streaming["broker"]["limits"]["accepted_question_target"] == 500
     assert streaming["broker"]["remaining"]["away_generation_submissions"] == 4999
+    assert state["gemini_screening"]["counts"] == {
+        "queued": 0,
+        "completed": 4,
+        "eligible": 0,
+        "excluded": 1,
+        "uncertain": 3,
+        "screening_error": 0,
+        "too_large_not_ready": 0,
+        "ambiguous_charge": 0,
+    }
     assert b"<script>" not in _safe_json_bytes(streaming)
     assert json.loads(artifacts.dataset_metadata())["export_id"] == "export-1"
     changed_ledger = json.loads(ledger.read_text(encoding="utf-8"))

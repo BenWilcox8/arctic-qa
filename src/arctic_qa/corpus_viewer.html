@@ -417,7 +417,7 @@
         const broker = streaming.broker || {};
         const policy = streaming.budget_policy || {};
         $('streaming-meta').textContent = `Run ${streaming.run_id || 'not selected'} | Current stage ${label(streaming.current_stage)} | Updated ${dateText(streaming.updated_at_utc || broker.updated_at_utc)} | Submissions ${formatNumber(broker.generation_submissions)} | In flight ${formatNumber(broker.inflight)} | Stop reason ${broker.halt_reason || streaming.stop_reason || 'none recorded'}`;
-        const streamingOrder = ['full_text_ready', 'eligible', 'rejected', 'accepted_qa'];
+        const streamingOrder = ['full_text_ready', 'eligibility_completed', 'eligible', 'excluded', 'unresolved', 'generation_rejected', 'legacy_rejected_or_unresolved', 'accepted_qa'];
         $('streaming-counts').replaceChildren(...streamingOrder.map((name) => { const box = document.createElement('div'); box.className = 'count'; box.append(text('span', label(name)), text('strong', formatNumber(streaming.counts?.[name]))); return box; }));
         const usage = broker.usage || {};
         const remaining = broker.remaining || {};

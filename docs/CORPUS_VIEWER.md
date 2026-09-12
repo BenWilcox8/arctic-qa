@@ -40,6 +40,13 @@ For the integrated streaming view, also pass these optional files:
 
 The streaming progress record can contain at most 100 recent paper rows.
 
+The integrated view shows `excluded` and `unresolved` as separate counts.
+`excluded` means that deterministic eligibility validation accepted an exclusion.
+`unresolved` means that no valid eligibility decision exists.
+The view shows downstream QA rejection as `generation_rejected`.
+For an old combined count, the view separates states only when all rows are present.
+Otherwise, it shows `legacy_rejected_or_unresolved` and does not guess the split.
+
 Each row can show its paper ID, title, current stage, final state, and final reason.
 
 The broker writes an adjacent `shared-gemini-broker-status-v2` record.
