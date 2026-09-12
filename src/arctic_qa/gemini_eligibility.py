@@ -139,7 +139,7 @@ def _segments(text: str, page_chars: int = 12000) -> list[dict[str, Any]]:
             {
                 "source_block_id": f"text-block-{number:05d}",
                 "section_id": "extracted-text",
-                "page_id": f"text-page-{number:05d}",
+                "page_id": None,
                 "start": start,
                 "end": min(start + page_chars, len(text)),
                 "text": text[start : start + page_chars],
@@ -157,6 +157,19 @@ def _correction_metadata(source: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _known_context_gaps(source: dict[str, Any]) -> list[str]:
+    coverage = source.get("extraction_coverage") or {}
+    gaps = []
+    for field in ("figures", "tables", "supplements", "ocr"):
+        value = coverage.get(field)
+        if value in {None, "unknown", "unknown_not_extracted", "not_extracted"}:
+            gaps.append(f"{field}:{value or 'unknown'}")
+    correction = _correction_metadata(source)
+    if not correction["provided"] or correction["known_status"] == "unknown":
+        gaps.append("correction_retraction_coverage:unknown")
+    return gaps
+
+
 def _identity(
     source: dict[str, Any],
     config: dict[str, Any],
@@ -171,6 +184,8 @@ def _identity(
                 "candidate_key",
                 "title",
                 "doi",
+                "authors",
+                "year",
                 "subgroup",
                 "source_content_hash",
                 "extraction_sha256",
@@ -228,12 +243,17 @@ def _request_payload(
             "candidate_key",
             "title",
             "doi",
+            "authors",
+            "year",
             "subgroup",
             "source_content_hash",
             "extraction_sha256",
             "extraction_coverage",
+            "media_type",
+            "final_url",
         )
     }
+    metadata["known_context_gaps"] = _known_context_gaps(source)
     correction = _correction_metadata(source)
     hashes = {
         "policy_sha256": policy_sha256,
@@ -700,10 +720,72 @@ def _strict_json_loads(text: str) -> Any:
     return json.loads(text, object_pairs_hook=pairs)
 
 
+def _schema_errors(
+    value: Any, schema: dict[str, Any], root: dict[str, Any]
+) -> list[str]:
+    if "$ref" in schema:
+        reference = str(schema["$ref"])
+        if not reference.startswith("#/"):
+            return ["unsupported_schema_reference"]
+        target: Any = root
+        for part in reference[2:].split("/"):
+            target = target.get(part) if isinstance(target, dict) else None
+        if not isinstance(target, dict):
+            return ["unresolved_schema_reference"]
+        return _schema_errors(value, target, root)
+    expected_type = schema.get("type")
+    allowed_types = (
+        expected_type if isinstance(expected_type, list) else [expected_type]
+    )
+    type_matches = {
+        "object": isinstance(value, dict),
+        "array": isinstance(value, list),
+        "string": isinstance(value, str),
+        "boolean": isinstance(value, bool),
+        "null": value is None,
+    }
+    if expected_type is not None and not any(
+        type_matches.get(name, False) for name in allowed_types
+    ):
+        return ["schema_type_invalid"]
+    if "const" in schema and value != schema["const"]:
+        return ["schema_const_invalid"]
+    if "enum" in schema and value not in schema["enum"]:
+        return ["schema_enum_invalid"]
+    errors: list[str] = []
+    if isinstance(value, dict):
+        properties = schema.get("properties") or {}
+        required = schema.get("required") or []
+        if any(field not in value for field in required):
+            errors.append("schema_required_field_missing")
+        if schema.get("additionalProperties") is False and not set(value) <= set(
+            properties
+        ):
+            errors.append("schema_additional_field")
+        for field, child in properties.items():
+            if field in value:
+                errors.extend(_schema_errors(value[field], child, root))
+    if isinstance(value, list):
+        if len(value) < int(schema.get("minItems", 0)):
+            errors.append("schema_array_too_short")
+        if "maxItems" in schema and len(value) > int(schema["maxItems"]):
+            errors.append("schema_array_too_long")
+        child = schema.get("items")
+        if isinstance(child, dict):
+            for item in value:
+                errors.extend(_schema_errors(item, child, root))
+    return errors
+
+
 def validate_response(
-    value: Any, segments: list[dict[str, Any]], *, expected: dict[str, Any]
+    value: Any,
+    segments: list[dict[str, Any]],
+    *,
+    expected: dict[str, Any],
+    response_schema: dict[str, Any],
 ) -> dict[str, Any]:
     errors: list[str] = []
+    errors.extend(_schema_errors(value, response_schema, response_schema))
     required = {
         "schema_version",
         "request_id",
@@ -730,6 +812,11 @@ def validate_response(
         errors.append("input_hash_mismatch")
     if value.get("correction_metadata_used") != expected["correction_metadata"]:
         errors.append("correction_metadata_mismatch")
+    missing_context = value.get("known_missing_context")
+    if isinstance(missing_context, list) and not set(
+        expected["known_context_gaps"]
+    ) <= set(missing_context):
+        errors.append("known_context_gap_hidden")
     if (
         value.get("overall") not in {"eligible", "excluded", "uncertain"}
         or not isinstance(value.get("overall_reason_codes"), list)
@@ -1195,14 +1282,13 @@ def run_gemini_eligibility(
     access_quarantined = False
     if quality_notice_path.is_file():
         quality_notice = _read(quality_notice_path)
-        if (
-            quality_notice.get("schema") != "article-access-quality-notice-v1"
-            or quality_notice.get("run_id") != access_manifest.get("run_id")
-        ):
+        if quality_notice.get(
+            "schema"
+        ) != "article-access-quality-notice-v1" or quality_notice.get(
+            "run_id"
+        ) != access_manifest.get("run_id"):
             raise ValueError("the article-access quality notice is invalid")
-        access_quarantined = (
-            quality_notice.get("status") == "superseded_quarantined"
-        )
+        access_quarantined = quality_notice.get("status") == "superseded_quarantined"
     sources: list[dict[str, Any]] = []
     item_paths = (
         []
@@ -1269,7 +1355,9 @@ def run_gemini_eligibility(
         )
 
     if access_quarantined:
-        raise ValueError("Gemini eligibility cannot use a quarantined article-access run")
+        raise ValueError(
+            "Gemini eligibility cannot use a quarantined article-access run"
+        )
 
     if (
         access_progress.get("state") != "completed"
@@ -1597,7 +1685,9 @@ def run_gemini_eligibility(
                             "request_id": job_key,
                             "input_echo": hashes,
                             "correction_metadata": _correction_metadata(source),
+                            "known_context_gaps": _known_context_gaps(source),
                         },
+                        response_schema=schema,
                     )
                 except (
                     IndexError,

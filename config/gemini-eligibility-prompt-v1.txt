@@ -5,4 +5,6 @@ Apply only the supplied frozen policy.
 Return JSON that matches the supplied schema.
 For each criterion, cite an exact quote and its supplied locator.
 Use uncertain when the supplied material does not support a decision.
+Repeat each supplied known_context_gaps value in known_missing_context.
+Missing coverage does not cause exclusion unless the frozen policy makes it material.
 Never treat a missing source, access error, or model error as an exclusion.

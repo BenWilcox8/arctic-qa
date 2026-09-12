@@ -71,6 +71,8 @@ def fixture(tmp_path: Path, *, live: bool = True) -> dict[str, Path]:
         "subgroup": "retained_article_type",
         "title": "A fixture article about Arctic samples",
         "doi": "10.1234/arctic",
+        "authors": ["A. Researcher"],
+        "year": 2026,
         "access_state": "full_text_ready",
         "identity_verified": True,
         "source_content_hash": source_hash,
@@ -131,7 +133,9 @@ def call(paths: dict[str, Path], action: str, transport=None) -> dict:
     )
 
 
-def response_value(request_id: str, hashes: dict, quote: str) -> dict:
+def response_value(
+    request_id: str, hashes: dict, quote: str, known_gaps: list[str] | None = None
+) -> dict:
     criteria = []
     for name in CRITERIA:
         status = (
@@ -149,7 +153,7 @@ def response_value(request_id: str, hashes: dict, quote: str) -> dict:
                         "quote": quote,
                         "locator": {
                             "source_block_id": "text-block-00001",
-                            "page_id": "text-page-00001",
+                            "page_id": None,
                             "section_id": "extracted-text",
                         },
                     }
@@ -165,7 +169,9 @@ def response_value(request_id: str, hashes: dict, quote: str) -> dict:
         "overall": "eligible",
         "overall_reason_codes": ["all_required_criteria_satisfied"],
         "criteria": criteria,
-        "known_missing_context": ["Correction coverage is unknown."],
+        "known_missing_context": known_gaps
+        if known_gaps is not None
+        else ["correction_retraction_coverage:unknown"],
         "correction_metadata_used": {
             "provided": False,
             "known_status": "unknown",
@@ -187,8 +193,12 @@ class GoodTransport:
         content = payload["contents"][0]["parts"][0]["text"]
         request_id = content.split("request_id: ", 1)[1].splitlines()[0]
         hashes = json.loads(content.split("input_hashes: ", 1)[1].splitlines()[0])
+        metadata = json.loads(content.split("metadata: ", 1)[1].splitlines()[0])
         value = response_value(
-            request_id, hashes, "Arctic samples were collected at 71 north."
+            request_id,
+            hashes,
+            "Arctic samples were collected at 71 north.",
+            metadata["known_context_gaps"],
         )
         return {
             "candidates": [
@@ -221,16 +231,60 @@ def test_exact_quotes_and_policy_mapping() -> None:
         "request_id": "request",
         "input_echo": hashes,
         "correction_metadata": value["correction_metadata_used"],
+        "known_context_gaps": ["correction_retraction_coverage:unknown"],
     }
-    result = validate_response(value, segments, expected=expected)
+    response_schema = json.loads(
+        (ROOT / "schemas" / "gemini-eligibility.v1.schema.json").read_text()
+    )
+    result = validate_response(
+        value, segments, expected=expected, response_schema=response_schema
+    )
     assert result["valid"] is True
     assert result["resolved_evidence"][0]["start"] == 7
 
     value["criteria"][0]["status"] = "failed"
     value["overall"] = "eligible"
-    contradictory = validate_response(value, segments, expected=expected)
+    contradictory = validate_response(
+        value, segments, expected=expected, response_schema=response_schema
+    )
     assert contradictory["valid"] is False
     assert "overall_contradicts_criteria" in contradictory["errors"]
+
+
+def test_local_schema_and_known_context_gaps_fail_closed() -> None:
+    segments = _segments("prefix unique evidence suffix")
+    hashes = {
+        "policy_sha256": "a",
+        "source_version_sha256": "b",
+        "extracted_text_sha256": "c",
+        "metadata_sha256": "d",
+    }
+    value = response_value("request", hashes, "unique evidence", [])
+    expected = {
+        "request_id": "request",
+        "input_echo": hashes,
+        "correction_metadata": value["correction_metadata_used"],
+        "known_context_gaps": [
+            "figures:unknown_not_extracted",
+            "correction_retraction_coverage:unknown",
+        ],
+    }
+    schema = json.loads(
+        (ROOT / "schemas" / "gemini-eligibility.v1.schema.json").read_text()
+    )
+    hidden = validate_response(
+        value, segments, expected=expected, response_schema=schema
+    )
+    assert hidden["valid"] is False
+    assert "known_context_gap_hidden" in hidden["errors"]
+
+    value["known_missing_context"] = list(expected["known_context_gaps"])
+    value["criteria"][0]["evidence"][0]["locator"]["extra"] = "hidden"
+    malformed = validate_response(
+        value, segments, expected=expected, response_schema=schema
+    )
+    assert malformed["valid"] is False
+    assert "schema_additional_field" in malformed["errors"]
 
 
 def test_strict_json_rejects_duplicate_fields() -> None:
@@ -256,6 +310,13 @@ def test_prompt_keeps_full_text_and_disables_tools(tmp_path: Path) -> None:
     assert text in serialized
     assert "ARTICLE_TEXT_BEGIN" in serialized
     assert "source_block_id=text-block-00001" in serialized
+    assert "page_id=None" in serialized
+    assert "text-page" not in serialized
+    user_text = payload["contents"][0]["parts"][0]["text"]
+    metadata = json.loads(user_text.split("metadata: ", 1)[1].splitlines()[0])
+    assert set(("authors", "year", "media_type", "final_url")) <= set(metadata)
+    assert metadata["authors"] == ["A. Researcher"]
+    assert metadata["year"] == 2026
     assert "tools" not in payload
     assert payload["store"] is False
     assert payload["generationConfig"]["candidateCount"] == 1
