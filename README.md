@@ -39,6 +39,9 @@ PYTHONPATH=src python -m arctic_qa --json doctor
 The shell supplies Python, pytest, and `pdftotext`.
 The project does not require a server, vector database, GPU, or parser model.
 
+The optional read-only corpus-stage viewer uses only the Python standard library.
+See `docs/CORPUS_VIEWER.md` for its artifact boundary and start command.
+
 ## Staged workflow
 
 All commands use the mounted default root unless you supply a test root.

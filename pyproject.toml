@@ -22,7 +22,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-arctic_qa = ["data/*.json"]
+arctic_qa = ["data/*.json", "corpus_viewer.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

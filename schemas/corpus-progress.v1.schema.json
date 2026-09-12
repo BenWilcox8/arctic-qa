@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/arctic-qa/corpus-progress.v1.schema.json",
+  "title": "Corpus stage progress",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "state", "stage", "updated_at_utc", "message"],
+  "properties": {
+    "schema": {"const": "corpus-progress-v1"},
+    "state": {
+      "enum": ["not_running", "running", "paused", "error", "completed"]
+    },
+    "stage": {
+      "enum": [
+        "query_exhaustion",
+        "metadata_prefilter",
+        "source_retrieval",
+        "eligibility_screening",
+        "corpus_freeze"
+      ]
+    },
+    "updated_at_utc": {"type": "string", "format": "date-time"},
+    "message": {"type": "string", "minLength": 1, "maxLength": 500}
+  }
+}

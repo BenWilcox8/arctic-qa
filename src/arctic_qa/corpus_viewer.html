@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath fill='%23123f54' d='M32 4 4 52h56z'/%3E%3Cpath fill='%23dff3f7' d='m32 20-8 14 8-4 8 4z'/%3E%3C/svg%3E">
+  <title>Arctic corpus stage</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #142b35;
+      --muted: #5c6e76;
+      --line: #d9e1e4;
+      --paper: #ffffff;
+      --wash: #f3f7f8;
+      --navy: #123f54;
+      --cyan: #dff3f7;
+      --green: #1c6b4b;
+      --green-bg: #e5f5ed;
+      --amber: #80570d;
+      --amber-bg: #fff2cf;
+      --red: #943b3b;
+      --red-bg: #fde9e7;
+      --gray-bg: #edf1f2;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--wash); color: var(--ink); }
+    a { color: #0b6486; text-underline-offset: 2px; }
+    button, input, select { font: inherit; }
+    button, select, input {
+      min-height: 2.5rem;
+      border: 1px solid #aab9bf;
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+    }
+    button { padding: .55rem .85rem; cursor: pointer; }
+    button:hover { background: var(--cyan); }
+    button:disabled { cursor: not-allowed; opacity: .45; }
+    input, select { padding: .55rem .65rem; }
+    .shell { width: min(1460px, calc(100% - 32px)); margin: 0 auto; }
+    header { background: var(--navy); color: #fff; padding: 2rem 0 1.7rem; }
+    header p { color: #d5e6ed; margin: .4rem 0 0; max-width: 72ch; }
+    h1 { font-size: clamp(1.75rem, 4vw, 2.65rem); line-height: 1.1; margin: 0; }
+    h2 { font-size: 1.3rem; margin: 0; }
+    h3 { font-size: 1rem; margin: 0 0 .35rem; }
+    main { padding: 1.3rem 0 4rem; }
+    .notice {
+      display: flex; gap: 1rem; align-items: flex-start; justify-content: space-between;
+      border: 1px solid var(--line); border-left: 5px solid var(--navy);
+      background: var(--paper); padding: 1rem; margin-bottom: 1rem;
+    }
+    .notice strong { display: block; margin-bottom: .25rem; }
+    .notice p { margin: 0; color: var(--muted); }
+    .meta { font-size: .82rem; color: var(--muted); }
+    .grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 1rem; margin-bottom: 1rem; }
+    .panel { background: var(--paper); border: 1px solid var(--line); border-radius: 8px; padding: 1rem; min-width: 0; }
+    .readiness { grid-column: span 6; }
+    .stages-panel { grid-column: 1 / -1; }
+    .verdict { display: flex; align-items: center; gap: .55rem; margin-top: .8rem; }
+    .verdict p { margin: 0; color: var(--muted); }
+    .badge {
+      display: inline-flex; align-items: center; width: max-content; max-width: 100%;
+      padding: .22rem .55rem; border-radius: 999px; font-size: .76rem;
+      font-weight: 700; letter-spacing: .02em; text-transform: uppercase;
+    }
+    .ready, .completed, .eligible, .fresh { color: var(--green); background: var(--green-bg); }
+    .partial, .pending, .paused, .stale { color: var(--amber); background: var(--amber-bg); }
+    .not_ready, .excluded, .error, .unavailable { color: var(--red); background: var(--red-bg); }
+    .not_started, .unreviewed, .not_running, .unknown { color: #4c5e66; background: var(--gray-bg); }
+    .counts { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .65rem; margin: 0 0 1rem; }
+    .count { background: var(--paper); border: 1px solid var(--line); border-radius: 8px; padding: .8rem; }
+    .count span { display: block; color: var(--muted); font-size: .77rem; text-transform: uppercase; letter-spacing: .04em; }
+    .count strong { display: block; font-size: clamp(1.25rem, 2.6vw, 1.8rem); margin-top: .18rem; }
+    .stages { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .7rem; margin-top: .8rem; }
+    .stage { border-top: 4px solid #9bb0b8; background: var(--wash); padding: .8rem; min-width: 0; }
+    .stage p { color: var(--muted); font-size: .86rem; line-height: 1.45; margin: .5rem 0 0; }
+    section.table-panel { background: var(--paper); border: 1px solid var(--line); border-radius: 8px; margin-top: 1rem; overflow: hidden; }
+    .section-head { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; padding: 1rem; border-bottom: 1px solid var(--line); }
+    .section-head p { color: var(--muted); margin: .3rem 0 0; }
+    .filters { display: grid; grid-template-columns: minmax(220px, 2fr) repeat(3, minmax(140px, 1fr)) auto; gap: .65rem; padding: 1rem; border-bottom: 1px solid var(--line); }
+    .field label { display: block; color: var(--muted); font-size: .75rem; margin-bottom: .25rem; }
+    .field input, .field select { width: 100%; }
+    .filter-action { align-self: end; background: var(--navy); color: #fff; border-color: var(--navy); }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+    th, td { text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); padding: .75rem; }
+    th { background: #eef4f6; color: #39535e; font-size: .75rem; letter-spacing: .03em; text-transform: uppercase; }
+    td { line-height: 1.45; }
+    td.title { min-width: 260px; }
+    td.reason { min-width: 230px; overflow-wrap: anywhere; }
+    td.links { min-width: 120px; }
+    .title strong { display: block; }
+    .subtle { color: var(--muted); font-size: .8rem; margin-top: .2rem; }
+    .links a { display: block; margin-bottom: .2rem; }
+    details { margin-top: .35rem; }
+    summary { color: #0b6486; cursor: pointer; }
+    .pager { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: 1rem; }
+    .pager-controls { display: flex; gap: .5rem; }
+    .empty, .loading, .fatal { padding: 1.4rem; color: var(--muted); }
+    .fatal { color: var(--red); }
+    .sources { margin: .8rem 0 0; padding-left: 1.1rem; color: var(--muted); font-size: .84rem; }
+    .sources li { margin: .2rem 0; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+    @media (max-width: 980px) {
+      .counts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .stages { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .readiness { grid-column: 1 / -1; }
+      .filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .filters .search { grid-column: 1 / -1; }
+      .filter-action { align-self: end; }
+    }
+    @media (max-width: 680px) {
+      .shell { width: min(100% - 20px, 1460px); }
+      header { padding: 1.3rem 0; }
+      .notice, .section-head, .pager { display: block; }
+      .notice button, .section-head .badge { margin-top: .75rem; }
+      .counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .stages, .filters { grid-template-columns: 1fr; }
+      .filters .search { grid-column: auto; }
+      .table-wrap { overflow: visible; }
+      table, thead, tbody, tr, th, td { display: block; }
+      thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+      tr { border-bottom: 1px solid var(--line); padding: .7rem; }
+      td { border: 0; padding: .3rem .2rem .3rem 7.2rem; min-height: 1.8rem; position: relative; min-width: 0 !important; overflow-wrap: anywhere; }
+      td::before { content: attr(data-label); position: absolute; left: .2rem; top: .34rem; width: 6.6rem; color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .03em; }
+      .pager-controls { margin-top: .8rem; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="shell">
+      <h1>Arctic corpus stage</h1>
+      <p>Live, read-only visibility for discovery and scientific eligibility. This page does not start or advance corpus work.</p>
+    </div>
+  </header>
+  <main class="shell">
+    <div class="notice" id="process-notice">
+      <div>
+        <strong id="process-title">Loading process state...</strong>
+        <p id="process-detail">The page reads the selected run artifacts.</p>
+        <div class="meta" id="run-meta"></div>
+      </div>
+      <button type="button" id="refresh">Refresh data</button>
+    </div>
+
+    <div class="counts" id="counts" aria-label="Corpus counts"></div>
+
+    <div class="grid">
+      <article class="panel readiness">
+        <h2>Metadata discovery</h2>
+        <div class="verdict"><span class="badge" id="discovery-verdict">Loading</span><p id="discovery-condition"></p></div>
+      </article>
+      <article class="panel readiness">
+        <h2>Full eligible corpus</h2>
+        <div class="verdict"><span class="badge" id="corpus-verdict">Loading</span><p id="corpus-condition"></p></div>
+      </article>
+      <article class="panel stages-panel">
+        <h2>Method stage boundaries</h2>
+        <div class="stages" id="stages"></div>
+      </article>
+    </div>
+
+    <section class="table-panel" aria-labelledby="accepted-title">
+      <div class="section-head">
+        <div><h2 id="accepted-title">Accepted corpus items</h2><p>Only source-screened inclusions appear here. Discovery records do not become accepted items automatically.</p></div>
+        <span class="badge eligible" id="accepted-count">0 accepted</span>
+      </div>
+      <div class="table-wrap" id="accepted-table"><div class="loading">Loading accepted items...</div></div>
+    </section>
+
+    <section class="table-panel" aria-labelledby="candidates-title">
+      <div class="section-head">
+        <div><h2 id="candidates-title">Discovery candidates and screening overlay</h2><p>The immutable discovery ledger remains separate. The latest screening ledger supplies the visible decisions.</p></div>
+      </div>
+      <form class="filters" id="filters">
+        <div class="field search"><label for="q">Title or DOI</label><input id="q" name="q" maxlength="200" placeholder="Search title or DOI"></div>
+        <div class="field"><label for="eligibility">Eligibility</label><select id="eligibility" name="eligibility"><option value="all">All states</option><option value="unreviewed">Unreviewed</option><option value="pending">Pending</option><option value="eligible">Eligible</option><option value="excluded">Excluded</option></select></div>
+        <div class="field"><label for="pending_reason">Pending reason</label><select id="pending_reason" name="pending_reason"><option value="all">All reasons</option><option value="unreviewed">Unreviewed</option><option value="access-pending">Access pending</option><option value="geography-pending">Geography pending</option><option value="other-pending">Other pending</option></select></div>
+        <div class="field"><label for="page_size">Rows per page</label><select id="page_size" name="page_size"><option>10</option><option selected>25</option><option>50</option><option>100</option></select></div>
+        <button class="filter-action" type="submit">Apply</button>
+      </form>
+      <div class="table-wrap" id="candidate-table"><div class="loading">Loading candidates...</div></div>
+      <div class="pager">
+        <span id="page-summary">Page 1</span>
+        <div class="pager-controls"><button type="button" id="previous">Previous</button><button type="button" id="next">Next</button></div>
+      </div>
+    </section>
+
+    <section class="panel" style="margin-top:1rem">
+      <h2>Data sources</h2>
+      <p class="meta">Auto-refresh checks artifact versions every 15 seconds. A page refresh is not corpus progress.</p>
+      <ul class="sources" id="sources"></ul>
+    </section>
+  </main>
+  <script>
+    const state = { page: 1, pages: 1, revision: null };
+    const $ = (id) => document.getElementById(id);
+    const formatNumber = (value) => new Intl.NumberFormat().format(value ?? 0);
+    const label = (value) => value ? String(value).replaceAll('_', ' ').replaceAll('-', ' ') : 'Not available';
+    const dateText = (value) => value ? new Date(value).toLocaleString() : 'Not available';
+    function setBadge(node, value) {
+      node.textContent = label(value);
+      node.className = `badge ${value || 'unknown'}`;
+    }
+    function text(tag, value, className) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      node.textContent = value;
+      return node;
+    }
+    function safeLink(url, caption) {
+      if (!url || !(url.startsWith('https://') || url.startsWith('http://') || url.startsWith('zotero://'))) return null;
+      const link = text('a', caption);
+      link.href = url;
+      if (!url.startsWith('zotero://')) {
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+      }
+      return link;
+    }
+    function renderRows(target, records) {
+      target.replaceChildren();
+      if (!records.length) {
+        target.append(text('div', 'No records match this view.', 'empty'));
+        return;
+      }
+      const table = document.createElement('table');
+      table.innerHTML = '<thead><tr><th>State</th><th>Paper</th><th>Decision evidence</th><th>Links</th></tr></thead>';
+      const body = document.createElement('tbody');
+      records.forEach((record) => {
+        const row = document.createElement('tr');
+        const status = document.createElement('td'); status.dataset.label = 'State';
+        const badge = text('span', label(record.eligibility), `badge ${record.eligibility}`); status.append(badge);
+        if (record.pending_reason) status.append(text('div', label(record.pending_reason), 'subtle'));
+        const paper = document.createElement('td'); paper.dataset.label = 'Paper'; paper.className = 'title';
+        paper.append(text('strong', record.title || 'Untitled'));
+        const authors = record.authors && record.authors.length ? record.authors.join(', ') : 'Authors not available';
+        paper.append(text('div', `${authors} | ${record.year || 'Year not available'}`, 'subtle'));
+        const evidence = document.createElement('td'); evidence.dataset.label = 'Evidence'; evidence.className = 'reason';
+        evidence.append(text('div', label(record.reason_code)));
+        evidence.append(text('div', record.evidence_locator ? `Locator: ${record.evidence_locator}` : 'Evidence locator not available', 'subtle'));
+        if (record.evidence_quote) {
+          const details = document.createElement('details');
+          details.append(text('summary', 'Source passage'));
+          details.append(text('div', record.evidence_quote, 'subtle'));
+          evidence.append(details);
+        }
+        const links = document.createElement('td'); links.dataset.label = 'Links'; links.className = 'links';
+        const doi = record.doi ? safeLink(`https://doi.org/${encodeURIComponent(record.doi)}`, 'DOI') : null;
+        const repository = safeLink(record.repository_url || record.landing_url, record.repository_url ? 'Repository' : 'Metadata');
+        const zotero = safeLink(record.zotero_url, 'Zotero');
+        [doi, repository, zotero].filter(Boolean).forEach((link) => links.append(link));
+        if (!links.children.length) links.append(text('span', 'Not available', 'subtle'));
+        row.append(status, paper, evidence, links); body.append(row);
+      });
+      table.append(body); target.append(table);
+    }
+    async function fetchJson(url) {
+      const response = await fetch(url, { cache: 'no-store' });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || `Request failed: ${response.status}`);
+      return payload;
+    }
+    async function loadState(force = false) {
+      try {
+        const data = await fetchJson('/api/state');
+        const process = data.progress;
+        if (process.telemetry === 'observed') {
+          $('process-title').textContent = process.state === 'not_running' ? 'No corpus processing is running' : `Corpus processing: ${label(process.state)}`;
+        } else {
+          $('process-title').textContent = 'Corpus process telemetry is not available';
+        }
+        $('process-detail').textContent = process.message;
+        $('run-meta').textContent = `Run ${data.selected_run} | Protocol ${data.protocol?.protocol_id || 'not available'} | Freshness ${label(data.freshness.state)} | Updated ${dateText(data.freshness.newest_artifact_at_utc)}`;
+        setBadge($('discovery-verdict'), data.readiness.metadata_discovery.verdict);
+        $('discovery-condition').textContent = data.readiness.metadata_discovery.completion_condition;
+        setBadge($('corpus-verdict'), data.readiness.eligible_corpus.verdict);
+        $('corpus-condition').textContent = data.readiness.eligible_corpus.completion_condition;
+        const countOrder = ['discovered', 'selected', 'retrieved', 'eligible', 'excluded', 'pending'];
+        $('counts').replaceChildren(...countOrder.map((name) => {
+          const box = document.createElement('div'); box.className = 'count';
+          box.append(text('span', name), text('strong', formatNumber(data.counts?.[name]))); return box;
+        }));
+        $('stages').replaceChildren(...data.stages.map((stage) => {
+          const box = document.createElement('div'); box.className = 'stage';
+          box.append(text('h3', stage.name), text('span', label(stage.state), `badge ${stage.state}`), text('p', stage.detail)); return box;
+        }));
+        $('sources').replaceChildren(...data.artifacts.map((source) => text('li', `${source.name}: ${source.available ? dateText(source.updated_at_utc) : 'unavailable'}`)));
+        if (force || state.revision !== data.data_revision) {
+          state.revision = data.data_revision;
+          await Promise.all([loadAccepted(), loadCandidates()]);
+        }
+      } catch (error) {
+        $('process-title').textContent = 'Corpus data is unavailable';
+        $('process-detail').textContent = error.message;
+      }
+    }
+    async function loadAccepted() {
+      try {
+        const data = await fetchJson('/api/candidates?eligibility=eligible&page_size=100');
+        $('accepted-count').textContent = `${formatNumber(data.total)} accepted`;
+        renderRows($('accepted-table'), data.records);
+      } catch (error) { $('accepted-table').replaceChildren(text('div', error.message, 'fatal')); }
+    }
+    async function loadCandidates() {
+      const parameters = new URLSearchParams(new FormData($('filters')));
+      parameters.set('page', state.page);
+      try {
+        const data = await fetchJson(`/api/candidates?${parameters}`);
+        state.page = data.page; state.pages = data.pages;
+        renderRows($('candidate-table'), data.records);
+        $('page-summary').textContent = `Page ${formatNumber(data.page)} of ${formatNumber(data.pages)} | ${formatNumber(data.total)} records`;
+        $('previous').disabled = data.page <= 1; $('next').disabled = data.page >= data.pages;
+      } catch (error) { $('candidate-table').replaceChildren(text('div', error.message, 'fatal')); }
+    }
+    $('filters').addEventListener('submit', (event) => { event.preventDefault(); state.page = 1; loadCandidates(); });
+    $('previous').addEventListener('click', () => { state.page = Math.max(1, state.page - 1); loadCandidates(); });
+    $('next').addEventListener('click', () => { state.page = Math.min(state.pages, state.page + 1); loadCandidates(); });
+    $('refresh').addEventListener('click', () => loadState(true));
+    loadState(true);
+    setInterval(() => loadState(false), 15000);
+  </script>
+</body>
+</html>

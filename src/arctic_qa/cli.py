@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .corpus_viewer import serve_corpus_viewer
 from .db import Database
 from .discovery import (
     crossref_exact_doi,
@@ -57,6 +58,18 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "doctor", help="Check the mounted data root and local dependencies."
     )
+
+    viewer = commands.add_parser(
+        "corpus-view", help="Serve the read-only corpus-stage monitor."
+    )
+    viewer.add_argument("--corpus-root", type=Path, required=True)
+    viewer.add_argument("--run-id", required=True)
+    viewer.add_argument("--runtime-dir", type=Path, required=True)
+    viewer.add_argument("--progress-file", type=Path)
+    viewer.add_argument("--zotero-receipts-dir", type=Path)
+    viewer.add_argument("--host", default="127.0.0.1")
+    viewer.add_argument("--port", type=int, default=8787)
+    viewer.add_argument("--stale-after-seconds", type=int, default=86400)
 
     discover = commands.add_parser(
         "discover", help="Discover and deduplicate source metadata."
@@ -178,6 +191,18 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "doctor":
             return _emit(args, _doctor(args))
+        if args.command == "corpus-view":
+            serve_corpus_viewer(
+                corpus_root=args.corpus_root,
+                run_id=args.run_id,
+                runtime_dir=args.runtime_dir,
+                progress_file=args.progress_file,
+                zotero_receipts_dir=args.zotero_receipts_dir,
+                host=args.host,
+                port=args.port,
+                stale_after_seconds=args.stale_after_seconds,
+            )
+            return 0
         paths, db = _open(args)
         try:
             handler = globals()[f"_{args.command}"]
