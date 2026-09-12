@@ -324,11 +324,14 @@ def _progress_payload(
 def _write_viewer_progress(path: Path | None, progress: dict[str, Any]) -> None:
     if path is None:
         return
+    viewer_state = (
+        "not_running" if progress["state"] == "prepared" else progress["state"]
+    )
     atomic_json(
         path,
         {
             "schema": "corpus-progress-v1",
-            "state": progress["state"],
+            "state": viewer_state,
             "stage": "source_screening",
             "updated_at_utc": progress["updated_at_utc"],
             "message": progress["message"],

@@ -154,6 +154,9 @@ def test_prepare_smoke_resume_and_access_outcomes(tmp_path: Path) -> None:
         "10.1234/source-1",
     ]
     assert calls == []
+    viewer_progress = json.loads((tmp_path / "viewer-progress.json").read_text())
+    assert viewer_progress["state"] == "not_running"
+    assert viewer_progress["stage"] == "source_screening"
 
     smoke = run_fixture(tmp_path, "smoke", calls=calls)
     assert smoke["state"] == "paused"
