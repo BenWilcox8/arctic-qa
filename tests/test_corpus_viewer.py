@@ -586,6 +586,37 @@ def test_stale_source_progress_does_not_claim_a_live_process(tmp_path: Path) -> 
     assert source["last_observed_state"] == "running"
 
 
+def test_stale_access_progress_reports_unknown_stage_state(tmp_path: Path) -> None:
+    fixture_corpus(tmp_path)
+    access_run = tmp_path / "access"
+    write_json(
+        access_run / "progress.json",
+        {
+            "schema": "article-access-progress-v1",
+            "state": "running",
+            "run_id": "access-r1",
+            "policy_id": "access-policy-v1",
+            "started_at_utc": (datetime.now(UTC) - timedelta(hours=2)).isoformat(),
+            "updated_at_utc": (datetime.now(UTC) - timedelta(hours=2)).isoformat(),
+            "completed_at_utc": None,
+            "counts": {"target": 2, "checked": 1, "full_text_ready": 1},
+            "message": "Old access observation.",
+        },
+    )
+    artifacts = CorpusArtifacts(
+        tmp_path,
+        "test-run",
+        tmp_path / "runtime",
+        access_run_dir=access_run,
+        process_stale_after_seconds=60,
+    )
+    state = artifacts.state()
+    assert state["progress"]["telemetry"] == "stale"
+    assert state["progress"]["stage"] == "article_access_readiness"
+    source = next(row for row in state["stages"] if row["id"] == "source_retrieval")
+    assert source["state"] == "unknown"
+
+
 def test_persistent_cache_does_not_reread_discovery_ledger(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

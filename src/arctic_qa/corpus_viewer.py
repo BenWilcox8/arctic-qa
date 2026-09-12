@@ -1396,6 +1396,22 @@ class CorpusArtifacts:
                 "started_at_utc": access.get("started_at_utc"),
                 "completed_at_utc": access.get("completed_at_utc"),
             }
+        elif access.get("telemetry") in {"stale", "invalid"} and access.get("run_id"):
+            process = {
+                "schema": "corpus-progress-v1",
+                "telemetry": access.get("telemetry"),
+                "state": None,
+                "last_observed_state": access.get("last_observed_state"),
+                "stage": "article_access_readiness",
+                "updated_at_utc": access.get("updated_at_utc"),
+                "message": access.get("message"),
+                "run_id": access.get("run_id"),
+                "policy_id": access.get("policy_id"),
+                "processed": (access.get("counts") or {}).get("checked"),
+                "total": (access.get("counts") or {}).get("target"),
+                "started_at_utc": access.get("started_at_utc"),
+                "completed_at_utc": access.get("completed_at_utc"),
+            }
         if gemini.get("telemetry") == "observed" and gemini.get("state") in {
             "running",
             "paused",
@@ -1560,7 +1576,12 @@ class CorpusArtifacts:
                 "name": "3. Source retrieval",
                 "state": access.get("state")
                 if access.get("state") in {"running", "paused", "error", "completed"}
-                else "not_started",
+                else (
+                    "unknown"
+                    if access.get("telemetry") in {"stale", "invalid"}
+                    and access.get("run_id")
+                    else "not_started"
+                ),
                 "detail": (
                     f"Frozen target: {(access.get('counts') or {}).get('target', 0)}. "
                     f"Checked {(access.get('counts') or {}).get('checked', 0)}. "
