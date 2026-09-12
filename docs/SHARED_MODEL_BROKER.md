@@ -22,6 +22,12 @@ The broker also validates ledger totals against immutable request receipts.
 
 An integrity mismatch creates an adjacent halt record and blocks more paid work.
 
+The broker publishes an adjacent `shared-gemini-broker-status-v2` record after each ledger change.
+
+This record contains verified limits, use, remaining capacity, stage totals, and paper totals.
+
+Consumers must verify its ledger and policy hashes before they show its values.
+
 ## Invocation
 
 Construct the broker with the policy, price, gate, central ledger, and receipt paths.

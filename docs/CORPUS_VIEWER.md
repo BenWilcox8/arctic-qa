@@ -42,7 +42,23 @@ The streaming progress record can contain at most 100 recent paper rows.
 
 Each row can show its paper ID, title, current stage, final state, and final reason.
 
-The page reads model costs and tokens from the shared ledger.
+The broker writes an adjacent `shared-gemini-broker-status-v2` record.
+
+The page reads model costs and tokens only from this invariant-checked record.
+
+The page verifies the ledger hash and budget-policy hash before it shows this state.
+
+The progress record must contain `broker_status_sha256` and `budget_policy_sha256` when a ledger exists.
+
+If dataset metadata exists, progress must also contain `dataset_metadata_sha256`.
+
+The dataset metadata run ID must equal the streaming progress run ID.
+
+The page shows each money limit, count limit, used value, and remaining value.
+
+It also shows per-paper remaining cost in the paper table.
+
+An absent or inconsistent custody record appears as an error.
 
 It never serves provider receipts, source text, PDFs, or credentials.
 

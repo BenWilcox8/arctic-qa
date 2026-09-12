@@ -221,6 +221,10 @@ class SharedGeminiBroker:
         return self.ledger_file.with_name(f".{self.ledger_file.name}.identity.json")
 
     @property
+    def _status_file(self) -> Path:
+        return self.ledger_file.with_name(f"{self.ledger_file.stem}.status.json")
+
+    @property
     def _integrity_file(self) -> Path:
         return self.ledger_file.with_name(
             f".{self.ledger_file.name}.integrity-halt.json"
@@ -263,7 +267,8 @@ class SharedGeminiBroker:
                     != self.prior
                 ):
                     raise ValueError("the shared paid-call ledger identity changed")
-                self._validated_ledger()
+                ledger = self._validated_ledger()
+                self._publish_status(ledger)
                 return
             if self._identity_file.exists():
                 raise ValueError(
@@ -300,7 +305,7 @@ class SharedGeminiBroker:
                 "updated_at_utc": _now(),
             }
             atomic_json(self._identity_file, self._ledger_identity(), immutable=True)
-            atomic_json(self.ledger_file, ledger)
+            self._commit_ledger(ledger)
 
     @staticmethod
     def _empty_usage_row() -> dict[str, Any]:
@@ -672,6 +677,163 @@ class SharedGeminiBroker:
         for value in ledger["recent_submission_times_utc"]:
             datetime.fromisoformat(str(value).replace("Z", "+00:00"))
 
+    def _status_payload(self, ledger: dict[str, Any]) -> dict[str, Any]:
+        away_used = sum(
+            _money(ledger[name], name)
+            for name in ("reserved_usd", "spent_usd", "ambiguous_reserved_usd")
+        )
+        live_used = sum(
+            _money(row.get("reserved_usd", 0), "live reserved")
+            + _money(row.get("spent_usd", 0), "live spent")
+            + _money(row.get("ambiguous_usd", 0), "live ambiguous")
+            for row in ledger["live_test_papers"].values()
+        )
+        construction_used = self.prior + away_used
+        accepted = int(ledger["accepted_question_count"])
+        cutoff = datetime.now(UTC) - timedelta(minutes=1)
+        recent_count = sum(
+            datetime.fromisoformat(value.replace("Z", "+00:00")) > cutoff
+            for value in ledger["recent_submission_times_utc"]
+        )
+        live_submissions = sum(
+            int(row.get("submissions", 0))
+            for row in ledger["live_test_papers"].values()
+        )
+        papers = {}
+        paper_cap = _money(self.policy["maximum_paper_cost_usd"], "paper cap")
+        for family_id, row in ledger["papers"].items():
+            used = sum(
+                _money(row[name], f"paper {name}")
+                for name in ("reserved_usd", "spent_usd", "ambiguous_usd")
+            )
+            papers[family_id] = {**row, "remaining_usd": str(paper_cap - used)}
+        limits = {
+            key: self.policy[key]
+            for key in (
+                "project_lifetime_ceiling_usd",
+                "reserved_for_benchmark_evaluation_usd",
+                "dataset_construction_allocation_usd",
+                "construction_review_checkpoint_usd",
+                "accepted_question_target",
+                "away_session_total_ceiling_usd",
+                "live_test_suballocation_usd",
+                "live_test_maximum_papers",
+                "live_test_maximum_generation_submissions",
+                "away_maximum_generation_submissions",
+                "maximum_request_reserved_cost_usd",
+                "maximum_paper_cost_usd",
+                "maximum_concurrent_generation_requests",
+                "maximum_generation_requests_per_minute",
+                "maximum_output_tokens_including_thinking",
+                "automatic_transport_generation_retries",
+            )
+        }
+        usage = {
+            "project_lifetime_usd": str(construction_used),
+            "benchmark_evaluation_usd": "0",
+            "dataset_construction_usd": str(construction_used),
+            "construction_checkpoint_usd": str(construction_used),
+            "away_session_usd": str(away_used),
+            "live_test_usd": str(live_used),
+            "accepted_questions": accepted,
+            "live_test_papers": len(ledger["live_test_papers"]),
+            "live_test_generation_submissions": live_submissions,
+            "away_generation_submissions": int(ledger["generation_submissions"]),
+            "concurrent_generation_requests": int(ledger["inflight"]),
+            "generation_requests_in_current_minute": recent_count,
+        }
+        remaining = {
+            "project_lifetime_usd": str(
+                _money(self.policy["project_lifetime_ceiling_usd"], "lifetime")
+                - construction_used
+            ),
+            "benchmark_evaluation_usd": str(
+                _money(
+                    self.policy["reserved_for_benchmark_evaluation_usd"],
+                    "evaluation reserve",
+                )
+            ),
+            "dataset_construction_usd": str(
+                _money(
+                    self.policy["dataset_construction_allocation_usd"],
+                    "construction allocation",
+                )
+                - construction_used
+            ),
+            "construction_checkpoint_usd": str(
+                _money(self.policy["construction_review_checkpoint_usd"], "checkpoint")
+                - construction_used
+            ),
+            "away_session_usd": str(
+                _money(self.policy["away_session_total_ceiling_usd"], "away")
+                - away_used
+            ),
+            "live_test_usd": str(
+                _money(self.policy["live_test_suballocation_usd"], "live test")
+                - live_used
+            ),
+            "accepted_questions": int(self.policy["accepted_question_target"])
+            - accepted,
+            "live_test_papers": int(self.policy["live_test_maximum_papers"])
+            - len(ledger["live_test_papers"]),
+            "live_test_generation_submissions": int(
+                self.policy["live_test_maximum_generation_submissions"]
+            )
+            - live_submissions,
+            "away_generation_submissions": int(
+                self.policy["away_maximum_generation_submissions"]
+            )
+            - int(ledger["generation_submissions"]),
+            "concurrent_generation_requests": int(
+                self.policy["maximum_concurrent_generation_requests"]
+            )
+            - int(ledger["inflight"]),
+            "generation_requests_in_current_minute": int(
+                self.policy["maximum_generation_requests_per_minute"]
+            )
+            - recent_count,
+        }
+        return {
+            "schema": "shared-gemini-broker-status-v2",
+            "ledger_file": str(self.ledger_file),
+            "ledger_sha256": sha256_file(self.ledger_file),
+            "policy_sha256": sha256_file(self.policy_file),
+            "price_config_sha256": sha256_file(self.price_config_file),
+            "updated_at_utc": ledger["updated_at_utc"],
+            "spent_usd": ledger["spent_usd"],
+            "reserved_usd": ledger["reserved_usd"],
+            "ambiguous_reserved_usd": ledger["ambiguous_reserved_usd"],
+            "away_remaining_usd": remaining["away_session_usd"],
+            "live_test_remaining_usd": remaining["live_test_usd"],
+            "construction_checkpoint_remaining_usd": remaining[
+                "construction_checkpoint_usd"
+            ],
+            "cost_per_accepted_question_usd": (
+                str(_money(ledger["spent_usd"], "spent") / accepted)
+                if accepted
+                else None
+            ),
+            "generation_submissions": ledger["generation_submissions"],
+            "count_requests": ledger["count_requests"],
+            "inflight": ledger["inflight"],
+            "accepted_question_count": accepted,
+            "halted": ledger["halted"],
+            "halt_reason": ledger["halt_reason"],
+            "limits": limits,
+            "usage": usage,
+            "remaining": remaining,
+            "stages": ledger["stages"],
+            "papers": papers,
+        }
+
+    def _publish_status(self, ledger: dict[str, Any]) -> None:
+        atomic_json(self._status_file, self._status_payload(ledger))
+
+    def _commit_ledger(self, ledger: dict[str, Any]) -> None:
+        self._validate_ledger(ledger)
+        atomic_json(self.ledger_file, ledger)
+        self._publish_status(ledger)
+
     def doctor(self) -> dict[str, Any]:
         gate = _read(self.execution_gate_file)
         return {
@@ -688,50 +850,7 @@ class SharedGeminiBroker:
         with self._lock_file.open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             ledger = self._validated_ledger()
-        away_used = sum(
-            _money(ledger[name], name)
-            for name in ("reserved_usd", "spent_usd", "ambiguous_reserved_usd")
-        )
-        live_used = sum(
-            _money(row.get("reserved_usd", 0), "live reserved")
-            + _money(row.get("spent_usd", 0), "live spent")
-            + _money(row.get("ambiguous_usd", 0), "live ambiguous")
-            for row in ledger["live_test_papers"].values()
-        )
-        accepted = int(ledger["accepted_question_count"])
-        return {
-            "schema": "shared-gemini-broker-status-v1",
-            "updated_at_utc": ledger["updated_at_utc"],
-            "spent_usd": ledger["spent_usd"],
-            "reserved_usd": ledger["reserved_usd"],
-            "ambiguous_reserved_usd": ledger["ambiguous_reserved_usd"],
-            "away_remaining_usd": str(
-                _money(self.policy["away_session_total_ceiling_usd"], "away")
-                - away_used
-            ),
-            "live_test_remaining_usd": str(
-                _money(self.policy["live_test_suballocation_usd"], "live test")
-                - live_used
-            ),
-            "construction_checkpoint_remaining_usd": str(
-                _money(self.policy["construction_review_checkpoint_usd"], "checkpoint")
-                - self.prior
-                - away_used
-            ),
-            "cost_per_accepted_question_usd": (
-                str(_money(ledger["spent_usd"], "spent") / accepted)
-                if accepted
-                else None
-            ),
-            "generation_submissions": ledger["generation_submissions"],
-            "count_requests": ledger["count_requests"],
-            "inflight": ledger["inflight"],
-            "accepted_question_count": ledger["accepted_question_count"],
-            "halted": ledger["halted"],
-            "halt_reason": ledger["halt_reason"],
-            "stages": ledger["stages"],
-            "papers": ledger["papers"],
-        }
+            return self._status_payload(ledger)
 
     def record_accepted(self, *, family_id: str, item_id: str) -> dict[str, Any]:
         if not family_id or not item_id:
@@ -742,6 +861,20 @@ class SharedGeminiBroker:
             old = ledger["accepted_families"].get(family_id)
             if old and old != item_id:
                 raise ValueError("a paper family already has an accepted item")
+            duplicate_family = next(
+                (
+                    other_family
+                    for other_family, accepted_item in ledger[
+                        "accepted_families"
+                    ].items()
+                    if accepted_item == item_id and other_family != family_id
+                ),
+                None,
+            )
+            if duplicate_family:
+                raise ValueError(
+                    "an accepted item is already assigned to another paper family"
+                )
             if not old and len(ledger["accepted_families"]) >= int(
                 self.policy["accepted_question_target"]
             ):
@@ -761,8 +894,7 @@ class SharedGeminiBroker:
             ledger["accepted_families"][family_id] = item_id
             ledger["accepted_question_count"] = len(ledger["accepted_families"])
             ledger["updated_at_utc"] = _now()
-            self._validate_ledger(ledger)
-            atomic_json(self.ledger_file, ledger)
+            self._commit_ledger(ledger)
         return self.status()
 
     def _halt(self, reason: str) -> None:
@@ -772,8 +904,7 @@ class SharedGeminiBroker:
             ledger["halted"] = True
             ledger["halt_reason"] = reason
             ledger["updated_at_utc"] = _now()
-            self._validate_ledger(ledger)
-            atomic_json(self.ledger_file, ledger)
+            self._commit_ledger(ledger)
 
     def _mark_not_submitted(self, request_key: str, state: str, reason: str) -> None:
         with self._lock_file.open("a+") as lock:
@@ -786,8 +917,7 @@ class SharedGeminiBroker:
             request["reason"] = reason
             request["completed_at_utc"] = _now()
             ledger["updated_at_utc"] = _now()
-            self._validate_ledger(ledger)
-            atomic_json(self.ledger_file, ledger)
+            self._commit_ledger(ledger)
 
     def _count_event(self, request_key: str, base: dict[str, Any]) -> None:
         with self._lock_file.open("a+") as lock:
@@ -820,8 +950,7 @@ class SharedGeminiBroker:
             ledger["count_requests"] += 1
             ledger["requests"][request_key] = {**base, "state": "counting"}
             ledger["updated_at_utc"] = _now()
-            self._validate_ledger(ledger)
-            atomic_json(self.ledger_file, ledger)
+            self._commit_ledger(ledger)
 
     def _pace(self) -> None:
         """Wait until the frozen per-minute submission window has room."""
@@ -998,8 +1127,7 @@ class SharedGeminiBroker:
                 }
             )
             ledger["updated_at_utc"] = _now()
-            self._validate_ledger(ledger)
-            atomic_json(self.ledger_file, ledger)
+            self._commit_ledger(ledger)
 
     def _settle(
         self,
@@ -1081,8 +1209,7 @@ class SharedGeminiBroker:
             ledger["inflight"] = max(int(ledger["inflight"]) - 1, 0)
             request["completed_at_utc"] = _now()
             ledger["updated_at_utc"] = _now()
-            self._validate_ledger(ledger)
-            atomic_json(self.ledger_file, ledger)
+            self._commit_ledger(ledger)
 
     def _completed_receipt(
         self, submitted: dict[str, Any], response: Any

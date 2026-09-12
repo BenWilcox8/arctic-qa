@@ -6,6 +6,7 @@ import threading
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ import pytest
 import arctic_qa.corpus_viewer as corpus_viewer
 from arctic_qa.corpus_viewer import CorpusArtifacts, CorpusServer, _safe_json_bytes
 from arctic_qa.metadata_prefilter import run_metadata_prefilter
+from arctic_qa.model_broker import SharedGeminiBroker, broker_request_key
 from arctic_qa.util import sha256_file
 
 
@@ -674,38 +676,93 @@ def test_streaming_budget_and_progress_are_bounded_and_read_only(
 ) -> None:
     fixture_corpus(tmp_path)
     ledger = tmp_path / "shared-ledger.json"
+    policy = tmp_path / "budget-policy.json"
+    policy.write_bytes(
+        (
+            Path(__file__).parents[1] / "config/streaming-dataset-budget-policy-v1.json"
+        ).read_bytes()
+    )
+    gate = tmp_path / "gate.json"
     write_json(
-        ledger,
+        gate,
         {
-            "schema": "shared-paid-call-ledger-v1",
-            "updated_at_utc": datetime.now(UTC).isoformat(),
-            "reserved_usd": "0.01",
-            "spent_usd": "0.02",
-            "ambiguous_reserved_usd": "0",
-            "generation_submissions": 2,
-            "count_requests": 2,
-            "inflight": 0,
-            "accepted_question_count": 1,
-            "halted": False,
-            "halt_reason": None,
-            "stages": {
-                "eligibility": {
-                    "input_tokens": 100,
-                    "output_tokens": 20,
-                    "thinking_tokens": 5,
-                    "spent_usd": "0.02",
-                    "reserved_usd": "0",
+            "schema": "streaming-live-execution-gate-v1",
+            "live_generation_enabled": True,
+            "allowed_phase": "live_test",
+            "integrated_code_commit": "fixture",
+            "independent_review_verdict": "pass",
+            "review_record": "fixture",
+        },
+    )
+    credential = tmp_path / "private" / "gemini.key"
+    credential.parent.mkdir(mode=0o700)
+    credential.write_text("unused-test-key", encoding="utf-8")
+    credential.chmod(0o600)
+
+    class Transport:
+        def post(self, model: str, method: str, body: dict) -> dict:
+            if method == "countTokens":
+                return {"totalTokens": 100}
+            return {
+                "usageMetadata": {
+                    "promptTokenCount": 100,
+                    "candidatesTokenCount": 20,
+                    "thoughtsTokenCount": 5,
+                    "totalTokenCount": 125,
                 }
-            },
-            "papers": {
-                "<paper>": {
-                    "input_tokens": 100,
-                    "output_tokens": 20,
-                    "thinking_tokens": 5,
-                    "spent_usd": "0.02",
-                    "reserved_usd": "0",
-                }
-            },
+            }
+
+    broker = SharedGeminiBroker(
+        policy_file=policy,
+        price_config_file=Path(__file__).parents[1]
+        / "config/gemini-eligibility-v1.json",
+        execution_gate_file=gate,
+        ledger_file=ledger,
+        receipts_dir=tmp_path / "receipts",
+        credential_file=credential,
+        prior_construction_spend_usd=Decimal("0"),
+        transport=Transport(),
+    )
+    request = {
+        "systemInstruction": {"parts": [{"text": "Return JSON."}]},
+        "contents": [{"role": "user", "parts": [{"text": "Paper text."}]}],
+        "generationConfig": {
+            "candidateCount": 1,
+            "responseMimeType": "application/json",
+            "responseJsonSchema": {"type": "object"},
+            "maxOutputTokens": 1000,
+            "thinkingConfig": {"thinkingLevel": "medium"},
+        },
+        "store": False,
+    }
+    request_key = broker_request_key(
+        model="gemini-3.8-flash",
+        run_id="stream-r1",
+        stage="eligibility",
+        paper_id="<paper>",
+        family_id="family-paper",
+        source_version_id="source-version-1",
+        payload=request,
+    )
+    broker.execute(
+        phase="live_test",
+        run_id="stream-r1",
+        stage="eligibility",
+        paper_id="<paper>",
+        family_id="family-paper",
+        source_version_id="source-version-1",
+        request_key=request_key,
+        payload=request,
+    )
+    status = tmp_path / "shared-ledger.status.json"
+    metadata = tmp_path / "dataset-metadata.json"
+    write_json(
+        metadata,
+        {
+            "schema_version": "1.0.0",
+            "export_id": "export-1",
+            "run_id": "stream-r1",
+            "files": {"mcq": "exports/mcq.jsonl"},
         },
     )
     progress = tmp_path / "streaming-progress.json"
@@ -732,24 +789,9 @@ def test_streaming_budget_and_progress_are_bounded_and_read_only(
                     "final_reason": "accepted",
                 }
             ],
-        },
-    )
-    policy = tmp_path / "budget-policy.json"
-    write_json(
-        policy,
-        {
-            "schema": "streaming-dataset-budget-policy-v1",
-            "away_session_total_ceiling_usd": "25.00",
-        },
-    )
-    metadata = tmp_path / "dataset-metadata.json"
-    write_json(
-        metadata,
-        {
-            "schema_version": "1.0.0",
-            "export_id": "export-1",
-            "run_id": "stream-r1",
-            "files": {"mcq": "exports/mcq.jsonl"},
+            "broker_status_sha256": sha256_file(status),
+            "budget_policy_sha256": sha256_file(policy),
+            "dataset_metadata_sha256": sha256_file(metadata),
         },
     )
     artifacts = CorpusArtifacts(
@@ -765,8 +807,16 @@ def test_streaming_budget_and_progress_are_bounded_and_read_only(
     assert streaming["state"] == "paused"
     assert streaming["broker"]["stages"]["eligibility"]["input_tokens"] == 100
     assert streaming["broker"]["papers"][0]["paper_id"] == "<paper>"
+    assert streaming["broker"]["limits"]["accepted_question_target"] == 500
+    assert streaming["broker"]["remaining"]["away_generation_submissions"] == 4999
     assert b"<script>" not in _safe_json_bytes(streaming)
     assert json.loads(artifacts.dataset_metadata())["export_id"] == "export-1"
+    changed_ledger = json.loads(ledger.read_text(encoding="utf-8"))
+    changed_ledger["spent_usd"] = "0"
+    write_json(ledger, changed_ledger)
+    invalid = artifacts.state()["streaming_pipeline"]
+    assert invalid["state"] == "error"
+    assert invalid["telemetry"] == "invalid"
 
 
 def test_http_surface_is_read_only_and_restricted(tmp_path: Path) -> None:

@@ -671,6 +671,7 @@ class CorpusArtifacts:
             "recent_papers": [],
         }
         try:
+            progress = None
             if self.streaming_progress_file and self.streaming_progress_file.is_file():
                 progress = _read_json(self.streaming_progress_file)
                 if (
@@ -682,30 +683,7 @@ class CorpusArtifacts:
                 ):
                     raise ValueError("the streaming progress record is invalid")
                 result = {**progress, "telemetry": "observed"}
-            if self.shared_ledger_file and self.shared_ledger_file.is_file():
-                ledger = _read_json(self.shared_ledger_file)
-                if ledger.get("schema") != "shared-paid-call-ledger-v1":
-                    raise ValueError("the shared paid-call ledger schema is invalid")
-                paper_rows = []
-                for paper_id, row in list((ledger.get("papers") or {}).items())[-100:]:
-                    paper_rows.append({"paper_id": paper_id, **row})
-                result["broker"] = {
-                    key: ledger.get(key)
-                    for key in (
-                        "updated_at_utc",
-                        "reserved_usd",
-                        "spent_usd",
-                        "ambiguous_reserved_usd",
-                        "generation_submissions",
-                        "count_requests",
-                        "inflight",
-                        "accepted_question_count",
-                        "halted",
-                        "halt_reason",
-                        "stages",
-                    )
-                }
-                result["broker"]["papers"] = paper_rows
+            policy = None
             if (
                 self.streaming_budget_policy_file
                 and self.streaming_budget_policy_file.is_file()
@@ -713,28 +691,61 @@ class CorpusArtifacts:
                 policy = _read_json(self.streaming_budget_policy_file)
                 if policy.get("schema") != "streaming-dataset-budget-policy-v1":
                     raise ValueError("the streaming budget policy schema is invalid")
-                result["budget_policy"] = {
-                    key: policy.get(key)
-                    for key in (
-                        "project_lifetime_ceiling_usd",
-                        "reserved_for_benchmark_evaluation_usd",
-                        "dataset_construction_allocation_usd",
-                        "construction_review_checkpoint_usd",
-                        "accepted_question_target",
-                        "away_session_total_ceiling_usd",
-                        "live_test_suballocation_usd",
-                        "live_test_maximum_papers",
-                        "live_test_maximum_generation_submissions",
-                        "away_maximum_generation_submissions",
-                        "maximum_request_reserved_cost_usd",
-                        "maximum_paper_cost_usd",
-                        "maximum_concurrent_generation_requests",
-                        "maximum_generation_requests_per_minute",
+                result["budget_policy"] = policy
+            if self.shared_ledger_file and self.shared_ledger_file.is_file():
+                status_file = self.shared_ledger_file.with_name(
+                    f"{self.shared_ledger_file.stem}.status.json"
+                )
+                if not status_file.is_file():
+                    raise ValueError("the invariant-checked broker status is absent")
+                status = _read_json(status_file)
+                if (
+                    status.get("schema") != "shared-gemini-broker-status-v2"
+                    or status.get("ledger_file") != str(self.shared_ledger_file)
+                    or status.get("ledger_sha256")
+                    != sha256_file(self.shared_ledger_file)
+                    or not isinstance(status.get("stages"), dict)
+                    or not isinstance(status.get("papers"), dict)
+                    or not isinstance(status.get("limits"), dict)
+                    or not isinstance(status.get("usage"), dict)
+                    or not isinstance(status.get("remaining"), dict)
+                ):
+                    raise ValueError("the invariant-checked broker status is invalid")
+                if policy is None or status.get("policy_sha256") != sha256_file(
+                    self.streaming_budget_policy_file
+                ):
+                    raise ValueError("the broker status and budget policy do not match")
+                if (
+                    progress is None
+                    or progress.get("broker_status_sha256") != sha256_file(status_file)
+                    or progress.get("budget_policy_sha256")
+                    != sha256_file(self.streaming_budget_policy_file)
+                ):
+                    raise ValueError(
+                        "the streaming progress and broker custody records do not match"
                     )
+                result["broker"] = {
+                    **status,
+                    "papers": [
+                        {"family_id": family_id, **row}
+                        for family_id, row in list(status["papers"].items())[-100:]
+                    ],
                 }
-            result["dataset_metadata_available"] = bool(
+            dataset_available = bool(
                 self.dataset_metadata_file and self.dataset_metadata_file.is_file()
             )
+            if dataset_available:
+                metadata = _read_json(self.dataset_metadata_file)
+                if (
+                    progress is None
+                    or metadata.get("run_id") != progress.get("run_id")
+                    or progress.get("dataset_metadata_sha256")
+                    != sha256_file(self.dataset_metadata_file)
+                ):
+                    raise ValueError(
+                        "the streaming progress and dataset metadata do not match"
+                    )
+            result["dataset_metadata_available"] = dataset_available
             return result
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
             return {

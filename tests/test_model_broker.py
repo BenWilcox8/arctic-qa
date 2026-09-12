@@ -244,6 +244,8 @@ def test_one_accepted_item_per_family_survives_restart(tmp_path: Path):
     assert resumed.status()["accepted_question_count"] == 1
     with pytest.raises(ValueError, match="already"):
         resumed.record_accepted(family_id="family-1", item_id="item-2")
+    with pytest.raises(ValueError, match="another paper family"):
+        resumed.record_accepted(family_id="family-2", item_id="item-1")
 
 
 def test_new_run_id_cannot_replay_the_same_request(tmp_path: Path):
