@@ -667,6 +667,106 @@ def test_source_text_is_escaped_in_json(tmp_path: Path) -> None:
     assert b"\\u003cscript\\u003e" in encoded
 
 
+def test_streaming_budget_and_progress_are_bounded_and_read_only(
+    tmp_path: Path,
+) -> None:
+    fixture_corpus(tmp_path)
+    ledger = tmp_path / "shared-ledger.json"
+    write_json(
+        ledger,
+        {
+            "schema": "shared-paid-call-ledger-v1",
+            "updated_at_utc": datetime.now(UTC).isoformat(),
+            "reserved_usd": "0.01",
+            "spent_usd": "0.02",
+            "ambiguous_reserved_usd": "0",
+            "generation_submissions": 2,
+            "count_requests": 2,
+            "inflight": 0,
+            "accepted_question_count": 1,
+            "halted": False,
+            "halt_reason": None,
+            "stages": {
+                "eligibility": {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "thinking_tokens": 5,
+                    "spent_usd": "0.02",
+                    "reserved_usd": "0",
+                }
+            },
+            "papers": {
+                "<paper>": {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "thinking_tokens": 5,
+                    "spent_usd": "0.02",
+                    "reserved_usd": "0",
+                }
+            },
+        },
+    )
+    progress = tmp_path / "streaming-progress.json"
+    write_json(
+        progress,
+        {
+            "schema": "streaming-dataset-progress-v1",
+            "state": "paused",
+            "run_id": "stream-r1",
+            "current_stage": "question_generation",
+            "updated_at_utc": datetime.now(UTC).isoformat(),
+            "message": "Paused at the offline gate.",
+            "counts": {
+                "full_text_ready": 1,
+                "eligible": 1,
+                "rejected": 0,
+                "accepted_qa": 1,
+            },
+            "recent_papers": [
+                {
+                    "paper_id": "<paper>",
+                    "title": "<script>unsafe</script>",
+                    "current_stage": "completed",
+                    "final_reason": "accepted",
+                }
+            ],
+        },
+    )
+    policy = tmp_path / "budget-policy.json"
+    write_json(
+        policy,
+        {
+            "schema": "streaming-dataset-budget-policy-v1",
+            "away_session_total_ceiling_usd": "25.00",
+        },
+    )
+    metadata = tmp_path / "dataset-metadata.json"
+    write_json(
+        metadata,
+        {
+            "schema_version": "1.0.0",
+            "export_id": "export-1",
+            "run_id": "stream-r1",
+            "files": {"mcq": "exports/mcq.jsonl"},
+        },
+    )
+    artifacts = CorpusArtifacts(
+        tmp_path,
+        "test-run",
+        tmp_path / "runtime",
+        shared_ledger_file=ledger,
+        streaming_budget_policy_file=policy,
+        streaming_progress_file=progress,
+        dataset_metadata_file=metadata,
+    )
+    streaming = artifacts.state()["streaming_pipeline"]
+    assert streaming["state"] == "paused"
+    assert streaming["broker"]["stages"]["eligibility"]["input_tokens"] == 100
+    assert streaming["broker"]["papers"][0]["paper_id"] == "<paper>"
+    assert b"<script>" not in _safe_json_bytes(streaming)
+    assert json.loads(artifacts.dataset_metadata())["export_id"] == "export-1"
+
+
 def test_http_surface_is_read_only_and_restricted(tmp_path: Path) -> None:
     fixture_corpus(tmp_path, title="<script>alert('x')</script>")
     artifacts = CorpusArtifacts(tmp_path, "test-run", tmp_path / "runtime")

@@ -28,8 +28,23 @@ PYTHONPATH=src python -m arctic_qa corpus-view \
 
 Stop the foreground process with `Ctrl-C`.
 
-The server exposes only `/`, `/api/state`, `/api/candidates`, and `/healthz`.
+The server exposes only `/`, `/api/state`, `/api/candidates`, `/healthz`, and one fixed metadata download route.
 It does not expose source files, PDFs, credentials, directories, or arbitrary paths.
+
+For the integrated streaming view, also pass these optional files:
+
+- `--shared-ledger-file` selects the one `shared-paid-call-ledger-v1` ledger.
+- `--streaming-budget-policy-file` selects the frozen budget grant.
+- `--streaming-progress-file` selects a small `streaming-dataset-progress-v1` record.
+- `--dataset-metadata-file` selects a validated export manifest for download.
+
+The streaming progress record can contain at most 100 recent paper rows.
+
+Each row can show its paper ID, title, current stage, final state, and final reason.
+
+The page reads model costs and tokens from the shared ledger.
+
+It never serves provider receipts, source text, PDFs, or credentials.
 
 ## Progress record
 

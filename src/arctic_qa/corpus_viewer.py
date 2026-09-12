@@ -173,6 +173,10 @@ class CorpusArtifacts:
         access_run_dir: Path | None = None,
         gemini_run_dir: Path | None = None,
         gemini_connection_file: Path | None = None,
+        shared_ledger_file: Path | None = None,
+        streaming_budget_policy_file: Path | None = None,
+        streaming_progress_file: Path | None = None,
+        dataset_metadata_file: Path | None = None,
         stale_after_seconds: int = 86400,
         process_stale_after_seconds: int = 300,
     ) -> None:
@@ -196,6 +200,20 @@ class CorpusArtifacts:
         self.gemini_run_dir = gemini_run_dir.resolve() if gemini_run_dir else None
         self.gemini_connection_file = (
             gemini_connection_file.resolve() if gemini_connection_file else None
+        )
+        self.shared_ledger_file = (
+            shared_ledger_file.resolve() if shared_ledger_file else None
+        )
+        self.streaming_budget_policy_file = (
+            streaming_budget_policy_file.resolve()
+            if streaming_budget_policy_file
+            else None
+        )
+        self.streaming_progress_file = (
+            streaming_progress_file.resolve() if streaming_progress_file else None
+        )
+        self.dataset_metadata_file = (
+            dataset_metadata_file.resolve() if dataset_metadata_file else None
         )
         self.stale_after_seconds = stale_after_seconds
         self.process_stale_after_seconds = process_stale_after_seconds
@@ -284,6 +302,10 @@ class CorpusArtifacts:
                 else None
             ),
             _file_fingerprint(self.gemini_connection_file),
+            _file_fingerprint(self.shared_ledger_file),
+            _file_fingerprint(self.streaming_budget_policy_file),
+            _file_fingerprint(self.streaming_progress_file),
+            _file_fingerprint(self.dataset_metadata_file),
         ]
         return hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
@@ -639,6 +661,102 @@ class CorpusArtifacts:
                 "state": "invalid",
                 "message": f"Read-only Gemini connection record error: {error}",
             }
+
+    def _streaming_state(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "telemetry": "absent",
+            "state": "not_started",
+            "message": "No streaming-pipeline progress record is selected.",
+            "counts": {},
+            "recent_papers": [],
+        }
+        try:
+            if self.streaming_progress_file and self.streaming_progress_file.is_file():
+                progress = _read_json(self.streaming_progress_file)
+                if (
+                    progress.get("schema") != "streaming-dataset-progress-v1"
+                    or progress.get("state") not in PROGRESS_STATES
+                    or not isinstance(progress.get("counts"), dict)
+                    or not isinstance(progress.get("recent_papers", []), list)
+                    or len(progress.get("recent_papers", [])) > 100
+                ):
+                    raise ValueError("the streaming progress record is invalid")
+                result = {**progress, "telemetry": "observed"}
+            if self.shared_ledger_file and self.shared_ledger_file.is_file():
+                ledger = _read_json(self.shared_ledger_file)
+                if ledger.get("schema") != "shared-paid-call-ledger-v1":
+                    raise ValueError("the shared paid-call ledger schema is invalid")
+                paper_rows = []
+                for paper_id, row in list((ledger.get("papers") or {}).items())[-100:]:
+                    paper_rows.append({"paper_id": paper_id, **row})
+                result["broker"] = {
+                    key: ledger.get(key)
+                    for key in (
+                        "updated_at_utc",
+                        "reserved_usd",
+                        "spent_usd",
+                        "ambiguous_reserved_usd",
+                        "generation_submissions",
+                        "count_requests",
+                        "inflight",
+                        "accepted_question_count",
+                        "halted",
+                        "halt_reason",
+                        "stages",
+                    )
+                }
+                result["broker"]["papers"] = paper_rows
+            if (
+                self.streaming_budget_policy_file
+                and self.streaming_budget_policy_file.is_file()
+            ):
+                policy = _read_json(self.streaming_budget_policy_file)
+                if policy.get("schema") != "streaming-dataset-budget-policy-v1":
+                    raise ValueError("the streaming budget policy schema is invalid")
+                result["budget_policy"] = {
+                    key: policy.get(key)
+                    for key in (
+                        "project_lifetime_ceiling_usd",
+                        "reserved_for_benchmark_evaluation_usd",
+                        "dataset_construction_allocation_usd",
+                        "construction_review_checkpoint_usd",
+                        "accepted_question_target",
+                        "away_session_total_ceiling_usd",
+                        "live_test_suballocation_usd",
+                        "live_test_maximum_papers",
+                        "live_test_maximum_generation_submissions",
+                        "away_maximum_generation_submissions",
+                        "maximum_request_reserved_cost_usd",
+                        "maximum_paper_cost_usd",
+                        "maximum_concurrent_generation_requests",
+                        "maximum_generation_requests_per_minute",
+                    )
+                }
+            result["dataset_metadata_available"] = bool(
+                self.dataset_metadata_file and self.dataset_metadata_file.is_file()
+            )
+            return result
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+            return {
+                **result,
+                "telemetry": "invalid",
+                "state": "error",
+                "message": f"Streaming-pipeline record error: {error}",
+            }
+
+    def dataset_metadata(self) -> bytes:
+        path = self.dataset_metadata_file
+        if path is None or not path.is_file():
+            raise RuntimeError("validated dataset metadata is not available")
+        value = _read_json(path)
+        if not isinstance(value, dict) or not {
+            "schema_version",
+            "export_id",
+            "run_id",
+            "files",
+        } <= set(value):
+            raise RuntimeError("validated dataset metadata has an unsupported shape")
+        return _safe_json_bytes(value)
 
     def _apply_source_overlay(
         self, connection: sqlite3.Connection, links: dict[str, str]
@@ -1037,6 +1155,10 @@ class CorpusArtifacts:
                 else None,
             ),
             ("Gemini read-only connection", self.gemini_connection_file),
+            ("Shared paid-call ledger", self.shared_ledger_file),
+            ("Streaming budget policy", self.streaming_budget_policy_file),
+            ("Streaming progress", self.streaming_progress_file),
+            ("Validated dataset metadata", self.dataset_metadata_file),
         ]
         rows = []
         for label, path in paths:
@@ -1123,9 +1245,7 @@ class CorpusArtifacts:
             "status": value["status"],
             "message": value.get("message"),
             "reported_full_text_ready": value.get("reported_full_text_ready"),
-            "authoritative_full_text_ready": value.get(
-                "authoritative_full_text_ready"
-            ),
+            "authoritative_full_text_ready": value.get("authoritative_full_text_ready"),
             "recorded_at_utc": value.get("recorded_at_utc"),
         }
 
@@ -1149,6 +1269,7 @@ class CorpusArtifacts:
             "Gemini eligibility screening is not started.",
         )
         gemini["connection"] = self._gemini_connection()
+        streaming = self._streaming_state()
         process = self._progress()
         if (
             metadata.get("state") == "completed"
@@ -1264,6 +1385,7 @@ class CorpusArtifacts:
             "source_pass": source_pass,
             "access_readiness": access,
             "gemini_screening": gemini,
+            "streaming_pipeline": streaming,
             "artifacts": artifacts,
             "data_revision": self._small_fingerprint or self._base_fingerprint(),
             "readiness": {
@@ -1563,6 +1685,12 @@ class CorpusRequestHandler(BaseHTTPRequestHandler):
                         parse_qs(parsed.query, keep_blank_values=True)
                     ),
                 )
+            elif parsed.path == "/downloads/dataset-metadata.json":
+                self._send(
+                    HTTPStatus.OK,
+                    self.artifacts.dataset_metadata(),
+                    "application/json; charset=utf-8",
+                )
             elif parsed.path == "/healthz":
                 state = self.artifacts.state()
                 status = (
@@ -1608,6 +1736,10 @@ def serve_corpus_viewer(
     access_run_dir: Path | None,
     gemini_run_dir: Path | None,
     gemini_connection_file: Path | None,
+    shared_ledger_file: Path | None,
+    streaming_budget_policy_file: Path | None,
+    streaming_progress_file: Path | None,
+    dataset_metadata_file: Path | None,
     host: str,
     port: int,
     stale_after_seconds: int,
@@ -1626,6 +1758,10 @@ def serve_corpus_viewer(
         access_run_dir=access_run_dir,
         gemini_run_dir=gemini_run_dir,
         gemini_connection_file=gemini_connection_file,
+        shared_ledger_file=shared_ledger_file,
+        streaming_budget_policy_file=streaming_budget_policy_file,
+        streaming_progress_file=streaming_progress_file,
+        dataset_metadata_file=dataset_metadata_file,
         stale_after_seconds=stale_after_seconds,
         process_stale_after_seconds=process_stale_after_seconds,
     )
@@ -1654,6 +1790,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--access-run-dir", type=Path)
     parser.add_argument("--gemini-run-dir", type=Path)
     parser.add_argument("--gemini-connection-file", type=Path)
+    parser.add_argument("--shared-ledger-file", type=Path)
+    parser.add_argument("--streaming-budget-policy-file", type=Path)
+    parser.add_argument("--streaming-progress-file", type=Path)
+    parser.add_argument("--dataset-metadata-file", type=Path)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--stale-after-seconds", type=int, default=86400)
@@ -1670,6 +1810,10 @@ def main(argv: list[str] | None = None) -> int:
         access_run_dir=args.access_run_dir,
         gemini_run_dir=args.gemini_run_dir,
         gemini_connection_file=args.gemini_connection_file,
+        shared_ledger_file=args.shared_ledger_file,
+        streaming_budget_policy_file=args.streaming_budget_policy_file,
+        streaming_progress_file=args.streaming_progress_file,
+        dataset_metadata_file=args.dataset_metadata_file,
         host=args.host,
         port=args.port,
         stale_after_seconds=args.stale_after_seconds,

@@ -81,6 +81,12 @@
     .metadata-head p { color: var(--muted); margin: .3rem 0 0; }
     .metadata-counts, .source-counts { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .55rem; margin-top: .9rem; }
     .metadata-counts .count, .source-counts .count { background: var(--wash); }
+    .streaming-panel { margin-bottom: 1rem; }
+    .telemetry-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 1rem; }
+    .telemetry-grid h3 { margin-bottom: .5rem; }
+    .compact-table { border: 1px solid var(--line); border-radius: 6px; overflow: auto; }
+    .compact-table table { font-size: .8rem; }
+    .download-link[hidden] { display: none; }
     .stages { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .7rem; margin-top: .8rem; }
     .stage { border-top: 4px solid #9bb0b8; background: var(--wash); padding: .8rem; min-width: 0; }
     .stage p { color: var(--muted); font-size: .86rem; line-height: 1.45; margin: .5rem 0 0; }
@@ -116,6 +122,7 @@
       .stages { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .readiness { grid-column: 1 / -1; }
       .operations-grid { grid-template-columns: 1fr; }
+      .telemetry-grid { grid-template-columns: 1fr; }
       .filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .filters .search { grid-column: 1 / -1; }
       .filter-action { align-self: end; }
@@ -191,6 +198,20 @@
       </section>
     </div>
 
+    <section class="panel streaming-panel" aria-labelledby="streaming-title">
+      <div class="metadata-head">
+        <div><h2 id="streaming-title">Streaming QA construction</h2><p id="streaming-detail">Loading integrated pipeline state...</p><div class="meta" id="streaming-meta"></div></div>
+        <span class="badge" id="streaming-state">Loading</span>
+      </div>
+      <div class="source-counts" id="streaming-counts" aria-label="Streaming pipeline counts"></div>
+      <div class="source-counts" id="budget-counts" aria-label="Shared budget counts"></div>
+      <div class="telemetry-grid">
+        <div><h3>Actual cost by model stage</h3><div class="compact-table" id="stage-costs"><div class="loading">No shared ledger selected.</div></div></div>
+        <div><h3>Recent paper pathways</h3><div class="compact-table" id="paper-costs"><div class="loading">No paper activity recorded.</div></div></div>
+      </div>
+      <p><a class="download-link" id="dataset-download" href="/downloads/dataset-metadata.json" hidden>Download validated dataset metadata</a></p>
+    </section>
+
     <div class="grid">
       <article class="panel readiness">
         <h2>Metadata discovery</h2>
@@ -251,6 +272,7 @@
     const formatNumber = (value) => new Intl.NumberFormat().format(value ?? 0);
     const label = (value) => value ? String(value).replaceAll('_', ' ').replaceAll('-', ' ') : 'Not available';
     const dateText = (value) => value ? new Date(value).toLocaleString() : 'Not available';
+    const money = (value) => value === null || value === undefined ? 'Not available' : `USD ${Number(value).toFixed(4)}`;
     function setBadge(node, value) {
       node.textContent = label(value);
       node.className = `badge ${value || 'unknown'}`;
@@ -270,6 +292,21 @@
         link.rel = 'noopener noreferrer';
       }
       return link;
+    }
+    function renderCostTable(target, rows, firstLabel) {
+      target.replaceChildren();
+      if (!rows.length) { target.append(text('div', 'No activity recorded.', 'empty')); return; }
+      const table = document.createElement('table');
+      table.innerHTML = `<thead><tr><th>${firstLabel}</th><th>Input</th><th>Output</th><th>Thinking</th><th>Spent</th><th>Reserved</th></tr></thead>`;
+      const body = document.createElement('tbody');
+      rows.forEach((item) => {
+        const row = document.createElement('tr');
+        [item.name, formatNumber(item.input_tokens), formatNumber(item.output_tokens), formatNumber(item.thinking_tokens), money(item.spent_usd), money(item.reserved_usd)].forEach((value, index) => {
+          const cell = text('td', value); cell.dataset.label = index === 0 ? firstLabel : ['Input', 'Output', 'Thinking', 'Spent', 'Reserved'][index - 1]; row.append(cell);
+        });
+        body.append(row);
+      });
+      table.append(body); target.append(table);
     }
     function renderRows(target, records) {
       target.replaceChildren();
@@ -370,6 +407,30 @@
         $('gemini-meta').textContent = `Model ${gemini.model || connection.model || 'not configured'} | Connection ${label(connection.state)} at ${dateText(connection.checked_at_utc)} | Generation requests ${formatNumber(connection.generation_requests)} | Fallback none | Allocation USD ${budget.run_allocation_usd || 'not set'} | Reserved USD ${budget.reserved_usd || '0'} | Spent USD ${budget.spent_usd || '0'} | Ambiguous USD ${budget.ambiguous_reserved_usd || '0'} | Phase remaining USD ${budget.initial_phase_remaining_usd || 'not set'} | Project remaining USD ${budget.project_remaining_usd || 'not set'} | Updated ${dateText(gemini.updated_at_utc)}`;
         const geminiOrder = ['queued', 'completed', 'eligible', 'excluded', 'uncertain', 'screening_error', 'too_large_not_ready', 'ambiguous_charge'];
         $('gemini-counts').replaceChildren(...geminiOrder.map((name) => { const box = document.createElement('div'); box.className = 'count'; box.append(text('span', label(name)), text('strong', formatNumber(data.gemini_counts?.[name]))); return box; }));
+        const streaming = data.streaming_pipeline || {};
+        setBadge($('streaming-state'), streaming.state || streaming.telemetry);
+        $('streaming-detail').textContent = streaming.message || 'No integrated pipeline progress is available.';
+        const broker = streaming.broker || {};
+        const policy = streaming.budget_policy || {};
+        $('streaming-meta').textContent = `Run ${streaming.run_id || 'not selected'} | Current stage ${label(streaming.current_stage)} | Updated ${dateText(streaming.updated_at_utc || broker.updated_at_utc)} | Submissions ${formatNumber(broker.generation_submissions)} | In flight ${formatNumber(broker.inflight)} | Stop reason ${broker.halt_reason || streaming.stop_reason || 'none recorded'}`;
+        const streamingOrder = ['full_text_ready', 'eligible', 'rejected', 'accepted_qa'];
+        $('streaming-counts').replaceChildren(...streamingOrder.map((name) => { const box = document.createElement('div'); box.className = 'count'; box.append(text('span', label(name)), text('strong', formatNumber(streaming.counts?.[name]))); return box; }));
+        const used = Number(broker.spent_usd || 0) + Number(broker.reserved_usd || 0) + Number(broker.ambiguous_reserved_usd || 0);
+        const budgetRows = [
+          ['spent', money(broker.spent_usd)], ['reserved', money(broker.reserved_usd)], ['ambiguous', money(broker.ambiguous_reserved_usd)],
+          ['away remaining', policy.away_session_total_ceiling_usd === undefined ? 'Not available' : money(Number(policy.away_session_total_ceiling_usd) - used)],
+          ['test cap', money(policy.live_test_suballocation_usd)], ['construction checkpoint', money(policy.construction_review_checkpoint_usd)]
+        ];
+        $('budget-counts').replaceChildren(...budgetRows.map(([name, value]) => { const box = document.createElement('div'); box.className = 'count'; box.append(text('span', name), text('strong', value)); return box; }));
+        renderCostTable($('stage-costs'), Object.entries(broker.stages || {}).map(([name, row]) => ({ name: label(name), ...row })), 'Stage');
+        const progressPapers = new Map((streaming.recent_papers || []).map((row) => [row.paper_id, row]));
+        renderCostTable($('paper-costs'), (broker.papers || []).map((row) => {
+          const progress = progressPapers.get(row.paper_id) || {};
+          const title = progress.title || row.paper_id;
+          const pathway = `${label(progress.current_stage)}; ${progress.final_reason || progress.final_state || 'no final reason'}`;
+          return { name: `${title} — ${pathway}`, ...row };
+        }), 'Paper');
+        $('dataset-download').hidden = !streaming.dataset_metadata_available;
         setBadge($('discovery-verdict'), data.readiness.metadata_discovery.verdict);
         $('discovery-condition').textContent = data.readiness.metadata_discovery.completion_condition;
         setBadge($('prefilter-verdict'), data.readiness.metadata_prefilter.verdict);

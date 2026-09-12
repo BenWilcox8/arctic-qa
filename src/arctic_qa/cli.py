@@ -77,6 +77,10 @@ def parser() -> argparse.ArgumentParser:
     viewer.add_argument("--access-run-dir", type=Path)
     viewer.add_argument("--gemini-run-dir", type=Path)
     viewer.add_argument("--gemini-connection-file", type=Path)
+    viewer.add_argument("--shared-ledger-file", type=Path)
+    viewer.add_argument("--streaming-budget-policy-file", type=Path)
+    viewer.add_argument("--streaming-progress-file", type=Path)
+    viewer.add_argument("--dataset-metadata-file", type=Path)
     viewer.add_argument("--host", default="127.0.0.1")
     viewer.add_argument("--port", type=int, default=8787)
     viewer.add_argument("--stale-after-seconds", type=int, default=86400)
@@ -310,6 +314,10 @@ def main(argv: list[str] | None = None) -> int:
                 access_run_dir=args.access_run_dir,
                 gemini_run_dir=args.gemini_run_dir,
                 gemini_connection_file=args.gemini_connection_file,
+                shared_ledger_file=args.shared_ledger_file,
+                streaming_budget_policy_file=args.streaming_budget_policy_file,
+                streaming_progress_file=args.streaming_progress_file,
+                dataset_metadata_file=args.dataset_metadata_file,
                 host=args.host,
                 port=args.port,
                 stale_after_seconds=args.stale_after_seconds,
