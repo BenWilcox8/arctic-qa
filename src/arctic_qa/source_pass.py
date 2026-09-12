@@ -261,10 +261,11 @@ def _attempt_receipts(
 def _counts(
     manifest: dict[str, Any], receipts: dict[int, dict[str, Any]], records=None
 ) -> dict[str, int]:
+    attempted = sum(bool(row.get("attempts")) for row in receipts.values())
     counts = {
         "selected": manifest["selection_size"],
         "processed": len(receipts),
-        "attempted": sum(bool(row.get("attempts")) for row in receipts.values()),
+        "attempted": attempted,
         "retrieved": sum(
             str(row.get("access_state", "")).startswith("retrieved_")
             for row in receipts.values()
@@ -276,7 +277,7 @@ def _counts(
         "eligible": 0,
         "excluded": 0,
         "pending": 0,
-        "unattempted": manifest["selection_size"] - len(receipts),
+        "unattempted": manifest["selection_size"] - attempted,
     }
     if records is not None:
         counts["eligible"] = sum(
@@ -292,7 +293,7 @@ def _counts(
             row.get("scientific_eligibility") == "unreviewed" for row in records
         )
     else:
-        counts["pending"] = len(receipts)
+        counts["pending"] = attempted
     return {key: int(value) for key, value in counts.items()}
 
 

@@ -173,8 +173,8 @@ def test_prepare_smoke_resume_and_access_outcomes(tmp_path: Path) -> None:
         "full_text_retrieved": 1,
         "eligible": 0,
         "excluded": 0,
-        "pending": 6,
-        "unattempted": 0,
+        "pending": 5,
+        "unattempted": 1,
     }
     assert len(calls) == 5
     replay = run_fixture(tmp_path, "continue", calls=calls)
