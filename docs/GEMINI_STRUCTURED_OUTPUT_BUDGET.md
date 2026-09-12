@@ -60,7 +60,13 @@ These three errors are model noncompliance, not a missing evidence rule.
 Prompt version 2 adds only the missing schema-value instruction.
 It does not normalize quotes or relax deterministic evidence checks.
 Prompt version 1 remains unchanged for the saved-response rejection path.
-New requests use prompt version 2 by default.
+Prompt version 2 remains unchanged for its completed request.
+
+Prompt version 3 is the default for new requests.
+It discloses the existing unique-within-block validator rule.
+It requires exact whitespace and Unicode preservation.
+It tells the model to extend repeated text with adjacent exact text.
+The validator remains byte-exact and unchanged.
 
 This correction does not make the saved response valid.
 It does not assign a scientific eligibility label.

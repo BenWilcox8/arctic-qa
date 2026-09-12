@@ -440,7 +440,7 @@ def broker_eligibility_inputs(tmp_path: Path) -> dict[str, Path]:
     policy = tmp_path / "eligibility-policy.json"
     write_json(policy, {"protocol_id": "test-only-policy"})
     return {
-        "eligibility_prompt_file": REPO / "config" / "gemini-eligibility-prompt-v2.txt",
+        "eligibility_prompt_file": REPO / "config" / "gemini-eligibility-prompt-v3.txt",
         "eligibility_schema_file": REPO
         / "schemas"
         / "gemini-eligibility.v1.schema.json",
@@ -807,7 +807,7 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
     eligibility_call = database.one(
         "SELECT prompt_version FROM calls WHERE role='eligibility'"
     )
-    assert eligibility_call["prompt_version"] == "gemini-eligibility-prompt-v2"
+    assert eligibility_call["prompt_version"] == "gemini-eligibility-prompt-v3"
     source = database.one("SELECT * FROM sources")
     assert source["geography_confidence"] == "model_reviewed_unverified"
     assert source["year"] == 2026

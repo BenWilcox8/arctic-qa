@@ -85,7 +85,7 @@ PYTHONPATH=src python -m arctic_qa --json stream \
   --campaign-id streaming-commission-r1 \
   --access-run-dir /mnt/crdata/research-abstention/arctic-qa/ARTICLE_ACCESS_RUN \
   --eligibility-run-dir /mnt/crdata/research-abstention/arctic-qa/ELIGIBILITY_RUN \
-  --eligibility-prompt-file config/gemini-eligibility-prompt-v2.txt \
+  --eligibility-prompt-file config/gemini-eligibility-prompt-v3.txt \
   --eligibility-policy-file /mnt/crdata/research-abstention/arctic-qa/ELIGIBILITY_POLICY.json \
   --credential-file /PRIVATE/DIRECTORY/gemini.key \
   --prior-construction-spend-usd KNOWN_VALUE \
@@ -176,7 +176,11 @@ The local ambiguous call entry becomes complete only after the saved JSON passes
 This resume path does not call token counting or generation, including after a process restart.
 The saved NDVI response binds prompt version 1.
 Its continuation command must specify `--eligibility-prompt-file config/gemini-eligibility-prompt-v1.txt`.
-New requests use prompt version 2.
+New requests use prompt version 3.
+Version 3 requires exact whitespace and Unicode preservation.
+It also requires each quote to occur once in its cited block.
+Repeated text must include adjacent exact text until the quote is unique.
+Prompt versions 1 and 2 remain immutable for their saved requests.
 See [the shared model broker guide](SHARED_MODEL_BROKER.md) for the exact command and rules.
 An immutable-event failure republishes broker status with `halted` set to `true` and `integrity_valid` set to `false`.
 The broker observer updates streaming progress to bind that halted status.

@@ -107,7 +107,7 @@ def fixture(tmp_path: Path, *, live: bool = True) -> dict[str, Path]:
         "access": access,
         "run": run,
         "config": ROOT / "config" / "gemini-eligibility-v1.json",
-        "prompt": ROOT / "config" / "gemini-eligibility-prompt-v2.txt",
+        "prompt": ROOT / "config" / "gemini-eligibility-prompt-v3.txt",
         "schema": ROOT / "schemas" / "gemini-eligibility.v1.schema.json",
         "policy": policy_file,
         "safety": safety_file,
@@ -332,19 +332,107 @@ def test_prompt_keeps_full_text_and_disables_tools(tmp_path: Path) -> None:
         "Set schema_version to the exact string eligibility-response-v1."
         in payload["systemInstruction"]["parts"][0]["text"]
     )
+    prompt = payload["systemInstruction"]["parts"][0]["text"]
+    assert "Preserve every whitespace and Unicode character exactly" in prompt
+    assert "occur exactly once in its cited source block" in prompt
+    assert "extend the quote with adjacent exact text until it is unique" in prompt
     assert hashes["extracted_text_sha256"] == source["extraction_sha256"]
 
 
 def test_saved_canary_prompt_remains_content_addressable() -> None:
     saved_prompt = ROOT / "config" / "gemini-eligibility-prompt-v1.txt"
-    current_prompt = ROOT / "config" / "gemini-eligibility-prompt-v2.txt"
+    prior_prompt = ROOT / "config" / "gemini-eligibility-prompt-v2.txt"
+    current_prompt = ROOT / "config" / "gemini-eligibility-prompt-v3.txt"
 
     assert sha256(saved_prompt.read_bytes()).hexdigest() == (
         "426d3fb8fa7cfdd41700a8b054c749b5934cd596fa5204ea5c9217338dc227a0"
     )
-    assert sha256(current_prompt.read_bytes()).hexdigest() == (
+    assert sha256(prior_prompt.read_bytes()).hexdigest() == (
         "dc7d430383ede2f3f094d203a727845f85b2c64811c9a2716a9488e08456b996"
     )
+    assert sha256(current_prompt.read_bytes()).hexdigest() == (
+        "2b613a7d9e95aa300485624774c6a411293daa90a5a74ee8635a61ca632854e6"
+    )
+
+
+def test_pdf_indentation_evidence_requires_exact_whitespace() -> None:
+    text = (ROOT / "fixtures" / "eligibility-pdf-indentation.txt").read_text()
+    segments = _segments(text)
+    hashes = {
+        "policy_sha256": "a",
+        "source_version_sha256": "b",
+        "extracted_text_sha256": "c",
+        "metadata_sha256": "d",
+    }
+    collapsed = (
+        "Here we report Arctic observations from 71°N to "
+        "the central Arctic Ocean at 87°N."
+    )
+    value = response_value("request", hashes, collapsed)
+    expected = {
+        "request_id": "request",
+        "input_echo": hashes,
+        "correction_metadata": value["correction_metadata_used"],
+        "known_context_gaps": ["correction_retraction_coverage:unknown"],
+    }
+    schema = json.loads(
+        (ROOT / "schemas" / "gemini-eligibility.v1.schema.json").read_text()
+    )
+
+    invalid = validate_response(
+        value, segments, expected=expected, response_schema=schema
+    )
+    assert invalid["valid"] is False
+    assert set(invalid["errors"]) == {
+        f"evidence_unmatched_or_ambiguous:{criterion}"
+        for criterion in CRITERIA
+        if criterion != "correction_retraction_coverage"
+    }
+
+    exact = text.rstrip("\n")
+    valid = validate_response(
+        response_value("request", hashes, exact),
+        segments,
+        expected=expected,
+        response_schema=schema,
+    )
+    assert valid["valid"] is True
+
+
+def test_repeated_footer_evidence_requires_a_unique_extension() -> None:
+    text = (ROOT / "fixtures" / "eligibility-repeated-footer.txt").read_text()
+    segments = _segments(text)
+    hashes = {
+        "policy_sha256": "a",
+        "source_version_sha256": "b",
+        "extracted_text_sha256": "c",
+        "metadata_sha256": "d",
+    }
+    footer = "Scientific Reports | 5:13760 | DOI: 10.1038/srep13760"
+    repeated = response_value("request", hashes, footer)
+    expected = {
+        "request_id": "request",
+        "input_echo": hashes,
+        "correction_metadata": repeated["correction_metadata_used"],
+        "known_context_gaps": ["correction_retraction_coverage:unknown"],
+    }
+    schema = json.loads(
+        (ROOT / "schemas" / "gemini-eligibility.v1.schema.json").read_text()
+    )
+
+    invalid = validate_response(
+        repeated, segments, expected=expected, response_schema=schema
+    )
+    assert invalid["valid"] is False
+
+    unique = f"First page context.\n{footer}"
+    valid = validate_response(
+        response_value("request", hashes, unique),
+        segments,
+        expected=expected,
+        response_schema=schema,
+    )
+    assert valid["valid"] is True
 
 
 def test_phase_budget_is_shared_across_run_directories(tmp_path: Path) -> None:
