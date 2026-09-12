@@ -22,7 +22,14 @@ from pathlib import Path
 from typing import Any
 
 from .source_pass import _extract_text, _identity_resolves
-from .util import atomic_json, atomic_write, canonical_json, sha256_bytes, sha256_file
+from .util import (
+    atomic_json,
+    atomic_write,
+    canonical_json,
+    redact,
+    sha256_bytes,
+    sha256_file,
+)
 
 
 MANIFEST_SCHEMA = "article-access-manifest-v1"
@@ -1205,3 +1212,216 @@ def run_access_readiness(
         completed_at=completed,
         receipts=receipts,
     )
+
+
+def _access_supervisor_record(
+    *,
+    status_file: Path,
+    output_dir: Path,
+    run_id: str,
+    service_unit: str,
+    runner_code_commit: str,
+    manifest_code_commit: str,
+    invocation_count: int,
+    state: str,
+    message: str,
+    started_at_utc: str,
+    result: dict[str, Any] | None = None,
+    error_type: str | None = None,
+    terminal: bool = False,
+    write_event: bool = False,
+) -> dict[str, Any]:
+    progress_file = output_dir / "progress.json"
+    counts = (result or {}).get("counts") or {}
+    record = {
+        "schema": "article-access-supervisor-status-v1",
+        "run_id": run_id,
+        "service_unit": service_unit,
+        "runner_code_commit": runner_code_commit,
+        "manifest_code_commit": manifest_code_commit,
+        "invocation_count": invocation_count,
+        "state": state,
+        "terminal": terminal,
+        "message": redact(message)[:1000],
+        "error_type": error_type,
+        "started_at_utc": started_at_utc,
+        "updated_at_utc": _now(),
+        "progress_file": str(progress_file),
+        "progress_sha256": sha256_file(progress_file)
+        if progress_file.is_file()
+        else None,
+        "counts": {
+            "target": int(counts.get("target", 0)),
+            "checked": int(counts.get("checked", 0)),
+            "full_text_ready": int(counts.get("full_text_ready", 0)),
+            "unchecked": int(counts.get("unchecked", 0)),
+        },
+        "paid_model_calls": 0,
+    }
+    atomic_json(status_file, record)
+    if write_event:
+        timestamp = record["updated_at_utc"].replace(":", "").replace("-", "")
+        event = (
+            status_file.parent
+            / "access-supervisor-events"
+            / (f"{invocation_count:06d}-{timestamp}.json")
+        )
+        atomic_json(event, record, immutable=True)
+    return record
+
+
+def supervise_access_readiness(
+    *,
+    queue_file: Path,
+    candidates_file: Path,
+    protocol_file: Path,
+    policy_file: Path,
+    output_dir: Path,
+    run_id: str,
+    manifest_code_commit: str,
+    runner_code_commit: str,
+    status_file: Path,
+    service_unit: str,
+    reuse_source_run_dir: Path | None = None,
+    reuse_access_run_dir: Path | None = None,
+    max_network_seconds: int = 3600,
+) -> dict[str, Any]:
+    """Continue one immutable access run until completion or a real stop guard."""
+    invocation_count = 0
+    if status_file.is_file():
+        old_status = _read_json(status_file)
+        if old_status.get("run_id") != run_id:
+            raise ValueError("the access supervisor status belongs to another run")
+        invocation_count = int(old_status.get("invocation_count", 0))
+    supervisor_started = _now()
+    while True:
+        progress_file = output_dir / "progress.json"
+        before = _read_json(progress_file) if progress_file.is_file() else {}
+        before_checked = int((before.get("counts") or {}).get("checked", 0))
+        invocation_count += 1
+        _access_supervisor_record(
+            status_file=status_file,
+            output_dir=output_dir,
+            run_id=run_id,
+            service_unit=service_unit,
+            runner_code_commit=runner_code_commit,
+            manifest_code_commit=manifest_code_commit,
+            invocation_count=invocation_count,
+            state="running",
+            message="The access supervisor started a bounded continuation.",
+            started_at_utc=supervisor_started,
+        )
+        try:
+            result = run_access_readiness(
+                action="continue",
+                queue_file=queue_file,
+                candidates_file=candidates_file,
+                protocol_file=protocol_file,
+                policy_file=policy_file,
+                output_dir=output_dir,
+                run_id=run_id,
+                code_commit=manifest_code_commit,
+                reuse_source_run_dir=reuse_source_run_dir,
+                reuse_access_run_dir=reuse_access_run_dir,
+                max_network_seconds=max_network_seconds,
+            )
+        except Exception as error:
+            message = f"{type(error).__name__}: {error}"
+            safe_message = redact(message)[:1000]
+            try:
+                manifest = _read_json(output_dir / "run-manifest.json")
+                receipts = _receipts(output_dir, manifest)
+                _write_progress(
+                    output_dir,
+                    manifest,
+                    "error",
+                    safe_message,
+                    started_at=before.get("started_at_utc") or supervisor_started,
+                    receipts=receipts,
+                )
+            except Exception:
+                pass
+            _access_supervisor_record(
+                status_file=status_file,
+                output_dir=output_dir,
+                run_id=run_id,
+                service_unit=service_unit,
+                runner_code_commit=runner_code_commit,
+                manifest_code_commit=manifest_code_commit,
+                invocation_count=invocation_count,
+                state="error",
+                message=safe_message,
+                error_type=type(error).__name__,
+                started_at_utc=supervisor_started,
+                terminal=True,
+                write_event=True,
+            )
+            raise
+        message = str(result.get("message") or "The bounded continuation ended.")
+        if result.get("state") == "completed":
+            return _access_supervisor_record(
+                status_file=status_file,
+                output_dir=output_dir,
+                run_id=run_id,
+                service_unit=service_unit,
+                runner_code_commit=runner_code_commit,
+                manifest_code_commit=manifest_code_commit,
+                invocation_count=invocation_count,
+                state="completed",
+                message=message,
+                started_at_utc=supervisor_started,
+                result=result,
+                terminal=True,
+                write_event=True,
+            )
+        if any(
+            marker in message.casefold()
+            for marker in ("free-space guard", "new-byte limit")
+        ):
+            return _access_supervisor_record(
+                status_file=status_file,
+                output_dir=output_dir,
+                run_id=run_id,
+                service_unit=service_unit,
+                runner_code_commit=runner_code_commit,
+                manifest_code_commit=manifest_code_commit,
+                invocation_count=invocation_count,
+                state="stopped",
+                message=message,
+                started_at_utc=supervisor_started,
+                result=result,
+                terminal=True,
+                write_event=True,
+            )
+        checked = int((result.get("counts") or {}).get("checked", 0))
+        if checked <= before_checked:
+            message = "The bounded access continuation made no durable progress."
+            return _access_supervisor_record(
+                status_file=status_file,
+                output_dir=output_dir,
+                run_id=run_id,
+                service_unit=service_unit,
+                runner_code_commit=runner_code_commit,
+                manifest_code_commit=manifest_code_commit,
+                invocation_count=invocation_count,
+                state="stalled",
+                message=message,
+                started_at_utc=supervisor_started,
+                result=result,
+                terminal=True,
+                write_event=True,
+            )
+        _access_supervisor_record(
+            status_file=status_file,
+            output_dir=output_dir,
+            run_id=run_id,
+            service_unit=service_unit,
+            runner_code_commit=runner_code_commit,
+            manifest_code_commit=manifest_code_commit,
+            invocation_count=invocation_count,
+            state="continuing",
+            message=message,
+            started_at_utc=supervisor_started,
+            result=result,
+            write_event=True,
+        )

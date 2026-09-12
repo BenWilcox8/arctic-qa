@@ -16,6 +16,7 @@ from arctic_qa.access_readiness import (
     _request_url,
     _receipts,
     _reuse_access,
+    supervise_access_readiness,
 )
 from arctic_qa.source_pass import _identity_resolves
 
@@ -46,6 +47,89 @@ def test_request_url_encodes_spaces_and_rejects_control_characters():
     )
     with pytest.raises(ValueError, match="control character"):
         _request_url("https://example.org/source.pdf\nX-Injected: value")
+
+
+def test_access_supervisor_continues_bounded_invocations(tmp_path: Path) -> None:
+    progress = tmp_path / "run" / "progress.json"
+
+    def write_json(path: Path, value: object) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value), encoding="utf-8")
+
+    write_json(progress, {"counts": {"checked": 0}})
+    results = iter(
+        [
+            {
+                "state": "paused",
+                "message": "The invocation stopped at its bounded checkpoint.",
+                "counts": {
+                    "target": 2,
+                    "checked": 1,
+                    "full_text_ready": 1,
+                    "unchecked": 1,
+                },
+            },
+            {
+                "state": "completed",
+                "message": "Access readiness checked every record.",
+                "counts": {
+                    "target": 2,
+                    "checked": 2,
+                    "full_text_ready": 1,
+                    "unchecked": 0,
+                },
+            },
+        ]
+    )
+
+    def fake_run(**kwargs):
+        result = next(results)
+        write_json(progress, {"counts": result["counts"]})
+        return result
+
+    with patch("arctic_qa.access_readiness.run_access_readiness", fake_run):
+        status = supervise_access_readiness(
+            queue_file=tmp_path / "queue",
+            candidates_file=tmp_path / "candidates",
+            protocol_file=tmp_path / "protocol",
+            policy_file=tmp_path / "policy",
+            output_dir=tmp_path / "run",
+            run_id="run-r1",
+            manifest_code_commit="manifest-commit",
+            runner_code_commit="runner-commit",
+            status_file=tmp_path / "supervisor.json",
+            service_unit="fixture.service",
+            max_network_seconds=1,
+        )
+    assert status["state"] == "completed"
+    assert status["invocation_count"] == 2
+    assert status["counts"]["checked"] == 2
+    assert len(list((tmp_path / "access-supervisor-events").glob("*.json"))) == 2
+
+
+def test_access_supervisor_records_failure_without_restarting(tmp_path: Path) -> None:
+    with patch(
+        "arctic_qa.access_readiness.run_access_readiness",
+        side_effect=RuntimeError("synthetic network stop"),
+    ):
+        with pytest.raises(RuntimeError, match="synthetic network stop"):
+            supervise_access_readiness(
+                queue_file=tmp_path / "queue",
+                candidates_file=tmp_path / "candidates",
+                protocol_file=tmp_path / "protocol",
+                policy_file=tmp_path / "policy",
+                output_dir=tmp_path / "run",
+                run_id="run-r1",
+                manifest_code_commit="manifest-commit",
+                runner_code_commit="runner-commit",
+                status_file=tmp_path / "supervisor.json",
+                service_unit="fixture.service",
+                max_network_seconds=1,
+            )
+    status = json.loads((tmp_path / "supervisor.json").read_text())
+    assert status["state"] == "error"
+    assert status["terminal"] is True
+    assert status["error_type"] == "RuntimeError"
 
 
 def test_connection_uses_only_the_validated_public_address():

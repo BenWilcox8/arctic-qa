@@ -340,6 +340,32 @@ PYTHONPATH=src python -m arctic_qa --json article-access \
   --max-new-bytes 107374182400
 ```
 
+Use the supervisor command when the full pass must continue across one-hour invocations:
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json article-access-supervise \
+  --queue-file "$METADATA_RUN/review-queue.ndjson" \
+  --candidates-file "$CORPUS_RUN/deduplicated-candidates.json" \
+  --protocol-file "$CORPUS_ROOT/protocol/protocol-v2.json" \
+  --policy-file config/article-access-policy-v1.json \
+  --output-dir "$ACCESS_RUN" \
+  --run-id "$ACCESS_RUN_ID" \
+  --manifest-code-commit "$MANIFEST_CODE_COMMIT" \
+  --runner-code-commit "$RUNNER_CODE_COMMIT" \
+  --status-file "$ACCESS_SUPERVISOR_STATUS" \
+  --service-unit arctic-access-full-r1.service \
+  --reuse-source-run-dir "$HISTORICAL_SOURCE_RUN" \
+  --max-network-seconds 3600
+```
+
+The supervisor reuses the immutable selection and all valid item receipts.
+
+It writes its current state to `ACCESS_SUPERVISOR_STATUS`.
+
+It writes one immutable event beside that file after each bounded invocation.
+
+It stops on completion, a disk or byte guard, no durable progress, or an error.
+
 Each invocation keeps at least 50 GiB free.
 Each source is limited to 50 MiB.
 The run uses two workers and records a checkpoint after each invocation.

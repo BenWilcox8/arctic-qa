@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .access_readiness import run_access_readiness
+from .access_readiness import run_access_readiness, supervise_access_readiness
 from .broker_provider import BrokerProvider
 from .corpus_viewer import serve_corpus_viewer
 from .db import Database
@@ -139,6 +139,24 @@ def parser() -> argparse.ArgumentParser:
     access.add_argument("--max-items", type=int)
     access.add_argument("--max-network-seconds", type=int)
     access.add_argument("--max-new-bytes", type=int)
+
+    access_supervisor = commands.add_parser(
+        "article-access-supervise",
+        help="Continue one frozen article-access run through bounded invocations.",
+    )
+    access_supervisor.add_argument("--queue-file", type=Path, required=True)
+    access_supervisor.add_argument("--candidates-file", type=Path, required=True)
+    access_supervisor.add_argument("--protocol-file", type=Path, required=True)
+    access_supervisor.add_argument("--policy-file", type=Path, required=True)
+    access_supervisor.add_argument("--output-dir", type=Path, required=True)
+    access_supervisor.add_argument("--run-id", required=True)
+    access_supervisor.add_argument("--manifest-code-commit", required=True)
+    access_supervisor.add_argument("--runner-code-commit", required=True)
+    access_supervisor.add_argument("--status-file", type=Path, required=True)
+    access_supervisor.add_argument("--service-unit", required=True)
+    access_supervisor.add_argument("--reuse-source-run-dir", type=Path)
+    access_supervisor.add_argument("--reuse-access-run-dir", type=Path)
+    access_supervisor.add_argument("--max-network-seconds", type=int, default=3600)
 
     gemini = commands.add_parser(
         "gemini-eligibility", help="Prepare or operate bounded Gemini eligibility jobs."
@@ -410,6 +428,25 @@ def main(argv: list[str] | None = None) -> int:
                     max_items=args.max_items,
                     max_network_seconds=args.max_network_seconds,
                     max_new_bytes=args.max_new_bytes,
+                ),
+            )
+        if args.command == "article-access-supervise":
+            return _emit(
+                args,
+                supervise_access_readiness(
+                    queue_file=args.queue_file,
+                    candidates_file=args.candidates_file,
+                    protocol_file=args.protocol_file,
+                    policy_file=args.policy_file,
+                    output_dir=args.output_dir,
+                    run_id=args.run_id,
+                    manifest_code_commit=args.manifest_code_commit,
+                    runner_code_commit=args.runner_code_commit,
+                    status_file=args.status_file,
+                    service_unit=args.service_unit,
+                    reuse_source_run_dir=args.reuse_source_run_dir,
+                    reuse_access_run_dir=args.reuse_access_run_dir,
+                    max_network_seconds=args.max_network_seconds,
                 ),
             )
         if args.command == "gemini-eligibility":
