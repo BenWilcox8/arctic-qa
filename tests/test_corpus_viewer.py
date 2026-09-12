@@ -240,15 +240,29 @@ def test_metadata_results_are_separate_and_filterable(tmp_path: Path) -> None:
     receipt = json.loads(receipt_path.read_text())
     receipt["completed_at_utc"] = (datetime.now(UTC) - timedelta(days=2)).isoformat()
     write_json(receipt_path, receipt)
+    global_progress = tmp_path / "global-progress.json"
+    write_json(
+        global_progress,
+        {
+            "schema": "corpus-progress-v1",
+            "state": "completed",
+            "stage": "metadata_prefilter",
+            "updated_at_utc": receipt["completed_at_utc"],
+            "message": "Old completion observation.",
+        },
+    )
     artifacts = CorpusArtifacts(
         tmp_path,
         "test-run",
         tmp_path / "runtime",
         metadata_run_dir=metadata_run,
+        progress_file=global_progress,
         process_stale_after_seconds=60,
     )
     state = artifacts.state()
     assert state["metadata_processing"]["state"] == "completed"
+    assert state["progress"]["state"] == "completed"
+    assert state["progress"]["telemetry"] == "observed"
     assert state["readiness"]["metadata_prefilter"]["verdict"] == "ready"
     assert state["metadata_counts"] == {
         "retained_article_type": 1,

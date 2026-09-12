@@ -633,6 +633,26 @@ class CorpusArtifacts:
         self.refresh()
         artifacts = self._artifact_rows()
         metadata = self._metadata_progress()
+        process = self._progress()
+        if (
+            metadata.get("state") == "completed"
+            and process.get("stage") == "metadata_prefilter"
+        ):
+            process = {
+                "schema": "corpus-progress-v1",
+                "telemetry": "observed",
+                "state": "completed",
+                "stage": "metadata_prefilter",
+                "updated_at_utc": metadata.get("completed_at_utc"),
+                "message": "Metadata-only processing is complete under its durable receipt.",
+                "run_id": metadata.get("run_id"),
+                "policy_id": metadata.get("policy_id"),
+                "processed": metadata.get("processed"),
+                "total": metadata.get("total"),
+                "started_at_utc": metadata.get("started_at_utc"),
+                "completed_at_utc": metadata.get("completed_at_utc"),
+                "disposition_counts": metadata.get("disposition_counts"),
+            }
         available_dates = [
             row["updated_at_utc"]
             for row in artifacts
@@ -659,7 +679,7 @@ class CorpusArtifacts:
                 "age_seconds": round(age) if age is not None else None,
                 "stale_after_seconds": self.stale_after_seconds,
             },
-            "progress": self._progress(),
+            "progress": process,
             "metadata_processing": metadata,
             "artifacts": artifacts,
             "data_revision": self._small_fingerprint or self._base_fingerprint(),
