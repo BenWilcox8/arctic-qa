@@ -16,6 +16,7 @@ from arctic_qa.access_readiness import (
     _request_url,
     _receipts,
     _reuse_access,
+    prepare_access_run,
     supervise_access_readiness,
 )
 from arctic_qa.source_pass import _identity_resolves
@@ -47,6 +48,102 @@ def test_request_url_encodes_spaces_and_rejects_control_characters():
     )
     with pytest.raises(ValueError, match="control character"):
         _request_url("https://example.org/source.pdf\nX-Injected: value")
+
+
+def test_prepare_access_run_accepts_relocated_identical_input(
+    tmp_path: Path,
+) -> None:
+    queue = tmp_path / "queue.ndjson"
+    candidates = tmp_path / "candidates.json"
+    protocol = tmp_path / "protocol.json"
+    original_policy = tmp_path / "original" / "policy.json"
+    relocated_policy = tmp_path / "runtime-copy" / "policy.json"
+    output = tmp_path / "run"
+    for path, value in (
+        (queue, "queue"),
+        (candidates, "candidates"),
+        (protocol, "protocol"),
+        (original_policy, "policy"),
+        (relocated_policy, "policy"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(value, encoding="utf-8")
+    policy = {
+        "policy_id": "fixture-policy",
+        "source_protocol_id": "fixture-protocol",
+        "smoke_sizes": [1],
+        "target_dispositions": {
+            "priority_seed": 0,
+            "retained_article_type": 1,
+        },
+    }
+    selection = [{"candidate_key": "candidate-1"}]
+    with (
+        patch("arctic_qa.access_readiness._read_json") as read_json,
+        patch("arctic_qa.access_readiness._validate_policy"),
+        patch("arctic_qa.access_readiness._load_target", return_value=selection),
+    ):
+        read_json.side_effect = lambda path: (
+            policy
+            if Path(path).name == "policy.json"
+            else {"protocol_id": "fixture-protocol"}
+        )
+        prepare_access_run(
+            queue_file=queue,
+            candidates_file=candidates,
+            protocol_file=protocol,
+            policy_file=original_policy,
+            output_dir=output,
+            run_id="fixture-run",
+            code_commit="fixture-commit",
+        )
+    immutable_manifest = json.loads((output / "run-manifest.json").read_text())
+    with (
+        patch("arctic_qa.access_readiness._read_json") as read_json,
+        patch("arctic_qa.access_readiness._validate_policy"),
+        patch("arctic_qa.access_readiness._load_target", return_value=selection),
+    ):
+        read_json.side_effect = lambda path: (
+            immutable_manifest
+            if Path(path).name == "run-manifest.json"
+            else policy
+            if Path(path).name == "policy.json"
+            else {"protocol_id": "fixture-protocol"}
+        )
+        resumed = prepare_access_run(
+            queue_file=queue,
+            candidates_file=candidates,
+            protocol_file=protocol,
+            policy_file=relocated_policy,
+            output_dir=output,
+            run_id="fixture-run",
+            code_commit="fixture-commit",
+        )
+    assert resumed["inputs"]["policy"]["path"] == str(relocated_policy)
+    assert json.loads((output / "run-manifest.json").read_text()) == immutable_manifest
+    relocated_policy.write_text("changed policy", encoding="utf-8")
+    with (
+        patch("arctic_qa.access_readiness._read_json") as read_json,
+        patch("arctic_qa.access_readiness._validate_policy"),
+        patch("arctic_qa.access_readiness._load_target", return_value=selection),
+    ):
+        read_json.side_effect = lambda path: (
+            immutable_manifest
+            if Path(path).name == "run-manifest.json"
+            else policy
+            if Path(path).name == "policy.json"
+            else {"protocol_id": "fixture-protocol"}
+        )
+        with pytest.raises(ValueError, match="manifest changed"):
+            prepare_access_run(
+                queue_file=queue,
+                candidates_file=candidates,
+                protocol_file=protocol,
+                policy_file=relocated_policy,
+                output_dir=output,
+                run_id="fixture-run",
+                code_commit="fixture-commit",
+            )
 
 
 def test_access_supervisor_continues_bounded_invocations(tmp_path: Path) -> None:

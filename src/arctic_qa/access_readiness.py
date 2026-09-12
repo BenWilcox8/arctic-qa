@@ -85,6 +85,16 @@ def _validate_policy(policy: dict[str, Any]) -> None:
         raise ValueError("article-access total size limit exceeds 100 GiB")
 
 
+def _manifest_identity(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Return the frozen identity without local input custody paths."""
+    identity = dict(manifest)
+    identity["inputs"] = {
+        name: {key: value for key, value in record.items() if key != "path"}
+        for name, record in manifest["inputs"].items()
+    }
+    return identity
+
+
 def _load_target(
     queue_file: Path, candidates_file: Path, policy: dict[str, Any]
 ) -> list[dict[str, Any]]:
@@ -196,11 +206,13 @@ def prepare_access_run(
         old = _read_json(path)
         candidate = dict(manifest)
         candidate["created_at_utc"] = old.get("created_at_utc")
-        if old != candidate:
+        if _manifest_identity(old) != _manifest_identity(candidate):
             raise ValueError(
                 "cannot resume because the article-access manifest changed"
             )
-        manifest = old
+        # Keep the immutable manifest on disk. Use the supplied, content-matched
+        # paths for this process so a durable runtime copy can outlive a worktree.
+        manifest = candidate
     else:
         atomic_json(path, manifest, immutable=True)
     if not (output_dir / "progress.json").is_file():

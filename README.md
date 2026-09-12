@@ -364,6 +364,11 @@ PYTHONPATH=src python -m arctic_qa --json article-access-supervise \
 
 The supervisor reuses the immutable selection and all valid item receipts.
 
+It can read an identical input from a new local path.
+The byte count and SHA-256 hash must match the frozen input record.
+All other manifest fields must also match.
+The command does not replace the immutable run manifest.
+
 It writes its current state to `ACCESS_SUPERVISOR_STATUS`.
 
 It writes one immutable event beside that file after each bounded invocation.
