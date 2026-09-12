@@ -263,19 +263,8 @@ class CorpusArtifacts:
             _file_fingerprint(self._source_pointer_file("overlay-current.json")),
             _file_fingerprint(self._source_pointer_file("run-receipt-current.json")),
             _file_fingerprint(
-                self.access_run_dir / "progress.json" if self.access_run_dir else None
-            ),
-            _file_fingerprint(
                 self.access_run_dir / "access-overlay.ndjson"
                 if self.access_run_dir
-                else None
-            ),
-            _file_fingerprint(
-                self.gemini_run_dir / "progress.json" if self.gemini_run_dir else None
-            ),
-            _file_fingerprint(
-                self.gemini_run_dir / "budget-ledger.json"
-                if self.gemini_run_dir
                 else None
             ),
             _directory_fingerprint(

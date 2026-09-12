@@ -424,6 +424,66 @@ def test_completed_source_overlay_is_visible_and_filterable(tmp_path: Path) -> N
     assert b"<script>" not in _safe_json_bytes(eligible)
 
 
+def test_access_and_gemini_state_are_separate_and_filterable(tmp_path: Path) -> None:
+    fixture_corpus(tmp_path)
+    access_run = tmp_path / "access"
+    access_run.mkdir()
+    progress = {
+        "schema": "article-access-progress-v1",
+        "state": "running",
+        "run_id": "access-r1",
+        "updated_at_utc": datetime.now(UTC).isoformat(),
+        "message": "Checking one candidate.",
+        "counts": {"target": 2, "checked": 1, "checking": 1, "full_text_ready": 1},
+    }
+    write_json(access_run / "progress.json", progress)
+    (access_run / "access-overlay.ndjson").write_text(
+        json.dumps(
+            {
+                "candidate_key": "10.1234/test",
+                "access_state": "full_text_ready",
+                "reason_code": "full_text_extracted_and_identity_verified",
+                "checked_at_utc": datetime.now(UTC).isoformat(),
+                "final_url": "https://example.test/paper.pdf",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    gemini_run = tmp_path / "gemini"
+    write_json(
+        gemini_run / "progress.json",
+        {
+            "schema": "gemini-eligibility-progress-v1",
+            "state": "disabled_no_key",
+            "model": "gemini-3.8-flash",
+            "updated_at_utc": datetime.now(UTC).isoformat(),
+            "counts": {"queued": 1, "completed": 0},
+        },
+    )
+    artifacts = CorpusArtifacts(
+        tmp_path,
+        "test-run",
+        tmp_path / "runtime",
+        access_run_dir=access_run,
+        gemini_run_dir=gemini_run,
+    )
+    state = artifacts.state()
+    assert state["progress"]["stage"] == "article_access_readiness"
+    assert state["gemini_screening"]["state"] == "disabled_no_key"
+    ready = artifacts.candidates(
+        {"access_readiness": ["full_text_ready"], "page_size": ["10"]}
+    )
+    assert ready["total"] == 1
+    assert ready["records"][0]["gemini_status"] == "not_started"
+
+    progress["counts"]["checked"] = 2
+    progress["counts"]["checking"] = 0
+    progress["updated_at_utc"] = datetime.now(UTC).isoformat()
+    write_json(access_run / "progress.json", progress)
+    assert artifacts.state()["access_readiness"]["counts"]["checked"] == 2
+
+
 def test_source_overlay_revision_refreshes_changed_decision(tmp_path: Path) -> None:
     fixture_corpus(tmp_path)
     source_run = fixture_source_run(tmp_path)

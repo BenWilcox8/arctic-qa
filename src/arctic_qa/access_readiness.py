@@ -263,6 +263,7 @@ def _write_progress(
     counts = _counts(manifest, receipts)
     counts["checking"] = len(active or [])
     counts["not_checked"] = max(counts["not_checked"] - len(active or []), 0)
+    counts["unchecked"] = counts["not_checked"]
     progress = {
         "schema": PROGRESS_SCHEMA,
         "state": state,
