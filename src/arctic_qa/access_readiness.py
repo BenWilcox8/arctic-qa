@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import html.parser
+import http.client
 import ipaddress
 import json
 import shutil
 import socket
+import ssl
 import subprocess
 import threading
 import time
@@ -40,6 +42,7 @@ STATES = {
     "no_source_found",
 }
 USER_AGENT = "arctic-qa-access-readiness-r1/1.0"
+MIN_EXTRACTED_TEXT_CHARS = 2000
 
 
 def _now() -> str:
@@ -212,11 +215,43 @@ def _verify_inputs(manifest: dict[str, Any]) -> None:
             )
 
 
-def _receipts(output_dir: Path) -> dict[int, dict[str, Any]]:
+def _receipts(
+    output_dir: Path, manifest: dict[str, Any] | None = None
+) -> dict[int, dict[str, Any]]:
     result = {}
     for path in sorted((output_dir / "items").glob("item-*.json")):
         row = _read_json(path)
-        result[int(row["position"])] = row
+        position = int(row.get("position") or 0)
+        if position in result:
+            raise ValueError("an article-access receipt position is repeated")
+        if path.name != f"item-{position:06d}.json":
+            raise ValueError("an article-access receipt file name is inconsistent")
+        if manifest is not None:
+            if not 1 <= position <= int(manifest["target_total"]):
+                raise ValueError("an article-access receipt position is out of range")
+            selected = manifest["selection"][position - 1]
+            if (
+                row.get("schema") != ITEM_SCHEMA
+                or row.get("run_id") != manifest["run_id"]
+                or row.get("candidate_key") != selected["candidate_key"]
+                or row.get("subgroup") != selected["subgroup"]
+                or row.get("access_state") not in STATES
+            ):
+                raise ValueError(
+                    "an article-access receipt does not match its manifest"
+                )
+            if row.get("access_state") == "full_text_ready":
+                source = Path(str(row.get("source_path") or ""))
+                extraction = Path(str(row.get("extraction_path") or ""))
+                if (
+                    not source.is_file()
+                    or not extraction.is_file()
+                    or sha256_file(source) != row.get("source_content_hash")
+                    or sha256_file(extraction) != row.get("extraction_sha256")
+                    or not row.get("identity_verified")
+                ):
+                    raise ValueError("a ready article-access receipt is not verifiable")
+        result[position] = row
     return result
 
 
@@ -290,7 +325,9 @@ def _write_progress(
     return progress
 
 
-def _public_url(url: str, resolver: Callable[..., Any] = socket.getaddrinfo) -> None:
+def _public_addresses(
+    url: str, resolver: Callable[..., Any] = socket.getaddrinfo
+) -> list[str]:
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("source URL must use public HTTP or HTTPS")
@@ -315,6 +352,53 @@ def _public_url(url: str, resolver: Callable[..., Any] = socket.getaddrinfo) -> 
         address = ipaddress.ip_address(value)
         if not address.is_global:
             raise ValueError("source hostname resolved to a non-public address")
+    return sorted(addresses)
+
+
+def _public_url(url: str, resolver: Callable[..., Any] = socket.getaddrinfo) -> None:
+    _public_addresses(url, resolver)
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def connect(self) -> None:
+        parsed = urllib.parse.urlsplit(f"http://{self.host}")
+        last_error: OSError | None = None
+        for address in _public_addresses(f"http://{self.host}"):
+            try:
+                self.sock = socket.create_connection(
+                    (address, parsed.port or 80), self.timeout, self.source_address
+                )
+                return
+            except OSError as error:
+                last_error = error
+        raise last_error or OSError("no public source address connected")
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def connect(self) -> None:
+        parsed = urllib.parse.urlsplit(f"https://{self.host}")
+        hostname = parsed.hostname or ""
+        last_error: OSError | None = None
+        for address in _public_addresses(f"https://{self.host}"):
+            try:
+                raw = socket.create_connection(
+                    (address, parsed.port or 443), self.timeout, self.source_address
+                )
+                self.sock = self._context.wrap_socket(raw, server_hostname=hostname)
+                return
+            except OSError as error:
+                last_error = error
+        raise last_error or OSError("no public source address connected")
+
+
+class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, request):
+        return self.do_open(_PinnedHTTPConnection, request)
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, request):
+        return self.do_open(_PinnedHTTPSConnection, request)
 
 
 class PublicRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -349,7 +433,9 @@ class HostPacer:
         with self._lock:
             remaining = self._cooldown_until.get(host, 0.0) - time.monotonic()
             if remaining > 0:
-                raise RuntimeError(f"source host is in cooldown for {remaining:.1f} seconds")
+                raise RuntimeError(
+                    f"source host is in cooldown for {remaining:.1f} seconds"
+                )
             delay = self.delay - (time.monotonic() - self._last.get(host, 0.0))
             if delay > 0:
                 time.sleep(delay)
@@ -378,7 +464,12 @@ def fetch_public(
         try:
             pacer.wait(url)
         except RuntimeError as error:
-            return {"state": "retryable_error", "reason_code": "host_cooldown", "error": str(error), "attempt": attempt}
+            return {
+                "state": "retryable_error",
+                "reason_code": "host_cooldown",
+                "error": str(error),
+                "attempt": attempt,
+            }
         request = urllib.request.Request(
             url,
             headers={
@@ -388,7 +479,10 @@ def fetch_public(
         )
         try:
             with urllib.request.build_opener(
-                PublicRedirectHandler(maximum_redirects)
+                urllib.request.ProxyHandler({}),
+                _PinnedHTTPHandler(),
+                _PinnedHTTPSHandler(context=ssl.create_default_context()),
+                PublicRedirectHandler(maximum_redirects),
             ).open(request, timeout=timeout) as response:
                 final_url = response.geturl()
                 _public_url(final_url)
@@ -428,7 +522,11 @@ def fetch_public(
             if not retryable or attempt == 3:
                 return last
             retry_after = error.headers.get("Retry-After") if error.headers else None
-            delay = min(int(retry_after), maximum_retry_after) if retry_after and retry_after.isdigit() else min(2**attempt, maximum_retry_after)
+            delay = (
+                min(int(retry_after), maximum_retry_after)
+                if retry_after and retry_after.isdigit()
+                else min(2**attempt, maximum_retry_after)
+            )
             pacer.cool_down(url, delay)
             return last
         except (OSError, TimeoutError, urllib.error.URLError, ValueError) as error:
@@ -474,6 +572,20 @@ def _landing_links(body: bytes, base_url: str) -> list[str]:
     )[:10]
 
 
+def _xml_has_article_body(body: bytes) -> bool:
+    try:
+        root = ET.fromstring(body.decode("utf-8", errors="replace"))
+    except ET.ParseError:
+        return False
+    body_nodes = [
+        node for node in root.iter() if node.tag.rsplit("}", 1)[-1].casefold() == "body"
+    ]
+    return any(
+        len(" ".join(node.itertext()).strip()) >= MIN_EXTRACTED_TEXT_CHARS
+        for node in body_nodes
+    )
+
+
 def _reuse(candidate: dict[str, Any], source_run: Path | None) -> dict[str, Any] | None:
     if source_run is None or not source_run.is_dir():
         return None
@@ -493,6 +605,8 @@ def _reuse(candidate: dict[str, Any], source_run: Path | None) -> dict[str, Any]
             text
         ) != row.get("extraction_sha256"):
             return None
+        if text.stat().st_size < MIN_EXTRACTED_TEXT_CHARS:
+            return None
         return {
             "access_state": "full_text_ready",
             "reason_code": "verified_historical_object_reused",
@@ -505,6 +619,14 @@ def _reuse(candidate: dict[str, Any], source_run: Path | None) -> dict[str, Any]
             "extraction_path": str(text),
             "extraction_sha256": row["extraction_sha256"],
             "identity_verified": True,
+            "extraction_coverage": {
+                "characters": len(text.read_text(encoding="utf-8", errors="replace")),
+                "article_body_recognized": True,
+                "figures": "unknown_not_extracted",
+                "tables": "unknown_not_extracted",
+                "supplements": "unknown_not_extracted",
+                "ocr": "not_applied",
+            },
             "reused_from": str(path),
             "new_bytes": 0,
         }
@@ -534,6 +656,12 @@ def _reuse_access(
             extraction
         ) != row.get("extraction_sha256"):
             raise ValueError("a reused ready source hash changed")
+        coverage = row.get("extraction_coverage") or {}
+        if (
+            extraction.stat().st_size < MIN_EXTRACTED_TEXT_CHARS
+            or coverage.get("article_body_recognized") is not True
+        ):
+            return None
     return {
         **row,
         "schema": ITEM_SCHEMA,
@@ -549,6 +677,7 @@ def _process(
     output_dir: Path,
     fetcher: Callable[..., dict[str, Any]],
     pacer: HostPacer,
+    invocation_deadline: float | None = None,
 ) -> dict[str, Any]:
     base = {
         "schema": ITEM_SCHEMA,
@@ -607,18 +736,34 @@ def _process(
         }
     attempts = []
     landing: dict[str, Any] | None = None
+    checked_urls: set[str] = set()
     candidate_deadline = time.monotonic() + float(
-        manifest["limits"]["maximum_network_seconds_per_candidate"]
+        manifest["limits"].get("maximum_network_seconds_per_candidate", 120)
     )
+    if invocation_deadline is not None:
+        candidate_deadline = min(candidate_deadline, invocation_deadline)
     for kind, url in urls:
+        if url in checked_urls:
+            continue
+        checked_urls.add(url)
         if time.monotonic() >= candidate_deadline:
-            attempts.append({"url": url, "provenance_kind": kind, "state": "retryable_error", "reason_code": "candidate_network_deadline"})
+            attempts.append(
+                {
+                    "url": url,
+                    "provenance_kind": kind,
+                    "state": "retryable_error",
+                    "reason_code": "candidate_network_deadline",
+                }
+            )
             break
         try:
             result = fetcher(
                 url,
                 max_bytes=int(manifest["limits"]["maximum_bytes_per_source"]),
-                timeout=min(float(manifest["limits"]["request_timeout_seconds"]), max(candidate_deadline - time.monotonic(), 1.0)),
+                timeout=min(
+                    float(manifest["limits"]["request_timeout_seconds"]),
+                    max(candidate_deadline - time.monotonic(), 1.0),
+                ),
                 maximum_redirects=int(manifest["limits"]["maximum_redirects"]),
                 maximum_retry_after=int(
                     manifest["limits"]["maximum_retry_after_seconds"]
@@ -646,7 +791,8 @@ def _process(
             for link in reversed(
                 _landing_links(body, str(result.get("final_url") or url))
             ):
-                urls.insert(len(urls), ("landing_pdf_link", link))
+                if link not in checked_urls and link not in [item[1] for item in urls]:
+                    urls.append(("landing_pdf_link", link))
             continue
         digest = sha256_bytes(body)
         suffix = {
@@ -674,17 +820,25 @@ def _process(
                 "error": str(error),
                 "attempts": attempts,
             }
+        recognized_xml_body = media not in {
+            "application/xml",
+            "text/xml",
+        } or _xml_has_article_body(body)
         extraction = output_dir / "extracted" / digest[:2] / digest / "text.txt"
         atomic_write(extraction, text.encode(), immutable=True)
         extraction_hash = sha256_file(extraction)
         identity = _identity_resolves(candidate, text)
         if media == "application/pdf" and len(text.strip()) < 200:
             state, reason = "OCR_required", "pdf_text_is_too_short"
+        elif not recognized_xml_body:
+            state, reason = "extraction_pending", "xml_article_body_not_recognized"
         elif not full_text:
             state, reason = (
                 "download_available",
                 "download_is_not_recognized_as_full_text",
             )
+        elif len(text.strip()) < MIN_EXTRACTED_TEXT_CHARS:
+            state, reason = "extraction_pending", "extracted_text_is_too_short"
         elif not identity:
             state, reason = "identity_pending", "source_identity_not_verified"
         else:
@@ -705,6 +859,14 @@ def _process(
             "extraction_path": str(extraction),
             "extraction_sha256": extraction_hash,
             "parser": parser,
+            "extraction_coverage": {
+                "characters": len(text),
+                "article_body_recognized": bool(full_text and recognized_xml_body),
+                "figures": "unknown_not_extracted",
+                "tables": "unknown_not_extracted",
+                "supplements": "unknown_not_extracted",
+                "ocr": "not_applied",
+            },
             "identity_verified": identity,
             "media_type": media,
             "new_bytes": len(body),
@@ -769,7 +931,7 @@ def run_access_readiness(
         reuse_access_run_dir=reuse_access_run_dir,
     )
     _verify_inputs(manifest)
-    receipts = _receipts(output_dir)
+    receipts = _receipts(output_dir, manifest)
     if action in {"prepare", "status"}:
         return _read_json(output_dir / "progress.json")
     target = {"smoke10": 10, "smoke100": 100, "continue": manifest["target_total"]}[
@@ -834,10 +996,16 @@ def run_access_readiness(
                 except StopIteration:
                     break
                 futures[
-                    pool.submit(_process, row, manifest, output_dir, fetch, pacer)
+                    pool.submit(
+                        _process, row, manifest, output_dir, fetch, pacer, deadline
+                    )
                 ] = row
                 active = [
-                    {"position": int(item["position"]), "candidate_key": item["candidate_key"], "event": "checking"}
+                    {
+                        "position": int(item["position"]),
+                        "candidate_key": item["candidate_key"],
+                        "event": "checking",
+                    }
                     for item in futures.values()
                 ]
                 _write_progress(
@@ -867,7 +1035,11 @@ def run_access_readiness(
             )
             receipts[int(row["position"])] = item
             active = [
-                {"position": int(value["position"]), "candidate_key": value["candidate_key"], "event": "checking"}
+                {
+                    "position": int(value["position"]),
+                    "candidate_key": value["candidate_key"],
+                    "event": "checking",
+                }
                 for value in futures.values()
             ]
             _write_progress(
