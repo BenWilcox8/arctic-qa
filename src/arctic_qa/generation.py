@@ -7,7 +7,13 @@ from typing import Any
 
 from .db import Database, now
 from .extraction import load_chunks
-from .providers import Provider, ProviderResult, call_provider, ensure_budget
+from .providers import (
+    Provider,
+    ProviderResult,
+    call_provider,
+    ensure_budget,
+    provider_prompt_hash,
+)
 from .util import canonical_json, normalize_text, stable_id
 from .validation import numeric_equal, numeric_rule_is_source_bound
 
@@ -312,7 +318,14 @@ def generate_candidate(
         raise ValueError(f"source has no usable chunks: {source_id}")
     prose_chunks = [row for row in chunks if not row.get("object_labels")]
     chunk = max(prose_chunks or chunks, key=lambda row: len(row["text"]))
-    ensure_budget(db, run_id, budget_mode, budget_limit)
+    externally_metered = (
+        getattr(author, "externally_metered", False),
+        getattr(verifier, "externally_metered", False),
+    )
+    if externally_metered[0] != externally_metered[1]:
+        raise ValueError("generation providers cannot mix budget authorities")
+    if not all(externally_metered):
+        ensure_budget(db, run_id, budget_mode, budget_limit)
     parameters: dict[str, Any] = {
         "temperature": 0,
         "max_tokens": max_output_tokens,
@@ -546,8 +559,15 @@ def generate_candidate(
                         "returned_model": result.returned_model,
                         "request_id": result.request_id,
                         "prompt_version": PROMPT_VERSION,
-                        "prompt_hash": stable_id(
-                            "prompt", SYSTEM, prompt, PROMPT_VERSION
+                        "prompt_hash": provider_prompt_hash(
+                            verifier,
+                            SYSTEM,
+                            prompt,
+                            PROMPT_VERSION,
+                            {
+                                **parameters,
+                                "json_schema": ROLE_SCHEMAS["option_verifier"],
+                            },
                         ),
                     },
                 }
@@ -596,12 +616,14 @@ def generate_candidate(
                     reconstruction_result,
                     "reconstructor",
                     reconstruction_prompt,
+                    parameters,
                 ),
                 "answer_verifier": _call_provenance(
                     verifier,
                     answer_verification_result,
                     "answer_verifier",
                     answer_verification_prompt,
+                    parameters,
                 ),
             },
             "family_overlap_disclosure": (
@@ -648,7 +670,11 @@ def generate_candidate(
 
 
 def _call_provenance(
-    provider: Provider, result: ProviderResult, role: str, prompt: str
+    provider: Provider,
+    result: ProviderResult,
+    role: str,
+    prompt: str,
+    parameters: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "role": role,
@@ -657,7 +683,13 @@ def _call_provenance(
         "returned_model": result.returned_model,
         "request_id": result.request_id,
         "prompt_version": PROMPT_VERSION,
-        "prompt_hash": stable_id("prompt", SYSTEM, prompt, PROMPT_VERSION),
+        "prompt_hash": provider_prompt_hash(
+            provider,
+            SYSTEM,
+            prompt,
+            PROMPT_VERSION,
+            {**parameters, "json_schema": ROLE_SCHEMAS[role]},
+        ),
     }
 
 

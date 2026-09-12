@@ -42,6 +42,7 @@ The project does not require a server, vector database, GPU, or parser model.
 The optional read-only corpus-stage viewer uses only the Python standard library.
 See `docs/CORPUS_VIEWER.md` for its artifact boundary and start command.
 See `docs/METADATA_PREFILTER.md` for the metadata-only processing boundary.
+See `docs/STREAMING_DATASET.md` for the resumable answer-first scheduler and shared broker.
 
 ## Staged workflow
 
@@ -179,59 +180,29 @@ The default generation queue excludes unresolved, mixed, and subarctic-related r
 
 ### 6. Generate candidates
 
-The versioned role defaults are in `config/roles.v1.json`.
-The strongest profile uses `claude-opus-5` for authoring.
-It uses `gemini-3.1-pro-preview` for independent reconstruction, answer checks, and exact-option checks.
-
-The cost-aware profile uses `claude-sonnet-5` and `gemini-3.8-flash`.
-These assignments are unvalidated starting configurations.
-
-Set keys only in the environment or another private supported input:
-
-```bash
-export ANTHROPIC_API_KEY='...'
-export GEMINI_API_KEY='...'
-```
-
-Do not put keys in repository files, command output, manifests, or exports.
-
-Live mode requires credentials and an explicit positive budget:
+The `generate` command supports only fake and replay providers in this commission.
+Use it to test either pipeline arm without a paid call:
 
 ```bash
 PYTHONPATH=src python -m arctic_qa --json generate \
   --source-id SOURCE_ID \
   --run-id pilot-r1 \
   --arm answer_first \
-  --author-provider claude \
-  --author-model claude-opus-5 \
-  --verifier-provider gemini \
-  --verifier-model gemini-3.1-pro-preview \
+  --author-provider fake \
+  --author-script fixtures/fake-author.jsonl \
+  --author-model fake-author-v1 \
+  --verifier-provider fake \
+  --verifier-script fixtures/fake-verifier.jsonl \
+  --verifier-model fake-verifier-v1 \
   --budget-mode tokens \
   --budget-limit 50000 \
-  --reservation 5000 \
-  --max-output-tokens 2048 \
-  --reasoning-token-cap 2048 \
-  --billable-token-overhead 1024
+  --reservation 5000
 ```
 
-The user reservation is only a floor.
-It cannot reduce the computed bound.
-Before dispatch, the CLI calculates a UTF-8 byte upper bound for the full input.
-The bound also includes output, reasoning, billable overhead, and all retry attempts.
-This bound is conservative because one input token cannot contain less than one encoded byte.
-The reasoning floor equals the output cap.
-The billable-overhead floor is 1,024 tokens.
-
-USD mode also needs all three configured prices:
-
-```text
---input-price-per-million PRICE
---output-price-per-million PRICE
---reasoning-price-per-million PRICE
-```
-
-The CLI refuses a USD request before dispatch when a price is absent.
-An unexpected provider overage is recorded and stops later calls.
+The CLI rejects Claude or Gemini on this legacy path.
+All paid stages must use `stream` and the shared broker.
+The broker reads a private credential file only after the execution gate passes.
+Do not put keys in repository files, command output, manifests, or exports.
 
 Use `--arm direct_joint` for the required baseline.
 Each run freezes one proposed finding per paper family.
@@ -256,6 +227,19 @@ A response must pass the complete role-specific nested schema before completion.
 A timeout after dispatch creates an `ambiguous_charge` receipt.
 The pipeline does not retry that receipt as a free request.
 
+### Streaming answer-first production
+
+The `stream` command consumes completed article-access records.
+For each newly ready paper, it runs Gemini eligibility and immediately continues an eligible paper through validation and export.
+It resumes from an existing valid eligibility receipt without repeating the call.
+Offline mode uses fake response scripts.
+Live-test and production modes use only the shared Gemini broker.
+
+The checked-in live gate is disabled.
+Do not enable it before the exact integrated commit passes independent review.
+
+See `docs/STREAMING_DATASET.md` for commands, storage paths, call counts, budgets, and resume rules.
+
 ### 7. Validate candidates
 
 ```bash
@@ -277,7 +261,8 @@ One item can use one component-only correction after hard gates pass.
 The candidate must fail exactly one declared remediable component gate.
 An absent or false independent source-entailment result stays unresolved.
 Unsafe version 1 candidates are rejected because they lack exact-option verifier bindings.
-If fewer than three distractors pass, the short-answer item remains accepted and the MCQ is withheld.
+If fewer than three distractors pass, the scheduler keeps the short answer as `incomplete_non_mcq` and withholds the MCQ.
+That record does not increase the accepted-item target.
 
 ### 8. Export records
 

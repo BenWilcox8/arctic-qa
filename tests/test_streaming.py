@@ -2,10 +2,22 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
+from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
+
+from arctic_qa import cli as cli_module
+from arctic_qa.broker_provider import BrokerProvider
+from arctic_qa.db import Database
+from arctic_qa.generation import ROLE_SCHEMAS
+from arctic_qa.model_broker import SharedGeminiBroker
+from arctic_qa.paths import DataPaths
+from arctic_qa.providers import FakeProvider
+from arctic_qa.streaming import run_stream
+from arctic_qa.util import stable_id
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -64,11 +76,6 @@ def streaming_fixture(tmp_path: Path) -> tuple[Path, Path]:
             "subgroup": "test_only",
             "title": "Synthetic public Arctic extraction fixture",
             "doi": None,
-            "authors": [{"name": "Arctic QA test suite"}],
-            "published_date": "2026-09-11",
-            "year": 2026,
-            "discipline": "synthetic calibration",
-            "paper_family_id": "family-test-only-public-arctic-v1",
             "access_state": "full_text_ready",
             "identity_verified": True,
             "source_path": str(source),
@@ -91,6 +98,8 @@ def streaming_fixture(tmp_path: Path) -> tuple[Path, Path]:
                     "position": 1,
                     "candidate_key": candidate_key,
                     "subgroup": "test_only",
+                    "authors": ["Arctic QA test suite"],
+                    "year": 2026,
                 }
             ],
         },
@@ -112,16 +121,222 @@ def streaming_fixture(tmp_path: Path) -> tuple[Path, Path]:
                 "request_id": "fixture-job",
                 "overall": "eligible",
                 "overall_reason_codes": ["all_required_criteria_satisfied"],
+                "criteria": [
+                    {
+                        "criterion_id": criterion,
+                        "status": "satisfied",
+                        "reason_codes": ["test_only_evidence"],
+                        "evidence": [
+                            {
+                                "quote": "The complete study site was at 71.3 N.",
+                                "locator": {
+                                    "source_block_id": "text-block-00001",
+                                    "page_id": None,
+                                    "section_id": "extracted-text",
+                                },
+                            }
+                        ],
+                        "missing_context": [],
+                    }
+                    for criterion in (
+                        "published_primary_findings",
+                        "stable_identity_version",
+                        "study_geography",
+                        "access_rights_evidence",
+                    )
+                ]
+                + [
+                    {
+                        "criterion_id": "correction_retraction_coverage",
+                        "status": "uncertain",
+                        "reason_codes": ["coverage_unknown"],
+                        "evidence": [],
+                        "missing_context": ["correction_retraction_coverage:unknown"],
+                    }
+                ],
+                "known_missing_context": ["correction_retraction_coverage:unknown"],
+                "correction_metadata_used": {
+                    "provided": False,
+                    "source": None,
+                    "as_of": None,
+                    "known_status": "unknown",
+                },
+                "input_echo": {
+                    "policy_sha256": "test-only",
+                    "source_version_sha256": source_hash,
+                    "extracted_text_sha256": extraction_hash,
+                    "metadata_sha256": "test-only",
+                },
             },
             "validation": {
                 "valid": True,
                 "errors": [],
                 "decision": "eligible",
+                "resolved_evidence": [
+                    {
+                        "criterion": "study_geography",
+                        "locator": {
+                            "source_block_id": "text-block-00001",
+                            "page_id": None,
+                            "section_id": "extracted-text",
+                        },
+                        "quote": "The complete study site was at 71.3 N.",
+                        "start": 0,
+                        "end": 39,
+                    }
+                ],
             },
             "actual_cost_usd": "0.01",
         },
     )
     return access, eligibility
+
+
+class ScriptedBrokerTransport:
+    def __init__(self, *, verifier_script: Path | None = None) -> None:
+        self.author = FakeProvider("gemini-3.8-flash", FIXTURES / "fake-author.jsonl")
+        self.verifier = FakeProvider(
+            "gemini-3.8-flash", verifier_script or FIXTURES / "fake-verifier.jsonl"
+        )
+        self.methods: list[str] = []
+
+    def post(self, model: str, method: str, body: dict) -> dict:
+        self.methods.append(method)
+        if method == "countTokens":
+            return {"totalTokens": 100}
+        generation = body["generationConfig"]
+        schema = generation["responseJsonSchema"]
+        if "criteria" in schema.get("properties", {}):
+            user_text = body["contents"][0]["parts"][0]["text"]
+            request_id = re.search(r"^request_id: (.+)$", user_text, re.M).group(1)
+            input_hashes = json.loads(
+                re.search(r"^input_hashes: (.+)$", user_text, re.M).group(1)
+            )
+            correction = json.loads(
+                re.search(r"^correction_metadata: (.+)$", user_text, re.M).group(1)
+            )
+            metadata = json.loads(
+                re.search(r"^metadata: (.+)$", user_text, re.M).group(1)
+            )
+            missing = metadata["known_context_gaps"]
+            evidence = [
+                {
+                    "quote": "The complete study site was at 71.3 N.",
+                    "locator": {
+                        "source_block_id": "text-block-00001",
+                        "page_id": None,
+                        "section_id": "extracted-text",
+                    },
+                }
+            ]
+            payload = {
+                "schema_version": "eligibility-response-v1",
+                "request_id": request_id,
+                "overall": "eligible",
+                "overall_reason_codes": ["all_required_criteria_satisfied"],
+                "criteria": [
+                    {
+                        "criterion_id": criterion,
+                        "status": "satisfied",
+                        "reason_codes": ["test_only_evidence"],
+                        "evidence": evidence,
+                        "missing_context": [],
+                    }
+                    for criterion in (
+                        "published_primary_findings",
+                        "stable_identity_version",
+                        "study_geography",
+                        "access_rights_evidence",
+                    )
+                ]
+                + [
+                    {
+                        "criterion_id": "correction_retraction_coverage",
+                        "status": "uncertain",
+                        "reason_codes": ["coverage_unknown"],
+                        "evidence": [],
+                        "missing_context": missing,
+                    }
+                ],
+                "known_missing_context": missing,
+                "correction_metadata_used": correction,
+                "input_echo": input_hashes,
+            }
+            return self._response(model, payload, "fixture-eligibility")
+        role = next(
+            name for name, expected in ROLE_SCHEMAS.items() if schema == expected
+        )
+        provider = (
+            self.author
+            if role
+            in {
+                "extractor",
+                "question_writer",
+                "direct_joint",
+                "distractor_writer",
+                "correction",
+            }
+            else self.verifier
+        )
+        result = provider.invoke(
+            role,
+            body["systemInstruction"]["parts"][0]["text"],
+            body["contents"][0]["parts"][0]["text"],
+            {
+                "temperature": generation.get("temperature", 0),
+                "max_tokens": generation["maxOutputTokens"],
+                "json_schema": schema,
+            },
+            timeout=30,
+        )
+        return self._response(model, result.payload, result.request_id)
+
+    def _response(self, model: str, payload: dict, request_id: str | None) -> dict:
+        return {
+            "responseId": request_id,
+            "modelVersion": model,
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "content": {"parts": [{"text": json.dumps(payload)}]},
+                }
+            ],
+            "usageMetadata": {
+                "promptTokenCount": 100,
+                "candidatesTokenCount": 10,
+                "thoughtsTokenCount": 5,
+                "totalTokenCount": 115,
+            },
+        }
+
+
+def shared_broker(tmp_path: Path, transport: ScriptedBrokerTransport):
+    gate = tmp_path / "broker-gate.json"
+    write_json(
+        gate,
+        {
+            "schema": "streaming-live-execution-gate-v1",
+            "live_generation_enabled": True,
+            "allowed_phase": "live_test",
+            "integrated_code_commit": "test-only-commit",
+            "independent_review_verdict": "pass",
+            "review_record": "test-only-review",
+        },
+    )
+    credential = tmp_path / "private" / "gemini.key"
+    credential.parent.mkdir(mode=0o700)
+    credential.write_text("test-only-unused-key", encoding="utf-8")
+    credential.chmod(0o600)
+    return SharedGeminiBroker(
+        policy_file=REPO / "config" / "streaming-dataset-budget-policy-v1.json",
+        price_config_file=REPO / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=gate,
+        ledger_file=tmp_path / "shared-ledger.json",
+        receipts_dir=tmp_path / "model-receipts",
+        credential_file=credential,
+        prior_construction_spend_usd=Decimal("0"),
+        transport=transport,
+    )
 
 
 def test_streaming_cli_moves_one_eligible_paper_to_validated_export(
@@ -151,6 +366,7 @@ def test_streaming_cli_moves_one_eligible_paper_to_validated_export(
         "accepted_base_questions": 1,
         "eligibility_rejected": 0,
         "generation_rejected": 0,
+        "incomplete_non_mcq": 0,
         "processed": 1,
     }
     assert result["export"]["short_answer_count"] == 1
@@ -161,6 +377,411 @@ def test_streaming_cli_moves_one_eligible_paper_to_validated_export(
         "correlated_error_disclosed": True,
         "live_provider": False,
     }
+    progress = json.loads(
+        (tmp_path / "arctic-qa" / "streaming-dataset-r1" / "progress.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert progress["schema"] == "streaming-dataset-progress-v1"
+    assert progress["state"] == "completed"
+    assert progress["run_id"] == "stream-fixture"
+    assert progress["counts"] == {
+        "full_text_ready": 1,
+        "eligible": 1,
+        "rejected": 0,
+        "accepted_qa": 1,
+    }
+    assert progress["recent_papers"] == [
+        {
+            "paper_id": result["paper_results"][0]["source_id"],
+            "title": "Synthetic public Arctic extraction fixture",
+            "current_stage": "completed",
+            "final_state": "accepted",
+            "final_reason": "machine_accepted_unverified",
+        }
+    ]
+
+
+def test_streaming_uses_one_shared_broker_for_all_ten_stages(
+    tmp_path: Path,
+) -> None:
+    access, eligibility = streaming_fixture(tmp_path)
+    (eligibility / "jobs" / "fixture-job.json").unlink()
+    eligibility_policy = tmp_path / "eligibility-policy.json"
+    write_json(eligibility_policy, {"protocol_id": "test-only-policy"})
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+    transport = ScriptedBrokerTransport()
+    broker = shared_broker(tmp_path, transport)
+    provider = BrokerProvider(
+        broker=broker,
+        phase="live_test",
+        invocation_run_id="live-test-r1",
+    )
+
+    result = run_stream(
+        database,
+        paths.namespace,
+        run_id="live-test-r1",
+        campaign_id="streaming-commission",
+        access_run_dir=access,
+        eligibility_run_dir=eligibility,
+        author=provider,
+        verifier=provider,
+        max_papers=1,
+        eligibility_prompt_file=REPO / "config" / "gemini-eligibility-prompt-v1.txt",
+        eligibility_schema_file=REPO / "schemas" / "gemini-eligibility.v1.schema.json",
+        eligibility_policy_file=eligibility_policy,
+    )
+
+    assert result["counts"]["accepted_base_questions"] == 1
+    assert result["provider_policy"] == {
+        "model": "gemini-3.8-flash",
+        "same_model_roles": True,
+        "correlated_error_disclosed": True,
+        "live_provider": True,
+    }
+    status = broker.status()
+    assert status["generation_submissions"] == 10
+    assert status["accepted_question_count"] == 1
+    access_item = json.loads(next((access / "items").glob("*.json")).read_text())
+    family_id = stable_id("family", access_item["candidate_key"])
+    assert set(status["papers"]) == {family_id}
+    ledger = json.loads((tmp_path / "shared-ledger.json").read_text())
+    assert ledger["family_bindings"] == {
+        family_id: {
+            "paper_id": access_item["candidate_key"],
+            "source_version_id": access_item["source_content_hash"],
+        }
+    }
+    assert {name: row["submissions"] for name, row in status["stages"].items()} == {
+        "eligibility": 1,
+        "finding_answer_extraction": 1,
+        "question_generation": 1,
+        "blinded_reconstruction": 1,
+        "answer_verification": 1,
+        "distractor_generation": 1,
+        "option_verification": 4,
+    }
+    assert (
+        database.one("SELECT * FROM budgets WHERE run_id='streaming-commission'")
+        is None
+    )
+    source = database.one("SELECT * FROM sources")
+    assert source["geography_confidence"] == "model_reviewed_unverified"
+    assert source["year"] == 2026
+    assert source["discipline"] == "unclassified"
+    assert source["source_version"] == access_item["source_content_hash"]
+    scope_evidence = json.loads(source["scope_evidence_json"])
+    eligibility_job_key = scope_evidence["eligibility_job_key"]
+    assert re.fullmatch(r"[a-f0-9]{64}", eligibility_job_key)
+    assert (eligibility / "jobs" / f"{eligibility_job_key}.json").is_file()
+    assert scope_evidence["study_geography"]["evidence"][0]["locator"] == {
+        "source_block_id": "text-block-00001",
+        "page_id": None,
+        "section_id": "extracted-text",
+    }
+    assert transport.methods.count("generateContent") == 10
+
+    resumed = run_stream(
+        database,
+        paths.namespace,
+        run_id="live-test-r1",
+        campaign_id="streaming-commission",
+        access_run_dir=access,
+        eligibility_run_dir=eligibility,
+        author=provider,
+        verifier=provider,
+        max_papers=1,
+        eligibility_prompt_file=REPO / "config" / "gemini-eligibility-prompt-v1.txt",
+        eligibility_schema_file=REPO / "schemas" / "gemini-eligibility.v1.schema.json",
+        eligibility_policy_file=eligibility_policy,
+    )
+
+    assert resumed["resumed_papers"] == 1
+    assert resumed["counts"]["accepted_base_questions"] == 1
+    assert broker.status()["generation_submissions"] == 10
+    assert transport.methods.count("generateContent") == 10
+
+
+def test_live_stream_cli_runs_inline_eligibility_and_qa(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    access, eligibility = streaming_fixture(tmp_path)
+    (eligibility / "jobs" / "fixture-job.json").unlink()
+    eligibility_policy = tmp_path / "eligibility-policy.json"
+    write_json(eligibility_policy, {"protocol_id": "test-only-policy"})
+    transport = ScriptedBrokerTransport()
+    broker = shared_broker(tmp_path, transport)
+    monkeypatch.setattr(cli_module, "SharedGeminiBroker", lambda **kwargs: broker)
+
+    exit_code = cli_module.main(
+        [
+            "--data-root",
+            str(tmp_path),
+            "--test-mode",
+            "--json",
+            "stream",
+            "--phase",
+            "live_test",
+            "--run-id",
+            "live-test-r1",
+            "--campaign-id",
+            "streaming-commission",
+            "--access-run-dir",
+            str(access),
+            "--eligibility-run-dir",
+            str(eligibility),
+            "--eligibility-policy-file",
+            str(eligibility_policy),
+            "--credential-file",
+            str(tmp_path / "unused-private-key"),
+            "--prior-construction-spend-usd",
+            "0",
+        ]
+    )
+
+    assert exit_code == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["counts"]["accepted_base_questions"] == 1
+    assert broker.status()["generation_submissions"] == 10
+    assert transport.methods.count("generateContent") == 10
+
+
+def test_streaming_live_cli_obeys_disabled_broker_gate_before_credentials(
+    tmp_path: Path,
+) -> None:
+    access, eligibility = streaming_fixture(tmp_path)
+    gate = tmp_path / "disabled-gate.json"
+    write_json(
+        gate,
+        {
+            "schema": "streaming-live-execution-gate-v1",
+            "live_generation_enabled": False,
+            "allowed_phase": None,
+            "integrated_code_commit": None,
+            "independent_review_verdict": "pending",
+            "review_record": None,
+        },
+    )
+
+    result = run_cli(
+        tmp_path,
+        "stream",
+        "--phase",
+        "live_test",
+        "--run-id",
+        "disabled-live-test",
+        "--access-run-dir",
+        str(access),
+        "--eligibility-run-dir",
+        str(eligibility),
+        "--execution-gate-file",
+        str(gate),
+        "--credential-file",
+        str(tmp_path / "missing-private-key"),
+        "--prior-construction-spend-usd",
+        "0",
+        expected=2,
+    )
+
+    assert result["code"] == "VALUEERROR"
+    assert result["message"] == "streaming live generation is disabled"
+    assert not (tmp_path / "missing-private-key").exists()
+    progress = json.loads(
+        (tmp_path / "arctic-qa" / "streaming-dataset-r1" / "progress.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert progress["state"] == "error"
+    assert progress["current_stage"] == "generation"
+    assert progress["recent_papers"][-1]["final_state"] == "error"
+
+
+def test_legacy_generate_cli_cannot_bypass_the_shared_broker(tmp_path: Path) -> None:
+    result = run_cli(
+        tmp_path,
+        "generate",
+        "--source-id",
+        "unused-source",
+        "--run-id",
+        "legacy-live-bypass",
+        "--arm",
+        "answer_first",
+        "--author-provider",
+        "claude",
+        "--author-model",
+        "claude-opus-5",
+        "--verifier-provider",
+        "gemini",
+        "--verifier-model",
+        "gemini-3.8-flash",
+        "--budget-limit",
+        "1",
+        expected=2,
+    )
+
+    assert result["code"] == "VALUEERROR"
+    assert result["message"] == (
+        "legacy live generation is disabled; use stream with the shared broker"
+    )
+
+
+def test_failed_reconstruction_never_reaches_distractor_generation(
+    tmp_path: Path,
+) -> None:
+    access, eligibility = streaming_fixture(tmp_path)
+    verifier_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-verifier.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    verifier_events[0]["response"]["ambiguity_label"] = "multiple_answers"
+    verifier_events[0]["response"]["alternatives"] = ["1.9 m"]
+    verifier_script = tmp_path / "ambiguous-verifier.jsonl"
+    verifier_script.write_text(
+        "\n".join(json.dumps(event) for event in verifier_events) + "\n",
+        encoding="utf-8",
+    )
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+    transport = ScriptedBrokerTransport(verifier_script=verifier_script)
+    broker = shared_broker(tmp_path, transport)
+    provider = BrokerProvider(
+        broker=broker,
+        phase="live_test",
+        invocation_run_id="live-test-r1",
+    )
+
+    result = run_stream(
+        database,
+        paths.namespace,
+        run_id="live-test-r1",
+        campaign_id="streaming-commission",
+        access_run_dir=access,
+        eligibility_run_dir=eligibility,
+        author=provider,
+        verifier=provider,
+        max_papers=1,
+    )
+
+    assert result["counts"]["accepted_base_questions"] == 0
+    assert result["counts"]["generation_rejected"] == 1
+    status = broker.status()
+    assert status["generation_submissions"] == 4
+    assert "distractor_generation" not in status["stages"]
+    assert "option_verification" not in status["stages"]
+
+
+def test_true_distractor_is_removed_before_streaming_export(tmp_path: Path) -> None:
+    access, eligibility = streaming_fixture(tmp_path)
+    verifier_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-verifier.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    verifier_events[2]["response"]["contradiction_established"] = False
+    verifier_events[2]["response"]["question_admits_option_as_correct"] = True
+    verifier_script = tmp_path / "true-option-verifier.jsonl"
+    verifier_script.write_text(
+        "\n".join(json.dumps(event) for event in verifier_events) + "\n",
+        encoding="utf-8",
+    )
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+    broker = shared_broker(
+        tmp_path, ScriptedBrokerTransport(verifier_script=verifier_script)
+    )
+    provider = BrokerProvider(
+        broker=broker,
+        phase="live_test",
+        invocation_run_id="live-test-r1",
+    )
+
+    result = run_stream(
+        database,
+        paths.namespace,
+        run_id="live-test-r1",
+        campaign_id="streaming-commission",
+        access_run_dir=access,
+        eligibility_run_dir=eligibility,
+        author=provider,
+        verifier=provider,
+        max_papers=1,
+    )
+
+    assert result["counts"]["accepted_base_questions"] == 1
+    assert result["export"]["mcq_count"] == 1
+    mcq_path = paths.namespace / result["export"]["files"]["mcq"]
+    records = [json.loads(line) for line in mcq_path.read_text().splitlines()]
+    assert all(
+        option["text"] != "2.5 m" for record in records for option in record["options"]
+    )
+
+
+def test_short_answer_without_three_distractors_is_not_counted_as_accepted(
+    tmp_path: Path,
+) -> None:
+    access, eligibility = streaming_fixture(tmp_path)
+    author_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-author.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    author_events[2]["response"]["distractors"] = author_events[2]["response"][
+        "distractors"
+    ][:2]
+    author_script = tmp_path / "two-distractor-author.jsonl"
+    author_script.write_text(
+        "\n".join(json.dumps(event) for event in author_events) + "\n",
+        encoding="utf-8",
+    )
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+    transport = ScriptedBrokerTransport()
+    transport.author = FakeProvider("gemini-3.8-flash", author_script)
+    broker = shared_broker(tmp_path, transport)
+    provider = BrokerProvider(
+        broker=broker,
+        phase="live_test",
+        invocation_run_id="live-test-r1",
+    )
+
+    result = run_stream(
+        database,
+        paths.namespace,
+        run_id="live-test-r1",
+        campaign_id="streaming-commission",
+        access_run_dir=access,
+        eligibility_run_dir=eligibility,
+        author=provider,
+        verifier=provider,
+        max_papers=1,
+    )
+
+    assert result["counts"]["accepted_base_questions"] == 0
+    assert result["counts"]["incomplete_non_mcq"] == 1
+    assert broker.status()["accepted_question_count"] == 0
+    assert result["export"]["short_answer_count"] == 0
+    assert result["export"]["incomplete_short_answer_count"] == 1
+    incomplete_path = (
+        paths.namespace / result["export"]["files"]["incomplete_short_answer"]
+    )
+    record = json.loads(incomplete_path.read_text(encoding="utf-8"))
+    assert record["release_label"] == "incomplete_non_mcq"
+    progress = json.loads(
+        (paths.namespace / "streaming-dataset-r1" / "progress.json").read_text()
+    )
+    assert progress["counts"]["accepted_qa"] == 0
 
 
 def test_streaming_cli_stops_after_eligibility_rejection(tmp_path: Path) -> None:
@@ -197,6 +818,7 @@ def test_streaming_cli_stops_after_eligibility_rejection(tmp_path: Path) -> None
         "accepted_base_questions": 0,
         "eligibility_rejected": 1,
         "generation_rejected": 0,
+        "incomplete_non_mcq": 0,
         "processed": 1,
     }
     assert result["export"]["short_answer_count"] == 0
@@ -335,6 +957,12 @@ def test_streaming_finding_selection_reads_results_not_only_the_longest_chunk(
     eligibility_item = json.loads(eligibility_path.read_text(encoding="utf-8"))
     eligibility_item["source_content_hash"] = source_hash
     eligibility_item["extraction_sha256"] = extraction_hash
+    eligibility_item["parsed_response"]["input_echo"]["source_version_sha256"] = (
+        source_hash
+    )
+    eligibility_item["parsed_response"]["input_echo"]["extracted_text_sha256"] = (
+        extraction_hash
+    )
     write_json(eligibility_path, eligibility_item)
     author_events = [
         json.loads(line)

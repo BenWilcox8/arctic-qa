@@ -311,7 +311,9 @@ def call_provider(
     retries: int,
     rate_limit_seconds: float,
 ) -> ProviderResult:
-    prompt_hash = stable_id("prompt", system, prompt, prompt_version)
+    prompt_hash = provider_prompt_hash(
+        provider, system, prompt, prompt_version, parameters
+    )
     completed = db.one(
         """SELECT * FROM calls WHERE run_id=? AND entity_id=? AND role=? AND prompt_hash=? AND status='completed'
         ORDER BY attempt DESC LIMIT 1""",
@@ -335,6 +337,23 @@ def call_provider(
     if ambiguous:
         raise AmbiguousChargeError(
             f"The prior {role} request has an ambiguous charge receipt. Manual reconciliation is required."
+        )
+    if getattr(provider, "externally_metered", False):
+        return _call_externally_metered(
+            db,
+            provider,
+            run_id=run_id,
+            entity_id=entity_id,
+            role=role,
+            system=system,
+            prompt=prompt,
+            prompt_version=prompt_version,
+            prompt_hash=prompt_hash,
+            parameters=parameters,
+            response_schema=response_schema,
+            timeout=timeout,
+            retries=retries,
+            rate_limit_seconds=rate_limit_seconds,
         )
     budget_mode = db.one("SELECT mode FROM budgets WHERE run_id=?", (run_id,))["mode"]
     attempt_bound = _request_bound(budget_mode, system, prompt, parameters, reservation)
@@ -452,6 +471,118 @@ def call_provider(
             time.sleep(rate_limit_seconds)
         return result
     raise ProviderError("provider retries were exhausted")
+
+
+def provider_prompt_hash(
+    provider: Provider,
+    system: str,
+    prompt: str,
+    prompt_version: str,
+    parameters: dict[str, Any],
+) -> str:
+    identity = getattr(provider, "request_identity", None)
+    return stable_id(
+        "prompt",
+        system,
+        prompt,
+        prompt_version,
+        provider.name,
+        provider.model,
+        identity() if callable(identity) else None,
+        parameters,
+    )
+
+
+def _call_externally_metered(
+    db: Database,
+    provider: Provider,
+    *,
+    run_id: str,
+    entity_id: str,
+    role: str,
+    system: str,
+    prompt: str,
+    prompt_version: str,
+    prompt_hash: str,
+    parameters: dict[str, Any],
+    response_schema: dict[str, Any],
+    timeout: float,
+    retries: int,
+    rate_limit_seconds: float,
+) -> ProviderResult:
+    if retries != 0 or rate_limit_seconds != 0:
+        raise ValueError("the shared broker does not permit local retries or pacing")
+    call_id = stable_id("call", run_id, entity_id, role, prompt_hash, 1)
+    existing = db.one("SELECT status FROM calls WHERE call_id=?", (call_id,))
+    if existing and existing["status"] not in {"started", "failed"}:
+        raise ProviderError("The shared-broker call journal has an invalid state.")
+    if not existing:
+        with db.transaction():
+            db.connection.execute(
+                """INSERT INTO calls
+                (call_id,run_id,entity_id,role,provider,requested_model,prompt_version,prompt_hash,
+                 parameters_json,attempt,status,started_at)
+                VALUES (?,?,?,?,?,?,?,?,?,1,'started',?)""",
+                (
+                    call_id,
+                    run_id,
+                    entity_id,
+                    role,
+                    provider.name,
+                    provider.model,
+                    prompt_version,
+                    prompt_hash,
+                    canonical_json(parameters),
+                    now(),
+                ),
+            )
+    try:
+        result = provider.invoke(role, system, prompt, parameters, timeout)
+        _validate_schema(result.payload, response_schema)
+    except AmbiguousChargeError as error:
+        _update_call_error(
+            db, call_id, "ambiguous_charge", error.code, redact(str(error))
+        )
+        raise
+    except (BudgetError, ProviderError, json.JSONDecodeError, ValueError) as error:
+        _update_call_error(
+            db,
+            call_id,
+            "failed",
+            getattr(error, "code", "BROKER_RESPONSE_INVALID"),
+            redact(str(error)),
+        )
+        raise
+    except Exception as error:
+        _update_call_error(
+            db,
+            call_id,
+            "ambiguous_charge",
+            "BROKER_OUTCOME_UNKNOWN",
+            redact(str(error)),
+        )
+        raise AmbiguousChargeError(
+            "The shared broker request ended without a usable receipt."
+        ) from error
+    with db.transaction():
+        db.connection.execute(
+            """UPDATE calls SET status='completed',completed_at=?,returned_model=?,
+            request_id=?,input_tokens=?,output_tokens=?,actual_cost_usd=?,response_json=?
+            WHERE call_id=?""",
+            (
+                now(),
+                result.returned_model,
+                result.request_id,
+                result.input_tokens,
+                result.output_tokens,
+                str(result.actual_cost_usd)
+                if result.actual_cost_usd is not None
+                else None,
+                canonical_json(result.payload),
+                call_id,
+            ),
+        )
+    return result
 
 
 def _request_bound(

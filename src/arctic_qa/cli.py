@@ -11,6 +11,7 @@ from typing import Any
 
 from . import __version__
 from .access_readiness import run_access_readiness
+from .broker_provider import BrokerProvider
 from .corpus_viewer import serve_corpus_viewer
 from .db import Database
 from .discovery import (
@@ -30,6 +31,7 @@ from .generation import generate_candidate
 from .gemini_eligibility import run_gemini_eligibility
 from .manifests import write_source_manifest
 from .metadata_prefilter import run_metadata_prefilter
+from .model_broker import SharedGeminiBroker
 from .paths import DEFAULT_DATA_ROOT, DataPaths
 from .providers import make_provider
 from .screening import screen_source
@@ -287,13 +289,49 @@ def parser() -> argparse.ArgumentParser:
     stream = commands.add_parser(
         "stream", help="Move eligible full-text papers through validated export."
     )
+    stream.add_argument(
+        "--phase",
+        choices=("offline", "live_test", "away_production"),
+        default="offline",
+    )
     stream.add_argument("--run-id", required=True)
     stream.add_argument("--campaign-id")
     stream.add_argument("--access-run-dir", type=Path, required=True)
     stream.add_argument("--eligibility-run-dir", type=Path, required=True)
-    stream.add_argument("--author-script", type=Path, required=True)
-    stream.add_argument("--verifier-script", type=Path, required=True)
+    stream.add_argument(
+        "--eligibility-prompt-file",
+        type=Path,
+        default=Path("config/gemini-eligibility-prompt-v1.txt"),
+    )
+    stream.add_argument(
+        "--eligibility-schema-file",
+        type=Path,
+        default=Path("schemas/gemini-eligibility.v1.schema.json"),
+    )
+    stream.add_argument("--eligibility-policy-file", type=Path)
+    stream.add_argument("--author-script", type=Path)
+    stream.add_argument("--verifier-script", type=Path)
     stream.add_argument("--max-papers", type=int, default=1)
+    stream.add_argument("--progress-file", type=Path)
+    stream.add_argument(
+        "--streaming-budget-policy-file",
+        type=Path,
+        default=Path("config/streaming-dataset-budget-policy-v1.json"),
+    )
+    stream.add_argument(
+        "--price-config-file",
+        type=Path,
+        default=Path("config/gemini-eligibility-v1.json"),
+    )
+    stream.add_argument(
+        "--execution-gate-file",
+        type=Path,
+        default=Path("config/streaming-live-execution-gate-v1.json"),
+    )
+    stream.add_argument("--shared-ledger-file", type=Path)
+    stream.add_argument("--model-receipts-dir", type=Path)
+    stream.add_argument("--credential-file", type=Path)
+    stream.add_argument("--prior-construction-spend-usd", type=Decimal)
     return root
 
 
@@ -533,6 +571,13 @@ def _extract(args, paths: DataPaths, db: Database) -> dict[str, Any]:
 
 
 def _generate(args, paths: DataPaths, db: Database) -> dict[str, Any]:
+    if args.author_provider not in {"fake", "replay"} or args.verifier_provider not in {
+        "fake",
+        "replay",
+    }:
+        raise ValueError(
+            "legacy live generation is disabled; use stream with the shared broker"
+        )
     author = make_provider(args.author_provider, args.author_model, args.author_script)
     verifier = make_provider(
         args.verifier_provider, args.verifier_model, args.verifier_script
@@ -660,12 +705,43 @@ def _status(args, paths: DataPaths, db: Database) -> dict[str, Any]:
 
 
 def _stream(args, paths: DataPaths, db: Database) -> dict[str, Any]:
-    author = make_provider(
-        "fake", "fake-gemini-3.8-flash", args.author_script.resolve()
-    )
-    verifier = make_provider(
-        "fake", "fake-gemini-3.8-flash", args.verifier_script.resolve()
-    )
+    if args.phase == "offline":
+        if not args.author_script or not args.verifier_script:
+            raise ValueError("offline streaming requires author and verifier scripts")
+        author = make_provider(
+            "fake", "fake-gemini-3.8-flash", args.author_script.resolve()
+        )
+        verifier = make_provider(
+            "fake", "fake-gemini-3.8-flash", args.verifier_script.resolve()
+        )
+    else:
+        if args.credential_file is None:
+            raise ValueError("live streaming requires a private credential file")
+        if args.prior_construction_spend_usd is None:
+            raise ValueError("live streaming requires known prior construction spend")
+        shared_dir = paths.namespace / "streaming-dataset-r1"
+        broker = SharedGeminiBroker(
+            policy_file=args.streaming_budget_policy_file.resolve(),
+            price_config_file=args.price_config_file.resolve(),
+            execution_gate_file=args.execution_gate_file.resolve(),
+            ledger_file=(
+                args.shared_ledger_file.resolve()
+                if args.shared_ledger_file
+                else shared_dir / "shared-paid-call-ledger.json"
+            ),
+            receipts_dir=(
+                args.model_receipts_dir.resolve()
+                if args.model_receipts_dir
+                else shared_dir / "model-receipts"
+            ),
+            credential_file=args.credential_file.resolve(),
+            prior_construction_spend_usd=args.prior_construction_spend_usd,
+        )
+        author = verifier = BrokerProvider(
+            broker=broker,
+            phase=args.phase,
+            invocation_run_id=args.run_id,
+        )
     return run_stream(
         db,
         paths.namespace,
@@ -676,6 +752,14 @@ def _stream(args, paths: DataPaths, db: Database) -> dict[str, Any]:
         author=author,
         verifier=verifier,
         max_papers=args.max_papers,
+        progress_file=args.progress_file.resolve() if args.progress_file else None,
+        eligibility_prompt_file=args.eligibility_prompt_file.resolve(),
+        eligibility_schema_file=args.eligibility_schema_file.resolve(),
+        eligibility_policy_file=(
+            args.eligibility_policy_file.resolve()
+            if args.eligibility_policy_file
+            else None
+        ),
     )
 
 

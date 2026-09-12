@@ -15,7 +15,12 @@ def export_run(
         "SELECT * FROM candidates WHERE run_id=? AND status='machine_accepted_unverified' ORDER BY item_id",
         (run_id,),
     )
+    incomplete_rows = db.rows(
+        "SELECT * FROM candidates WHERE run_id=? AND status='incomplete_non_mcq' ORDER BY item_id",
+        (run_id,),
+    )
     short_answers: list[dict[str, Any]] = []
+    incomplete_short_answers: list[dict[str, Any]] = []
     mcqs: list[dict[str, Any]] = []
     for row in rows:
         candidate = json.loads(row["candidate_json"])
@@ -42,14 +47,30 @@ def export_run(
             mcqs.append(_present_mcq(candidate, accepted[:3], seed))
         if len(accepted) >= 4:
             mcqs.append(_absent_mcq(candidate, accepted[:4], seed))
-    export_id = stable_id("export", run_id, seed, [row["item_id"] for row in rows])
+    for row in incomplete_rows:
+        candidate = json.loads(row["candidate_json"])
+        candidate["release_label"] = "incomplete_non_mcq"
+        incomplete_short_answers.append(_short_answer(candidate))
+    export_id = stable_id(
+        "export",
+        run_id,
+        seed,
+        [row["item_id"] for row in rows],
+        [row["item_id"] for row in incomplete_rows],
+    )
     destination = namespace / "exports" / export_id
     files = {
         "short_answer": destination / "short_answer.jsonl",
+        "incomplete_short_answer": destination / "incomplete_short_answer.jsonl",
         "mcq": destination / "mcq.jsonl",
         "rejections": destination / "rejections.jsonl",
     }
     atomic_write(files["short_answer"], jsonl_bytes(short_answers), immutable=True)
+    atomic_write(
+        files["incomplete_short_answer"],
+        jsonl_bytes(incomplete_short_answers),
+        immutable=True,
+    )
     atomic_write(
         files["mcq"],
         jsonl_bytes(sorted(mcqs, key=lambda row: row["item_id"])),
@@ -73,6 +94,7 @@ def export_run(
         "shuffle_seed": seed,
         "release_label_ceiling": "machine_accepted_unverified",
         "short_answer_count": len(short_answers),
+        "incomplete_short_answer_count": len(incomplete_short_answers),
         "mcq_count": len(mcqs),
         "rejection_count": len(rejections),
         "files": {key: str(path.relative_to(namespace)) for key, path in files.items()},
