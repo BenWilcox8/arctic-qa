@@ -48,6 +48,9 @@ Nonnumeric deterministic distractor rules are derived from the source-located an
 A distractor cannot create its own allowed or excluded set.
 Numeric values, units, and tolerance must resolve in the answer and source quote.
 Each answer-verification and post-generation option-verification claim must match a completed call receipt and its stored response.
+An option response must be an object with every required field and no extra field.
+The validator compares the canonical response object with the recorded verdict fields.
+An incomplete object or a JSON array fails closed.
 Each option verdict also binds to the stored source hash, QA hash, displayed option hash, prompt, provider, model, and request record.
 Author verification flags do not control acceptance.
 Truth at a different location or time does not invalidate a distractor when the question fixes its scope.

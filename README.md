@@ -242,6 +242,8 @@ All QA gates run before distractor generation.
 After generation, the verifier receives each exact displayed option in a separate call.
 Each answer-verification and option-verification record must resolve to its completed call receipt.
 Each option verdict binds to the stored source, QA, displayed option, prompt, provider, model, request, and response payload.
+The stored option response must be a complete schema-valid object that equals the recorded verdict fields.
+Incomplete objects and JSON arrays fail closed.
 Author verification flags have no acceptance authority.
 A scope substitution can remain a valid distractor when it is false for this question, even if it is true in another location or period.
 

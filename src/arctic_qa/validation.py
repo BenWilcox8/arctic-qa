@@ -48,6 +48,17 @@ REQUIRED_ANSWER_KEYS = {
     "scope",
     "required_question_phrases",
 }
+OPTION_VERDICT_RESPONSE_KEYS = frozenset(
+    {
+        "contradiction_established",
+        "alternative_answer_search_passed",
+        "true_in_different_context",
+        "question_admits_option_as_correct",
+        "evidence_quote",
+        "locator",
+        "rationale",
+    }
+)
 
 
 @dataclass
@@ -492,7 +503,37 @@ def _option_verdict_receipt_matches(
         response = json.loads(receipt["response_json"])
     except (TypeError, json.JSONDecodeError):
         return False
-    return all(response.get(key) == verdict.get(key) for key in response)
+    if not _option_response_schema_valid(response):
+        return False
+    recorded_response = {key: verdict.get(key) for key in OPTION_VERDICT_RESPONSE_KEYS}
+    return canonical_json(response) == canonical_json(recorded_response)
+
+
+def _option_response_schema_valid(response: Any) -> bool:
+    if not isinstance(response, dict) or set(response) != OPTION_VERDICT_RESPONSE_KEYS:
+        return False
+    boolean_fields = (
+        "contradiction_established",
+        "alternative_answer_search_passed",
+        "true_in_different_context",
+        "question_admits_option_as_correct",
+    )
+    if not all(type(response[field]) is bool for field in boolean_fields):
+        return False
+    if not all(
+        isinstance(response[field], str) and response[field]
+        for field in ("evidence_quote", "rationale")
+    ):
+        return False
+    locator = response["locator"]
+    return bool(
+        isinstance(locator, dict)
+        and set(locator) == {"chunk_id", "start_offset", "end_offset"}
+        and isinstance(locator["chunk_id"], str)
+        and locator["chunk_id"]
+        and type(locator["start_offset"]) is int
+        and type(locator["end_offset"]) is int
+    )
 
 
 def _qa_verification_receipts_match(db: Database, candidate: dict[str, Any]) -> bool:

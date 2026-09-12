@@ -1392,6 +1392,96 @@ def test_validation_rejects_unstored_source_or_verifier_provenance(
         assert expected_reason in result["reasons"]
 
 
+def test_validation_rejects_empty_option_receipt_response(tmp_path: Path) -> None:
+    receipt = smoke(tmp_path, "empty-option-response-run")
+    with database(tmp_path) as connection:
+        connection.execute(
+            "UPDATE calls SET response_json='{}' WHERE role='option_verifier'"
+        )
+
+    result = json.loads(
+        cli(tmp_path, "validate", "--item-id", receipt["item_id"]).stdout
+    )
+    assert result["labels"]["mcq_eligible"] is False
+    assert all(row["accepted"] is False for row in result["distractors"])
+    assert all(
+        "option_verdict_call_receipt_missing" in row["reasons"]
+        for row in result["distractors"]
+    )
+
+
+def test_validation_rejects_empty_array_option_receipt_response(
+    tmp_path: Path,
+) -> None:
+    receipt = smoke(tmp_path, "empty-array-option-response-run")
+    with database(tmp_path) as connection:
+        connection.execute(
+            "UPDATE calls SET response_json='[]' WHERE role='option_verifier'"
+        )
+
+    result = json.loads(
+        cli(tmp_path, "validate", "--item-id", receipt["item_id"]).stdout
+    )
+    assert result["labels"]["mcq_eligible"] is False
+    assert all(row["accepted"] is False for row in result["distractors"])
+    assert all(
+        "option_verdict_call_receipt_missing" in row["reasons"]
+        for row in result["distractors"]
+    )
+
+
+def test_validation_rejects_nonempty_array_option_receipt_response(
+    tmp_path: Path,
+) -> None:
+    receipt = smoke(tmp_path, "nonempty-array-option-response-run")
+    with database(tmp_path) as connection:
+        connection.execute(
+            "UPDATE calls SET response_json='[true]' WHERE role='option_verifier'"
+        )
+
+    result = json.loads(
+        cli(tmp_path, "validate", "--item-id", receipt["item_id"]).stdout
+    )
+    assert result["labels"]["mcq_eligible"] is False
+    assert all(row["accepted"] is False for row in result["distractors"])
+    assert all(
+        "option_verdict_call_receipt_missing" in row["reasons"]
+        for row in result["distractors"]
+    )
+
+
+def test_validation_rejects_incomplete_option_receipt_response(
+    tmp_path: Path,
+) -> None:
+    receipt = smoke(tmp_path, "incomplete-option-response-run")
+    with database(tmp_path) as connection:
+        connection.execute(
+            """UPDATE calls SET response_json='{"contradiction_established":true}'
+            WHERE role='option_verifier'"""
+        )
+
+    result = json.loads(
+        cli(tmp_path, "validate", "--item-id", receipt["item_id"]).stdout
+    )
+    assert result["labels"]["mcq_eligible"] is False
+    assert all(row["accepted"] is False for row in result["distractors"])
+    assert all(
+        "option_verdict_call_receipt_missing" in row["reasons"]
+        for row in result["distractors"]
+    )
+
+
+def test_validation_accepts_complete_option_receipt_response(tmp_path: Path) -> None:
+    receipt = smoke(tmp_path, "complete-option-response-run")
+
+    result = json.loads(
+        cli(tmp_path, "validate", "--item-id", receipt["item_id"]).stdout
+    )
+    assert result["final_label"] == "machine_accepted_unverified"
+    assert result["labels"]["mcq_eligible"] is True
+    assert all(row["accepted"] is True for row in result["distractors"])
+
+
 def test_external_candidate_validation_cannot_change_stored_candidate_status(
     tmp_path: Path,
 ) -> None:
