@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "source-screening.v1.schema.json",
+  "title": "Arctic source-screening overlay revision 1",
+  "type": "object",
+  "required": [
+    "schema",
+    "run_id",
+    "policy_id",
+    "revision",
+    "supersedes",
+    "records",
+    "counts"
+  ],
+  "properties": {
+    "schema": {"const": "source-screening-overlay-v1"},
+    "run_id": {"type": "string"},
+    "policy_id": {"type": "string"},
+    "revision": {"type": "integer", "minimum": 1},
+    "supersedes": {"type": "object"},
+    "records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "candidate_key",
+          "access_state",
+          "decision",
+          "scientific_eligibility",
+          "geography_verdict",
+          "reason_code",
+          "evidence_passages",
+          "decision_method_version",
+          "correction_retraction"
+        ],
+        "properties": {
+          "scientific_eligibility": {
+            "enum": ["eligible", "excluded", "pending", "unreviewed"]
+          },
+          "geography_verdict": {"type": "string"},
+          "evidence_passages": {"type": "array"},
+          "decision_method_version": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "counts": {"type": "object"}
+  }
+}

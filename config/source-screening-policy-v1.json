@@ -1,0 +1,42 @@
+{
+  "schema": "source-screening-policy-v1",
+  "policy_id": "arctic-source-screening-r1-policy-v1",
+  "frozen_at_utc": "2026-09-12T03:20:00Z",
+  "source_protocol_id": "arctic-corpus-search-r1-protocol-v2",
+  "selection_size": 100,
+  "smoke_size": 10,
+  "selection_queues": [
+    "priority_seed_review",
+    "retrieval_review"
+  ],
+  "maximum_attempts_per_source": 3,
+  "maximum_bytes_per_source": 52428800,
+  "maximum_aggregate_new_bytes": 5368709120,
+  "maximum_network_seconds": 5400,
+  "minimum_seconds_between_requests": 1.1,
+  "request_timeout_seconds": 90,
+  "retry_http_statuses": [
+    429,
+    500,
+    502,
+    503,
+    504
+  ],
+  "full_text_media_types": [
+    "application/pdf",
+    "application/xml",
+    "text/xml"
+  ],
+  "selection_rule": "Collaborator seeds first, then article-type retrieval review in saved queue order.",
+  "decision_method_version": "codex-native-semantic-source-review-v1",
+  "constraints": [
+    "Metadata type and title terms do not establish scientific eligibility.",
+    "The source pass records geography separately from overall eligibility.",
+    "An eligible or excluded decision requires exact source-bound evidence.",
+    "An abstract or landing page is not full-text evidence.",
+    "Missing access remains pending and is not an exclusion.",
+    "Unknown correction or retraction coverage remains unknown.",
+    "Unattempted candidates remain source-unreviewed.",
+    "All selected records remain in the versioned overlay."
+  ]
+}

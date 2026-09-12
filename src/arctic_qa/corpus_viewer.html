@@ -75,11 +75,11 @@
     .count span { display: block; color: var(--muted); font-size: .77rem; text-transform: uppercase; letter-spacing: .04em; }
     .count strong { display: block; font-size: clamp(1.25rem, 2.6vw, 1.8rem); margin-top: .18rem; }
     .summary-label { color: var(--muted); font-size: .78rem; font-weight: 700; letter-spacing: .04em; margin: 1rem 0 .45rem; text-transform: uppercase; }
-    .metadata-panel { margin-bottom: 1rem; }
+    .metadata-panel, .source-panel { margin-bottom: 1rem; }
     .metadata-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
     .metadata-head p { color: var(--muted); margin: .3rem 0 0; }
-    .metadata-counts { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .55rem; margin-top: .9rem; }
-    .metadata-counts .count { background: var(--wash); }
+    .metadata-counts, .source-counts { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .55rem; margin-top: .9rem; }
+    .metadata-counts .count, .source-counts .count { background: var(--wash); }
     .stages { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .7rem; margin-top: .8rem; }
     .stage { border-top: 4px solid #9bb0b8; background: var(--wash); padding: .8rem; min-width: 0; }
     .stage p { color: var(--muted); font-size: .86rem; line-height: 1.45; margin: .5rem 0 0; }
@@ -111,7 +111,7 @@
     .sources li { margin: .2rem 0; }
     .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
     @media (max-width: 980px) {
-      .counts, .metadata-counts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .counts, .metadata-counts, .source-counts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .stages { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .readiness { grid-column: 1 / -1; }
       .filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -123,7 +123,7 @@
       header { padding: 1.3rem 0; }
       .notice, .section-head, .pager, .metadata-head { display: block; }
       .notice button, .section-head .badge { margin-top: .75rem; }
-      .counts, .metadata-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .counts, .metadata-counts, .source-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .stages, .filters { grid-template-columns: 1fr; }
       .filters .search { grid-column: auto; }
       .table-wrap { overflow: visible; }
@@ -162,6 +162,14 @@
         <span class="badge" id="metadata-state">Loading</span>
       </div>
       <div class="metadata-counts" id="metadata-counts" aria-label="Metadata disposition counts"></div>
+    </section>
+
+    <section class="panel source-panel" aria-labelledby="source-pass-title">
+      <div class="metadata-head">
+        <div><h2 id="source-pass-title">Bounded source eligibility pass</h2><p id="source-pass-detail">Loading source-pass state...</p><div class="meta" id="source-pass-run-meta"></div></div>
+        <span class="badge" id="source-pass-state">Loading</span>
+      </div>
+      <div class="source-counts" id="source-pass-counts" aria-label="Bounded source-pass counts"></div>
     </section>
 
     <div class="grid">
@@ -256,6 +264,8 @@
         const status = document.createElement('td'); status.dataset.label = 'Source state';
         const badge = text('span', label(record.eligibility), `badge ${record.eligibility}`); status.append(badge);
         if (record.pending_reason) status.append(text('div', label(record.pending_reason), 'subtle'));
+        if (record.source_geography) status.append(text('div', `Geography: ${label(record.source_geography)}`, 'subtle'));
+        if (record.source_pass_position) status.append(text('div', `Source pass item ${formatNumber(record.source_pass_position)}`, 'subtle'));
         const metadata = document.createElement('td'); metadata.dataset.label = 'Metadata'; metadata.className = 'reason';
         metadata.append(text('span', label(record.metadata_disposition || 'not_processed'), `badge ${record.metadata_disposition || 'unknown'}`));
         metadata.append(text('div', record.metadata_reason_code ? label(record.metadata_reason_code) : 'No metadata disposition recorded', 'subtle'));
@@ -276,6 +286,8 @@
           details.append(text('div', record.evidence_quote, 'subtle'));
           evidence.append(details);
         }
+        if (record.source_decision_method) evidence.append(text('div', `Method: ${label(record.source_decision_method)}`, 'subtle'));
+        if (record.source_limitations?.length) evidence.append(text('div', `Limits: ${record.source_limitations.join(' ')}`, 'subtle'));
         const links = document.createElement('td'); links.dataset.label = 'Links'; links.className = 'links';
         const doi = record.doi ? safeLink(`https://doi.org/${encodeURIComponent(record.doi)}`, 'DOI') : null;
         const repository = safeLink(record.repository_url || record.landing_url, record.repository_url ? 'Repository' : 'Metadata');
@@ -311,6 +323,15 @@
         $('metadata-counts').replaceChildren(...metadataCountOrder.map((name) => {
           const box = document.createElement('div'); box.className = 'count';
           box.append(text('span', label(name)), text('strong', formatNumber(data.metadata_counts?.[name]))); return box;
+        }));
+        const sourcePass = data.source_pass;
+        setBadge($('source-pass-state'), sourcePass.state || sourcePass.telemetry);
+        $('source-pass-detail').textContent = sourcePass.message;
+        $('source-pass-run-meta').textContent = `Run ${sourcePass.run_id || 'not selected'} | Policy ${sourcePass.policy_id || 'not selected'} | Processed ${formatNumber(sourcePass.counts?.processed)} of ${formatNumber(sourcePass.counts?.selected)} | Started ${dateText(sourcePass.started_at_utc)} | Completed ${dateText(sourcePass.completed_at_utc)} | Producer ${sourcePass.producer_code_commit || 'not available'}`;
+        const sourceCountOrder = ['attempted', 'retrieved', 'full_text_retrieved', 'eligible', 'excluded', 'pending', 'unattempted'];
+        $('source-pass-counts').replaceChildren(...sourceCountOrder.map((name) => {
+          const box = document.createElement('div'); box.className = 'count';
+          box.append(text('span', label(name)), text('strong', formatNumber(data.source_pass_counts?.[name]))); return box;
         }));
         setBadge($('discovery-verdict'), data.readiness.metadata_discovery.verdict);
         $('discovery-condition').textContent = data.readiness.metadata_discovery.completion_condition;

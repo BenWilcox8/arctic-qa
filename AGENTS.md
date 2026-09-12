@@ -3,6 +3,7 @@
 This file is the project's committed home for project-intrinsic agent knowledge: build, test, release, architecture, and sharp-edge notes that should travel with the code.
 
 - Read `docs/CORPUS_VIEWER.md` before you operate the read-only corpus-stage monitor.
+- Read `docs/SOURCE_SCREENING_PASS.md` before you operate a bounded source pass.
 
 ## Maintaining this file
 

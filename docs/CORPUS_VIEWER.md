@@ -20,6 +20,7 @@ PYTHONPATH=src python -m arctic_qa corpus-view \
   --progress-file /private/runtime/path/corpus-progress-v1.json \
   --zotero-receipts-dir /private/zotero/receipts \
   --metadata-run-dir /private/metadata-prefilter/run-RUN_ID \
+  --source-run-dir /private/source-screening/run-RUN_ID \
   --host 127.0.0.1 \
   --port 8787 \
   --process-stale-after-seconds 300
@@ -46,6 +47,11 @@ It is independent of the longer historical artifact freshness window.
 The optional metadata run directory contains producer progress, dispositions, and a final receipt.
 The viewer uses the completed receipt as the authority for completion.
 It keeps metadata disposition separate from source eligibility.
+
+The optional source run directory contains live progress and versioned completion records.
+The viewer follows hash-checked pointers to the current source overlay and receipt.
+It refreshes its cache when a pointer or progress record changes.
+It does not expose stored source files or extracted text.
 
 ## Stage completion
 

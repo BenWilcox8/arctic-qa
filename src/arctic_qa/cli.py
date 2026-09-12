@@ -31,6 +31,7 @@ from .metadata_prefilter import run_metadata_prefilter
 from .paths import DEFAULT_DATA_ROOT, DataPaths
 from .providers import make_provider
 from .screening import screen_source
+from .source_pass import run_source_pass
 from .storage import fetch_source, store_original
 from .util import atomic_json, canonical_json
 from .validation import validate_candidate
@@ -69,6 +70,7 @@ def parser() -> argparse.ArgumentParser:
     viewer.add_argument("--progress-file", type=Path)
     viewer.add_argument("--zotero-receipts-dir", type=Path)
     viewer.add_argument("--metadata-run-dir", type=Path)
+    viewer.add_argument("--source-run-dir", type=Path)
     viewer.add_argument("--host", default="127.0.0.1")
     viewer.add_argument("--port", type=int, default=8787)
     viewer.add_argument("--stale-after-seconds", type=int, default=86400)
@@ -86,6 +88,24 @@ def parser() -> argparse.ArgumentParser:
     metadata.add_argument("--run-id", required=True)
     metadata.add_argument("--code-commit", required=True)
     metadata.add_argument("--viewer-progress-file", type=Path)
+
+    source_pass = commands.add_parser(
+        "source-pass",
+        help="Run one bounded, source-bound eligibility pass.",
+    )
+    source_pass.add_argument(
+        "--action", choices=("prepare", "smoke", "continue", "decide"), required=True
+    )
+    source_pass.add_argument("--queue-file", type=Path, required=True)
+    source_pass.add_argument("--candidates-file", type=Path, required=True)
+    source_pass.add_argument("--protocol-file", type=Path, required=True)
+    source_pass.add_argument("--prior-screening-file", type=Path, required=True)
+    source_pass.add_argument("--policy-file", type=Path, required=True)
+    source_pass.add_argument("--output-dir", type=Path, required=True)
+    source_pass.add_argument("--run-id", required=True)
+    source_pass.add_argument("--code-commit", required=True)
+    source_pass.add_argument("--viewer-progress-file", type=Path)
+    source_pass.add_argument("--decisions-file", type=Path)
 
     discover = commands.add_parser(
         "discover", help="Discover and deduplicate source metadata."
@@ -215,6 +235,7 @@ def main(argv: list[str] | None = None) -> int:
                 progress_file=args.progress_file,
                 zotero_receipts_dir=args.zotero_receipts_dir,
                 metadata_run_dir=args.metadata_run_dir,
+                source_run_dir=args.source_run_dir,
                 host=args.host,
                 port=args.port,
                 stale_after_seconds=args.stale_after_seconds,
@@ -233,6 +254,23 @@ def main(argv: list[str] | None = None) -> int:
                     run_id=args.run_id,
                     code_commit=args.code_commit,
                     viewer_progress_file=args.viewer_progress_file,
+                ),
+            )
+        if args.command == "source-pass":
+            return _emit(
+                args,
+                run_source_pass(
+                    action=args.action,
+                    queue_file=args.queue_file,
+                    candidates_file=args.candidates_file,
+                    protocol_file=args.protocol_file,
+                    prior_screening_file=args.prior_screening_file,
+                    policy_file=args.policy_file,
+                    output_dir=args.output_dir,
+                    run_id=args.run_id,
+                    code_commit=args.code_commit,
+                    viewer_progress_file=args.viewer_progress_file,
+                    decisions_file=args.decisions_file,
                 ),
             )
         paths, db = _open(args)

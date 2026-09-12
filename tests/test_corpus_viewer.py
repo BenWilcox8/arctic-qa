@@ -13,6 +13,7 @@ import pytest
 import arctic_qa.corpus_viewer as corpus_viewer
 from arctic_qa.corpus_viewer import CorpusArtifacts, CorpusServer, _safe_json_bytes
 from arctic_qa.metadata_prefilter import run_metadata_prefilter
+from arctic_qa.util import sha256_file
 
 
 REAL_CORPUS = Path("/mnt/crdata/research-abstention/arctic-qa/corpus-search-r1")
@@ -118,6 +119,120 @@ def fixture_metadata_run(root: Path) -> Path:
         code_commit="deadbeef",
     )
     return output
+
+
+def write_source_revision(
+    source_run: Path, *, revision: int, eligibility: str = "eligible"
+) -> None:
+    decision = "include" if eligibility == "eligible" else "exclude"
+    counts = {
+        "selected": 2,
+        "processed": 2,
+        "attempted": 1,
+        "retrieved": 1,
+        "full_text_retrieved": 1,
+        "eligible": int(eligibility == "eligible"),
+        "excluded": int(eligibility == "excluded"),
+        "pending": 0,
+        "unattempted": 1,
+    }
+    overlay = {
+        "schema": "source-screening-overlay-v1",
+        "run_id": "source-test-r1",
+        "policy_id": "source-test-policy-v1",
+        "revision": revision,
+        "records": [
+            {
+                "candidate_key": "10.1234/test",
+                "position": 1,
+                "decision": decision,
+                "scientific_eligibility": eligibility,
+                "geography_verdict": "core" if eligibility == "eligible" else "mixed",
+                "access_state": "retrieved_full_text",
+                "reason_code": f"source_supported_{eligibility}",
+                "decision_method_version": "codex-native-semantic-source-review-v1",
+                "evidence_passages": [
+                    {
+                        "quote": "<script>source evidence</script>",
+                        "locator": {
+                            "section": "methods",
+                            "page": 2,
+                            "start_offset": 10,
+                            "end_offset": 42,
+                        },
+                    }
+                ],
+                "limitations": ["Correction coverage is unknown."],
+            },
+            {
+                "candidate_key": "s2:second",
+                "position": 2,
+                "decision": "unreviewed",
+                "scientific_eligibility": "unreviewed",
+                "geography_verdict": "unresolved",
+                "access_state": "unattempted_no_open_access_url",
+                "reason_code": "no_open_access_source_url",
+                "decision_method_version": None,
+                "evidence_passages": [],
+                "limitations": ["No source review was completed."],
+            },
+        ],
+        "counts": counts,
+    }
+    overlay_path = source_run / f"source-screening-overlay-r{revision}.json"
+    write_json(overlay_path, overlay)
+    receipt = {
+        "schema": "source-screening-run-receipt-v1",
+        "state": "completed",
+        "run_id": "source-test-r1",
+        "policy_id": "source-test-policy-v1",
+        "producer_code_commit": "deadbeef",
+        "completed_at_utc": datetime.now(UTC).isoformat(),
+        "selection_size": 2,
+        "overlay_revision": revision,
+        "overlay_file": overlay_path.name,
+        "overlay_sha256": sha256_file(overlay_path),
+        "counts": counts,
+    }
+    receipt_path = source_run / f"run-receipt-r{revision}.json"
+    write_json(receipt_path, receipt)
+    write_json(
+        source_run / "overlay-current.json",
+        {
+            "revision": revision,
+            "file": overlay_path.name,
+            "sha256": sha256_file(overlay_path),
+        },
+    )
+    write_json(
+        source_run / "run-receipt-current.json",
+        {
+            "revision": revision,
+            "file": receipt_path.name,
+            "sha256": sha256_file(receipt_path),
+        },
+    )
+
+
+def fixture_source_run(root: Path) -> Path:
+    source_run = root / "source" / "run-source-test-r1"
+    write_json(
+        source_run / "progress.json",
+        {
+            "schema": "source-screening-progress-v1",
+            "state": "completed",
+            "run_id": "source-test-r1",
+            "policy_id": "source-test-policy-v1",
+            "producer_code_commit": "deadbeef",
+            "started_at_utc": datetime.now(UTC).isoformat(),
+            "updated_at_utc": datetime.now(UTC).isoformat(),
+            "completed_at_utc": datetime.now(UTC).isoformat(),
+            "counts": {},
+            "message": "Fixture source pass complete.",
+        },
+    )
+    write_source_revision(source_run, revision=1)
+    return source_run
 
 
 @pytest.fixture(scope="module")
@@ -281,6 +396,81 @@ def test_metadata_results_are_separate_and_filterable(tmp_path: Path) -> None:
     )
     assert unresolved["total"] == 1
     assert unresolved["records"][0]["eligibility"] == "unreviewed"
+
+
+def test_completed_source_overlay_is_visible_and_filterable(tmp_path: Path) -> None:
+    fixture_corpus(tmp_path)
+    source_run = fixture_source_run(tmp_path)
+    artifacts = CorpusArtifacts(
+        tmp_path,
+        "test-run",
+        tmp_path / "runtime",
+        source_run_dir=source_run,
+    )
+    state = artifacts.state()
+    assert state["source_pass"]["state"] == "completed"
+    assert state["source_pass"]["overlay_revision"] == 1
+    assert state["source_pass_counts"]["eligible"] == 1
+    eligible = artifacts.candidates({"eligibility": ["eligible"], "page_size": ["10"]})
+    assert eligible["total"] == 1
+    record = eligible["records"][0]
+    assert record["source_geography"] == "core"
+    assert record["source_pass_position"] == 1
+    assert record["source_decision_method"] == (
+        "codex-native-semantic-source-review-v1"
+    )
+    assert b"<script>" not in _safe_json_bytes(eligible)
+
+
+def test_source_overlay_revision_refreshes_changed_decision(tmp_path: Path) -> None:
+    fixture_corpus(tmp_path)
+    source_run = fixture_source_run(tmp_path)
+    artifacts = CorpusArtifacts(
+        tmp_path,
+        "test-run",
+        tmp_path / "runtime",
+        source_run_dir=source_run,
+    )
+    assert (
+        artifacts.candidates({"q": ["10.1234/test"]})["records"][0]["eligibility"]
+        == "eligible"
+    )
+    write_source_revision(source_run, revision=2, eligibility="excluded")
+    changed = artifacts.candidates({"q": ["10.1234/test"]})["records"][0]
+    assert changed["eligibility"] == "excluded"
+    assert changed["source_geography"] == "mixed"
+    assert artifacts.state()["source_pass"]["overlay_revision"] == 2
+
+
+def test_stale_source_progress_does_not_claim_a_live_process(tmp_path: Path) -> None:
+    fixture_corpus(tmp_path)
+    source_run = tmp_path / "source" / "run-source-test-r1"
+    write_json(
+        source_run / "progress.json",
+        {
+            "schema": "source-screening-progress-v1",
+            "state": "running",
+            "run_id": "source-test-r1",
+            "policy_id": "source-test-policy-v1",
+            "producer_code_commit": "deadbeef",
+            "started_at_utc": (datetime.now(UTC) - timedelta(hours=2)).isoformat(),
+            "updated_at_utc": (datetime.now(UTC) - timedelta(hours=2)).isoformat(),
+            "completed_at_utc": None,
+            "counts": {"selected": 100, "processed": 3},
+            "message": "Old fixture observation.",
+        },
+    )
+    artifacts = CorpusArtifacts(
+        tmp_path,
+        "test-run",
+        tmp_path / "runtime",
+        source_run_dir=source_run,
+        process_stale_after_seconds=60,
+    )
+    source = artifacts.state()["source_pass"]
+    assert source["telemetry"] == "stale"
+    assert source["state"] is None
+    assert source["last_observed_state"] == "running"
 
 
 def test_persistent_cache_does_not_reread_discovery_ledger(

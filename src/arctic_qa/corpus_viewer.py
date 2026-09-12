@@ -29,7 +29,7 @@ PENDING_FILTERS = {
 }
 PAGE_SIZES = {10, 25, 50, 100}
 METADATA_DISPOSITION_FILTERS = {"all", *DISPOSITIONS}
-CACHE_SCHEMA_VERSION = "corpus-view-cache-v2"
+CACHE_SCHEMA_VERSION = "corpus-view-cache-v3"
 SCHEMA = """
 CREATE TABLE candidates (
     candidate_key TEXT PRIMARY KEY,
@@ -60,7 +60,12 @@ CREATE TABLE candidates (
     metadata_flags_json TEXT,
     metadata_title_terms_json TEXT,
     metadata_policy_id TEXT,
-    metadata_run_id TEXT
+    metadata_run_id TEXT,
+    source_geography TEXT,
+    source_pass_run_id TEXT,
+    source_pass_position INTEGER,
+    source_decision_method TEXT,
+    source_limitations_json TEXT
 );
 CREATE INDEX candidates_title_search ON candidates(title_search);
 CREATE INDEX candidates_doi ON candidates(doi);
@@ -132,6 +137,7 @@ class CorpusArtifacts:
         progress_file: Path | None = None,
         zotero_receipts_dir: Path | None = None,
         metadata_run_dir: Path | None = None,
+        source_run_dir: Path | None = None,
         stale_after_seconds: int = 86400,
         process_stale_after_seconds: int = 300,
     ) -> None:
@@ -150,6 +156,7 @@ class CorpusArtifacts:
             zotero_receipts_dir.resolve() if zotero_receipts_dir else None
         )
         self.metadata_run_dir = metadata_run_dir.resolve() if metadata_run_dir else None
+        self.source_run_dir = source_run_dir.resolve() if source_run_dir else None
         self.stale_after_seconds = stale_after_seconds
         self.process_stale_after_seconds = process_stale_after_seconds
         self.run_dir = self.corpus_root / "ledgers" / f"run-{run_id}"
@@ -185,6 +192,25 @@ class CorpusArtifacts:
             return None
         return self.metadata_run_dir / "metadata-dispositions.ndjson"
 
+    def _source_progress_file(self) -> Path | None:
+        return self.source_run_dir / "progress.json" if self.source_run_dir else None
+
+    def _source_pointer_file(self, name: str) -> Path | None:
+        return self.source_run_dir / name if self.source_run_dir else None
+
+    def _source_pointed_file(self, name: str) -> Path | None:
+        pointer_path = self._source_pointer_file(name)
+        if pointer_path is None or not pointer_path.is_file():
+            return None
+        pointer = _read_json(pointer_path)
+        file_name = str(pointer.get("file") or "")
+        if not re.fullmatch(r"[A-Za-z0-9._-]+\.json", file_name):
+            raise ValueError(f"the {name} source-pass pointer is invalid")
+        target = self.source_run_dir / file_name  # type: ignore[operator]
+        if not target.is_file() or sha256_file(target) != pointer.get("sha256"):
+            raise ValueError(f"the {name} source-pass target is unavailable or changed")
+        return target
+
     def _base_fingerprint(self) -> str:
         return f"{CACHE_SCHEMA_VERSION}:{_file_fingerprint(self.candidates_file)}"
 
@@ -199,6 +225,9 @@ class CorpusArtifacts:
             _file_fingerprint(self._metadata_progress_file()),
             _file_fingerprint(self._metadata_receipt_file()),
             _file_fingerprint(self._metadata_dispositions_file()),
+            _file_fingerprint(self._source_progress_file()),
+            _file_fingerprint(self._source_pointer_file("overlay-current.json")),
+            _file_fingerprint(self._source_pointer_file("run-receipt-current.json")),
         ]
         return hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
@@ -382,7 +411,9 @@ class CorpusArtifacts:
                 metadata_reason_code=NULL,metadata_evidence_field=NULL,
                 metadata_evidence_value=NULL,metadata_queue=NULL,
                 metadata_flags_json=NULL,metadata_title_terms_json=NULL,
-                metadata_policy_id=NULL,metadata_run_id=NULL"""
+                metadata_policy_id=NULL,metadata_run_id=NULL,source_geography=NULL,
+                source_pass_run_id=NULL,source_pass_position=NULL,
+                source_decision_method=NULL,source_limitations_json=NULL"""
             )
             for item in screening:
                 decision = str(item.get("decision") or "pending")
@@ -416,11 +447,94 @@ class CorpusArtifacts:
                     ),
                 )
             self._apply_metadata_overlay(connection)
+            self._apply_source_overlay(connection, links)
             connection.execute(
                 "INSERT OR REPLACE INTO cache_meta (key,value) VALUES ('overlay_fingerprint',?)",
                 (fingerprint,),
             )
             connection.commit()
+
+    def _apply_source_overlay(
+        self, connection: sqlite3.Connection, links: dict[str, str]
+    ) -> None:
+        overlay_file = self._source_pointed_file("overlay-current.json")
+        receipt_file = self._source_pointed_file("run-receipt-current.json")
+        if overlay_file is None and receipt_file is None:
+            return
+        if overlay_file is None or receipt_file is None:
+            raise ValueError("the source-pass completion pointers are incomplete")
+        overlay = _read_json(overlay_file)
+        receipt = _read_json(receipt_file)
+        if (
+            overlay.get("schema") != "source-screening-overlay-v1"
+            or receipt.get("schema") != "source-screening-run-receipt-v1"
+            or receipt.get("state") != "completed"
+            or receipt.get("overlay_sha256") != sha256_file(overlay_file)
+        ):
+            raise ValueError("the source-pass receipt or overlay is invalid")
+        records = overlay.get("records")
+        if not isinstance(records, list) or len(records) != receipt.get(
+            "selection_size"
+        ):
+            raise ValueError("the source-pass overlay count does not match its receipt")
+        seen: set[str] = set()
+        for item in records:
+            key = str(item.get("candidate_key") or "")
+            if not key or key in seen:
+                raise ValueError(
+                    "the source-pass overlay has a missing or repeated key"
+                )
+            eligibility = item.get("scientific_eligibility")
+            if eligibility not in {"eligible", "excluded", "pending", "unreviewed"}:
+                raise ValueError("the source-pass eligibility state is unsupported")
+            reason = str(item.get("reason_code") or "source_reason_not_recorded")
+            passages = item.get("evidence_passages") or []
+            first = passages[0] if passages else {}
+            locator = first.get("locator") or {}
+            locator_text = None
+            if locator:
+                section = locator.get("section") or "source text"
+                page = locator.get("page")
+                offsets = (
+                    f"offsets {locator.get('start_offset')}-{locator.get('end_offset')}"
+                )
+                locator_text = (
+                    f"{section}; page {page}; {offsets}"
+                    if page
+                    else f"{section}; {offsets}"
+                )
+            cursor = connection.execute(
+                """UPDATE candidates SET decision=?,eligibility=?,pending_reason=?,
+                access_status=?,reason_code=?,evidence_locator=?,evidence_quote=?,
+                selected=1,zotero_url=COALESCE(?,zotero_url),source_geography=?,
+                source_pass_run_id=?,source_pass_position=?,source_decision_method=?,
+                source_limitations_json=? WHERE candidate_key=?""",
+                (
+                    item.get("decision") or eligibility,
+                    eligibility,
+                    _pending_reason(reason)
+                    if eligibility == "pending"
+                    else "unreviewed"
+                    if eligibility == "unreviewed"
+                    else None,
+                    item.get("access_state"),
+                    reason,
+                    locator_text,
+                    first.get("quote"),
+                    links.get(key.casefold()),
+                    item.get("geography_verdict"),
+                    overlay.get("run_id"),
+                    item.get("position"),
+                    item.get("decision_method_version"),
+                    json.dumps(item.get("limitations") or [], ensure_ascii=False),
+                    key,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError(f"source-pass key does not match discovery: {key}")
+            seen.add(key)
+        if overlay.get("counts") != receipt.get("counts"):
+            raise ValueError("the source-pass counts do not match their receipt")
 
     def refresh(self) -> None:
         with self._lock:
@@ -495,6 +609,7 @@ class CorpusArtifacts:
                 "started_at_utc": value.get("started_at_utc"),
                 "completed_at_utc": value.get("completed_at_utc"),
                 "disposition_counts": value.get("disposition_counts"),
+                "source_counts": value.get("source_counts"),
             }
         except (OSError, ValueError, json.JSONDecodeError, TypeError) as error:
             return {
@@ -600,6 +715,88 @@ class CorpusArtifacts:
                 "message": f"Metadata-processing record error: {error}",
             }
 
+    def _source_progress(self) -> dict[str, Any]:
+        absent = {
+            "schema": "source-screening-progress-v1",
+            "telemetry": "absent",
+            "state": "not_started",
+            "run_id": None,
+            "policy_id": None,
+            "producer_code_commit": None,
+            "started_at_utc": None,
+            "updated_at_utc": None,
+            "completed_at_utc": None,
+            "counts": {},
+            "message": "No bounded source pass is selected.",
+        }
+        try:
+            receipt_file = self._source_pointed_file("run-receipt-current.json")
+            if receipt_file is not None:
+                receipt = _read_json(receipt_file)
+                if (
+                    receipt.get("schema") != "source-screening-run-receipt-v1"
+                    or receipt.get("state") != "completed"
+                ):
+                    raise ValueError("the source-pass receipt is invalid")
+                progress_file = self._source_progress_file()
+                progress = (
+                    _read_json(progress_file)
+                    if progress_file and progress_file.is_file()
+                    else {}
+                )
+                return {
+                    **absent,
+                    "telemetry": "observed",
+                    "state": "completed",
+                    "run_id": receipt.get("run_id"),
+                    "policy_id": receipt.get("policy_id"),
+                    "producer_code_commit": receipt.get("producer_code_commit"),
+                    "started_at_utc": progress.get("started_at_utc"),
+                    "updated_at_utc": receipt.get("completed_at_utc"),
+                    "completed_at_utc": receipt.get("completed_at_utc"),
+                    "counts": receipt.get("counts") or {},
+                    "overlay_revision": receipt.get("overlay_revision"),
+                    "message": "The durable source-pass receipt is complete.",
+                }
+            progress_file = self._source_progress_file()
+            if progress_file is None or not progress_file.is_file():
+                return absent
+            progress = _read_json(progress_file)
+            if progress.get("schema") != "source-screening-progress-v1":
+                raise ValueError("the source-pass progress schema is unsupported")
+            state = progress.get("state")
+            if state not in {"prepared", "running", "paused", "error", "completed"}:
+                raise ValueError("the source-pass progress state is unsupported")
+            updated_text = progress.get("updated_at_utc")
+            if not isinstance(updated_text, str):
+                raise ValueError("the source-pass progress timestamp is missing")
+            updated = datetime.fromisoformat(updated_text.replace("Z", "+00:00"))
+            if updated.tzinfo is None:
+                raise ValueError("the source-pass progress timestamp has no time zone")
+            age = (datetime.now(UTC) - updated.astimezone(UTC)).total_seconds()
+            if age > self.process_stale_after_seconds and state != "completed":
+                return {
+                    **absent,
+                    "telemetry": "stale",
+                    "state": None,
+                    "last_observed_state": state,
+                    "run_id": progress.get("run_id"),
+                    "policy_id": progress.get("policy_id"),
+                    "producer_code_commit": progress.get("producer_code_commit"),
+                    "started_at_utc": progress.get("started_at_utc"),
+                    "updated_at_utc": updated_text,
+                    "counts": progress.get("counts") or {},
+                    "message": "The source-pass progress record is stale. Current state is unknown.",
+                }
+            return {**absent, **progress, "telemetry": "observed"}
+        except (OSError, ValueError, json.JSONDecodeError, TypeError) as error:
+            return {
+                **absent,
+                "telemetry": "invalid",
+                "state": None,
+                "message": f"Source-pass record error: {error}",
+            }
+
     def _artifact_rows(self) -> list[dict[str, Any]]:
         paths = [
             ("Protocol", self.protocol_file),
@@ -611,6 +808,12 @@ class CorpusArtifacts:
             ("Metadata progress", self._metadata_progress_file()),
             ("Metadata dispositions", self._metadata_dispositions_file()),
             ("Metadata receipt", self._metadata_receipt_file()),
+            ("Source-pass progress", self._source_progress_file()),
+            ("Source-pass overlay", self._source_pointer_file("overlay-current.json")),
+            (
+                "Source-pass receipt",
+                self._source_pointer_file("run-receipt-current.json"),
+            ),
         ]
         rows = []
         for label, path in paths:
@@ -633,6 +836,7 @@ class CorpusArtifacts:
         self.refresh()
         artifacts = self._artifact_rows()
         metadata = self._metadata_progress()
+        source_pass = self._source_progress()
         process = self._progress()
         if (
             metadata.get("state") == "completed"
@@ -652,6 +856,25 @@ class CorpusArtifacts:
                 "started_at_utc": metadata.get("started_at_utc"),
                 "completed_at_utc": metadata.get("completed_at_utc"),
                 "disposition_counts": metadata.get("disposition_counts"),
+            }
+        if (
+            source_pass.get("state") == "completed"
+            and process.get("stage") == "source_screening"
+        ):
+            process = {
+                "schema": "corpus-progress-v1",
+                "telemetry": "observed",
+                "state": "completed",
+                "stage": "source_screening",
+                "updated_at_utc": source_pass.get("completed_at_utc"),
+                "message": "The bounded source pass is complete under its durable receipt.",
+                "run_id": source_pass.get("run_id"),
+                "policy_id": source_pass.get("policy_id"),
+                "processed": (source_pass.get("counts") or {}).get("processed"),
+                "total": (source_pass.get("counts") or {}).get("selected"),
+                "started_at_utc": source_pass.get("started_at_utc"),
+                "completed_at_utc": source_pass.get("completed_at_utc"),
+                "source_counts": source_pass.get("counts") or {},
             }
         available_dates = [
             row["updated_at_utc"]
@@ -681,6 +904,7 @@ class CorpusArtifacts:
             },
             "progress": process,
             "metadata_processing": metadata,
+            "source_pass": source_pass,
             "artifacts": artifacts,
             "data_revision": self._small_fingerprint or self._base_fingerprint(),
             "readiness": {
@@ -710,7 +934,7 @@ class CorpusArtifacts:
             counts = connection.execute(
                 """SELECT COUNT(*) discovered,
                 SUM(selected) selected,
-                SUM(CASE WHEN access_status='retrieved_original_pdf' THEN 1 ELSE 0 END) retrieved,
+                SUM(CASE WHEN access_status='retrieved_original_pdf' OR access_status LIKE 'retrieved_%' THEN 1 ELSE 0 END) retrieved,
                 SUM(CASE WHEN eligibility='eligible' THEN 1 ELSE 0 END) eligible,
                 SUM(CASE WHEN eligibility='excluded' THEN 1 ELSE 0 END) excluded,
                 SUM(CASE WHEN eligibility='pending' THEN 1 ELSE 0 END) pending,
@@ -739,6 +963,7 @@ class CorpusArtifacts:
         discovered = int(counts["discovered"] or 0)
         payload["counts"] = {key: int(counts[key] or 0) for key in counts.keys()}
         payload["metadata_counts"] = metadata.get("disposition_counts") or {}
+        payload["source_pass_counts"] = source_pass.get("counts") or {}
         payload["protocol"] = {
             "protocol_id": protocol.get("protocol_id"),
             "frozen_at_utc": protocol.get("frozen_at_utc"),
@@ -783,14 +1008,35 @@ class CorpusArtifacts:
             {
                 "id": "source_retrieval",
                 "name": "3. Source retrieval",
-                "state": "partial",
-                "detail": f"{int(counts['retrieved'] or 0)} selected sources have verified original PDFs. Missing access remains pending.",
+                "state": source_pass.get("state")
+                if source_pass.get("state")
+                in {"running", "paused", "error", "completed"}
+                else "partial",
+                "detail": (
+                    f"Bounded pass {source_pass.get('run_id')}: "
+                    f"{(source_pass.get('counts') or {}).get('retrieved', 0)} retrieved and "
+                    f"{(source_pass.get('counts') or {}).get('unattempted', 0)} unattempted. "
+                    "Missing access remains separate from scientific exclusion."
+                    if source_pass.get("run_id")
+                    else f"{int(counts['retrieved'] or 0)} selected sources have verified original PDFs. Missing access remains pending."
+                ),
             },
             {
                 "id": "eligibility_screening",
                 "name": "4. Scientific eligibility",
-                "state": "partial",
-                "detail": f"{int(counts['eligible'] or 0)} eligible, {int(counts['excluded'] or 0)} excluded, {int(counts['pending'] or 0)} pending, and {int(counts['unreviewed'] or 0)} unreviewed.",
+                "state": source_pass.get("state")
+                if source_pass.get("state")
+                in {"running", "paused", "error", "completed"}
+                else "partial",
+                "detail": (
+                    f"Source pass: {(source_pass.get('counts') or {}).get('eligible', 0)} eligible, "
+                    f"{(source_pass.get('counts') or {}).get('excluded', 0)} excluded, "
+                    f"{(source_pass.get('counts') or {}).get('pending', 0)} pending, and "
+                    f"{(source_pass.get('counts') or {}).get('unattempted', 0)} unattempted. "
+                    "Geography is one separate criterion."
+                    if source_pass.get("run_id")
+                    else f"{int(counts['eligible'] or 0)} eligible, {int(counts['excluded'] or 0)} excluded, {int(counts['pending'] or 0)} pending, and {int(counts['unreviewed'] or 0)} unreviewed."
+                ),
             },
             {
                 "id": "corpus_freeze",
@@ -861,6 +1107,8 @@ class CorpusArtifacts:
                 ,metadata_disposition,metadata_reason_code,metadata_evidence_field,
                 metadata_evidence_value,metadata_queue,metadata_flags_json,
                 metadata_title_terms_json,metadata_policy_id,metadata_run_id
+                ,source_geography,source_pass_run_id,source_pass_position,
+                source_decision_method,source_limitations_json
                 FROM candidates{clause}
                 ORDER BY CASE eligibility WHEN 'eligible' THEN 0 WHEN 'excluded' THEN 1
                 WHEN 'pending' THEN 2 ELSE 3 END, title_search, candidate_key
@@ -878,6 +1126,8 @@ class CorpusArtifacts:
             item["metadata_title_terms"] = (
                 json.loads(title_terms) if title_terms else []
             )
+            limitations = item.pop("source_limitations_json")
+            item["source_limitations"] = json.loads(limitations) if limitations else []
             records.append(item)
         return {
             "page": page,
@@ -985,6 +1235,7 @@ def serve_corpus_viewer(
     progress_file: Path | None,
     zotero_receipts_dir: Path | None,
     metadata_run_dir: Path | None,
+    source_run_dir: Path | None,
     host: str,
     port: int,
     stale_after_seconds: int,
@@ -999,6 +1250,7 @@ def serve_corpus_viewer(
         progress_file=progress_file,
         zotero_receipts_dir=zotero_receipts_dir,
         metadata_run_dir=metadata_run_dir,
+        source_run_dir=source_run_dir,
         stale_after_seconds=stale_after_seconds,
         process_stale_after_seconds=process_stale_after_seconds,
     )
@@ -1023,6 +1275,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--progress-file", type=Path)
     parser.add_argument("--zotero-receipts-dir", type=Path)
     parser.add_argument("--metadata-run-dir", type=Path)
+    parser.add_argument("--source-run-dir", type=Path)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--stale-after-seconds", type=int, default=86400)
@@ -1035,6 +1288,7 @@ def main(argv: list[str] | None = None) -> int:
         progress_file=args.progress_file,
         zotero_receipts_dir=args.zotero_receipts_dir,
         metadata_run_dir=args.metadata_run_dir,
+        source_run_dir=args.source_run_dir,
         host=args.host,
         port=args.port,
         stale_after_seconds=args.stale_after_seconds,
