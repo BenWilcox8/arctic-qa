@@ -169,7 +169,7 @@ def prepare_access_run(
         "limits": {
             key: value
             for key, value in policy.items()
-            if key.startswith(("maximum_", "minimum_", "workers"))
+            if key.startswith(("maximum_", "minimum_", "workers", "request_"))
         },
         "smoke_sizes": policy["smoke_sizes"],
         "reuse_source_run_dir": str(reuse_source_run_dir.resolve())
@@ -221,6 +221,7 @@ def _counts(
 ) -> dict[str, int]:
     states = Counter(str(row.get("access_state")) for row in receipts.values())
     counts = {state: int(states[state]) for state in sorted(STATES)}
+    counts["not_checked"] = int(manifest["target_total"]) - len(receipts)
     counts.update(
         {
             "target": int(manifest["target_total"]),
