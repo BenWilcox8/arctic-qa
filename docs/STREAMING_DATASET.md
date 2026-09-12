@@ -139,8 +139,12 @@ The broker rejects a paper family that changes its source version.
 It also rejects one source version assigned to two paper families.
 An eligibility job resumes without another call only when its exact request and response resolve to a completed receipt in the shared ledger.
 Standalone or fabricated eligibility jobs cannot skip the brokered eligibility call.
+Each resume reruns deterministic eligibility validation against the frozen full extraction and the broker receipt response.
+Saved job state and validation fields have no acceptance authority.
 Completed receipts are reused only after the broker validates that each immutable event remains present in its ledger.
 Ambiguous receipts stop the scheduler.
+An immutable-event failure republishes broker status with `halted` set to `true` and `integrity_valid` set to `false`.
+The broker observer updates streaming progress to bind that halted status.
 
 The scheduler records one accepted base question for each family only after at least three distractors pass all checks.
 MCQ variants do not increase that count.

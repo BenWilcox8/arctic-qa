@@ -9,6 +9,8 @@ from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
 
+import pytest
+
 from arctic_qa import cli as cli_module
 from arctic_qa.broker_provider import BrokerProvider
 from arctic_qa.db import Database
@@ -318,6 +320,28 @@ class ScriptedBrokerTransport:
         }
 
 
+class InvalidEligibilityEvidenceTransport(ScriptedBrokerTransport):
+    def post(self, model: str, method: str, body: dict) -> dict:
+        response = super().post(model, method, body)
+        schema = body.get("generationConfig", {}).get("responseJsonSchema", {})
+        if method == "generateContent" and "criteria" in schema.get("properties", {}):
+            payload = json.loads(
+                response["candidates"][0]["content"]["parts"][0]["text"]
+            )
+            geography = next(
+                row
+                for row in payload["criteria"]
+                if row["criterion_id"] == "study_geography"
+            )
+            geography["evidence"][0]["quote"] = (
+                "quote absent from the synthetic extraction"
+            )
+            response["candidates"][0]["content"]["parts"][0]["text"] = json.dumps(
+                payload
+            )
+        return response
+
+
 def shared_broker(tmp_path: Path, transport: ScriptedBrokerTransport):
     gate = tmp_path / "broker-gate.json"
     write_json(
@@ -452,6 +476,56 @@ def test_streaming_run_manifest_rejects_changed_resume_inputs(tmp_path: Path) ->
 
     assert result["code"] == "VALUEERROR"
     assert result["message"] == "the immutable streaming run inputs changed"
+
+
+def test_streaming_revalidates_brokered_eligibility_on_resume(tmp_path: Path) -> None:
+    access, eligibility = streaming_fixture(tmp_path)
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+    transport = InvalidEligibilityEvidenceTransport()
+    broker = shared_broker(tmp_path, transport)
+    provider = BrokerProvider(
+        broker=broker,
+        phase="live_test",
+        invocation_run_id="eligibility-tamper",
+    )
+    arguments = {
+        "db": database,
+        "namespace": paths.namespace,
+        "run_id": "eligibility-tamper",
+        "campaign_id": "eligibility-tamper-campaign",
+        "access_run_dir": access,
+        "eligibility_run_dir": eligibility,
+        "author": provider,
+        "verifier": provider,
+        "max_papers": 1,
+        **broker_eligibility_inputs(tmp_path),
+    }
+
+    with pytest.raises(ValueError, match="deterministic validation"):
+        run_stream(**arguments)
+    job_path = next(
+        path
+        for path in (eligibility / "jobs").glob("*.json")
+        if json.loads(path.read_text()).get("execution_authority")
+        == "shared_gemini_broker"
+    )
+    job = json.loads(job_path.read_text())
+    job["state"] = "completed"
+    job["validation"] = {
+        "valid": True,
+        "errors": [],
+        "decision": "eligible",
+        "resolved_evidence": [],
+    }
+    write_json(job_path, job)
+
+    with pytest.raises(ValueError, match="deterministic validation"):
+        run_stream(**arguments)
+
+    assert transport.methods.count("generateContent") == 1
+    assert broker.status()["generation_submissions"] == 1
 
 
 def test_streaming_uses_one_shared_broker_for_all_ten_stages(

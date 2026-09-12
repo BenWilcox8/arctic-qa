@@ -233,9 +233,12 @@ The `stream` command consumes completed article-access records.
 For each newly ready paper, it runs Gemini eligibility and immediately continues an eligible paper through validation and export.
 It resumes from an existing eligibility receipt without repeating the call only when that receipt resolves to the same immutable request in the shared ledger.
 Unbrokered eligibility records cannot skip the live eligibility stage.
+Each resume reruns deterministic eligibility validation from the frozen extraction and broker response.
+Saved eligibility state and validation fields have no acceptance authority.
 Offline mode uses fake response scripts.
 Live-test and production modes use only the shared Gemini broker.
 Brokered progress hash-links the invariant-checked broker status and budget policy after each ledger change.
+An immutable-event failure republishes an integrity-halted status and refreshes that progress link.
 The final progress record also hash-links the export manifest under the same campaign run ID.
 An immutable invocation manifest stops changed access, eligibility, provider, phase, or campaign inputs before another model call.
 

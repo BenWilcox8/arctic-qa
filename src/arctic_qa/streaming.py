@@ -114,11 +114,15 @@ def run_stream(
                 item.get("access_state") == "full_text_ready"
                 for item in access_items.values()
             ),
-            "eligible": sum(
+            "eligible": 0
+            if verifier_broker is not None
+            else sum(
                 (item.get("validation") or {}).get("decision") == "eligible"
                 for item in eligibility_jobs.values()
             ),
-            "rejected": sum(
+            "rejected": 0
+            if verifier_broker is not None
+            else sum(
                 (item.get("validation") or {}).get("decision")
                 in {"excluded", "uncertain"}
                 for item in eligibility_jobs.values()
@@ -138,6 +142,7 @@ def run_stream(
     }
     paper_results: list[dict[str, Any]] = []
     resumed_papers = 0
+    trusted_eligibility_decisions: dict[str, str] = {}
     for selected in selection:
         if counts["processed"] >= max_papers:
             break
@@ -195,25 +200,26 @@ def run_stream(
                 progress.error(candidate_key, access.get("title"), "eligibility", error)
                 raise
             eligibility_jobs[candidate_key] = eligibility
-            progress.set_count(
-                "eligible",
-                sum(
-                    (item.get("validation") or {}).get("decision") == "eligible"
-                    for item in eligibility_jobs.values()
-                ),
-            )
-            progress.set_count(
-                "rejected",
-                sum(
-                    (item.get("validation") or {}).get("decision")
-                    in {"excluded", "uncertain"}
-                    for item in eligibility_jobs.values()
-                ),
-            )
+            if verifier_broker is None:
+                progress.set_count(
+                    "eligible",
+                    sum(
+                        (item.get("validation") or {}).get("decision") == "eligible"
+                        for item in eligibility_jobs.values()
+                    ),
+                )
+                progress.set_count(
+                    "rejected",
+                    sum(
+                        (item.get("validation") or {}).get("decision")
+                        in {"excluded", "uncertain"}
+                        for item in eligibility_jobs.values()
+                    ),
+                )
         progress.write("running", "eligibility", f"Checking {candidate_key}.")
         try:
             if verifier_broker is not None:
-                _validate_brokered_eligibility(
+                validation = _validate_brokered_eligibility(
                     eligibility,
                     paper_verifier,
                     access=access,
@@ -221,11 +227,32 @@ def run_stream(
                     schema_file=eligibility_schema_file,
                     policy_file=eligibility_policy_file,
                 )
+                eligibility = {
+                    **eligibility,
+                    "state": "completed" if validation["valid"] else "screening_error",
+                    "validation": validation,
+                }
             _validate_pair(access, eligibility)
         except Exception as error:
             progress.error(candidate_key, access.get("title"), "eligibility", error)
             raise
         decision = eligibility["validation"]["decision"]
+        if verifier_broker is not None:
+            trusted_eligibility_decisions[candidate_key] = decision
+            progress.set_count(
+                "eligible",
+                sum(
+                    value == "eligible"
+                    for value in trusted_eligibility_decisions.values()
+                ),
+            )
+            progress.set_count(
+                "rejected",
+                sum(
+                    value in {"excluded", "uncertain"}
+                    for value in trusted_eligibility_decisions.values()
+                ),
+            )
         if decision != "eligible":
             reason_codes = eligibility["parsed_response"].get(
                 "overall_reason_codes", ["eligibility_unresolved"]
@@ -721,7 +748,7 @@ def _validate_brokered_eligibility(
     prompt_file: Path,
     schema_file: Path,
     policy_file: Path,
-) -> None:
+) -> dict[str, Any]:
     if eligibility.get("execution_authority") != "shared_gemini_broker":
         raise ValueError("the eligibility job did not use the shared broker")
     broker = provider.broker
@@ -740,10 +767,11 @@ def _validate_brokered_eligibility(
             }
         ).encode()
     )
-    request, _ = _request_payload(
+    text = Path(access["extraction_path"]).read_text(encoding="utf-8")
+    request, hashes = _request_payload(
         source=access,
         policy=policy,
-        text=Path(access["extraction_path"]).read_text(encoding="utf-8"),
+        text=text,
         prompt=prompt,
         schema=schema,
         config=broker.config,
@@ -786,6 +814,20 @@ def _validate_brokered_eligibility(
         or result.request_id != eligibility.get("response_id")
     ):
         raise ValueError("the brokered eligibility job and receipt do not match")
+    validation = validate_response(
+        result.payload,
+        _segments(text),
+        expected={
+            "request_id": expected_job_key,
+            "input_echo": hashes,
+            "correction_metadata": _correction_metadata(access),
+            "known_context_gaps": _known_context_gaps(access),
+        },
+        response_schema=schema,
+    )
+    if not validation["valid"]:
+        raise ValueError("the brokered eligibility failed deterministic validation")
+    return validation
 
 
 def _validate_pair(access: dict[str, Any], eligibility: dict[str, Any]) -> None:

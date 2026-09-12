@@ -384,6 +384,28 @@ def test_deleted_request_cannot_orphan_immutable_spend_events(tmp_path: Path):
         fixture(tmp_path, transport=Transport())
 
 
+def test_integrity_halt_republishes_honest_status(tmp_path: Path):
+    values = fixture(tmp_path, transport=Transport())
+    broker = values["broker"]
+    status_path = tmp_path / "shared-ledger.status.json"
+    observed: list[dict] = []
+    broker.set_status_observer(
+        lambda path: observed.append(json.loads(path.read_text(encoding="utf-8")))
+    )
+    before = json.loads(status_path.read_text(encoding="utf-8"))
+    write_json(tmp_path / "receipts" / f"{'f' * 64}.json", {})
+
+    with pytest.raises(ValueError, match="immutable paid-call event"):
+        broker.status()
+
+    after = json.loads(status_path.read_text(encoding="utf-8"))
+    assert after != before
+    assert after["halted"] is True
+    assert after["integrity_valid"] is False
+    assert "immutable paid-call event" in after["halt_reason"]
+    assert observed[-1] == after
+
+
 def test_production_spend_does_not_renew_or_inflate_live_test(tmp_path: Path):
     transport = Transport()
     values = fixture(tmp_path, transport=transport)

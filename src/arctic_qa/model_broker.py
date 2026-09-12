@@ -348,6 +348,35 @@ class SharedGeminiBroker:
             immutable=True,
         )
 
+    def _publish_integrity_halt(self, error: Exception) -> None:
+        try:
+            previous = _read(self._status_file) if self._status_file.is_file() else {}
+        except (OSError, ValueError, json.JSONDecodeError):
+            previous = {}
+        status = {
+            **previous,
+            "schema": "shared-gemini-broker-status-v2",
+            "ledger_file": str(self.ledger_file),
+            "ledger_sha256": sha256_file(self.ledger_file)
+            if self.ledger_file.is_file()
+            else None,
+            "policy_sha256": sha256_file(self.policy_file),
+            "price_config_sha256": sha256_file(self.price_config_file),
+            "updated_at_utc": _now(),
+            "stages": previous.get("stages", {}),
+            "papers": previous.get("papers", {}),
+            "limits": previous.get("limits", {}),
+            "usage": previous.get("usage", {}),
+            "remaining": previous.get("remaining", {}),
+            "halted": True,
+            "halt_reason": f"{type(error).__name__}: {error}",
+            "integrity_valid": False,
+            "status_state": "integrity_halted",
+        }
+        atomic_json(self._status_file, status)
+        if self._status_observer is not None:
+            self._status_observer(self._status_file)
+
     def _validated_ledger(self) -> dict[str, Any]:
         if self._integrity_file.exists():
             raise ValueError("the shared paid-call ledger has an integrity halt")
@@ -358,6 +387,7 @@ class SharedGeminiBroker:
             return ledger
         except Exception as error:
             self._record_integrity_halt(error)
+            self._publish_integrity_halt(error)
             raise ValueError(
                 f"the shared paid-call ledger failed integrity validation: {error}"
             ) from error
@@ -845,6 +875,8 @@ class SharedGeminiBroker:
             "accepted_question_count": accepted,
             "halted": ledger["halted"],
             "halt_reason": ledger["halt_reason"],
+            "integrity_valid": True,
+            "status_state": "valid",
             "limits": limits,
             "usage": usage,
             "remaining": remaining,
