@@ -221,6 +221,7 @@ def run_stream(
         try:
             deterministic_unresolved = False
             if verifier_broker is not None:
+                _validate_access_integrity(access, eligibility)
                 validation = _validate_brokered_eligibility(
                     eligibility,
                     paper_verifier,
@@ -849,16 +850,39 @@ def _validate_brokered_eligibility(
     return validation
 
 
-def _validate_pair(access: dict[str, Any], eligibility: dict[str, Any]) -> None:
+def _validate_access_integrity(
+    access: dict[str, Any], eligibility: dict[str, Any]
+) -> None:
     if (
         access.get("schema") != "article-access-item-v1"
         or access.get("access_state") != "full_text_ready"
         or access.get("identity_verified") is not True
     ):
         raise ValueError("the article-access item is not full-text ready")
+    if eligibility.get("schema") != "gemini-eligibility-job-v1":
+        raise ValueError("the Gemini eligibility receipt schema is invalid")
     if (
-        eligibility.get("schema") != "gemini-eligibility-job-v1"
-        or eligibility.get("state") != "completed"
+        access.get("candidate_key") != eligibility.get("candidate_key")
+        or access.get("source_content_hash") != eligibility.get("source_content_hash")
+        or access.get("extraction_sha256") != eligibility.get("extraction_sha256")
+    ):
+        raise ValueError("the access and eligibility receipts do not match")
+    source_path = Path(str(access.get("source_path") or ""))
+    extraction_path = Path(str(access.get("extraction_path") or ""))
+    if not source_path.is_file() or sha256_file(source_path) != access.get(
+        "source_content_hash"
+    ):
+        raise ValueError("the ready source object is missing or changed")
+    if not extraction_path.is_file() or sha256_file(extraction_path) != access.get(
+        "extraction_sha256"
+    ):
+        raise ValueError("the ready extraction is missing or changed")
+
+
+def _validate_pair(access: dict[str, Any], eligibility: dict[str, Any]) -> None:
+    _validate_access_integrity(access, eligibility)
+    if (
+        eligibility.get("state") != "completed"
         or (eligibility.get("validation") or {}).get("valid") is not True
     ):
         raise ValueError("the Gemini eligibility receipt is not valid and complete")
@@ -898,22 +922,6 @@ def _validate_pair(access: dict[str, Any], eligibility: dict[str, Any]) -> None:
         "source_content_hash"
     ) or echo.get("extracted_text_sha256") != access.get("extraction_sha256"):
         raise ValueError("the Gemini eligibility input hashes do not match")
-    if (
-        access.get("candidate_key") != eligibility.get("candidate_key")
-        or access.get("source_content_hash") != eligibility.get("source_content_hash")
-        or access.get("extraction_sha256") != eligibility.get("extraction_sha256")
-    ):
-        raise ValueError("the access and eligibility receipts do not match")
-    source_path = Path(str(access.get("source_path") or ""))
-    extraction_path = Path(str(access.get("extraction_path") or ""))
-    if not source_path.is_file() or sha256_file(source_path) != access.get(
-        "source_content_hash"
-    ):
-        raise ValueError("the ready source object is missing or changed")
-    if not extraction_path.is_file() or sha256_file(extraction_path) != access.get(
-        "extraction_sha256"
-    ):
-        raise ValueError("the ready extraction is missing or changed")
 
 
 def _import_source(

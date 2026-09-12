@@ -601,6 +601,48 @@ def test_streaming_revalidates_brokered_eligibility_on_resume(tmp_path: Path) ->
     assert broker.status()["generation_submissions"] == 1
 
 
+def test_unresolved_eligibility_resume_rejects_changed_source(tmp_path: Path) -> None:
+    access, eligibility = streaming_fixture(tmp_path)
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+    transport = InvalidEligibilityEvidenceTransport()
+    broker = shared_broker(tmp_path, transport)
+    provider = BrokerProvider(
+        broker=broker,
+        phase="live_test",
+        invocation_run_id="unresolved-source-integrity",
+    )
+    arguments = {
+        "db": database,
+        "namespace": paths.namespace,
+        "run_id": "unresolved-source-integrity",
+        "campaign_id": "unresolved-source-integrity-campaign",
+        "access_run_dir": access,
+        "eligibility_run_dir": eligibility,
+        "author": provider,
+        "verifier": provider,
+        "max_papers": 1,
+        **broker_eligibility_inputs(tmp_path),
+    }
+
+    first = run_stream(**arguments)
+    assert first["paper_results"][0]["disposition"] == "eligibility_unresolved"
+    assert transport.methods.count("generateContent") == 1
+
+    access_item = json.loads(
+        (access / "items" / "item-000001.json").read_text(encoding="utf-8")
+    )
+    source_path = Path(access_item["source_path"])
+    source_path.write_bytes(source_path.read_bytes() + b"\nchanged after receipt\n")
+
+    with pytest.raises(ValueError, match="ready source object is missing or changed"):
+        run_stream(**arguments)
+
+    assert transport.methods.count("generateContent") == 1
+    assert broker.status()["generation_submissions"] == 1
+
+
 def test_streaming_advances_after_uncertain_brokered_eligibility(
     tmp_path: Path,
 ) -> None:
