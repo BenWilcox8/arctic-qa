@@ -18,6 +18,10 @@ Do not create a new ledger for a new process, run, phase, or stage.
 
 The adjacent immutable identity record makes a missing ledger fail closed.
 
+The broker also validates ledger totals against immutable request receipts.
+
+An integrity mismatch creates an adjacent halt record and blocks more paid work.
+
 ## Invocation
 
 Construct the broker with the policy, price, gate, central ledger, and receipt paths.
@@ -45,6 +49,7 @@ request_key = broker_request_key(
     stage="question_generation",
     paper_id=paper_id,
     family_id=family_id,
+    source_version_id=source_version_id,
     payload=payload,
 )
 
@@ -54,6 +59,7 @@ receipt = broker.execute(
     stage="question_generation",
     paper_id=paper_id,
     family_id=family_id,
+    source_version_id=source_version_id,
     request_key=request_key,
     payload=payload,
 )
@@ -64,6 +70,12 @@ Valid phases are `live_test` and `away_production`.
 Valid stages are defined in `arctic_qa.model_broker.STAGES`.
 
 The broker checks the offline-review execution gate before it reads a credential.
+
+The broker binds each family to one paper ID and one source-version ID.
+
+Use a stable source-version ID from the versioned full-text artifact.
+
+Do not derive this ID from a run name or a display title.
 
 The broker permits only text inputs and structured JSON output.
 
@@ -80,6 +92,12 @@ It also records spend and reservations by stage and paper.
 An unknown provider outcome reserves the full amount and stops the broker.
 
 Do not retry an ambiguous request.
+
+The broker writes an immutable response event before it settles a successful request.
+
+After a crash, it uses that event to complete the ledger and final receipt.
+
+If no response event exists, it treats the interrupted request as an ambiguous charge.
 
 Use `status()` for the live page and scheduler state.
 

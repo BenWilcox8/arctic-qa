@@ -512,7 +512,9 @@ def test_access_and_gemini_state_are_separate_and_filterable(tmp_path: Path) -> 
     )
     state = artifacts.state()
     assert state["progress"]["stage"] == "article_access_readiness"
-    assert state["gemini_screening"]["state"] == "disabled_no_key"
+    assert state["gemini_screening"]["state"] == "not_started"
+    assert state["gemini_screening"]["historical_setup"]["state"] == ("disabled_no_key")
+    assert state["gemini_screening"]["counts"]["queued"] == 0
     ready = artifacts.candidates(
         {"access_readiness": ["full_text_ready"], "page_size": ["10"]}
     )

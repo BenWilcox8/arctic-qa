@@ -163,6 +163,7 @@ def broker_request_key(
     stage: str,
     paper_id: str,
     family_id: str,
+    source_version_id: str,
     payload: dict[str, Any],
 ) -> str:
     """Bind one request key to its model, pipeline identity, and exact payload."""
@@ -173,6 +174,7 @@ def broker_request_key(
                 "stage": stage,
                 "paper_id": paper_id,
                 "family_id": family_id,
+                "source_version_id": source_version_id,
                 "payload": payload,
             }
         ).encode()
@@ -218,6 +220,12 @@ class SharedGeminiBroker:
     def _identity_file(self) -> Path:
         return self.ledger_file.with_name(f".{self.ledger_file.name}.identity.json")
 
+    @property
+    def _integrity_file(self) -> Path:
+        return self.ledger_file.with_name(
+            f".{self.ledger_file.name}.integrity-halt.json"
+        )
+
     def _ledger_identity(self) -> dict[str, Any]:
         return {
             "schema": "shared-paid-call-ledger-identity-v1",
@@ -233,6 +241,10 @@ class SharedGeminiBroker:
         with self._lock_file.open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             if self.ledger_file.is_file():
+                if self._integrity_file.exists():
+                    raise ValueError(
+                        "the shared paid-call ledger has an integrity halt"
+                    )
                 if not self._identity_file.is_file():
                     raise ValueError(
                         "the shared paid-call ledger identity record is absent"
@@ -251,6 +263,7 @@ class SharedGeminiBroker:
                     != self.prior
                 ):
                     raise ValueError("the shared paid-call ledger identity changed")
+                self._validated_ledger()
                 return
             if self._identity_file.exists():
                 raise ValueError(
@@ -275,6 +288,7 @@ class SharedGeminiBroker:
                 "inflight": 0,
                 "accepted_question_count": 0,
                 "accepted_families": {},
+                "family_bindings": {},
                 "live_test_papers": {},
                 "recent_submission_times_utc": [],
                 "requests": {},
@@ -287,6 +301,376 @@ class SharedGeminiBroker:
             }
             atomic_json(self._identity_file, self._ledger_identity(), immutable=True)
             atomic_json(self.ledger_file, ledger)
+
+    @staticmethod
+    def _empty_usage_row() -> dict[str, Any]:
+        return {
+            "submissions": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "thinking_tokens": 0,
+            "reserved_usd": "0",
+            "spent_usd": "0",
+            "ambiguous_usd": "0",
+        }
+
+    @staticmethod
+    def _empty_live_row() -> dict[str, Any]:
+        return {
+            "submissions": 0,
+            "reserved_usd": "0",
+            "spent_usd": "0",
+            "ambiguous_usd": "0",
+        }
+
+    def _record_integrity_halt(self, error: Exception) -> None:
+        if self._integrity_file.exists():
+            return
+        atomic_json(
+            self._integrity_file,
+            {
+                "schema": "shared-paid-call-ledger-integrity-halt-v1",
+                "ledger_file": str(self.ledger_file),
+                "ledger_sha256": sha256_file(self.ledger_file)
+                if self.ledger_file.is_file()
+                else None,
+                "reason": f"{type(error).__name__}: {error}",
+                "recorded_at_utc": _now(),
+            },
+            immutable=True,
+        )
+
+    def _validated_ledger(self) -> dict[str, Any]:
+        if self._integrity_file.exists():
+            raise ValueError("the shared paid-call ledger has an integrity halt")
+        try:
+            ledger = _read(self.ledger_file)
+            self._validate_ledger(ledger)
+            self._validate_immutable_events(ledger)
+            return ledger
+        except Exception as error:
+            self._record_integrity_halt(error)
+            raise ValueError(
+                f"the shared paid-call ledger failed integrity validation: {error}"
+            ) from error
+
+    def _validate_immutable_events(self, ledger: dict[str, Any]) -> None:
+        base_fields = (
+            "request_key",
+            "request_sha256",
+            "run_id",
+            "stage",
+            "paper_id",
+            "family_id",
+            "source_version_id",
+            "model",
+            "gate_sha256",
+        )
+        for request_key, request in ledger["requests"].items():
+            submitted_path = self.receipts_dir / f"{request_key}.submitted.json"
+            final_path = self.receipts_dir / f"{request_key}.json"
+            if submitted_path.is_file():
+                submitted = _read(submitted_path)
+                if any(
+                    submitted.get(name) != request.get(name) for name in base_fields
+                ):
+                    raise ValueError("an immutable submitted event changed identity")
+                if request.get("state") in {
+                    "submitted",
+                    "completed",
+                    "ambiguous_charge",
+                } and _money(
+                    submitted.get("reserved_usd"),
+                    "submitted reservation",
+                    positive=True,
+                ) != _money(
+                    request.get("reserved_usd"), "ledger reservation", positive=True
+                ):
+                    raise ValueError("an immutable submitted reservation changed")
+            state = request.get("state")
+            if state not in {
+                "completed",
+                "ambiguous_charge",
+                "count_error",
+                "too_large_not_ready",
+                "not_submitted",
+            }:
+                continue
+            if not final_path.is_file():
+                raise ValueError("a terminal paid request lacks its immutable receipt")
+            final = _read(final_path)
+            if any(final.get(name) != request.get(name) for name in base_fields):
+                raise ValueError("an immutable final event changed request identity")
+            if final.get("state") != state:
+                raise ValueError("an immutable final event changed request state")
+            if state == "completed" and (
+                _money(final.get("actual_cost_usd"), "final actual cost")
+                != _money(request.get("actual_cost_usd"), "ledger actual cost")
+                or final.get("usage") != request.get("usage")
+            ):
+                raise ValueError("an immutable final event changed cost or usage")
+
+        accepted_events: dict[str, str] = {}
+        for path in self.receipts_dir.glob("accepted-*.json"):
+            value = _read(path)
+            if value.get("schema") != "shared-paid-call-accepted-item-v1":
+                raise ValueError("an accepted-item event has an invalid schema")
+            family_id = value.get("family_id")
+            item_id = value.get("item_id")
+            expected_name = f"accepted-{sha256_bytes(str(family_id).encode())}.json"
+            if (
+                not isinstance(family_id, str)
+                or not family_id
+                or not isinstance(item_id, str)
+                or not item_id
+                or path.name != expected_name
+            ):
+                raise ValueError("an accepted-item event has an invalid identity")
+            accepted_events[family_id] = item_id
+        if accepted_events != ledger["accepted_families"]:
+            raise ValueError("the accepted-item ledger differs from immutable events")
+
+    def _validate_ledger(self, ledger: dict[str, Any]) -> None:
+        required = {
+            "schema",
+            "policy_sha256",
+            "price_config_sha256",
+            "prior_construction_spend_usd",
+            "reserved_usd",
+            "spent_usd",
+            "ambiguous_reserved_usd",
+            "generation_submissions",
+            "count_requests",
+            "inflight",
+            "accepted_question_count",
+            "accepted_families",
+            "family_bindings",
+            "live_test_papers",
+            "recent_submission_times_utc",
+            "requests",
+            "stages",
+            "papers",
+            "halted",
+            "halt_reason",
+            "created_at_utc",
+            "updated_at_utc",
+        }
+        if not isinstance(ledger, dict) or set(ledger) != required:
+            raise ValueError("the shared paid-call ledger fields changed")
+        if ledger["schema"] != "shared-paid-call-ledger-v1":
+            raise ValueError("the shared paid-call ledger schema changed")
+        if not isinstance(ledger["requests"], dict) or not isinstance(
+            ledger["family_bindings"], dict
+        ):
+            raise ValueError("the shared paid-call ledger mappings are invalid")
+        if not isinstance(ledger["halted"], bool):
+            raise ValueError("the shared paid-call halt state is invalid")
+
+        expected_stages: dict[str, dict[str, Any]] = {}
+        expected_papers: dict[str, dict[str, Any]] = {}
+        expected_live: dict[str, dict[str, Any]] = {}
+        totals = {
+            "reserved": Decimal("0"),
+            "spent": Decimal("0"),
+            "ambiguous": Decimal("0"),
+        }
+        submissions = 0
+        inflight = 0
+        submitted_states = {"submitted", "completed", "ambiguous_charge"}
+        terminal_states = {
+            "completed",
+            "ambiguous_charge",
+            "count_error",
+            "too_large_not_ready",
+            "not_submitted",
+        }
+        for key, request in ledger["requests"].items():
+            if not re.fullmatch(r"[a-f0-9]{64}", key) or not isinstance(request, dict):
+                raise ValueError("the shared paid-call request identity is invalid")
+            if request.get("request_key") != key:
+                raise ValueError("a paid-call request key does not match its record")
+            for name in (
+                "request_sha256",
+                "run_id",
+                "stage",
+                "paper_id",
+                "family_id",
+                "source_version_id",
+                "model",
+                "gate_sha256",
+            ):
+                if not isinstance(request.get(name), str) or not request[name]:
+                    raise ValueError(f"a paid-call request lacks {name}")
+            if request["stage"] not in STAGES:
+                raise ValueError("a paid-call request has an unsupported stage")
+            binding = ledger["family_bindings"].get(request["family_id"])
+            if binding != {
+                "paper_id": request["paper_id"],
+                "source_version_id": request["source_version_id"],
+            }:
+                raise ValueError("a paid-call family binding is inconsistent")
+            state = request.get("state")
+            if state not in {"counting", *terminal_states, "submitted"}:
+                raise ValueError("a paid-call request state is invalid")
+            if state not in submitted_states:
+                continue
+            phase = request.get("phase")
+            if phase not in PHASES:
+                raise ValueError("a submitted paid-call phase is invalid")
+            reserved = _money(
+                request.get("reserved_usd"), "request reservation", positive=True
+            )
+            submissions += 1
+            stage = expected_stages.setdefault(
+                request["stage"], self._empty_usage_row()
+            )
+            paper = expected_papers.setdefault(
+                request["family_id"],
+                {
+                    **{
+                        key: value
+                        for key, value in self._empty_usage_row().items()
+                        if key != "submissions"
+                    },
+                    "paper_id": request["paper_id"],
+                    "source_version_id": request["source_version_id"],
+                },
+            )
+            stage["submissions"] += 1
+            live = None
+            if phase == "live_test":
+                live = expected_live.setdefault(
+                    request["family_id"], self._empty_live_row()
+                )
+                live["submissions"] += 1
+            if state == "submitted":
+                inflight += 1
+                totals["reserved"] += reserved
+                stage["reserved_usd"] = str(
+                    _money(stage["reserved_usd"], "stage reserved") + reserved
+                )
+                paper["reserved_usd"] = str(
+                    _money(paper["reserved_usd"], "paper reserved") + reserved
+                )
+                if live is not None:
+                    live["reserved_usd"] = str(
+                        _money(live["reserved_usd"], "live reserved") + reserved
+                    )
+            elif state == "ambiguous_charge":
+                totals["ambiguous"] += reserved
+                stage["ambiguous_usd"] = str(
+                    _money(stage["ambiguous_usd"], "stage ambiguous") + reserved
+                )
+                paper["ambiguous_usd"] = str(
+                    _money(paper["ambiguous_usd"], "paper ambiguous") + reserved
+                )
+                if live is not None:
+                    live["ambiguous_usd"] = str(
+                        _money(live["ambiguous_usd"], "live ambiguous") + reserved
+                    )
+            else:
+                actual = _money(request.get("actual_cost_usd"), "request actual cost")
+                if actual > reserved:
+                    raise ValueError("a paid-call actual cost exceeds its reservation")
+                usage = request.get("usage")
+                if not isinstance(usage, dict):
+                    raise ValueError("a completed paid-call request lacks usage")
+                for field in (
+                    "promptTokenCount",
+                    "candidatesTokenCount",
+                    "thoughtsTokenCount",
+                ):
+                    value = usage.get(field)
+                    if (
+                        isinstance(value, bool)
+                        or not isinstance(value, int)
+                        or value < 0
+                    ):
+                        raise ValueError(
+                            "a completed paid-call request has invalid usage"
+                        )
+                totals["spent"] += actual
+                stage["spent_usd"] = str(
+                    _money(stage["spent_usd"], "stage spent") + actual
+                )
+                paper["spent_usd"] = str(
+                    _money(paper["spent_usd"], "paper spent") + actual
+                )
+                if live is not None:
+                    live["spent_usd"] = str(
+                        _money(live["spent_usd"], "live spent") + actual
+                    )
+                for target in (stage, paper):
+                    target["input_tokens"] += usage["promptTokenCount"]
+                    target["output_tokens"] += usage["candidatesTokenCount"]
+                    target["thinking_tokens"] += usage["thoughtsTokenCount"]
+
+        source_bindings: dict[str, str] = {}
+        for family_id, binding in ledger["family_bindings"].items():
+            if (
+                not isinstance(family_id, str)
+                or not family_id
+                or not isinstance(binding, dict)
+                or set(binding) != {"paper_id", "source_version_id"}
+                or not all(
+                    isinstance(value, str) and value for value in binding.values()
+                )
+            ):
+                raise ValueError("a paid-call family binding is invalid")
+            previous = source_bindings.setdefault(
+                binding["source_version_id"], family_id
+            )
+            if previous != family_id:
+                raise ValueError(
+                    "one source version is bound to multiple paper families"
+                )
+        for name, value in {
+            "reserved_usd": totals["reserved"],
+            "spent_usd": totals["spent"],
+            "ambiguous_reserved_usd": totals["ambiguous"],
+        }.items():
+            if _money(ledger.get(name), name) != value:
+                raise ValueError(f"the shared paid-call {name} total is inconsistent")
+        for name, value in {
+            "generation_submissions": submissions,
+            "count_requests": len(ledger["requests"]),
+            "inflight": inflight,
+            "accepted_question_count": len(ledger["accepted_families"]),
+        }.items():
+            if ledger.get(name) != value:
+                raise ValueError(f"the shared paid-call {name} total is inconsistent")
+
+        def rows_match(actual: Any, expected: dict[str, dict[str, Any]]) -> bool:
+            if not isinstance(actual, dict) or set(actual) != set(expected):
+                return False
+            for identity, expected_row in expected.items():
+                actual_row = actual.get(identity)
+                if not isinstance(actual_row, dict) or set(actual_row) != set(
+                    expected_row
+                ):
+                    return False
+                for name, value in expected_row.items():
+                    if name.endswith("_usd"):
+                        if _money(actual_row.get(name), name) != _money(value, name):
+                            return False
+                    elif actual_row.get(name) != value:
+                        return False
+            return True
+
+        for name, value in {
+            "stages": expected_stages,
+            "papers": expected_papers,
+            "live_test_papers": expected_live,
+        }.items():
+            if not rows_match(ledger.get(name), value):
+                raise ValueError(f"the shared paid-call {name} total is inconsistent")
+        if (
+            not isinstance(ledger["recent_submission_times_utc"], list)
+            or len(ledger["recent_submission_times_utc"]) > submissions
+        ):
+            raise ValueError("the paid-call submission window is inconsistent")
+        for value in ledger["recent_submission_times_utc"]:
+            datetime.fromisoformat(str(value).replace("Z", "+00:00"))
 
     def doctor(self) -> dict[str, Any]:
         gate = _read(self.execution_gate_file)
@@ -301,7 +685,9 @@ class SharedGeminiBroker:
         }
 
     def status(self) -> dict[str, Any]:
-        ledger = _read(self.ledger_file)
+        with self._lock_file.open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            ledger = self._validated_ledger()
         away_used = sum(
             _money(ledger[name], name)
             for name in ("reserved_usd", "spent_usd", "ambiguous_reserved_usd")
@@ -352,7 +738,7 @@ class SharedGeminiBroker:
             raise ValueError("accepted item identity is missing")
         with self._lock_file.open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            ledger = _read(self.ledger_file)
+            ledger = self._validated_ledger()
             old = ledger["accepted_families"].get(family_id)
             if old and old != item_id:
                 raise ValueError("a paper family already has an accepted item")
@@ -360,25 +746,39 @@ class SharedGeminiBroker:
                 self.policy["accepted_question_target"]
             ):
                 raise ValueError("the accepted-question target is complete")
+            if not old:
+                atomic_json(
+                    self.receipts_dir
+                    / f"accepted-{sha256_bytes(family_id.encode())}.json",
+                    {
+                        "schema": "shared-paid-call-accepted-item-v1",
+                        "family_id": family_id,
+                        "item_id": item_id,
+                        "recorded_at_utc": _now(),
+                    },
+                    immutable=True,
+                )
             ledger["accepted_families"][family_id] = item_id
             ledger["accepted_question_count"] = len(ledger["accepted_families"])
             ledger["updated_at_utc"] = _now()
+            self._validate_ledger(ledger)
             atomic_json(self.ledger_file, ledger)
         return self.status()
 
     def _halt(self, reason: str) -> None:
         with self._lock_file.open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            ledger = _read(self.ledger_file)
+            ledger = self._validated_ledger()
             ledger["halted"] = True
             ledger["halt_reason"] = reason
             ledger["updated_at_utc"] = _now()
+            self._validate_ledger(ledger)
             atomic_json(self.ledger_file, ledger)
 
     def _mark_not_submitted(self, request_key: str, state: str, reason: str) -> None:
         with self._lock_file.open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            ledger = _read(self.ledger_file)
+            ledger = self._validated_ledger()
             request = ledger["requests"][request_key]
             if request.get("state") != "counting":
                 raise ValueError("the paid request is not in its counting state")
@@ -386,27 +786,49 @@ class SharedGeminiBroker:
             request["reason"] = reason
             request["completed_at_utc"] = _now()
             ledger["updated_at_utc"] = _now()
+            self._validate_ledger(ledger)
             atomic_json(self.ledger_file, ledger)
 
     def _count_event(self, request_key: str, base: dict[str, Any]) -> None:
         with self._lock_file.open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            ledger = _read(self.ledger_file)
+            ledger = self._validated_ledger()
             if ledger["halted"]:
                 raise ValueError(
                     f"the paid-call broker is halted: {ledger['halt_reason']}"
                 )
             if request_key in ledger["requests"]:
                 raise ValueError("the paid request key already exists")
+            binding = {
+                "paper_id": base["paper_id"],
+                "source_version_id": base["source_version_id"],
+            }
+            old_binding = ledger["family_bindings"].get(base["family_id"])
+            if old_binding is not None and old_binding != binding:
+                raise ValueError(
+                    "the paper family is already bound to another paper or source version"
+                )
+            for family_id, item in ledger["family_bindings"].items():
+                if (
+                    item["source_version_id"] == base["source_version_id"]
+                    and family_id != base["family_id"]
+                ):
+                    raise ValueError(
+                        "the source version is already bound to another paper family"
+                    )
+            ledger["family_bindings"].setdefault(base["family_id"], binding)
             ledger["count_requests"] += 1
             ledger["requests"][request_key] = {**base, "state": "counting"}
             ledger["updated_at_utc"] = _now()
+            self._validate_ledger(ledger)
             atomic_json(self.ledger_file, ledger)
 
     def _pace(self) -> None:
         """Wait until the frozen per-minute submission window has room."""
         while True:
-            ledger = _read(self.ledger_file)
+            with self._lock_file.open("a+") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                ledger = self._validated_ledger()
             cutoff = datetime.now(UTC) - timedelta(minutes=1)
             recent = sorted(
                 datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -429,12 +851,13 @@ class SharedGeminiBroker:
         request_key: str,
         phase: str,
         paper_id: str,
+        family_id: str,
         stage: str,
         reserved: Decimal,
     ) -> None:
         with self._lock_file.open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            ledger = _read(self.ledger_file)
+            ledger = self._validated_ledger()
             request = ledger["requests"].get(request_key)
             if not request or request.get("state") != "counting":
                 raise ValueError("the paid request is not ready for reservation")
@@ -468,7 +891,7 @@ class SharedGeminiBroker:
             ):
                 raise ValueError("the accepted-question target is complete")
             paper = ledger["papers"].setdefault(
-                paper_id,
+                family_id,
                 {
                     "input_tokens": 0,
                     "output_tokens": 0,
@@ -476,6 +899,8 @@ class SharedGeminiBroker:
                     "reserved_usd": "0",
                     "spent_usd": "0",
                     "ambiguous_usd": "0",
+                    "paper_id": paper_id,
+                    "source_version_id": request["source_version_id"],
                 },
             )
             paper_used = sum(
@@ -499,7 +924,7 @@ class SharedGeminiBroker:
                     raise ValueError(
                         "the paid request exceeds the USD 10 live-test cap"
                     )
-                if paper_id not in ledger["live_test_papers"] and len(
+                if family_id not in ledger["live_test_papers"] and len(
                     ledger["live_test_papers"]
                 ) >= int(self.policy["live_test_maximum_papers"]):
                     raise ValueError("the live test reached its paper limit")
@@ -552,7 +977,7 @@ class SharedGeminiBroker:
             )
             if phase == "live_test":
                 live = ledger["live_test_papers"].setdefault(
-                    paper_id,
+                    family_id,
                     {
                         "submissions": 0,
                         "reserved_usd": "0",
@@ -573,6 +998,7 @@ class SharedGeminiBroker:
                 }
             )
             ledger["updated_at_utc"] = _now()
+            self._validate_ledger(ledger)
             atomic_json(self.ledger_file, ledger)
 
     def _settle(
@@ -584,12 +1010,12 @@ class SharedGeminiBroker:
     ) -> None:
         with self._lock_file.open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            ledger = _read(self.ledger_file)
+            ledger = self._validated_ledger()
             request = ledger["requests"][request_key]
             if request.get("state") != "submitted":
                 raise ValueError("the paid request is not submitted")
             reserved = _money(request["reserved_usd"], "reservation", positive=True)
-            paper = ledger["papers"][request["paper_id"]]
+            paper = ledger["papers"][request["family_id"]]
             stage = ledger["stages"][request["stage"]]
             ledger["reserved_usd"] = str(
                 _money(ledger["reserved_usd"], "reserved") - reserved
@@ -601,7 +1027,7 @@ class SharedGeminiBroker:
                 _money(stage["reserved_usd"], "stage reserved") - reserved
             )
             live = (
-                ledger["live_test_papers"].get(request["paper_id"])
+                ledger["live_test_papers"].get(request["family_id"])
                 if request["phase"] == "live_test"
                 else None
             )
@@ -655,7 +1081,114 @@ class SharedGeminiBroker:
             ledger["inflight"] = max(int(ledger["inflight"]) - 1, 0)
             request["completed_at_utc"] = _now()
             ledger["updated_at_utc"] = _now()
+            self._validate_ledger(ledger)
             atomic_json(self.ledger_file, ledger)
+
+    def _completed_receipt(
+        self, submitted: dict[str, Any], response: Any
+    ) -> tuple[dict[str, Any], Decimal | None, dict[str, int] | None]:
+        usage = response.get("usageMetadata") if isinstance(response, dict) else None
+        try:
+            if not isinstance(usage, dict):
+                raise ValueError("provider usage is absent")
+            names = (
+                "promptTokenCount",
+                "candidatesTokenCount",
+                "thoughtsTokenCount",
+                "totalTokenCount",
+            )
+            values = [usage[name] for name in names]
+            if any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+                for value in values
+            ) or values[3] != sum(values[:3]):
+                raise ValueError("provider usage is inconsistent")
+            actual = _cost(self.config, values[0], values[1] + values[2])
+            if actual > _money(submitted["reserved_usd"], "reservation", positive=True):
+                raise ValueError("provider usage exceeds the reservation")
+        except Exception as error:
+            return (
+                {
+                    **submitted,
+                    "state": "ambiguous_charge",
+                    "error": f"{type(error).__name__}: {error}",
+                    "response": response,
+                    "live_call_made": True,
+                    "completed_at_utc": _now(),
+                },
+                None,
+                None,
+            )
+        return (
+            {
+                **submitted,
+                "state": "completed",
+                "actual_cost_usd": str(actual),
+                "usage": usage,
+                "response": response,
+                "live_call_made": True,
+                "completed_at_utc": _now(),
+            },
+            actual,
+            usage,
+        )
+
+    def _recover_orphans(self) -> None:
+        with self._lock_file.open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            ledger = self._validated_ledger()
+            requests = {key: dict(row) for key, row in ledger["requests"].items()}
+        for request_key, request in requests.items():
+            final_path = self.receipts_dir / f"{request_key}.json"
+            received_path = self.receipts_dir / f"{request_key}.received.json"
+            if request["state"] in {"completed", "ambiguous_charge"}:
+                if not final_path.is_file():
+                    error = ValueError(
+                        "a terminal paid request lacks its immutable final receipt"
+                    )
+                    self._record_integrity_halt(error)
+                    raise error
+                continue
+            if request["state"] != "submitted":
+                continue
+            if final_path.is_file():
+                receipt = _read(final_path)
+                state = receipt.get("state")
+                if state == "completed":
+                    actual = _money(
+                        receipt.get("actual_cost_usd"), "recovered actual cost"
+                    )
+                    usage = receipt.get("usage")
+                elif state == "ambiguous_charge":
+                    actual = None
+                    usage = None
+                else:
+                    raise ValueError("an orphan final receipt has an invalid state")
+            elif received_path.is_file():
+                received = _read(received_path)
+                if received.get("request_key") != request_key:
+                    raise ValueError("a received provider response has the wrong key")
+                receipt, actual, usage = self._completed_receipt(
+                    {
+                        **request,
+                        "state": "submitted",
+                        "input_tokens": received.get("input_tokens"),
+                    },
+                    received.get("response"),
+                )
+                atomic_json(final_path, receipt, immutable=True)
+            else:
+                actual = None
+                usage = None
+                receipt = {
+                    **request,
+                    "state": "ambiguous_charge",
+                    "error": "interrupted request has no durable provider response",
+                    "live_call_made": True,
+                    "completed_at_utc": _now(),
+                }
+                atomic_json(final_path, receipt, immutable=True)
+            self._settle(request_key, actual=actual, usage=usage)
 
     def execute(
         self,
@@ -665,16 +1198,16 @@ class SharedGeminiBroker:
         stage: str,
         paper_id: str,
         family_id: str,
+        source_version_id: str,
         request_key: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         if phase not in PHASES or stage not in STAGES:
             raise ValueError("the paid request phase or stage is unsupported")
-        if not all((run_id, paper_id, family_id, request_key)):
+        if not all((run_id, paper_id, family_id, source_version_id, request_key)):
             raise ValueError("the paid request identity is incomplete")
         if not re.fullmatch(r"[a-f0-9]{64}", request_key):
             raise ValueError("the paid request key must be a lowercase SHA-256 value")
-        _validate_gate(self.execution_gate_file, phase)
         _validate_payload(payload, self.config)
         expected_key = broker_request_key(
             model=self.config["model"],
@@ -682,6 +1215,7 @@ class SharedGeminiBroker:
             stage=stage,
             paper_id=paper_id,
             family_id=family_id,
+            source_version_id=source_version_id,
             payload=payload,
         )
         if request_key != expected_key:
@@ -694,6 +1228,7 @@ class SharedGeminiBroker:
             "stage": stage,
             "paper_id": paper_id,
             "family_id": family_id,
+            "source_version_id": source_version_id,
             "model": self.config["model"],
             "gate_sha256": sha256_file(self.execution_gate_file),
         }
@@ -704,20 +1239,8 @@ class SharedGeminiBroker:
             operation.close()
             raise ValueError("another paid broker operation is active") from error
         try:
-            ledger = _read(self.ledger_file)
-            orphan = next(
-                (
-                    key
-                    for key, row in ledger["requests"].items()
-                    if row.get("state") == "submitted"
-                ),
-                None,
-            )
-            if orphan:
-                self._settle(orphan, actual=None, usage=None)
-                raise ValueError(
-                    "an interrupted paid request became an ambiguous charge"
-                )
+            self._recover_orphans()
+            _validate_gate(self.execution_gate_file, phase)
             self._pace()
             client = self.transport or GeminiTransport(
                 self.config["api_base"], _load_key(self.credential_file)
@@ -742,10 +1265,6 @@ class SharedGeminiBroker:
                 ):
                     raise ValueError("countTokens did not return a nonnegative integer")
             except Exception as error:
-                self._mark_not_submitted(
-                    request_key, "count_error", f"{type(error).__name__}: {error}"
-                )
-                self._halt(f"countTokens error: {type(error).__name__}")
                 receipt = {
                     **base,
                     "state": "count_error",
@@ -758,14 +1277,12 @@ class SharedGeminiBroker:
                     receipt,
                     immutable=True,
                 )
+                self._mark_not_submitted(
+                    request_key, "count_error", f"{type(error).__name__}: {error}"
+                )
+                self._halt(f"countTokens error: {type(error).__name__}")
                 return receipt
             if exact_input > int(self.config["maximum_input_tokens"]):
-                self._mark_not_submitted(
-                    request_key,
-                    "too_large_not_ready",
-                    "counted request exceeds the model input limit",
-                )
-                self._halt("counted request exceeds the model input limit")
                 receipt = {
                     **base,
                     "state": "too_large_not_ready",
@@ -778,6 +1295,12 @@ class SharedGeminiBroker:
                     receipt,
                     immutable=True,
                 )
+                self._mark_not_submitted(
+                    request_key,
+                    "too_large_not_ready",
+                    "counted request exceeds the model input limit",
+                )
+                self._halt("counted request exceeds the model input limit")
                 return receipt
             output_limit = int(payload["generationConfig"]["maxOutputTokens"])
             reserved = _cost(self.config, exact_input, output_limit)
@@ -786,11 +1309,11 @@ class SharedGeminiBroker:
                     request_key=request_key,
                     phase=phase,
                     paper_id=paper_id,
+                    family_id=family_id,
                     stage=stage,
                     reserved=reserved,
                 )
             except ValueError as error:
-                self._mark_not_submitted(request_key, "not_submitted", str(error))
                 receipt = {
                     **base,
                     "state": "not_submitted",
@@ -804,6 +1327,7 @@ class SharedGeminiBroker:
                     receipt,
                     immutable=True,
                 )
+                self._mark_not_submitted(request_key, "not_submitted", str(error))
                 return receipt
             submitted = {
                 **base,
@@ -820,7 +1344,6 @@ class SharedGeminiBroker:
             try:
                 response = client.post(self.config["model"], "generateContent", payload)
             except urllib.error.HTTPError as error:
-                self._settle(request_key, actual=None, usage=None)
                 receipt = {
                     **submitted,
                     "state": "ambiguous_charge",
@@ -837,9 +1360,9 @@ class SharedGeminiBroker:
                     receipt,
                     immutable=True,
                 )
+                self._settle(request_key, actual=None, usage=None)
                 return receipt
             except Exception as error:
-                self._settle(request_key, actual=None, usage=None)
                 receipt = {
                     **submitted,
                     "state": "ambiguous_charge",
@@ -852,58 +1375,27 @@ class SharedGeminiBroker:
                     receipt,
                     immutable=True,
                 )
-                return receipt
-            usage = (
-                response.get("usageMetadata") if isinstance(response, dict) else None
-            )
-            try:
-                if not isinstance(usage, dict):
-                    raise ValueError("provider usage is absent")
-                names = (
-                    "promptTokenCount",
-                    "candidatesTokenCount",
-                    "thoughtsTokenCount",
-                    "totalTokenCount",
-                )
-                values = [usage[name] for name in names]
-                if any(
-                    isinstance(value, bool) or not isinstance(value, int) or value < 0
-                    for value in values
-                ) or values[3] != sum(values[:3]):
-                    raise ValueError("provider usage is inconsistent")
-                actual = _cost(self.config, values[0], values[1] + values[2])
-                if actual > reserved:
-                    raise ValueError("provider usage exceeds the reservation")
-            except Exception as error:
                 self._settle(request_key, actual=None, usage=None)
-                receipt = {
-                    **submitted,
-                    "state": "ambiguous_charge",
-                    "error": f"{type(error).__name__}: {error}",
-                    "live_call_made": True,
-                    "completed_at_utc": _now(),
-                }
-                atomic_json(
-                    self.receipts_dir / f"{request_key}.json",
-                    receipt,
-                    immutable=True,
-                )
                 return receipt
-            self._settle(request_key, actual=actual, usage=usage)
-            receipt = {
+            received = {
                 **submitted,
-                "state": "completed",
-                "actual_cost_usd": str(actual),
-                "usage": usage,
+                "state": "response_received",
                 "response": response,
                 "live_call_made": True,
-                "completed_at_utc": _now(),
+                "received_at_utc": _now(),
             }
+            atomic_json(
+                self.receipts_dir / f"{request_key}.received.json",
+                received,
+                immutable=True,
+            )
+            receipt, actual, usage = self._completed_receipt(submitted, response)
             atomic_json(
                 self.receipts_dir / f"{request_key}.json",
                 receipt,
                 immutable=True,
             )
+            self._settle(request_key, actual=actual, usage=usage)
             return receipt
         finally:
             operation.close()

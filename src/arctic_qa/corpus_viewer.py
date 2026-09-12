@@ -1268,8 +1268,64 @@ class CorpusArtifacts:
             "gemini-eligibility-progress-v1",
             "Gemini eligibility screening is not started.",
         )
-        gemini["connection"] = self._gemini_connection()
+        connection = self._gemini_connection()
+        gemini["connection"] = connection
         streaming = self._streaming_state()
+        historical_gemini = {
+            "state": gemini.get("state"),
+            "updated_at_utc": gemini.get("updated_at_utc"),
+            "counts": gemini.get("counts") or {},
+            "budget": gemini.get("budget") or {},
+            "message": "This setup record predates the authenticated connection and shared budget policy.",
+        }
+        current_counts = streaming.get("counts") or {}
+        current_broker = streaming.get("broker") or {}
+        current_policy = streaming.get("budget_policy") or {}
+        current_state = (
+            streaming.get("state")
+            if streaming.get("telemetry") == "observed"
+            else "not_started"
+        )
+        authenticated = connection.get("state") == "authenticated_read_only"
+        gemini = {
+            "telemetry": streaming.get("telemetry", "absent"),
+            "state": current_state,
+            "model": connection.get("model") or gemini.get("model"),
+            "updated_at_utc": streaming.get("updated_at_utc"),
+            "message": (
+                "The Gemini connection is authenticated. Paid generation is disabled until the integrated review passes."
+                if authenticated and current_state == "not_running"
+                else streaming.get("message")
+                or "Current Gemini eligibility processing is not started."
+            ),
+            "counts": {
+                "queued": int(current_counts.get("queued", 0)),
+                "completed": int(current_counts.get("eligibility_completed", 0)),
+                "eligible": int(current_counts.get("eligible", 0)),
+                "excluded": int(current_counts.get("rejected", 0)),
+                "uncertain": int(current_counts.get("uncertain", 0)),
+                "screening_error": int(current_counts.get("screening_error", 0)),
+                "too_large_not_ready": int(
+                    current_counts.get("too_large_not_ready", 0)
+                ),
+                "ambiguous_charge": int(current_counts.get("ambiguous_charge", 0)),
+            },
+            "budget": {
+                "away_session_total_ceiling_usd": current_policy.get(
+                    "away_session_total_ceiling_usd"
+                ),
+                "live_test_suballocation_usd": current_policy.get(
+                    "live_test_suballocation_usd"
+                ),
+                "reserved_usd": current_broker.get("reserved_usd", "0"),
+                "spent_usd": current_broker.get("spent_usd", "0"),
+                "ambiguous_reserved_usd": current_broker.get(
+                    "ambiguous_reserved_usd", "0"
+                ),
+            },
+            "connection": connection,
+            "historical_setup": historical_gemini,
+        }
         process = self._progress()
         if (
             metadata.get("state") == "completed"
@@ -1509,8 +1565,8 @@ class CorpusArtifacts:
                 else "not_started",
                 "detail": (
                     f"Gemini model: {gemini.get('model') or 'not configured'}. "
-                    f"Queued {(gemini.get('counts') or {}).get('queued', 0)}. "
-                    "The historical native-agent pass is a pilot, not Gemini output."
+                    f"Current queued {(gemini.get('counts') or {}).get('queued', 0)}. "
+                    "The prior disabled setup record is historical."
                 ),
             },
             {

@@ -91,16 +91,21 @@ def execute(
     *,
     stage: str = "eligibility",
     paper="p1",
+    family=None,
+    source=None,
     phase="live_test",
     run_id="run-1",
 ):
     body = payload()
+    family = family or f"family-{paper}"
+    source = source or f"source-{paper}"
     key = broker_request_key(
         model="gemini-3.8-flash",
         run_id=run_id,
         stage=stage,
         paper_id=paper,
-        family_id=f"family-{paper}",
+        family_id=family,
+        source_version_id=source,
         payload=body,
     )
     return broker.execute(
@@ -108,7 +113,8 @@ def execute(
         run_id=run_id,
         stage=stage,
         paper_id=paper,
-        family_id=f"family-{paper}",
+        family_id=family,
+        source_version_id=source,
         request_key=key,
         payload=body,
     )
@@ -145,28 +151,38 @@ def test_all_stages_share_one_durable_ledger(tmp_path: Path):
     assert status["generation_submissions"] == 2
     assert status["stages"]["eligibility"]["input_tokens"] == 100
     assert status["stages"]["question_generation"]["thinking_tokens"] == 5
-    assert status["papers"]["p2"]["output_tokens"] == 10
+    assert status["papers"]["family-p2"]["output_tokens"] == 10
     assert Decimal(status["spent_usd"]) > 0
 
 
-def test_live_test_cap_cannot_reset_with_a_new_broker(tmp_path: Path):
+def test_inconsistent_ledger_totals_fail_closed_on_restart(tmp_path: Path):
     transport = Transport()
     values = fixture(tmp_path, transport=transport)
     ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
-    ledger["spent_usd"] = "9.999900"
-    ledger["live_test_papers"]["old"] = {
-        "submissions": 1,
-        "reserved_usd": "0",
-        "spent_usd": "9.999900",
-        "ambiguous_usd": "0",
-    }
+    assert execute(values["broker"])["state"] == "completed"
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    ledger["spent_usd"] = "0"
     write_json(values["ledger"], ledger)
-    resumed = fixture(tmp_path, transport=transport)["broker"]
-    receipt = execute(resumed)
-    assert receipt["state"] == "not_submitted"
-    assert "USD 10" in receipt["reason"]
-    assert transport.methods == ["countTokens"]
-    assert resumed.status()["generation_submissions"] == 0
+    with pytest.raises(ValueError, match="spent_usd total is inconsistent"):
+        fixture(tmp_path, transport=transport)
+    assert (tmp_path / ".shared-ledger.json.integrity-halt.json").is_file()
+
+
+def test_consistently_lowered_ledger_spend_conflicts_with_immutable_receipt(
+    tmp_path: Path,
+):
+    values = fixture(tmp_path, transport=Transport())
+    assert execute(values["broker"])["state"] == "completed"
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    request = next(iter(ledger["requests"].values()))
+    request["actual_cost_usd"] = "0"
+    ledger["spent_usd"] = "0"
+    ledger["stages"]["eligibility"]["spent_usd"] = "0"
+    ledger["papers"]["family-p1"]["spent_usd"] = "0"
+    ledger["live_test_papers"]["family-p1"]["spent_usd"] = "0"
+    write_json(values["ledger"], ledger)
+    with pytest.raises(ValueError, match="immutable final event changed cost"):
+        fixture(tmp_path, transport=Transport())
 
 
 def test_ambiguous_generation_halts_without_replay(tmp_path: Path):
@@ -202,6 +218,7 @@ def test_request_key_and_payload_features_fail_closed(tmp_path: Path):
             stage="eligibility",
             paper_id="p1",
             family_id="family-p1",
+            source_version_id="source-p1",
             request_key="0" * 64,
             payload=body,
         )
@@ -213,6 +230,7 @@ def test_request_key_and_payload_features_fail_closed(tmp_path: Path):
             stage="eligibility",
             paper_id="p1",
             family_id="family-p1",
+            source_version_id="source-p1",
             request_key="0" * 64,
             payload=body,
         )
@@ -237,6 +255,76 @@ def test_new_run_id_cannot_replay_the_same_request(tmp_path: Path):
     assert transport.methods == ["countTokens", "generateContent"]
 
 
+def test_paper_alias_cannot_bypass_family_binding(tmp_path: Path):
+    transport = Transport()
+    broker = fixture(tmp_path, transport=transport)["broker"]
+    assert (
+        execute(broker, paper="canonical", family="family-1", source="source-v1")[
+            "state"
+        ]
+        == "completed"
+    )
+    with pytest.raises(ValueError, match="already bound"):
+        execute(broker, paper="alias", family="family-1", source="source-v1")
+    assert transport.methods == ["countTokens", "generateContent"]
+
+
+def test_source_version_cannot_move_to_an_alias_family(tmp_path: Path):
+    transport = Transport()
+    broker = fixture(tmp_path, transport=transport)["broker"]
+    assert (
+        execute(broker, paper="canonical", family="family-1", source="source-v1")[
+            "state"
+        ]
+        == "completed"
+    )
+    with pytest.raises(ValueError, match="source version is already bound"):
+        execute(broker, paper="canonical", family="family-alias", source="source-v1")
+    assert transport.methods == ["countTokens", "generateContent"]
+
+
+def test_received_response_is_recovered_after_final_receipt_write_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import arctic_qa.model_broker as broker_module
+
+    transport = Transport()
+    values = fixture(tmp_path, transport=transport)
+    original = broker_module.atomic_json
+
+    def crash_final(path: Path, value: object, *, immutable: bool = False):
+        if (
+            path.parent.name == "receipts"
+            and path.name.endswith(".json")
+            and not (
+                path.name.endswith(".submitted.json")
+                or path.name.endswith(".received.json")
+            )
+        ):
+            raise OSError("simulated final receipt crash")
+        return original(path, value, immutable=immutable)
+
+    monkeypatch.setattr(broker_module, "atomic_json", crash_final)
+    with pytest.raises(OSError, match="simulated final receipt crash"):
+        execute(values["broker"])
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    request_key = next(iter(ledger["requests"]))
+    assert ledger["requests"][request_key]["state"] == "submitted"
+    assert (tmp_path / "receipts" / f"{request_key}.received.json").is_file()
+
+    monkeypatch.setattr(broker_module, "atomic_json", original)
+    resumed = fixture(tmp_path, transport=transport)["broker"]
+    with pytest.raises(ValueError, match="already exists"):
+        execute(resumed)
+    recovered = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    assert recovered["requests"][request_key]["state"] == "completed"
+    final = json.loads(
+        (tmp_path / "receipts" / f"{request_key}.json").read_text(encoding="utf-8")
+    )
+    assert final["response"]["usageMetadata"]["totalTokenCount"] == 115
+    assert transport.methods == ["countTokens", "generateContent"]
+
+
 def test_production_spend_does_not_renew_or_inflate_live_test(tmp_path: Path):
     transport = Transport()
     values = fixture(tmp_path, transport=transport)
@@ -253,7 +341,7 @@ def test_production_spend_does_not_renew_or_inflate_live_test(tmp_path: Path):
         == "completed"
     )
     ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
-    assert ledger["live_test_papers"]["p1"]["spent_usd"] == "0.000132"
+    assert ledger["live_test_papers"]["family-p1"]["spent_usd"] == "0.000132"
     assert ledger["generation_submissions"] == 2
 
 
