@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/arctic-qa/metadata-prefilter.v1.schema.json",
+  "title": "Metadata prefilter disposition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "run_id", "policy_id", "policy_hash", "sequence",
+    "candidate_key", "metadata_disposition", "provisional",
+    "scientific_eligibility_effect", "reason_code", "evidence",
+    "queue", "identity", "type_metadata", "access_metadata",
+    "version_relation", "retraction_correction", "metadata_flags",
+    "title_review_terms", "source_screening_snapshot"
+  ],
+  "properties": {
+    "schema": {"const": "metadata-disposition-v1"},
+    "run_id": {"type": "string"},
+    "policy_id": {"type": "string"},
+    "policy_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sequence": {"type": "integer", "minimum": 1},
+    "candidate_key": {"type": "string", "minLength": 1},
+    "metadata_disposition": {
+      "enum": [
+        "priority_seed", "retained_article_type", "flagged_nonresearch_type",
+        "unresolved_missing_type", "unresolved_mixed_type", "unresolved_other_type"
+      ]
+    },
+    "provisional": {"const": true},
+    "scientific_eligibility_effect": {"const": "none"},
+    "reason_code": {"type": "string"},
+    "evidence": {
+      "type": "object",
+      "required": ["field", "value"],
+      "properties": {"field": {"type": "string"}, "value": {}}
+    },
+    "queue": {
+      "type": "object",
+      "required": ["name", "rank"],
+      "properties": {
+        "name": {"type": "string"},
+        "rank": {"type": "integer", "minimum": 1}
+      }
+    },
+    "identity": {"type": "object"},
+    "type_metadata": {"type": "object"},
+    "access_metadata": {"type": "object"},
+    "version_relation": {},
+    "retraction_correction": {},
+    "metadata_flags": {"type": "array", "items": {"type": "string"}},
+    "title_review_terms": {"type": "array", "items": {"type": "string"}},
+    "source_screening_snapshot": {"type": "object"}
+  }
+}

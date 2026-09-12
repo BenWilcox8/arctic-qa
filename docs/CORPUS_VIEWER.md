@@ -19,8 +19,10 @@ PYTHONPATH=src python -m arctic_qa corpus-view \
   --runtime-dir /private/runtime/path \
   --progress-file /private/runtime/path/corpus-progress-v1.json \
   --zotero-receipts-dir /private/zotero/receipts \
+  --metadata-run-dir /private/metadata-prefilter/run-RUN_ID \
   --host 127.0.0.1 \
-  --port 8787
+  --port 8787 \
+  --process-stale-after-seconds 300
 ```
 
 Stop the foreground process with `Ctrl-C`.
@@ -38,6 +40,12 @@ The record states are `not_running`, `running`, `paused`, `error`, and `complete
 The record timestamp shows when the pipeline owner observed the state.
 The viewer reports stale telemetry as unknown process state.
 The viewer also keeps absent telemetry separate from an observed `not_running` state.
+The process liveness window is 300 seconds by default.
+It is independent of the longer historical artifact freshness window.
+
+The optional metadata run directory contains producer progress, dispositions, and a final receipt.
+The viewer uses the completed receipt as the authority for completion.
+It keeps metadata disposition separate from source eligibility.
 
 ## Stage completion
 

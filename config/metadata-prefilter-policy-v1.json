@@ -1,0 +1,85 @@
+{
+  "schema": "metadata-prefilter-policy-v1",
+  "policy_id": "arctic-metadata-prefilter-r1-policy-v1",
+  "frozen_at_utc": "2026-09-12T02:24:00Z",
+  "source_protocol_id": "arctic-corpus-search-r1-protocol-v2",
+  "purpose": "Create a conservative retrieval and review queue from existing metadata only.",
+  "scientific_boundary": "This policy does not determine source eligibility or study geography.",
+  "batch_size": 1000,
+  "article_type_tokens": ["journalarticle", "journal-article", "study"],
+  "nonresearch_type_tokens": ["review", "editorial", "news", "book", "lettersandcomments"],
+  "title_review_terms": [
+    "arctic",
+    "arctic ocean",
+    "beaufort sea",
+    "canadian arctic",
+    "central arctic ocean",
+    "greenland",
+    "kara sea",
+    "laptev sea",
+    "north slope",
+    "siberian arctic",
+    "svalbard"
+  ],
+  "disposition_precedence": [
+    "priority_seed",
+    "unresolved_missing_type",
+    "flagged_nonresearch_type",
+    "unresolved_mixed_type",
+    "retained_article_type",
+    "unresolved_other_type"
+  ],
+  "queue_order": [
+    "priority_seed_review",
+    "retrieval_review",
+    "metadata_resolution_review",
+    "nonresearch_type_review"
+  ],
+  "rules": [
+    {
+      "disposition": "priority_seed",
+      "reason_code": "collaborator_seed_priority",
+      "condition": "An origin starts with collaborator_seed:.",
+      "queue": "priority_seed_review"
+    },
+    {
+      "disposition": "unresolved_missing_type",
+      "reason_code": "provider_type_missing",
+      "condition": "The provider type is missing.",
+      "queue": "metadata_resolution_review"
+    },
+    {
+      "disposition": "flagged_nonresearch_type",
+      "reason_code": "provider_type_explicit_nonresearch_flag",
+      "condition": "Every supplied type token is in nonresearch_type_tokens.",
+      "queue": "nonresearch_type_review"
+    },
+    {
+      "disposition": "unresolved_mixed_type",
+      "reason_code": "provider_type_mixes_primary_and_nonresearch",
+      "condition": "The supplied type contains article and nonresearch tokens.",
+      "queue": "metadata_resolution_review"
+    },
+    {
+      "disposition": "retained_article_type",
+      "reason_code": "provider_article_type_for_review",
+      "condition": "The supplied type contains an article token and no nonresearch token.",
+      "queue": "retrieval_review"
+    },
+    {
+      "disposition": "unresolved_other_type",
+      "reason_code": "provider_type_requires_review",
+      "condition": "A supplied type does not meet another rule.",
+      "queue": "metadata_resolution_review"
+    }
+  ],
+  "constraints": [
+    "A title term is a review flag only and never proves geography.",
+    "The absence of a title term never removes a candidate.",
+    "A metadata flag never changes source eligibility.",
+    "Every metadata disposition and flag is provisional until source review.",
+    "Missing access metadata never becomes a scientific exclusion.",
+    "Unknown correction and version status remain unknown.",
+    "All candidates remain in an auditable queue."
+  ]
+}

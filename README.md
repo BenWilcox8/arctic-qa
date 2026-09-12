@@ -41,6 +41,7 @@ The project does not require a server, vector database, GPU, or parser model.
 
 The optional read-only corpus-stage viewer uses only the Python standard library.
 See `docs/CORPUS_VIEWER.md` for its artifact boundary and start command.
+See `docs/METADATA_PREFILTER.md` for the metadata-only processing boundary.
 
 ## Staged workflow
 

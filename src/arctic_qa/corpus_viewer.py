@@ -14,6 +14,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+from .metadata_prefilter import DISPOSITIONS
+from .util import sha256_file
+
 
 PROGRESS_STATES = {"not_running", "running", "paused", "error", "completed"}
 ELIGIBILITY_FILTERS = {"all", "unreviewed", "pending", "eligible", "excluded"}
@@ -25,6 +28,8 @@ PENDING_FILTERS = {
     "other-pending",
 }
 PAGE_SIZES = {10, 25, 50, 100}
+METADATA_DISPOSITION_FILTERS = {"all", *DISPOSITIONS}
+CACHE_SCHEMA_VERSION = "corpus-view-cache-v2"
 SCHEMA = """
 CREATE TABLE candidates (
     candidate_key TEXT PRIMARY KEY,
@@ -46,7 +51,16 @@ CREATE TABLE candidates (
     evidence_locator TEXT,
     evidence_quote TEXT,
     selected INTEGER NOT NULL DEFAULT 0,
-    zotero_url TEXT
+    zotero_url TEXT,
+    metadata_disposition TEXT,
+    metadata_reason_code TEXT,
+    metadata_evidence_field TEXT,
+    metadata_evidence_value TEXT,
+    metadata_queue TEXT,
+    metadata_flags_json TEXT,
+    metadata_title_terms_json TEXT,
+    metadata_policy_id TEXT,
+    metadata_run_id TEXT
 );
 CREATE INDEX candidates_title_search ON candidates(title_search);
 CREATE INDEX candidates_doi ON candidates(doi);
@@ -117,12 +131,16 @@ class CorpusArtifacts:
         *,
         progress_file: Path | None = None,
         zotero_receipts_dir: Path | None = None,
+        metadata_run_dir: Path | None = None,
         stale_after_seconds: int = 86400,
+        process_stale_after_seconds: int = 300,
     ) -> None:
         if not re.fullmatch(r"[A-Za-z0-9_-]{3,80}", run_id):
             raise ValueError("run-id contains unsupported characters")
         if stale_after_seconds < 1:
             raise ValueError("stale-after-seconds must be positive")
+        if process_stale_after_seconds < 1:
+            raise ValueError("process-stale-after-seconds must be positive")
         self.corpus_root = corpus_root.resolve()
         self.run_id = run_id
         self.runtime_dir = runtime_dir.resolve()
@@ -131,7 +149,9 @@ class CorpusArtifacts:
         self.zotero_receipts_dir = (
             zotero_receipts_dir.resolve() if zotero_receipts_dir else None
         )
+        self.metadata_run_dir = metadata_run_dir.resolve() if metadata_run_dir else None
         self.stale_after_seconds = stale_after_seconds
+        self.process_stale_after_seconds = process_stale_after_seconds
         self.run_dir = self.corpus_root / "ledgers" / f"run-{run_id}"
         self.candidates_file = self.run_dir / "deduplicated-candidates.json"
         self.summary_file = self.run_dir / "summary.json"
@@ -150,8 +170,23 @@ class CorpusArtifacts:
             return plain if plain.is_file() else None
         return max(files, key=_screening_revision)
 
+    def _metadata_progress_file(self) -> Path | None:
+        if self.metadata_run_dir is None:
+            return None
+        return self.metadata_run_dir / "progress.json"
+
+    def _metadata_receipt_file(self) -> Path | None:
+        if self.metadata_run_dir is None:
+            return None
+        return self.metadata_run_dir / "run-receipt.json"
+
+    def _metadata_dispositions_file(self) -> Path | None:
+        if self.metadata_run_dir is None:
+            return None
+        return self.metadata_run_dir / "metadata-dispositions.ndjson"
+
     def _base_fingerprint(self) -> str:
-        return _file_fingerprint(self.candidates_file)
+        return f"{CACHE_SCHEMA_VERSION}:{_file_fingerprint(self.candidates_file)}"
 
     def _overlay_fingerprint(self) -> str:
         parts = [
@@ -161,6 +196,9 @@ class CorpusArtifacts:
             _file_fingerprint(self.protocol_file),
             _file_fingerprint(self.progress_file),
             _directory_fingerprint(self.zotero_receipts_dir),
+            _file_fingerprint(self._metadata_progress_file()),
+            _file_fingerprint(self._metadata_receipt_file()),
+            _file_fingerprint(self._metadata_dispositions_file()),
         ]
         return hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
@@ -258,6 +296,80 @@ class CorpusArtifacts:
                 continue
         return links
 
+    def _apply_metadata_overlay(self, connection: sqlite3.Connection) -> None:
+        receipt_file = self._metadata_receipt_file()
+        dispositions_file = self._metadata_dispositions_file()
+        if receipt_file is None or not receipt_file.is_file():
+            return
+        receipt = _read_json(receipt_file)
+        if (
+            not isinstance(receipt, dict)
+            or receipt.get("schema") != "metadata-prefilter-run-receipt-v1"
+            or receipt.get("state") != "completed"
+        ):
+            raise ValueError("the metadata run receipt is invalid or incomplete")
+        if dispositions_file is None or not dispositions_file.is_file():
+            raise ValueError("the completed metadata disposition file is unavailable")
+        if sha256_file(dispositions_file) != receipt.get("dispositions_sha256"):
+            raise ValueError("the completed metadata disposition file hash changed")
+        seen: set[str] = set()
+        counts: dict[str, int] = {}
+        with dispositions_file.open(encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, 1):
+                record = json.loads(line)
+                key = str(record.get("candidate_key") or "")
+                if not key or key in seen:
+                    raise ValueError(
+                        f"metadata disposition key is missing or repeated at line {line_number}"
+                    )
+                disposition = record.get("metadata_disposition")
+                if disposition not in DISPOSITIONS:
+                    raise ValueError(
+                        f"unsupported metadata disposition at line {line_number}"
+                    )
+                evidence = record.get("evidence") or {}
+                evidence_value = evidence.get("value")
+                if not isinstance(evidence_value, str):
+                    evidence_value = json.dumps(evidence_value, ensure_ascii=False)
+                cursor = connection.execute(
+                    """UPDATE candidates SET metadata_disposition=?,
+                    metadata_reason_code=?,metadata_evidence_field=?,
+                    metadata_evidence_value=?,metadata_queue=?,metadata_flags_json=?,
+                    metadata_title_terms_json=?,metadata_policy_id=?,metadata_run_id=?
+                    WHERE candidate_key=?""",
+                    (
+                        disposition,
+                        record.get("reason_code"),
+                        evidence.get("field"),
+                        evidence_value,
+                        (record.get("queue") or {}).get("name"),
+                        json.dumps(
+                            record.get("metadata_flags") or [], ensure_ascii=False
+                        ),
+                        json.dumps(
+                            record.get("title_review_terms") or [], ensure_ascii=False
+                        ),
+                        record.get("policy_id"),
+                        record.get("run_id"),
+                        key,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError(
+                        f"metadata disposition does not match discovery key: {key}"
+                    )
+                seen.add(key)
+                counts[disposition] = counts.get(disposition, 0) + 1
+        if len(seen) != receipt.get("total"):
+            raise ValueError("metadata disposition count does not match its receipt")
+        if counts != receipt.get("disposition_counts"):
+            raise ValueError(
+                "metadata disposition subtotals do not match their receipt"
+            )
+        discovered = connection.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
+        if len(seen) != discovered:
+            raise ValueError("metadata dispositions do not account for every candidate")
+
     def _apply_overlays(self, fingerprint: str) -> None:
         screening_file = self._screening_file()
         screening = _read_json(screening_file) if screening_file else []
@@ -266,7 +378,11 @@ class CorpusArtifacts:
             connection.execute(
                 """UPDATE candidates SET decision='pending', eligibility='unreviewed',
                 pending_reason='unreviewed', selected=0, evidence_locator=NULL,
-                evidence_quote=NULL, zotero_url=NULL"""
+                evidence_quote=NULL, zotero_url=NULL,metadata_disposition=NULL,
+                metadata_reason_code=NULL,metadata_evidence_field=NULL,
+                metadata_evidence_value=NULL,metadata_queue=NULL,
+                metadata_flags_json=NULL,metadata_title_terms_json=NULL,
+                metadata_policy_id=NULL,metadata_run_id=NULL"""
             )
             for item in screening:
                 decision = str(item.get("decision") or "pending")
@@ -299,6 +415,7 @@ class CorpusArtifacts:
                         item.get("candidate_key"),
                     ),
                 )
+            self._apply_metadata_overlay(connection)
             connection.execute(
                 "INSERT OR REPLACE INTO cache_meta (key,value) VALUES ('overlay_fingerprint',?)",
                 (fingerprint,),
@@ -355,7 +472,7 @@ class CorpusArtifacts:
             if updated.tzinfo is None:
                 raise ValueError("progress timestamp has no time zone")
             age = (datetime.now(UTC) - updated.astimezone(UTC)).total_seconds()
-            if age > self.stale_after_seconds:
+            if age > self.process_stale_after_seconds:
                 return {
                     **absent,
                     "telemetry": "stale",
@@ -371,12 +488,116 @@ class CorpusArtifacts:
                 "stage": value.get("stage"),
                 "updated_at_utc": value.get("updated_at_utc"),
                 "message": value.get("message") or "No progress message was recorded.",
+                "run_id": value.get("run_id"),
+                "policy_id": value.get("policy_id"),
+                "processed": value.get("processed"),
+                "total": value.get("total"),
+                "started_at_utc": value.get("started_at_utc"),
+                "completed_at_utc": value.get("completed_at_utc"),
+                "disposition_counts": value.get("disposition_counts"),
             }
         except (OSError, ValueError, json.JSONDecodeError, TypeError) as error:
             return {
                 **absent,
                 "telemetry": "invalid",
                 "message": f"Progress record error: {error}",
+            }
+
+    def _metadata_progress(self) -> dict[str, Any]:
+        absent = {
+            "schema": "metadata-prefilter-progress-v1",
+            "telemetry": "absent",
+            "state": "not_started",
+            "run_id": None,
+            "policy_id": None,
+            "producer_code_commit": None,
+            "started_at_utc": None,
+            "updated_at_utc": None,
+            "completed_at_utc": None,
+            "processed": 0,
+            "total": None,
+            "disposition_counts": {},
+            "queue_counts": {},
+            "message": "No metadata-processing run is selected.",
+        }
+        receipt_file = self._metadata_receipt_file()
+        progress_file = self._metadata_progress_file()
+        try:
+            if receipt_file is not None and receipt_file.is_file():
+                receipt = _read_json(receipt_file)
+                if (
+                    receipt.get("schema") != "metadata-prefilter-run-receipt-v1"
+                    or receipt.get("state") != "completed"
+                ):
+                    raise ValueError("the metadata receipt is invalid")
+                return {
+                    **absent,
+                    "telemetry": "observed",
+                    "state": "completed",
+                    "run_id": receipt.get("run_id"),
+                    "policy_id": receipt.get("policy_id"),
+                    "producer_code_commit": receipt.get("producer_code_commit"),
+                    "started_at_utc": receipt.get("started_at_utc"),
+                    "updated_at_utc": receipt.get("completed_at_utc"),
+                    "completed_at_utc": receipt.get("completed_at_utc"),
+                    "processed": receipt.get("processed"),
+                    "total": receipt.get("total"),
+                    "disposition_counts": receipt.get("disposition_counts") or {},
+                    "queue_counts": receipt.get("queue_counts") or {},
+                    "message": "The durable metadata-processing receipt is complete.",
+                }
+            if progress_file is None or not progress_file.is_file():
+                return absent
+            progress = _read_json(progress_file)
+            if progress.get("schema") != "metadata-prefilter-progress-v1":
+                raise ValueError("the metadata progress schema is unsupported")
+            state = progress.get("state")
+            if state not in {"not_running", "running", "paused", "error", "completed"}:
+                raise ValueError("the metadata progress state is unsupported")
+            processed = progress.get("processed")
+            total = progress.get("total")
+            if (
+                not isinstance(processed, int)
+                or not isinstance(total, int)
+                or not 0 <= processed <= total
+            ):
+                raise ValueError("the metadata progress counts are invalid")
+            updated_text = progress.get("updated_at_utc")
+            if not isinstance(updated_text, str):
+                raise ValueError("the metadata progress timestamp is missing")
+            updated = datetime.fromisoformat(updated_text.replace("Z", "+00:00"))
+            if updated.tzinfo is None:
+                raise ValueError("the metadata progress timestamp has no time zone")
+            age = (datetime.now(UTC) - updated.astimezone(UTC)).total_seconds()
+            if age > self.process_stale_after_seconds and state != "completed":
+                return {
+                    **absent,
+                    "telemetry": "stale",
+                    "state": None,
+                    "last_observed_state": state,
+                    "run_id": progress.get("run_id"),
+                    "policy_id": progress.get("policy_id"),
+                    "producer_code_commit": progress.get("producer_code_commit"),
+                    "started_at_utc": progress.get("started_at_utc"),
+                    "updated_at_utc": updated_text,
+                    "processed": processed,
+                    "total": total,
+                    "disposition_counts": progress.get("disposition_counts") or {},
+                    "queue_counts": progress.get("queue_counts") or {},
+                    "message": "The metadata progress record is stale. Current state is unknown.",
+                }
+            return {
+                **absent,
+                **progress,
+                "telemetry": "observed",
+                "message": f"Metadata-only processing is {state}: {processed} of {total} records processed.",
+            }
+        except (OSError, ValueError, json.JSONDecodeError, TypeError) as error:
+            return {
+                **absent,
+                "telemetry": "invalid",
+                "state": None,
+                "message": f"Metadata-processing record error: {error}",
             }
 
     def _artifact_rows(self) -> list[dict[str, Any]]:
@@ -387,6 +608,9 @@ class CorpusArtifacts:
             ("Query receipts", self.query_receipts_file),
             ("Screening overlay", self._screening_file()),
             ("Progress record", self.progress_file),
+            ("Metadata progress", self._metadata_progress_file()),
+            ("Metadata dispositions", self._metadata_dispositions_file()),
+            ("Metadata receipt", self._metadata_receipt_file()),
         ]
         rows = []
         for label, path in paths:
@@ -408,6 +632,7 @@ class CorpusArtifacts:
     def state(self) -> dict[str, Any]:
         self.refresh()
         artifacts = self._artifact_rows()
+        metadata = self._metadata_progress()
         available_dates = [
             row["updated_at_utc"]
             for row in artifacts
@@ -435,12 +660,19 @@ class CorpusArtifacts:
                 "stale_after_seconds": self.stale_after_seconds,
             },
             "progress": self._progress(),
+            "metadata_processing": metadata,
             "artifacts": artifacts,
             "data_revision": self._small_fingerprint or self._base_fingerprint(),
             "readiness": {
                 "metadata_discovery": {
                     "verdict": "not_ready",
                     "completion_condition": "The required discovery artifacts are not available.",
+                },
+                "metadata_prefilter": {
+                    "verdict": "ready"
+                    if metadata.get("state") == "completed"
+                    else "not_ready",
+                    "completion_condition": "Every discovery record has one versioned metadata disposition and queue assignment with reconciled counts.",
                 },
                 "eligible_corpus": {
                     "verdict": "not_ready",
@@ -485,8 +717,8 @@ class CorpusArtifacts:
             payload["stages"] = []
             return payload
         discovered = int(counts["discovered"] or 0)
-        selected = int(counts["selected"] or 0)
         payload["counts"] = {key: int(counts[key] or 0) for key in counts.keys()}
+        payload["metadata_counts"] = metadata.get("disposition_counts") or {}
         payload["protocol"] = {
             "protocol_id": protocol.get("protocol_id"),
             "frozen_at_utc": protocol.get("frozen_at_utc"),
@@ -520,8 +752,13 @@ class CorpusArtifacts:
             {
                 "id": "metadata_prefilter",
                 "name": "2. Metadata prefilter",
-                "state": "partial",
-                "detail": f"The {selected}-source cap is a historical initial batch, not a full prefilter of {discovered} records.",
+                "state": metadata.get("state")
+                if metadata.get("state") in {"running", "paused", "error", "completed"}
+                else "not_started",
+                "detail": (
+                    f"{metadata.get('processed') or 0} of {metadata.get('total') or discovered} records processed under "
+                    f"{metadata.get('policy_id') or 'no selected policy'}. Metadata status does not determine source eligibility."
+                ),
             },
             {
                 "id": "source_retrieval",
@@ -553,10 +790,13 @@ class CorpusArtifacts:
             raise ValueError("search text must contain 200 characters or fewer")
         eligibility = (parameters.get("eligibility") or ["all"])[0]
         pending = (parameters.get("pending_reason") or ["all"])[0]
+        metadata_disposition = (parameters.get("metadata_disposition") or ["all"])[0]
         if eligibility not in ELIGIBILITY_FILTERS:
             raise ValueError("unsupported eligibility filter")
         if pending not in PENDING_FILTERS:
             raise ValueError("unsupported pending-reason filter")
+        if metadata_disposition not in METADATA_DISPOSITION_FILTERS:
+            raise ValueError("unsupported metadata-disposition filter")
         try:
             page = max(1, int((parameters.get("page") or ["1"])[0]))
             page_size = int((parameters.get("page_size") or ["25"])[0])
@@ -583,6 +823,9 @@ class CorpusArtifacts:
         if pending != "all":
             where.append("pending_reason=?")
             values.append(pending)
+        if metadata_disposition != "all":
+            where.append("metadata_disposition=?")
+            values.append(metadata_disposition)
         clause = " WHERE " + " AND ".join(where) if where else ""
         with self._lock, sqlite3.connect(self.database) as connection:
             connection.row_factory = sqlite3.Row
@@ -595,6 +838,9 @@ class CorpusArtifacts:
                 f"""SELECT candidate_key,doi,stable_id,title,authors_json,year,venue,
                 item_type,landing_url,repository_url,decision,eligibility,pending_reason,
                 access_status,reason_code,evidence_locator,evidence_quote,selected,zotero_url
+                ,metadata_disposition,metadata_reason_code,metadata_evidence_field,
+                metadata_evidence_value,metadata_queue,metadata_flags_json,
+                metadata_title_terms_json,metadata_policy_id,metadata_run_id
                 FROM candidates{clause}
                 ORDER BY CASE eligibility WHEN 'eligible' THEN 0 WHEN 'excluded' THEN 1
                 WHEN 'pending' THEN 2 ELSE 3 END, title_search, candidate_key
@@ -606,6 +852,12 @@ class CorpusArtifacts:
             item = dict(row)
             item["authors"] = json.loads(item.pop("authors_json"))
             item["selected"] = bool(item["selected"])
+            flags = item.pop("metadata_flags_json")
+            title_terms = item.pop("metadata_title_terms_json")
+            item["metadata_flags"] = json.loads(flags) if flags else []
+            item["metadata_title_terms"] = (
+                json.loads(title_terms) if title_terms else []
+            )
             records.append(item)
         return {
             "page": page,
@@ -617,6 +869,7 @@ class CorpusArtifacts:
                 "q": query,
                 "eligibility": eligibility,
                 "pending_reason": pending,
+                "metadata_disposition": metadata_disposition,
             },
         }
 
@@ -711,9 +964,11 @@ def serve_corpus_viewer(
     runtime_dir: Path,
     progress_file: Path | None,
     zotero_receipts_dir: Path | None,
+    metadata_run_dir: Path | None,
     host: str,
     port: int,
     stale_after_seconds: int,
+    process_stale_after_seconds: int,
 ) -> None:
     if not 0 <= port <= 65535:
         raise ValueError("port must be between 0 and 65535")
@@ -723,7 +978,9 @@ def serve_corpus_viewer(
         runtime_dir,
         progress_file=progress_file,
         zotero_receipts_dir=zotero_receipts_dir,
+        metadata_run_dir=metadata_run_dir,
         stale_after_seconds=stale_after_seconds,
+        process_stale_after_seconds=process_stale_after_seconds,
     )
     server = CorpusServer((host, port), artifacts)
     actual_host, actual_port = server.server_address[:2]
@@ -745,9 +1002,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runtime-dir", type=Path, required=True)
     parser.add_argument("--progress-file", type=Path)
     parser.add_argument("--zotero-receipts-dir", type=Path)
+    parser.add_argument("--metadata-run-dir", type=Path)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--stale-after-seconds", type=int, default=86400)
+    parser.add_argument("--process-stale-after-seconds", type=int, default=300)
     args = parser.parse_args(argv)
     serve_corpus_viewer(
         corpus_root=args.corpus_root,
@@ -755,9 +1014,11 @@ def main(argv: list[str] | None = None) -> int:
         runtime_dir=args.runtime_dir,
         progress_file=args.progress_file,
         zotero_receipts_dir=args.zotero_receipts_dir,
+        metadata_run_dir=args.metadata_run_dir,
         host=args.host,
         port=args.port,
         stale_after_seconds=args.stale_after_seconds,
+        process_stale_after_seconds=args.process_stale_after_seconds,
     )
     return 0
 

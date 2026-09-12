@@ -12,6 +12,7 @@ import pytest
 
 import arctic_qa.corpus_viewer as corpus_viewer
 from arctic_qa.corpus_viewer import CorpusArtifacts, CorpusServer, _safe_json_bytes
+from arctic_qa.metadata_prefilter import run_metadata_prefilter
 
 
 REAL_CORPUS = Path("/mnt/crdata/research-abstention/arctic-qa/corpus-search-r1")
@@ -20,6 +21,7 @@ REAL_ZOTERO = Path(
     "/home/ben/.treehouse/firstmate-c40011/6/firstmate/"
     "data/research-workbench/zotero/receipts"
 )
+POLICY = Path(__file__).parents[1] / "config" / "metadata-prefilter-policy-v1.json"
 
 
 def write_json(path: Path, payload: object) -> None:
@@ -97,6 +99,25 @@ def fixture_corpus(root: Path, *, title: str = "Safe title") -> tuple[Path, Path
         },
     )
     return run, root / "progress-v1.json"
+
+
+def fixture_metadata_run(root: Path) -> Path:
+    run = root / "ledgers" / "run-test-run"
+    output = root / "metadata" / "run-metadata-r1"
+    policy_file = root / "metadata-policy.json"
+    policy = json.loads(POLICY.read_text(encoding="utf-8"))
+    policy["source_protocol_id"] = "test-protocol-v2"
+    write_json(policy_file, policy)
+    run_metadata_prefilter(
+        candidates_file=run / "deduplicated-candidates.json",
+        screening_file=run / "initial-screening-ledger-r1.json",
+        protocol_file=root / "protocol" / "protocol-v2.json",
+        policy_file=policy_file,
+        output_dir=output,
+        run_id="metadata-r1",
+        code_commit="deadbeef",
+    )
+    return output
 
 
 @pytest.fixture(scope="module")
@@ -212,6 +233,42 @@ def test_progress_and_screening_updates_refresh_from_fixture(tmp_path: Path) -> 
     assert artifacts.state()["counts"]["eligible"] == 1
 
 
+def test_metadata_results_are_separate_and_filterable(tmp_path: Path) -> None:
+    fixture_corpus(tmp_path)
+    metadata_run = fixture_metadata_run(tmp_path)
+    receipt_path = metadata_run / "run-receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["completed_at_utc"] = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+    write_json(receipt_path, receipt)
+    artifacts = CorpusArtifacts(
+        tmp_path,
+        "test-run",
+        tmp_path / "runtime",
+        metadata_run_dir=metadata_run,
+        process_stale_after_seconds=60,
+    )
+    state = artifacts.state()
+    assert state["metadata_processing"]["state"] == "completed"
+    assert state["readiness"]["metadata_prefilter"]["verdict"] == "ready"
+    assert state["metadata_counts"] == {
+        "retained_article_type": 1,
+        "unresolved_missing_type": 1,
+    }
+    retained = artifacts.candidates(
+        {"metadata_disposition": ["retained_article_type"], "page_size": ["10"]}
+    )
+    unresolved = artifacts.candidates(
+        {"metadata_disposition": ["unresolved_missing_type"], "page_size": ["10"]}
+    )
+    assert retained["total"] == 1
+    assert retained["records"][0]["eligibility"] == "pending"
+    assert retained["records"][0]["metadata_reason_code"] == (
+        "provider_article_type_for_review"
+    )
+    assert unresolved["total"] == 1
+    assert unresolved["records"][0]["eligibility"] == "unreviewed"
+
+
 def test_persistent_cache_does_not_reread_discovery_ledger(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -254,6 +311,7 @@ def test_absent_stale_and_invalid_progress_are_distinct(tmp_path: Path) -> None:
     assert stale["telemetry"] == "stale"
     assert stale["state"] is None
     assert stale["last_observed_state"] == "running"
+    assert artifacts.state()["freshness"]["state"] == "fresh"
     write_json(progress, {"schema": "corpus-progress-v1", "state": "running"})
     invalid = artifacts.state()["progress"]
     assert invalid["telemetry"] == "invalid"

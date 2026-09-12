@@ -27,6 +27,7 @@ from .exporting import export_run
 from .extraction import extract_source, load_chunks
 from .generation import generate_candidate
 from .manifests import write_source_manifest
+from .metadata_prefilter import run_metadata_prefilter
 from .paths import DEFAULT_DATA_ROOT, DataPaths
 from .providers import make_provider
 from .screening import screen_source
@@ -67,9 +68,24 @@ def parser() -> argparse.ArgumentParser:
     viewer.add_argument("--runtime-dir", type=Path, required=True)
     viewer.add_argument("--progress-file", type=Path)
     viewer.add_argument("--zotero-receipts-dir", type=Path)
+    viewer.add_argument("--metadata-run-dir", type=Path)
     viewer.add_argument("--host", default="127.0.0.1")
     viewer.add_argument("--port", type=int, default=8787)
     viewer.add_argument("--stale-after-seconds", type=int, default=86400)
+    viewer.add_argument("--process-stale-after-seconds", type=int, default=300)
+
+    metadata = commands.add_parser(
+        "metadata-prefilter",
+        help="Build a deterministic review queue from an existing metadata ledger.",
+    )
+    metadata.add_argument("--candidates-file", type=Path, required=True)
+    metadata.add_argument("--screening-file", type=Path, required=True)
+    metadata.add_argument("--protocol-file", type=Path, required=True)
+    metadata.add_argument("--policy-file", type=Path, required=True)
+    metadata.add_argument("--output-dir", type=Path, required=True)
+    metadata.add_argument("--run-id", required=True)
+    metadata.add_argument("--code-commit", required=True)
+    metadata.add_argument("--viewer-progress-file", type=Path)
 
     discover = commands.add_parser(
         "discover", help="Discover and deduplicate source metadata."
@@ -198,11 +214,27 @@ def main(argv: list[str] | None = None) -> int:
                 runtime_dir=args.runtime_dir,
                 progress_file=args.progress_file,
                 zotero_receipts_dir=args.zotero_receipts_dir,
+                metadata_run_dir=args.metadata_run_dir,
                 host=args.host,
                 port=args.port,
                 stale_after_seconds=args.stale_after_seconds,
+                process_stale_after_seconds=args.process_stale_after_seconds,
             )
             return 0
+        if args.command == "metadata-prefilter":
+            return _emit(
+                args,
+                run_metadata_prefilter(
+                    candidates_file=args.candidates_file,
+                    screening_file=args.screening_file,
+                    protocol_file=args.protocol_file,
+                    policy_file=args.policy_file,
+                    output_dir=args.output_dir,
+                    run_id=args.run_id,
+                    code_commit=args.code_commit,
+                    viewer_progress_file=args.viewer_progress_file,
+                ),
+            )
         paths, db = _open(args)
         try:
             handler = globals()[f"_{args.command}"]
