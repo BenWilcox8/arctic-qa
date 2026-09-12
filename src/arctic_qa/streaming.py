@@ -11,11 +11,16 @@ from .exporting import export_run
 from .extraction import extract_source
 from .generation import generate_candidate
 from .gemini_eligibility import (
+    ELIGIBILITY_RESPONSE_V2,
+    ELIGIBILITY_STATUS_MAPPING_VERSION,
     _correction_metadata,
     _job_key,
     _known_context_gaps,
+    _persist_span_manifest_v2,
     _request_payload,
-    _segments,
+    _span_blocks_v2,
+    _span_manifest_v2,
+    _validation_evidence,
     validate_response,
 )
 from .providers import Provider, call_provider
@@ -306,8 +311,11 @@ def run_stream(
             reason_codes = (
                 validation.get("errors") or ["eligibility_validation_unresolved"]
                 if validation["valid"] is not True
-                else eligibility["parsed_response"].get(
-                    "overall_reason_codes", ["eligibility_unresolved"]
+                else validation.get(
+                    "overall_reason_codes",
+                    eligibility["parsed_response"].get(
+                        "overall_reason_codes", ["eligibility_unresolved"]
+                    ),
                 )
             )
             disposition = (
@@ -722,6 +730,13 @@ def _run_eligibility(
         request_id=job_key,
         policy_sha256=sha256_file(policy_file),
     )
+    span_manifest_reference = _persist_span_manifest_v2(
+        run_dir,
+        job_key,
+        text,
+        str(access["extraction_sha256"]),
+        schema,
+    )
     generation = request["generationConfig"]
     system = request["systemInstruction"]["parts"][0]["text"]
     user_prompt = request["contents"][0]["parts"][0]["text"]
@@ -748,7 +763,7 @@ def _run_eligibility(
     )
     validation = validate_response(
         result.payload,
-        _segments(text),
+        _validation_evidence(text, str(access["extraction_sha256"]), schema),
         expected={
             "request_id": job_key,
             "input_echo": hashes,
@@ -786,6 +801,7 @@ def _run_eligibility(
         "policy_sha256": sha256_file(policy_file),
         "prompt_sha256": sha256_file(prompt_file),
         "schema_sha256": sha256_file(schema_file),
+        **span_manifest_reference,
         "parsed_response": result.payload,
         "validation": validation,
         "input_tokens": result.input_tokens,
@@ -837,6 +853,25 @@ def _validate_brokered_eligibility(
         request_id=expected_job_key,
         policy_sha256=sha256_file(policy_file),
     )
+    if schema.get("properties", {}).get("schema_version", {}).get("const") == (
+        ELIGIBILITY_RESPONSE_V2
+    ):
+        manifest_path = Path(str(eligibility.get("span_manifest_path") or ""))
+        expected_manifest = _span_manifest_v2(
+            _span_blocks_v2(text, str(access["extraction_sha256"]))
+        )
+        expected_manifest_sha256 = sha256_bytes(
+            canonical_json(expected_manifest).encode()
+        )
+        if (
+            manifest_path.name != f"{expected_job_key}.json"
+            or manifest_path.parent.name != "span-manifests"
+            or not manifest_path.is_file()
+            or _read(manifest_path) != expected_manifest
+            or eligibility.get("span_manifest_sha256") != expected_manifest_sha256
+            or hashes.get("span_manifest_sha256") != expected_manifest_sha256
+        ):
+            raise ValueError("the eligibility span manifest does not match")
     identity = provider.request_identity()
     expected_request_key = broker_request_key(
         model=provider.model,
@@ -875,7 +910,7 @@ def _validate_brokered_eligibility(
         raise ValueError("the brokered eligibility job and receipt do not match")
     validation = validate_response(
         result.payload,
-        _segments(text),
+        _validation_evidence(text, str(access["extraction_sha256"]), schema),
         expected={
             "request_id": expected_job_key,
             "input_echo": hashes,
@@ -924,10 +959,19 @@ def _validate_pair(access: dict[str, Any], eligibility: dict[str, Any]) -> None:
     ):
         raise ValueError("the Gemini eligibility receipt is not valid and complete")
     decision = (eligibility.get("validation") or {}).get("decision")
-    overall = (eligibility.get("parsed_response") or {}).get("overall")
-    if decision not in {"eligible", "excluded", "uncertain"} or overall != decision:
-        raise ValueError("the Gemini eligibility decision is inconsistent")
     parsed = eligibility.get("parsed_response") or {}
+    version = parsed.get("schema_version")
+    decision_consistent = (
+        version == "eligibility-response-v1" and parsed.get("overall") == decision
+    ) or (
+        version == ELIGIBILITY_RESPONSE_V2
+        and "overall" not in parsed
+        and "overall_reason_codes" not in parsed
+        and (eligibility.get("validation") or {}).get("mapping_version")
+        == ELIGIBILITY_STATUS_MAPPING_VERSION
+    )
+    if decision not in {"eligible", "excluded", "uncertain"} or not decision_consistent:
+        raise ValueError("the Gemini eligibility decision is inconsistent")
     criteria = parsed.get("criteria")
     if (
         parsed.get("request_id") != eligibility.get("job_key")
@@ -1029,7 +1073,14 @@ def _import_source(
         "returned_model": eligibility.get("model_version"),
         "response_id": eligibility.get("response_id"),
         "decision": eligibility["validation"]["decision"],
-        "overall_reason_codes": parsed["overall_reason_codes"],
+        "overall_reason_codes": eligibility["validation"].get(
+            "overall_reason_codes", parsed.get("overall_reason_codes", [])
+        ),
+        **(
+            {"status_mapping_version": eligibility["validation"].get("mapping_version")}
+            if parsed.get("schema_version") == ELIGIBILITY_RESPONSE_V2
+            else {}
+        ),
         "study_geography": geography,
         "resolved_evidence": [
             row

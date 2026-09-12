@@ -25,6 +25,9 @@ CRITERIA = (
     "correction_retraction_coverage",
 )
 
+ELIGIBILITY_RESPONSE_V2 = "eligibility-response-v2"
+ELIGIBILITY_STATUS_MAPPING_VERSION = "eligibility-criterion-status-map-v1"
+
 
 def _now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -150,6 +153,178 @@ def _segments(text: str, page_chars: int = 12000) -> list[dict[str, Any]]:
     return result
 
 
+def _response_contract_version(schema: dict[str, Any]) -> str:
+    value = (schema.get("properties") or {}).get("schema_version", {}).get("const")
+    return value if value == ELIGIBILITY_RESPONSE_V2 else "eligibility-response-v1"
+
+
+def _line_fragments(text: str, maximum_bytes: int) -> list[str]:
+    fragments: list[str] = []
+    for line in text.splitlines(keepends=True):
+        current = ""
+        current_bytes = 0
+        for character in line:
+            size = len(character.encode("utf-8"))
+            if current and current_bytes + size > maximum_bytes:
+                fragments.append(current)
+                current = ""
+                current_bytes = 0
+            current += character
+            current_bytes += size
+        if current:
+            fragments.append(current)
+    if text and not fragments:
+        fragments.append(text)
+    return fragments
+
+
+def _span_blocks_v2(
+    text: str, extraction_sha256: str, block_bytes: int = 12000
+) -> list[dict[str, Any]]:
+    if block_bytes <= 0:
+        raise ValueError("eligibility span block size must be positive")
+    encoded = text.encode("utf-8")
+    if sha256_bytes(encoded) != extraction_sha256:
+        raise ValueError("eligibility extraction hash does not match the source text")
+    fragments = _line_fragments(text, block_bytes)
+    grouped: list[list[str]] = []
+    current: list[str] = []
+    current_size = 0
+    for fragment in fragments:
+        size = len(fragment.encode("utf-8"))
+        if current and current_size + size > block_bytes:
+            grouped.append(current)
+            current = []
+            current_size = 0
+        current.append(fragment)
+        current_size += size
+    if current:
+        grouped.append(current)
+
+    blocks: list[dict[str, Any]] = []
+    byte_cursor = 0
+    span_number = 0
+    for block_number, group in enumerate(grouped, start=1):
+        block_text = "".join(group)
+        block_encoded = block_text.encode("utf-8")
+        block_id = f"text-block-{block_number:05d}"
+        block_sha256 = sha256_bytes(block_encoded)
+        spans = []
+        for fragment in group:
+            fragment_encoded = fragment.encode("utf-8")
+            span_number += 1
+            start = byte_cursor
+            end = start + len(fragment_encoded)
+            spans.append(
+                {
+                    "span_id": f"s{span_number:06d}",
+                    "source_block_id": block_id,
+                    "section_id": "extracted-text",
+                    "page_id": None,
+                    "extraction_sha256": extraction_sha256,
+                    "block_sha256": block_sha256,
+                    "span_sha256": sha256_bytes(fragment_encoded),
+                    "start_byte": start,
+                    "end_byte": end,
+                    "text": fragment,
+                }
+            )
+            byte_cursor = end
+        blocks.append(
+            {
+                "source_block_id": block_id,
+                "section_id": "extracted-text",
+                "page_id": None,
+                "extraction_sha256": extraction_sha256,
+                "block_sha256": block_sha256,
+                "start_byte": byte_cursor - len(block_encoded),
+                "end_byte": byte_cursor,
+                "text": block_text,
+                "spans": spans,
+            }
+        )
+    return blocks
+
+
+def _span_manifest_v2(blocks: list[dict[str, Any]]) -> dict[str, Any]:
+    extraction_sha256 = blocks[0]["extraction_sha256"] if blocks else sha256_bytes(b"")
+    return {
+        "schema": "eligibility-span-manifest-v1",
+        "response_schema_version": ELIGIBILITY_RESPONSE_V2,
+        "extraction_sha256": extraction_sha256,
+        "blocks": [
+            {
+                key: block[key]
+                for key in (
+                    "source_block_id",
+                    "section_id",
+                    "page_id",
+                    "extraction_sha256",
+                    "block_sha256",
+                    "start_byte",
+                    "end_byte",
+                )
+            }
+            | {
+                "spans": [
+                    {
+                        key: span[key]
+                        for key in (
+                            "span_id",
+                            "source_block_id",
+                            "section_id",
+                            "page_id",
+                            "extraction_sha256",
+                            "block_sha256",
+                            "span_sha256",
+                            "start_byte",
+                            "end_byte",
+                        )
+                    }
+                    for span in block["spans"]
+                ]
+            }
+            for block in blocks
+        ],
+    }
+
+
+def _validation_evidence(
+    text: str, extraction_sha256: str, schema: dict[str, Any]
+) -> list[dict[str, Any]]:
+    if _response_contract_version(schema) == ELIGIBILITY_RESPONSE_V2:
+        return _span_blocks_v2(text, extraction_sha256)
+    return _segments(text)
+
+
+def _render_span_blocks_v2(blocks: list[dict[str, Any]]) -> str:
+    rendered = []
+    for block in blocks:
+        parts = [f"[source_block_id={block['source_block_id']}]\n"]
+        parts.extend(f"{span['span_id']}\t{span['text']}" for span in block["spans"])
+        rendered.append("".join(parts))
+    return "".join(rendered)
+
+
+def _persist_span_manifest_v2(
+    run_dir: Path,
+    job_key: str,
+    text: str,
+    extraction_sha256: str,
+    schema: dict[str, Any],
+) -> dict[str, str]:
+    if _response_contract_version(schema) != ELIGIBILITY_RESPONSE_V2:
+        return {}
+    manifest = _span_manifest_v2(_span_blocks_v2(text, extraction_sha256))
+    manifest_sha256 = sha256_bytes(canonical_json(manifest).encode())
+    path = run_dir / "span-manifests" / f"{job_key}.json"
+    atomic_json(path, manifest, immutable=True)
+    return {
+        "span_manifest_path": str(path.resolve()),
+        "span_manifest_sha256": manifest_sha256,
+    }
+
+
 def _correction_metadata(source: dict[str, Any]) -> dict[str, Any]:
     return source.get("correction_metadata") or {
         "provided": False,
@@ -263,6 +438,43 @@ def _request_payload(
         "extracted_text_sha256": str(source["extraction_sha256"]),
         "metadata_sha256": sha256_bytes(canonical_json(metadata).encode()),
     }
+    if _response_contract_version(schema) == ELIGIBILITY_RESPONSE_V2:
+        span_blocks = _span_blocks_v2(text, str(source["extraction_sha256"]))
+        span_manifest = _span_manifest_v2(span_blocks)
+        hashes["span_manifest_sha256"] = sha256_bytes(
+            canonical_json(span_manifest).encode()
+        )
+        user_text = "\n".join(
+            (
+                "<ELIGIBILITY_SCREEN_REQUEST_V2>",
+                f"request_id: {request_id}",
+                f"status_mapping_version: {ELIGIBILITY_STATUS_MAPPING_VERSION}",
+                f"input_hashes: {canonical_json(hashes)}",
+                f"policy: {canonical_json(policy)}",
+                f"metadata: {canonical_json(metadata)}",
+                f"correction_metadata: {canonical_json(correction)}",
+                "ARTICLE_SPANS_BEGIN",
+                _render_span_blocks_v2(span_blocks),
+                "ARTICLE_SPANS_END",
+                "</ELIGIBILITY_SCREEN_REQUEST_V2>",
+            )
+        )
+        return (
+            {
+                "systemInstruction": {"parts": [{"text": prompt}]},
+                "contents": [{"role": "user", "parts": [{"text": user_text}]}],
+                "generationConfig": {
+                    "candidateCount": 1,
+                    "temperature": 0,
+                    "responseMimeType": "application/json",
+                    "responseJsonSchema": schema,
+                    "maxOutputTokens": int(config["maximum_output_tokens"]),
+                    "thinkingConfig": {"thinkingLevel": config["thinking_level"]},
+                },
+                "store": False,
+            },
+            hashes,
+        )
     blocks = [
         f"[source_block_id={row['source_block_id']}; section_id={row['section_id']}; page_id={row['page_id']}]\n{row['text']}"
         for row in _segments(text)
@@ -779,7 +991,7 @@ def _schema_errors(
     return errors
 
 
-def validate_response(
+def _validate_response_v1(
     value: Any,
     segments: list[dict[str, Any]],
     *,
@@ -921,6 +1133,323 @@ def validate_response(
         "resolved_evidence": resolved,
         "decision": value.get("overall") if not errors else "uncertain",
     }
+
+
+def _status_mapping_v2(by_id: dict[str, dict[str, Any]]) -> tuple[str, list[str]]:
+    failed = sorted(
+        criterion
+        for criterion in CRITERIA
+        if by_id.get(criterion, {}).get("status") == "failed"
+    )
+    if failed:
+        return "excluded", [f"criterion_failed:{criterion}" for criterion in failed]
+    required = {
+        "published_primary_findings",
+        "stable_identity_version",
+        "study_geography",
+        "access_rights_evidence",
+    }
+    unresolved = sorted(
+        criterion
+        for criterion in required
+        if by_id.get(criterion, {}).get("status") != "satisfied"
+    )
+    correction = by_id.get("correction_retraction_coverage", {}).get("status")
+    if not unresolved and correction in {"satisfied", "uncertain"}:
+        return "eligible", ["all_required_criteria_satisfied"]
+    if correction not in {"satisfied", "uncertain"}:
+        unresolved.append("correction_retraction_coverage")
+    return "uncertain", [
+        f"criterion_unresolved:{criterion}" for criterion in sorted(set(unresolved))
+    ]
+
+
+def _span_catalog_v2(
+    blocks: list[dict[str, Any]], expected_hashes: dict[str, Any]
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    errors: list[str] = []
+    catalog: dict[str, dict[str, Any]] = {}
+    extraction = bytearray()
+    block_cursor = 0
+    expected_span_number = 1
+    if not isinstance(blocks, list):
+        return {}, ["evidence_catalog_changed"]
+    for block_number, block in enumerate(blocks, start=1):
+        if not isinstance(block, dict):
+            errors.append("evidence_catalog_changed")
+            continue
+        try:
+            block_text = block["text"]
+            block_bytes = block_text.encode("utf-8")
+            block_start = block["start_byte"]
+            block_end = block["end_byte"]
+            spans = block["spans"]
+        except (AttributeError, KeyError):
+            errors.append("evidence_catalog_changed")
+            continue
+        block_bounds_valid = (
+            isinstance(block_start, int)
+            and isinstance(block_end, int)
+            and block_start == block_cursor
+            and block_end == block_start + len(block_bytes)
+            and block_end >= block_start
+        )
+        if not block_bounds_valid:
+            errors.append("evidence_block_out_of_bounds")
+        safe_block_start = block_start if isinstance(block_start, int) else block_cursor
+        safe_block_end = (
+            block_end
+            if isinstance(block_end, int)
+            else safe_block_start + len(block_bytes)
+        )
+        if not isinstance(block_text, str):
+            errors.append("evidence_catalog_changed")
+        expected_block_id = f"text-block-{block_number:05d}"
+        actual_block_sha256 = sha256_bytes(block_bytes)
+        if (
+            block.get("source_block_id") != expected_block_id
+            or block.get("section_id") != "extracted-text"
+            or block.get("page_id") is not None
+            or block.get("extraction_sha256")
+            != expected_hashes.get("extracted_text_sha256")
+            or block.get("block_sha256") != actual_block_sha256
+            or not isinstance(spans, list)
+        ):
+            errors.append("evidence_catalog_changed")
+            spans = spans if isinstance(spans, list) else []
+        span_bytes = bytearray()
+        span_cursor = safe_block_start
+        for span in spans:
+            if not isinstance(span, dict):
+                errors.append("evidence_catalog_changed")
+                continue
+            span_id = span.get("span_id")
+            if isinstance(span_id, str) and span_id in catalog:
+                errors.append("evidence_span_duplicate")
+                continue
+            try:
+                source_text = span["text"]
+                source_bytes = source_text.encode("utf-8")
+                start = span["start_byte"]
+                end = span["end_byte"]
+            except (AttributeError, KeyError):
+                errors.append("evidence_catalog_changed")
+                continue
+            span_bounds_valid = (
+                isinstance(start, int)
+                and isinstance(end, int)
+                and start == span_cursor
+                and start >= safe_block_start
+                and end <= safe_block_end
+                and end == start + len(source_bytes)
+                and end > start
+            )
+            if not span_bounds_valid:
+                errors.append("evidence_span_out_of_bounds")
+            if not isinstance(source_text, str):
+                errors.append("evidence_catalog_changed")
+            expected_span_id = f"s{expected_span_number:06d}"
+            if (
+                span_id != expected_span_id
+                or span.get("source_block_id") != expected_block_id
+                or span.get("section_id") != "extracted-text"
+                or span.get("page_id") is not None
+                or span.get("extraction_sha256")
+                != expected_hashes.get("extracted_text_sha256")
+                or span.get("block_sha256") != actual_block_sha256
+                or span.get("span_sha256") != sha256_bytes(source_bytes)
+            ):
+                errors.append("evidence_catalog_changed")
+            if isinstance(span_id, str):
+                catalog[span_id] = span
+            span_bytes.extend(source_bytes)
+            span_cursor = end if isinstance(end, int) else span_cursor
+            expected_span_number += 1
+        if bytes(span_bytes) != block_bytes:
+            errors.append("evidence_catalog_changed")
+        extraction.extend(block_bytes)
+        block_cursor = safe_block_end
+    if sha256_bytes(bytes(extraction)) != expected_hashes.get("extracted_text_sha256"):
+        errors.append("evidence_catalog_changed")
+    try:
+        manifest_sha256 = sha256_bytes(
+            canonical_json(_span_manifest_v2(blocks)).encode()
+        )
+    except (KeyError, TypeError):
+        manifest_sha256 = None
+        errors.append("evidence_catalog_changed")
+    if manifest_sha256 != expected_hashes.get("span_manifest_sha256"):
+        errors.append("evidence_manifest_hash_mismatch")
+    return catalog, sorted(set(errors))
+
+
+def _validate_response_v2(
+    value: Any,
+    blocks: list[dict[str, Any]],
+    *,
+    expected: dict[str, Any],
+    response_schema: dict[str, Any],
+) -> dict[str, Any]:
+    errors = _schema_errors(value, response_schema, response_schema)
+    required = {
+        "schema_version",
+        "status_mapping_version",
+        "request_id",
+        "criteria",
+        "known_missing_context",
+        "correction_metadata_used",
+        "input_echo",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        return {
+            "valid": False,
+            "errors": ["response_shape_invalid"],
+            "resolved_evidence": [],
+            "decision": "uncertain",
+            "overall_reason_codes": ["response_shape_invalid"],
+            "mapping_version": ELIGIBILITY_STATUS_MAPPING_VERSION,
+        }
+    if (
+        value.get("schema_version") != ELIGIBILITY_RESPONSE_V2
+        or value.get("request_id") != expected["request_id"]
+    ):
+        errors.append("response_identity_mismatch")
+    if value.get("status_mapping_version") != ELIGIBILITY_STATUS_MAPPING_VERSION:
+        errors.append("status_mapping_version_mismatch")
+    if value.get("input_echo") != expected["input_echo"]:
+        errors.append("input_hash_mismatch")
+    if value.get("correction_metadata_used") != expected["correction_metadata"]:
+        errors.append("correction_metadata_mismatch")
+    missing_context = value.get("known_missing_context")
+    if isinstance(missing_context, list) and not set(
+        expected["known_context_gaps"]
+    ) <= set(missing_context):
+        errors.append("known_context_gap_hidden")
+
+    catalog, catalog_errors = _span_catalog_v2(blocks, expected["input_echo"])
+    errors.extend(catalog_errors)
+    trusted_catalog = not catalog_errors
+    criteria = value.get("criteria") if isinstance(value.get("criteria"), list) else []
+    if not isinstance(value.get("criteria"), list):
+        errors.append("criteria_invalid")
+    by_id: dict[str, dict[str, Any]] = {}
+    resolved: list[dict[str, Any]] = []
+    selected_globally: set[str] = set()
+    for row in criteria:
+        if not isinstance(row, dict) or set(row) != {
+            "criterion_id",
+            "status",
+            "reason_codes",
+            "evidence",
+            "missing_context",
+        }:
+            errors.append("criterion_shape_invalid")
+            continue
+        criterion = row.get("criterion_id")
+        if not isinstance(criterion, str) or criterion not in CRITERIA:
+            errors.append(f"criterion_invalid:{criterion}")
+            continue
+        if criterion in by_id:
+            errors.append("criterion_repeated")
+            continue
+        by_id[criterion] = row
+        if (
+            row.get("status") not in {"satisfied", "failed", "uncertain"}
+            or not isinstance(row.get("reason_codes"), list)
+            or not row["reason_codes"]
+            or not all(isinstance(code, str) and code for code in row["reason_codes"])
+            or not isinstance(row.get("evidence"), list)
+            or not isinstance(row.get("missing_context"), list)
+        ):
+            errors.append(f"criterion_invalid:{criterion}")
+            continue
+        if row["status"] in {"satisfied", "failed"} and not row["evidence"]:
+            errors.append(f"criterion_evidence_missing:{criterion}")
+        if row["status"] == "uncertain" and not row["missing_context"]:
+            errors.append(f"criterion_missing_context_absent:{criterion}")
+        selected_for_criterion: set[str] = set()
+        for evidence in row["evidence"]:
+            if not isinstance(evidence, dict) or set(evidence) != {"span_ids"}:
+                errors.append(f"evidence_invalid:{criterion}")
+                continue
+            span_ids = evidence.get("span_ids")
+            if (
+                not isinstance(span_ids, list)
+                or not span_ids
+                or not all(isinstance(span_id, str) and span_id for span_id in span_ids)
+            ):
+                errors.append(f"evidence_invalid:{criterion}")
+                continue
+            if (
+                len(span_ids) != len(set(span_ids))
+                or selected_for_criterion.intersection(span_ids)
+                or selected_globally.intersection(span_ids)
+            ):
+                errors.append(f"evidence_span_duplicate:{criterion}")
+            selected_for_criterion.update(span_ids)
+            selected_globally.update(span_ids)
+            unknown = [span_id for span_id in span_ids if span_id not in catalog]
+            if unknown:
+                errors.append(f"evidence_span_unknown:{criterion}")
+                continue
+            if trusted_catalog:
+                resolved.append(
+                    {
+                        "criterion": criterion,
+                        "span_ids": list(span_ids),
+                        "spans": [
+                            {
+                                "span_id": span_id,
+                                "locator": {
+                                    "source_block_id": catalog[span_id][
+                                        "source_block_id"
+                                    ],
+                                    "section_id": catalog[span_id]["section_id"],
+                                    "page_id": catalog[span_id]["page_id"],
+                                },
+                                "start_byte": catalog[span_id]["start_byte"],
+                                "end_byte": catalog[span_id]["end_byte"],
+                                "quote": catalog[span_id]["text"],
+                                "source_bytes_sha256": catalog[span_id]["span_sha256"],
+                            }
+                            for span_id in span_ids
+                        ],
+                    }
+                )
+    if set(by_id) != set(CRITERIA):
+        errors.append("criterion_set_invalid")
+    mapped, reason_codes = _status_mapping_v2(by_id)
+    unique_errors = sorted(set(errors))
+    return {
+        "valid": not unique_errors,
+        "errors": unique_errors,
+        "resolved_evidence": resolved if not catalog_errors else [],
+        "decision": mapped if not unique_errors else "uncertain",
+        "overall_reason_codes": reason_codes,
+        "mapping_version": ELIGIBILITY_STATUS_MAPPING_VERSION,
+    }
+
+
+def validate_response(
+    value: Any,
+    segments: list[dict[str, Any]],
+    *,
+    expected: dict[str, Any],
+    response_schema: dict[str, Any],
+) -> dict[str, Any]:
+    if _response_contract_version(response_schema) == ELIGIBILITY_RESPONSE_V2:
+        return _validate_response_v2(
+            value,
+            segments,
+            expected=expected,
+            response_schema=response_schema,
+        )
+    return _validate_response_v1(
+        value,
+        segments,
+        expected=expected,
+        response_schema=response_schema,
+    )
 
 
 class GeminiTransport:
@@ -1482,6 +2011,13 @@ def run_gemini_eligibility(
                 "schema_sha256": sha256_file(schema_file),
                 "request_sha256": sha256_bytes(canonical_json(payload).encode()),
                 "started_at_utc": _now(),
+                **_persist_span_manifest_v2(
+                    run_dir,
+                    job_key,
+                    text,
+                    str(source["extraction_sha256"]),
+                    schema,
+                ),
             }
             try:
                 _phase_event(run_dir, safety, project_ledger_file, "count")
@@ -1686,7 +2222,9 @@ def run_gemini_eligibility(
                     parsed = _strict_json_loads(response_text)
                     validation = validate_response(
                         parsed,
-                        _segments(text),
+                        _validation_evidence(
+                            text, str(source["extraction_sha256"]), schema
+                        ),
                         expected={
                             "request_id": job_key,
                             "input_echo": hashes,

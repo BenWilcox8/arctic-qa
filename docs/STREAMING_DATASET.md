@@ -186,11 +186,34 @@ The local ambiguous call entry becomes complete only after the saved JSON passes
 This resume path does not call token counting or generation, including after a process restart.
 The saved NDVI response binds prompt version 1.
 Its continuation command must specify `--eligibility-prompt-file config/gemini-eligibility-prompt-v1.txt`.
-New requests use prompt version 3.
+The current CLI defaults use prompt version 3 and response schema v1.
 Version 3 requires exact whitespace and Unicode preservation.
 It also requires each quote to occur once in its cited block.
 Repeated text must include adjacent exact text until the quote is unique.
-Prompt versions 1 and 2 remain immutable for their saved requests.
+Prompt versions 1, 2, and 3 and response schema v1 remain immutable for saved requests.
+
+The candidate contract for new requests uses prompt version 4 and response schema v2.
+Select it explicitly only after the focused review and release gate pass:
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json stream \
+  OTHER_REQUIRED_ARGUMENTS \
+  --eligibility-prompt-file config/gemini-eligibility-prompt-v4.txt \
+  --eligibility-schema-file schemas/gemini-eligibility.v2.schema.json
+```
+
+Version 4 renders each complete source text once with short scoped span IDs.
+The internal immutable manifest binds each ID to the extraction hash, block hash, span hash, and UTF-8 byte range.
+The response selects one or more IDs for each criterion.
+The validator rejects unknown IDs, duplicate IDs, changed bindings, and out-of-range bindings.
+The validator copies the exact source bytes into the resolved evidence record.
+It does not accept a generated or normalized quote.
+Multiple IDs support findings that PDF extraction separates with text from another column.
+The response does not contain an overall decision.
+The program derives the decision from the five criterion statuses with mapping `eligibility-criterion-status-map-v1`.
+This mapping does not change the scientific criteria.
+Span location proves source provenance, but it does not prove scientific entailment.
+The existing evidence and scope gates still decide whether the selected text supports the status.
 See [the shared model broker guide](SHARED_MODEL_BROKER.md) for the exact command and rules.
 An immutable-event failure republishes broker status with `halted` set to `true` and `integrity_valid` set to `false`.
 The broker observer updates streaming progress to bind that halted status.

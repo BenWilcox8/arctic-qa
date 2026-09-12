@@ -420,9 +420,15 @@ The adapter calls `countTokens` with the completed request before generation.
 It reserves the maximum configured output and thinking cost before transmission.
 Configuration revision v2 requires low thinking for every structured Gemini request.
 The output caps stay unchanged.
-New eligibility requests use `config/gemini-eligibility-prompt-v3.txt`.
-This prompt states the required schema value and exact unique-quote rules.
-Prompt versions 1 and 2 remain unchanged for their saved request paths.
+The CLI defaults remain prompt v3 and response schema v1 for saved request compatibility.
+Prompt versions 1, 2, and 3 and response schema v1 remain unchanged.
+The candidate contract for a new request uses `config/gemini-eligibility-prompt-v4.txt` with `schemas/gemini-eligibility.v2.schema.json`.
+Version 4 asks the model to select short source-span IDs instead of generating quotes.
+The program copies the exact selected UTF-8 source bytes into resolved evidence.
+The program derives the overall decision with frozen status mapping `eligibility-criterion-status-map-v1`.
+Do not apply version 4 to a saved request or response.
+Use version 4 only after its focused review and release gate pass.
+Span location proves source provenance, but it does not prove scientific entailment.
 See [the structured-output budget correction](docs/GEMINI_STRUCTURED_OUTPUT_BUDGET.md).
 If the central ledger predates this revision, use a reviewed configuration transition.
 The transition preserves the initial identity, spend, submission counts, and immutable receipts.
