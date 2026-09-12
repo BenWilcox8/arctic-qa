@@ -410,12 +410,40 @@ def _extract_text(body: bytes, media_type: str) -> tuple[str, str, bool]:
 
 
 def _identity_resolves(candidate: dict[str, Any], text: str) -> bool:
-    normalized = " ".join(text.casefold().split())
-    doi = str(candidate.get("doi") or "").casefold()
-    if doi and doi in normalized:
+    identity_region = _identity_region(text)
+    doi = _normalize_doi(str(candidate.get("doi") or ""))
+    if doi and doi in _doi_tokens(identity_region):
         return True
+    normalized = " ".join(identity_region.casefold().split())
     title = " ".join(str(candidate.get("title") or "").casefold().split())
     return bool(len(title) >= 20 and title in normalized)
+
+
+def _identity_region(text: str) -> str:
+    """Return the front matter before a reference section, with a fixed bound."""
+    front = text[:12000]
+    reference = re.search(
+        r"(?:^|[\r\n])\s*(?:references|bibliography)\s*(?:[\r\n]|$)",
+        front,
+        flags=re.IGNORECASE,
+    )
+    return front[: reference.start()] if reference else front
+
+
+def _normalize_doi(value: str) -> str:
+    normalized = urllib.parse.unquote(value).strip().casefold()
+    normalized = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", normalized)
+    return normalized.rstrip(".,;:)]}")
+
+
+def _doi_tokens(text: str) -> set[str]:
+    return {
+        _normalize_doi(match.group(0))
+        for match in re.finditer(
+            r"(?<![a-z0-9])10\.\d{4,9}/[^\s\"<>]+",
+            urllib.parse.unquote(text).casefold(),
+        )
+    }
 
 
 def _validate_source_url(url: str) -> None:

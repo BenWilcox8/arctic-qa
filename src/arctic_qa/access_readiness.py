@@ -243,12 +243,19 @@ def _receipts(
             if row.get("access_state") == "full_text_ready":
                 source = Path(str(row.get("source_path") or ""))
                 extraction = Path(str(row.get("extraction_path") or ""))
+                coverage = row.get("extraction_coverage") or {}
                 if (
                     not source.is_file()
                     or not extraction.is_file()
                     or sha256_file(source) != row.get("source_content_hash")
                     or sha256_file(extraction) != row.get("extraction_sha256")
-                    or not row.get("identity_verified")
+                    or row.get("identity_verified") is not True
+                    or extraction.stat().st_size < MIN_EXTRACTED_TEXT_CHARS
+                    or coverage.get("article_body_recognized") is not True
+                    or not _identity_resolves(
+                        selected,
+                        extraction.read_text(encoding="utf-8", errors="replace"),
+                    )
                 ):
                     raise ValueError("a ready article-access receipt is not verifiable")
         result[position] = row
@@ -605,7 +612,16 @@ def _reuse(candidate: dict[str, Any], source_run: Path | None) -> dict[str, Any]
             text
         ) != row.get("extraction_sha256"):
             return None
-        if text.stat().st_size < MIN_EXTRACTED_TEXT_CHARS:
+        extracted_text = text.read_text(encoding="utf-8", errors="replace")
+        media_type = str(row.get("media_type") or "").casefold()
+        if (
+            len(extracted_text) < MIN_EXTRACTED_TEXT_CHARS
+            or not _identity_resolves(candidate, extracted_text)
+            or (
+                media_type in {"application/xml", "text/xml"}
+                and not _xml_has_article_body(source.read_bytes())
+            )
+        ):
             return None
         return {
             "access_state": "full_text_ready",
@@ -613,14 +629,14 @@ def _reuse(candidate: dict[str, Any], source_run: Path | None) -> dict[str, Any]
             "link_working": True,
             "checked_at_utc": row.get("completed_at_utc"),
             "final_url": row.get("final_url"),
-            "media_type": row.get("media_type"),
+            "media_type": media_type,
             "source_path": str(source),
             "source_content_hash": row["source_content_hash"],
             "extraction_path": str(text),
             "extraction_sha256": row["extraction_sha256"],
             "identity_verified": True,
             "extraction_coverage": {
-                "characters": len(text.read_text(encoding="utf-8", errors="replace")),
+                "characters": len(extracted_text),
                 "article_body_recognized": True,
                 "figures": "unknown_not_extracted",
                 "tables": "unknown_not_extracted",
@@ -657,9 +673,12 @@ def _reuse_access(
         ) != row.get("extraction_sha256"):
             raise ValueError("a reused ready source hash changed")
         coverage = row.get("extraction_coverage") or {}
+        extracted_text = extraction.read_text(encoding="utf-8", errors="replace")
         if (
-            extraction.stat().st_size < MIN_EXTRACTED_TEXT_CHARS
+            row.get("identity_verified") is not True
+            or extraction.stat().st_size < MIN_EXTRACTED_TEXT_CHARS
             or coverage.get("article_body_recognized") is not True
+            or not _identity_resolves(candidate, extracted_text)
         ):
             return None
     return {
@@ -802,7 +821,6 @@ def _process(
             "text/plain": ".txt",
         }.get(media, ".bin")
         original = output_dir / "originals" / digest[:2] / digest / f"source{suffix}"
-        atomic_write(original, body, immutable=True)
         try:
             text, parser, full_text = _extract_text(body, media)
         except (ValueError, ET.ParseError, subprocess.SubprocessError) as error:
@@ -819,14 +837,15 @@ def _process(
                 "new_bytes": len(body),
                 "error": str(error),
                 "attempts": attempts,
+                "_source_body": body,
             }
         recognized_xml_body = media not in {
             "application/xml",
             "text/xml",
         } or _xml_has_article_body(body)
         extraction = output_dir / "extracted" / digest[:2] / digest / "text.txt"
-        atomic_write(extraction, text.encode(), immutable=True)
-        extraction_hash = sha256_file(extraction)
+        extraction_bytes = text.encode()
+        extraction_hash = sha256_bytes(extraction_bytes)
         identity = _identity_resolves(candidate, text)
         if media == "application/pdf" and len(text.strip()) < 200:
             state, reason = "OCR_required", "pdf_text_is_too_short"
@@ -871,6 +890,8 @@ def _process(
             "media_type": media,
             "new_bytes": len(body),
             "attempts": attempts,
+            "_source_body": body,
+            "_extraction_body": extraction_bytes,
         }
     if landing:
         return {
@@ -898,6 +919,33 @@ def _process(
         "new_bytes": 0,
         "attempts": attempts,
     }
+
+
+def _persist_artifacts(
+    item: dict[str, Any], *, committed_bytes: int, byte_cap: int
+) -> dict[str, Any]:
+    """Persist fetched content only after the coordinator accepts its byte cost."""
+    item_bytes = int(item.get("new_bytes") or 0)
+    if committed_bytes + item_bytes > byte_cap:
+        raise ValueError("article-access new-byte limit reached before source write")
+    stored = dict(item)
+    source_body = stored.pop("_source_body", None)
+    extraction_body = stored.pop("_extraction_body", None)
+    if source_body is not None:
+        if not isinstance(source_body, bytes):
+            raise ValueError("article-access source body is not bytes")
+        if len(source_body) != item_bytes:
+            raise ValueError("article-access source byte count changed")
+        if sha256_bytes(source_body) != stored.get("source_content_hash"):
+            raise ValueError("article-access source body hash changed")
+        atomic_write(Path(stored["source_path"]), source_body, immutable=True)
+    if extraction_body is not None:
+        if not isinstance(extraction_body, bytes):
+            raise ValueError("article-access extraction body is not bytes")
+        if sha256_bytes(extraction_body) != stored.get("extraction_sha256"):
+            raise ValueError("article-access extraction body hash changed")
+        atomic_write(Path(stored["extraction_path"]), extraction_body, immutable=True)
+    return stored
 
 
 def run_access_readiness(
@@ -1024,7 +1072,13 @@ def run_access_readiness(
             row = futures.pop(future)
             item = future.result()
             item_bytes = int(item.get("new_bytes") or 0)
-            if new_bytes + item_bytes > byte_cap:
+            try:
+                item = _persist_artifacts(
+                    item, committed_bytes=new_bytes, byte_cap=byte_cap
+                )
+            except ValueError as error:
+                if "new-byte limit" not in str(error):
+                    raise
                 stop_reason = "The access run reached the new-byte limit."
                 break
             new_bytes += item_bytes

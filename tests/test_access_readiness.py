@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,11 +10,13 @@ import pytest
 from arctic_qa.access_readiness import (
     HostPacer,
     _PinnedHTTPConnection,
+    _persist_artifacts,
     _process,
     _public_url,
     _receipts,
     _reuse_access,
 )
+from arctic_qa.source_pass import _identity_resolves
 
 
 def public_resolver(host, port, type):
@@ -201,6 +204,93 @@ def test_prior_access_receipt_is_reused_without_network(tmp_path: Path):
     assert reused is not None
     assert reused["access_state"] == "working_landing_page_only"
     assert reused["reused_from"] == str(path)
+
+
+def test_ready_reuse_requires_current_identity_and_coverage(tmp_path: Path):
+    prior = tmp_path / "prior"
+    source = prior / "objects" / "source.xml"
+    extraction = prior / "objects" / "text.txt"
+    source.parent.mkdir(parents=True)
+    source_body = b"<article><body>stored body</body></article>"
+    extracted = "Unrelated article text " * 150
+    source.write_bytes(source_body)
+    extraction.write_text(extracted, encoding="utf-8")
+    receipt = {
+        "candidate_key": "10.1/example",
+        "access_state": "full_text_ready",
+        "identity_verified": False,
+        "source_path": str(source),
+        "source_content_hash": sha256(source_body).hexdigest(),
+        "extraction_path": str(extraction),
+        "extraction_sha256": sha256(extracted.encode()).hexdigest(),
+        "extraction_coverage": {"article_body_recognized": True},
+        "new_bytes": len(source_body),
+    }
+    path = prior / "items" / "item-000001.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    assert _reuse_access(candidate(), prior) is None
+
+    receipt["identity_verified"] = True
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+    assert _reuse_access(candidate(), prior) is None
+
+
+def test_identity_uses_exact_doi_and_ignores_reference_only_mentions():
+    item = {
+        "doi": "https://doi.org/10.1234/example",
+        "title": "The target Arctic scientific article",
+    }
+    assert _identity_resolves(item, "doi:10.1234/example. Article body")
+    assert not _identity_resolves(
+        item,
+        "A different publication 10.1234/example-other " + "evidence " * 2000,
+    )
+    assert not _identity_resolves(
+        item,
+        "A different publication\nReferences\n10.1234/example",
+    )
+
+
+def test_new_byte_cap_precedes_durable_source_writes(tmp_path: Path):
+    def fetcher(url, **kwargs):
+        body = (
+            b"<article><title>A sufficiently long scientific article title</title>"
+            b"<body><p>10.1234/example "
+            + b"substantive evidence " * 160
+            + b"</p></body></article>"
+        )
+        return {
+            "state": "downloaded",
+            "body": body,
+            "media_type": "application/xml",
+            "final_url": url,
+            "checked_at_utc": "2026-09-12T00:00:00Z",
+        }
+
+    item = candidate()
+    item["doi"] = "10.1234/example"
+    result = _process(item, manifest(tmp_path), tmp_path, fetcher, HostPacer(0))
+    source = Path(result["source_path"])
+    extraction = Path(result["extraction_path"])
+    assert not source.exists()
+    assert not extraction.exists()
+
+    with pytest.raises(ValueError, match="before source write"):
+        _persist_artifacts(
+            result, committed_bytes=0, byte_cap=int(result["new_bytes"]) - 1
+        )
+    assert not source.exists()
+    assert not extraction.exists()
+
+    stored = _persist_artifacts(
+        result, committed_bytes=0, byte_cap=int(result["new_bytes"])
+    )
+    assert source.is_file()
+    assert extraction.is_file()
+    assert "_source_body" not in stored
+    assert "_extraction_body" not in stored
 
 
 def test_resume_rejects_a_receipt_with_the_wrong_identity(tmp_path: Path):
