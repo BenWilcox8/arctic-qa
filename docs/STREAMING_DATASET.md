@@ -39,10 +39,14 @@ The broker refreshes those custody hashes after each durable ledger change.
 After export, `dataset_metadata_sha256` binds the progress record to the export manifest.
 The progress and export manifest use the campaign ID as their shared `run_id`.
 The progress record keeps the command run ID separately as `invocation_run_id`.
+It also binds `run_manifest_sha256` to an immutable invocation manifest.
+That manifest freezes the access selection, completion receipt, eligibility inputs, providers, models, phase, campaign, generation arm, and export seed.
+Changing those inputs under the same command run ID fails before a model call.
 
 Article-access item records can omit catalog fields that remain in the ordered selection.
 The scheduler carries the selected authors and year into the source record.
 It records a missing discipline as `unclassified` and does not guess a subject from the title or venue.
+It skips items that are not `full_text_ready` and continues to the next ready item in the frozen order.
 
 ## Live command boundary
 
@@ -133,7 +137,9 @@ The local call journal binds each result to the provider, model, paper, family, 
 The central broker independently binds the model, stage, paper, family, immutable source SHA-256, and exact request payload.
 The broker rejects a paper family that changes its source version.
 It also rejects one source version assigned to two paper families.
-Completed receipts are reused.
+An eligibility job resumes without another call only when its exact request and response resolve to a completed receipt in the shared ledger.
+Standalone or fabricated eligibility jobs cannot skip the brokered eligibility call.
+Completed receipts are reused only after the broker validates that each immutable event remains present in its ledger.
 Ambiguous receipts stop the scheduler.
 
 The scheduler records one accepted base question for each family only after at least three distractors pass all checks.

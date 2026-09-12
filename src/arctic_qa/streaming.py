@@ -19,8 +19,9 @@ from .gemini_eligibility import (
     validate_response,
 )
 from .providers import Provider, call_provider
+from .model_broker import broker_request_key
 from .storage import store_original
-from .util import atomic_json, canonical_json, sha256_file, stable_id
+from .util import atomic_json, canonical_json, sha256_bytes, sha256_file, stable_id
 from .validation import validate_candidate
 
 
@@ -53,13 +54,15 @@ def run_stream(
             _read(path) for path in sorted((access_run_dir / "items").glob("*.json"))
         )
     }
-    eligibility_jobs = {
-        item["candidate_key"]: item
-        for item in (
-            _read(path)
-            for path in sorted((eligibility_run_dir / "jobs").glob("*.json"))
-        )
-    }
+    eligibility_jobs: dict[str, dict[str, Any]] = {}
+    for item in (
+        _read(path) for path in sorted((eligibility_run_dir / "jobs").glob("*.json"))
+    ):
+        key = item["candidate_key"]
+        if key not in eligibility_jobs or item.get("execution_authority") == (
+            "shared_gemini_broker"
+        ):
+            eligibility_jobs[key] = item
     selection = access_manifest.get("selection")
     if not isinstance(selection, list):
         raise ValueError("the article-access selection is missing")
@@ -75,12 +78,42 @@ def run_stream(
             or access.get("subgroup") != selected.get("subgroup")
         ):
             raise ValueError("the ordered selection does not match its access item")
+    author_broker = getattr(author, "broker", None)
+    verifier_broker = getattr(verifier, "broker", None)
+    if author_broker is not None or verifier_broker is not None:
+        if author_broker is None or author_broker is not verifier_broker:
+            raise ValueError("streaming live providers must use one shared broker")
+        if not all(
+            (
+                eligibility_prompt_file,
+                eligibility_schema_file,
+                eligibility_policy_file,
+            )
+        ):
+            raise ValueError("streaming live eligibility inputs are required")
+    run_manifest_file = _write_run_manifest(
+        namespace,
+        run_id=run_id,
+        campaign_id=campaign_id,
+        access_run_dir=access_run_dir,
+        eligibility_run_dir=eligibility_run_dir,
+        access_manifest=access_manifest,
+        author=author,
+        verifier=verifier,
+        eligibility_prompt_file=eligibility_prompt_file,
+        eligibility_schema_file=eligibility_schema_file,
+        eligibility_policy_file=eligibility_policy_file,
+    )
     progress = _Progress(
         progress_file or namespace / "streaming-dataset-r1" / "progress.json",
         run_id=campaign_id,
         invocation_run_id=run_id,
+        run_manifest_file=run_manifest_file,
         counts={
-            "full_text_ready": len(access_items),
+            "full_text_ready": sum(
+                item.get("access_state") == "full_text_ready"
+                for item in access_items.values()
+            ),
             "eligible": sum(
                 (item.get("validation") or {}).get("decision") == "eligible"
                 for item in eligibility_jobs.values()
@@ -93,11 +126,7 @@ def run_stream(
             "accepted_qa": _accepted_count(db, campaign_id),
         },
     )
-    author_broker = getattr(author, "broker", None)
-    verifier_broker = getattr(verifier, "broker", None)
     if author_broker is not None or verifier_broker is not None:
-        if author_broker is None or author_broker is not verifier_broker:
-            raise ValueError("streaming live providers must use one shared broker")
         progress.attach_broker(author_broker)
     progress.write("running", "eligibility", "Streaming pipeline started.")
     counts = {
@@ -115,7 +144,7 @@ def run_stream(
         candidate_key = selected.get("candidate_key")
         access = access_items.get(candidate_key)
         eligibility = eligibility_jobs.get(candidate_key)
-        if access is None:
+        if access is None or access.get("access_state") != "full_text_ready":
             continue
         paper_id = str(candidate_key)
         family_id = str(
@@ -135,6 +164,11 @@ def run_stream(
             family_id=family_id,
             source_version_id=source_version_id,
         )
+        if verifier_broker is not None and (
+            eligibility is None
+            or eligibility.get("execution_authority") != "shared_gemini_broker"
+        ):
+            eligibility = None
         if eligibility is None:
             if not all(
                 (
@@ -146,16 +180,20 @@ def run_stream(
                 raise ValueError(
                     "streaming eligibility inputs are required for a newly ready paper"
                 )
-            eligibility = _run_eligibility(
-                db,
-                access,
-                eligibility_run_dir,
-                run_id=campaign_id,
-                provider=paper_verifier,
-                prompt_file=eligibility_prompt_file,
-                schema_file=eligibility_schema_file,
-                policy_file=eligibility_policy_file,
-            )
+            try:
+                eligibility = _run_eligibility(
+                    db,
+                    access,
+                    eligibility_run_dir,
+                    run_id=campaign_id,
+                    provider=paper_verifier,
+                    prompt_file=eligibility_prompt_file,
+                    schema_file=eligibility_schema_file,
+                    policy_file=eligibility_policy_file,
+                )
+            except Exception as error:
+                progress.error(candidate_key, access.get("title"), "eligibility", error)
+                raise
             eligibility_jobs[candidate_key] = eligibility
             progress.set_count(
                 "eligible",
@@ -174,6 +212,15 @@ def run_stream(
             )
         progress.write("running", "eligibility", f"Checking {candidate_key}.")
         try:
+            if verifier_broker is not None:
+                _validate_brokered_eligibility(
+                    eligibility,
+                    paper_verifier,
+                    access=access,
+                    prompt_file=eligibility_prompt_file,
+                    schema_file=eligibility_schema_file,
+                    policy_file=eligibility_policy_file,
+                )
             _validate_pair(access, eligibility)
         except Exception as error:
             progress.error(candidate_key, access.get("title"), "eligibility", error)
@@ -374,6 +421,59 @@ def _accepted_count(db: Database, run_id: str) -> int:
     return int(row["count"])
 
 
+def _write_run_manifest(
+    namespace: Path,
+    *,
+    run_id: str,
+    campaign_id: str,
+    access_run_dir: Path,
+    eligibility_run_dir: Path,
+    access_manifest: dict[str, Any],
+    author: Provider,
+    verifier: Provider,
+    eligibility_prompt_file: Path | None,
+    eligibility_schema_file: Path | None,
+    eligibility_policy_file: Path | None,
+) -> Path:
+    def file_hash(path: Path | None) -> str | None:
+        return sha256_file(path) if path is not None and path.is_file() else None
+
+    manifest = {
+        "schema": "streaming-dataset-run-manifest-v1",
+        "run_id": run_id,
+        "campaign_id": campaign_id,
+        "phase": getattr(author, "phase", "offline"),
+        "access_run_dir": str(access_run_dir.resolve()),
+        "access_manifest_sha256": sha256_file(access_run_dir / "run-manifest.json"),
+        "access_completion_receipt_sha256": sha256_file(
+            access_run_dir / "run-receipt.json"
+        ),
+        "selection_sha256": sha256_bytes(
+            canonical_json(access_manifest["selection"]).encode()
+        ),
+        "eligibility_run_dir": str(eligibility_run_dir.resolve()),
+        "eligibility_prompt_sha256": file_hash(eligibility_prompt_file),
+        "eligibility_schema_sha256": file_hash(eligibility_schema_file),
+        "eligibility_policy_sha256": file_hash(eligibility_policy_file),
+        "author": {"provider": author.name, "model": author.model},
+        "verifier": {"provider": verifier.name, "model": verifier.model},
+        "generation_arm": "answer_first",
+        "export_seed": "streaming-20260912",
+    }
+    path = (
+        namespace
+        / "streaming-dataset-r1"
+        / "runs"
+        / stable_id("stream-invocation", run_id)
+        / "run-manifest.json"
+    )
+    try:
+        atomic_json(path, manifest, immutable=True)
+    except FileExistsError as error:
+        raise ValueError("the immutable streaming run inputs changed") from error
+    return path
+
+
 class _Progress:
     def __init__(
         self,
@@ -381,11 +481,13 @@ class _Progress:
         *,
         run_id: str,
         invocation_run_id: str,
+        run_manifest_file: Path,
         counts: dict[str, int],
     ) -> None:
         self.path = path.resolve()
         self.run_id = run_id
         self.invocation_run_id = invocation_run_id
+        self.run_manifest_file = run_manifest_file.resolve()
         self.counts = counts
         self.recent: list[dict[str, Any]] = []
         self.state = "running"
@@ -399,7 +501,9 @@ class _Progress:
         self.state = state
         self.stage = stage
         self.message = message
-        custody: dict[str, str] = {}
+        custody: dict[str, str] = {
+            "run_manifest_sha256": sha256_file(self.run_manifest_file)
+        }
         if self.broker_status_file is not None:
             custody["broker_status_sha256"] = sha256_file(self.broker_status_file)
             custody["budget_policy_sha256"] = sha256_file(self.budget_policy_file)
@@ -510,7 +614,18 @@ def _run_eligibility(
     schema = _read(schema_file)
     policy = _read(policy_file)
     text = Path(access["extraction_path"]).read_text(encoding="utf-8")
-    job_key = _job_key(access, config, prompt_file, schema_file, policy_file)
+    job_key = sha256_bytes(
+        canonical_json(
+            {
+                "base_job_key": _job_key(
+                    access, config, prompt_file, schema_file, policy_file
+                ),
+                "provider_identity": provider.request_identity(),
+                "model": provider.model,
+                "authority": "shared_gemini_broker",
+            }
+        ).encode()
+    )
     request, hashes = _request_payload(
         source=access,
         policy=policy,
@@ -522,20 +637,23 @@ def _run_eligibility(
         policy_sha256=sha256_file(policy_file),
     )
     generation = request["generationConfig"]
+    system = request["systemInstruction"]["parts"][0]["text"]
+    user_prompt = request["contents"][0]["parts"][0]["text"]
+    parameters = {
+        "temperature": generation.get("temperature", 0),
+        "max_tokens": generation["maxOutputTokens"],
+        "json_schema": schema,
+    }
     result = call_provider(
         db,
         provider,
         run_id=run_id,
         entity_id=stable_id("eligibility", access["candidate_key"], job_key),
         role="eligibility",
-        system=request["systemInstruction"]["parts"][0]["text"],
-        prompt=request["contents"][0]["parts"][0]["text"],
+        system=system,
+        prompt=user_prompt,
         prompt_version="gemini-eligibility-prompt-v1",
-        parameters={
-            "temperature": generation.get("temperature", 0),
-            "max_tokens": generation["maxOutputTokens"],
-            "json_schema": schema,
-        },
+        parameters=parameters,
         response_schema=schema,
         reservation=Decimal("0"),
         timeout=120,
@@ -553,9 +671,25 @@ def _run_eligibility(
         },
         response_schema=schema,
     )
+    identity = provider.request_identity()
+    request_key = broker_request_key(
+        model=provider.model,
+        run_id=provider.invocation_run_id,
+        stage="eligibility",
+        paper_id=identity["paper_id"],
+        family_id=identity["family_id"],
+        source_version_id=identity["source_version_id"],
+        payload=request,
+    )
+    receipt_path = broker.receipts_dir / f"{request_key}.json"
+    if not receipt_path.is_file():
+        raise ValueError("the brokered eligibility receipt is missing")
     job = {
         "schema": "gemini-eligibility-job-v1",
         "job_key": job_key,
+        "execution_authority": "shared_gemini_broker",
+        "broker_request_key": request_key,
+        "broker_receipt_sha256": sha256_file(receipt_path),
         "candidate_key": access["candidate_key"],
         "model": provider.model,
         "model_version": result.returned_model,
@@ -577,6 +711,81 @@ def _run_eligibility(
     }
     atomic_json(run_dir / "jobs" / f"{job_key}.json", job, immutable=True)
     return job
+
+
+def _validate_brokered_eligibility(
+    eligibility: dict[str, Any],
+    provider: Provider,
+    *,
+    access: dict[str, Any],
+    prompt_file: Path,
+    schema_file: Path,
+    policy_file: Path,
+) -> None:
+    if eligibility.get("execution_authority") != "shared_gemini_broker":
+        raise ValueError("the eligibility job did not use the shared broker")
+    broker = provider.broker
+    prompt = prompt_file.read_text(encoding="utf-8")
+    schema = _read(schema_file)
+    policy = _read(policy_file)
+    expected_job_key = sha256_bytes(
+        canonical_json(
+            {
+                "base_job_key": _job_key(
+                    access, broker.config, prompt_file, schema_file, policy_file
+                ),
+                "provider_identity": provider.request_identity(),
+                "model": provider.model,
+                "authority": "shared_gemini_broker",
+            }
+        ).encode()
+    )
+    request, _ = _request_payload(
+        source=access,
+        policy=policy,
+        text=Path(access["extraction_path"]).read_text(encoding="utf-8"),
+        prompt=prompt,
+        schema=schema,
+        config=broker.config,
+        request_id=expected_job_key,
+        policy_sha256=sha256_file(policy_file),
+    )
+    identity = provider.request_identity()
+    expected_request_key = broker_request_key(
+        model=provider.model,
+        run_id=provider.invocation_run_id,
+        stage="eligibility",
+        paper_id=identity["paper_id"],
+        family_id=identity["family_id"],
+        source_version_id=identity["source_version_id"],
+        payload=request,
+    )
+    request_key = eligibility.get("broker_request_key")
+    if (
+        eligibility.get("job_key") != expected_job_key
+        or request_key != expected_request_key
+        or eligibility.get("model") != provider.model
+        or eligibility.get("policy_sha256") != sha256_file(policy_file)
+        or eligibility.get("prompt_sha256") != sha256_file(prompt_file)
+        or eligibility.get("schema_sha256") != sha256_file(schema_file)
+    ):
+        raise ValueError("the brokered eligibility request identity does not match")
+    if not isinstance(request_key, str):
+        raise ValueError("the brokered eligibility request key is missing")
+    receipt, result = provider.read_receipt(
+        request_key=request_key,
+        role="eligibility",
+        request_sha256=sha256_bytes(canonical_json(request).encode()),
+    )
+    receipt_path = broker.receipts_dir / f"{request_key}.json"
+    if (
+        eligibility.get("broker_receipt_sha256") != sha256_file(receipt_path)
+        or receipt.get("state") != "completed"
+        or result.payload != eligibility.get("parsed_response")
+        or result.returned_model != eligibility.get("model_version")
+        or result.request_id != eligibility.get("response_id")
+    ):
+        raise ValueError("the brokered eligibility job and receipt do not match")
 
 
 def _validate_pair(access: dict[str, Any], eligibility: dict[str, Any]) -> None:

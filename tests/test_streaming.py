@@ -347,6 +347,18 @@ def shared_broker(tmp_path: Path, transport: ScriptedBrokerTransport):
     )
 
 
+def broker_eligibility_inputs(tmp_path: Path) -> dict[str, Path]:
+    policy = tmp_path / "eligibility-policy.json"
+    write_json(policy, {"protocol_id": "test-only-policy"})
+    return {
+        "eligibility_prompt_file": REPO / "config" / "gemini-eligibility-prompt-v1.txt",
+        "eligibility_schema_file": REPO
+        / "schemas"
+        / "gemini-eligibility.v1.schema.json",
+        "eligibility_policy_file": policy,
+    }
+
+
 def test_streaming_cli_moves_one_eligible_paper_to_validated_export(
     tmp_path: Path,
 ) -> None:
@@ -393,6 +405,12 @@ def test_streaming_cli_moves_one_eligible_paper_to_validated_export(
     assert progress["schema"] == "streaming-dataset-progress-v1"
     assert progress["state"] == "completed"
     assert progress["run_id"] == "stream-fixture"
+    run_manifest = next(
+        (tmp_path / "arctic-qa" / "streaming-dataset-r1" / "runs").glob(
+            "*/run-manifest.json"
+        )
+    )
+    assert progress["run_manifest_sha256"] == sha256_file(run_manifest)
     assert progress["counts"] == {
         "full_text_ready": 1,
         "eligible": 1,
@@ -410,13 +428,37 @@ def test_streaming_cli_moves_one_eligible_paper_to_validated_export(
     ]
 
 
+def test_streaming_run_manifest_rejects_changed_resume_inputs(tmp_path: Path) -> None:
+    access, eligibility = streaming_fixture(tmp_path)
+    arguments = (
+        "stream",
+        "--run-id",
+        "stream-frozen-inputs",
+        "--access-run-dir",
+        str(access),
+        "--eligibility-run-dir",
+        str(eligibility),
+        "--author-script",
+        str(FIXTURES / "fake-author.jsonl"),
+        "--verifier-script",
+        str(FIXTURES / "fake-verifier.jsonl"),
+    )
+    run_cli(tmp_path, *arguments)
+    access_manifest = json.loads((access / "run-manifest.json").read_text())
+    access_manifest["changed_after_first_run"] = True
+    write_json(access / "run-manifest.json", access_manifest)
+
+    result = run_cli(tmp_path, *arguments, expected=2)
+
+    assert result["code"] == "VALUEERROR"
+    assert result["message"] == "the immutable streaming run inputs changed"
+
+
 def test_streaming_uses_one_shared_broker_for_all_ten_stages(
     tmp_path: Path,
 ) -> None:
     access, eligibility = streaming_fixture(tmp_path)
-    (eligibility / "jobs" / "fixture-job.json").unlink()
-    eligibility_policy = tmp_path / "eligibility-policy.json"
-    write_json(eligibility_policy, {"protocol_id": "test-only-policy"})
+    eligibility_inputs = broker_eligibility_inputs(tmp_path)
     paths = DataPaths.open(tmp_path, test_mode=True)
     database = Database(paths.database)
     database.migrate(paths.namespace / "backups")
@@ -442,9 +484,7 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
         author=provider,
         verifier=provider,
         max_papers=1,
-        eligibility_prompt_file=REPO / "config" / "gemini-eligibility-prompt-v1.txt",
-        eligibility_schema_file=REPO / "schemas" / "gemini-eligibility.v1.schema.json",
-        eligibility_policy_file=eligibility_policy,
+        **eligibility_inputs,
     )
 
     assert result["counts"]["accepted_base_questions"] == 1
@@ -516,15 +556,21 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
         author=provider,
         verifier=provider,
         max_papers=1,
-        eligibility_prompt_file=REPO / "config" / "gemini-eligibility-prompt-v1.txt",
-        eligibility_schema_file=REPO / "schemas" / "gemini-eligibility.v1.schema.json",
-        eligibility_policy_file=eligibility_policy,
+        **eligibility_inputs,
     )
 
     assert resumed["resumed_papers"] == 1
     assert resumed["counts"]["accepted_base_questions"] == 1
     assert broker.status()["generation_submissions"] == 10
     assert transport.methods.count("generateContent") == 10
+    jobs = [
+        json.loads(path.read_text()) for path in (eligibility / "jobs").glob("*.json")
+    ]
+    assert len(jobs) == 2
+    assert (
+        sum(job.get("execution_authority") == "shared_gemini_broker" for job in jobs)
+        == 1
+    )
 
 
 def test_live_stream_cli_runs_inline_eligibility_and_qa(
@@ -577,6 +623,7 @@ def test_streaming_live_cli_obeys_disabled_broker_gate_before_credentials(
     tmp_path: Path,
 ) -> None:
     access, eligibility = streaming_fixture(tmp_path)
+    eligibility_inputs = broker_eligibility_inputs(tmp_path)
     gate = tmp_path / "disabled-gate.json"
     write_json(
         gate,
@@ -601,6 +648,8 @@ def test_streaming_live_cli_obeys_disabled_broker_gate_before_credentials(
         str(access),
         "--eligibility-run-dir",
         str(eligibility),
+        "--eligibility-policy-file",
+        str(eligibility_inputs["eligibility_policy_file"]),
         "--execution-gate-file",
         str(gate),
         "--credential-file",
@@ -619,7 +668,7 @@ def test_streaming_live_cli_obeys_disabled_broker_gate_before_credentials(
         )
     )
     assert progress["state"] == "error"
-    assert progress["current_stage"] == "generation"
+    assert progress["current_stage"] == "eligibility"
     assert progress["recent_papers"][-1]["final_state"] == "error"
 
 
@@ -690,12 +739,13 @@ def test_failed_reconstruction_never_reaches_distractor_generation(
         author=provider,
         verifier=provider,
         max_papers=1,
+        **broker_eligibility_inputs(tmp_path),
     )
 
     assert result["counts"]["accepted_base_questions"] == 0
     assert result["counts"]["generation_rejected"] == 1
     status = broker.status()
-    assert status["generation_submissions"] == 4
+    assert status["generation_submissions"] == 5
     assert "distractor_generation" not in status["stages"]
     assert "option_verification" not in status["stages"]
 
@@ -737,6 +787,7 @@ def test_true_distractor_is_removed_before_streaming_export(tmp_path: Path) -> N
         author=provider,
         verifier=provider,
         max_papers=1,
+        **broker_eligibility_inputs(tmp_path),
     )
 
     assert result["counts"]["accepted_base_questions"] == 1
@@ -788,6 +839,7 @@ def test_short_answer_without_three_distractors_is_not_counted_as_accepted(
         author=provider,
         verifier=provider,
         max_papers=1,
+        **broker_eligibility_inputs(tmp_path),
     )
 
     assert result["counts"]["accepted_base_questions"] == 0
@@ -845,6 +897,68 @@ def test_streaming_cli_stops_after_eligibility_rejection(tmp_path: Path) -> None
     }
     assert result["export"]["short_answer_count"] == 0
     assert result["export"]["mcq_count"] == 0
+
+
+def test_streaming_skips_pending_access_before_next_ready_paper(
+    tmp_path: Path,
+) -> None:
+    access, eligibility = streaming_fixture(tmp_path)
+    ready_path = access / "items" / "item-000001.json"
+    ready = json.loads(ready_path.read_text(encoding="utf-8"))
+    ready["position"] = 2
+    write_json(ready_path, ready)
+    pending = {
+        "schema": "article-access-item-v1",
+        "run_id": "access-fixture",
+        "position": 1,
+        "candidate_key": "test-only:pending-paper",
+        "subgroup": "test_only",
+        "title": "Pending source",
+        "access_state": "access_pending",
+        "identity_verified": False,
+    }
+    write_json(access / "items" / "item-000000.json", pending)
+    manifest = json.loads((access / "run-manifest.json").read_text())
+    manifest["target_total"] = 2
+    manifest["selection"] = [
+        {
+            "position": 1,
+            "candidate_key": pending["candidate_key"],
+            "subgroup": "test_only",
+        },
+        {
+            "position": 2,
+            "candidate_key": ready["candidate_key"],
+            "subgroup": "test_only",
+            "authors": ["Arctic QA test suite"],
+            "year": 2026,
+        },
+    ]
+    write_json(access / "run-manifest.json", manifest)
+
+    result = run_cli(
+        tmp_path,
+        "stream",
+        "--run-id",
+        "stream-skip-pending",
+        "--access-run-dir",
+        str(access),
+        "--eligibility-run-dir",
+        str(eligibility),
+        "--author-script",
+        str(FIXTURES / "fake-author.jsonl"),
+        "--verifier-script",
+        str(FIXTURES / "fake-verifier.jsonl"),
+        "--max-papers",
+        "1",
+    )
+
+    assert result["counts"]["accepted_base_questions"] == 1
+    assert result["counts"]["processed"] == 1
+    progress = json.loads(
+        (tmp_path / "arctic-qa" / "streaming-dataset-r1" / "progress.json").read_text()
+    )
+    assert progress["counts"]["full_text_ready"] == 1
 
 
 def test_streaming_cli_reports_the_eligibility_rejection_reason(

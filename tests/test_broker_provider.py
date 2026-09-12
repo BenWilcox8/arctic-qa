@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from arctic_qa.broker_provider import BrokerProvider
+from arctic_qa.broker_provider import BrokerProvider, _request_payload
 from arctic_qa.db import Database
 from arctic_qa.errors import ProviderError
-from arctic_qa.model_broker import SharedGeminiBroker
+from arctic_qa.model_broker import SharedGeminiBroker, broker_request_key
 from arctic_qa.providers import call_provider, provider_prompt_hash
 from arctic_qa.util import canonical_json, stable_id
 
@@ -376,3 +376,46 @@ def test_started_local_journal_resumes_through_broker(tmp_path: Path) -> None:
     assert result.payload == {"question": "What changed?"}
     assert database.one("SELECT status FROM calls") == {"status": "completed"}
     assert transport.methods == ["countTokens", "generateContent"]
+
+
+def test_adapter_rejects_receipt_that_is_absent_from_broker_ledger(
+    tmp_path: Path,
+) -> None:
+    transport = Transport()
+    broker = broker_fixture(tmp_path, transport)
+    provider = BrokerProvider(
+        broker=broker,
+        phase="live_test",
+        invocation_run_id="live-test-r1",
+    ).bind(
+        paper_id="paper-1",
+        family_id="family-1",
+        source_version_id=SOURCE_VERSION,
+    )
+    schema = {
+        "type": "object",
+        "required": ["question"],
+        "properties": {"question": {"type": "string"}},
+        "additionalProperties": False,
+    }
+    parameters = {
+        "temperature": 0,
+        "max_tokens": 1000,
+        "json_schema": schema,
+    }
+    payload = _request_payload("System", "Prompt", parameters, broker.config)
+    request_key = broker_request_key(
+        model=provider.model,
+        run_id="live-test-r1",
+        stage="question_generation",
+        paper_id="paper-1",
+        family_id="family-1",
+        source_version_id=SOURCE_VERSION,
+        payload=payload,
+    )
+    write_json(broker.receipts_dir / f"{request_key}.json", {})
+
+    with pytest.raises(ValueError, match="immutable paid-call event"):
+        provider.invoke("question_writer", "System", "Prompt", parameters, 30)
+
+    assert transport.methods == []

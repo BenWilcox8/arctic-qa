@@ -99,17 +99,12 @@ class BrokerProvider:
         )
         receipt_path = self.broker.receipts_dir / f"{request_key}.json"
         if receipt_path.is_file():
-            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-            _validate_receipt(
-                receipt,
+            receipt, result = self.read_receipt(
                 request_key=request_key,
+                role=role,
                 request_sha256=sha256_bytes(canonical_json(payload).encode()),
-                stage=stage,
-                paper_id=self.paper_id,
-                family_id=self.family_id,
-                source_version_id=self.source_version_id,
-                model=self.model,
             )
+            return result
         else:
             receipt = self.broker.execute(
                 phase=self.phase,
@@ -122,6 +117,43 @@ class BrokerProvider:
                 payload=payload,
             )
         return _provider_result(receipt, self.model)
+
+    def read_receipt(
+        self,
+        *,
+        request_key: str,
+        role: str,
+        request_sha256: str | None = None,
+    ) -> tuple[dict[str, Any], ProviderResult]:
+        """Read one receipt only after the broker validates its ledger custody."""
+        if (
+            self.paper_id is None
+            or self.family_id is None
+            or self.source_version_id is None
+        ):
+            raise ValueError("the broker provider is not bound to a paper")
+        try:
+            stage = ROLE_STAGES[role]
+        except KeyError as error:
+            raise ValueError(
+                f"the generation role has no broker stage: {role}"
+            ) from error
+        self.broker.status()
+        receipt_path = self.broker.receipts_dir / f"{request_key}.json"
+        if not receipt_path.is_file():
+            raise ValueError("the broker receipt is missing")
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        _validate_receipt(
+            receipt,
+            request_key=request_key,
+            request_sha256=request_sha256 or str(receipt.get("request_sha256") or ""),
+            stage=stage,
+            paper_id=self.paper_id,
+            family_id=self.family_id,
+            source_version_id=self.source_version_id,
+            model=self.model,
+        )
+        return receipt, _provider_result(receipt, self.model)
 
 
 def _request_payload(
