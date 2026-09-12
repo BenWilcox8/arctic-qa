@@ -21,6 +21,7 @@ PYTHONPATH=src python -m arctic_qa corpus-view \
   --zotero-receipts-dir /private/zotero/receipts \
   --metadata-run-dir /private/metadata-prefilter/run-RUN_ID \
   --source-run-dir /private/source-screening/run-RUN_ID \
+  --project-overview-file /private/status/project-progress-overview-v1.json \
   --host 127.0.0.1 \
   --port 8787 \
   --process-stale-after-seconds 300
@@ -37,6 +38,7 @@ For the integrated streaming view, also pass these optional files:
 - `--streaming-budget-policy-file` selects the frozen budget grant.
 - `--streaming-progress-file` selects a small `streaming-dataset-progress-v1` record.
 - `--dataset-metadata-file` selects a validated export manifest for download.
+- `--project-overview-file` selects the maintained editorial project status.
 
 The streaming progress record can contain at most 100 recent paper rows.
 
@@ -68,6 +70,31 @@ It also shows per-paper remaining cost in the paper table.
 An absent or inconsistent custody record appears as an error.
 
 It never serves provider receipts, source text, PDFs, or credentials.
+
+## Project progress overview
+
+The top of the page contains two compact diagrams.
+One diagram shows scientific dataset stages.
+The other diagram shows supporting engineering stages.
+The diagrams use text labels with green, yellow, and red status colors.
+Select a node to open its explanation and next action.
+
+The configured overview file must use `project-progress-overview-v1`.
+It contains an `updated_at_utc` timestamp and two stage arrays.
+Each stage has an ID, label, status, explanation, and next action.
+The supported status values are `completed`, `in_progress`, and `not_finished`.
+The file can also contain a summary, a scientific and engineering distinction, and short notes.
+
+The pipeline owner must replace this file atomically after a reviewed status change.
+The viewer never writes the file.
+It does not expose the configured path.
+It rejects files larger than 128 KiB.
+It rejects malformed values and displays no inferred stage state.
+It marks an old valid record stale with the normal artifact freshness threshold.
+
+The editorial stage record does not contain live counters.
+The viewer derives those counters from the existing discovery, access, streaming, and broker records.
+This separation prevents an editorial update from overriding accounting or pipeline evidence.
 
 ## Progress record
 

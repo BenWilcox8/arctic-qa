@@ -54,6 +54,29 @@ GEMINI_FILTERS = {
     "too_large_not_ready",
     "ambiguous_charge",
 }
+PROJECT_PROGRESS_STATUSES = {"completed", "in_progress", "not_finished"}
+PROJECT_PROGRESS_SCHEMA = "project-progress-overview-v1"
+PROJECT_PROGRESS_MAX_BYTES = 131_072
+PROJECT_PROGRESS_STAGE_IDS = {
+    "scientific": (
+        "research-design",
+        "paper-discovery",
+        "working-full-text",
+        "scientific-eligibility",
+        "qa-answer",
+        "answer-verification",
+        "distractor-verification",
+        "usable-dataset",
+        "model-evaluation",
+    ),
+    "engineering": (
+        "api-accounting",
+        "batch-progression",
+        "export-counts",
+        "source-span-evidence",
+        "live-end-to-end-proof",
+    ),
+}
 METADATA_DISPOSITION_FILTERS = {"all", *DISPOSITIONS}
 CACHE_SCHEMA_VERSION = "corpus-view-cache-v4"
 SCHEMA = """
@@ -177,6 +200,7 @@ class CorpusArtifacts:
         streaming_budget_policy_file: Path | None = None,
         streaming_progress_file: Path | None = None,
         dataset_metadata_file: Path | None = None,
+        project_overview_file: Path | None = None,
         stale_after_seconds: int = 86400,
         process_stale_after_seconds: int = 300,
     ) -> None:
@@ -214,6 +238,9 @@ class CorpusArtifacts:
         )
         self.dataset_metadata_file = (
             dataset_metadata_file.resolve() if dataset_metadata_file else None
+        )
+        self.project_overview_file = (
+            project_overview_file.resolve() if project_overview_file else None
         )
         self.stale_after_seconds = stale_after_seconds
         self.process_stale_after_seconds = process_stale_after_seconds
@@ -306,6 +333,7 @@ class CorpusArtifacts:
             _file_fingerprint(self.streaming_budget_policy_file),
             _file_fingerprint(self.streaming_progress_file),
             _file_fingerprint(self.dataset_metadata_file),
+            _file_fingerprint(self.project_overview_file),
         ]
         return hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
@@ -803,6 +831,160 @@ class CorpusArtifacts:
             raise RuntimeError("validated dataset metadata has an unsupported shape")
         return _safe_json_bytes(value)
 
+    def _project_overview(self, streaming: dict[str, Any]) -> dict[str, Any]:
+        unavailable: dict[str, Any] = {
+            "schema": PROJECT_PROGRESS_SCHEMA,
+            "telemetry": "absent",
+            "state": "unavailable",
+            "updated_at_utc": None,
+            "summary": "Project overview is unavailable.",
+            "distinction": "Scientific-stage status is not available.",
+            "scientific_stages": [],
+            "engineering_stages": [],
+            "notes": [],
+            "live_metrics": self._project_live_metrics(streaming),
+        }
+        path = self.project_overview_file
+        if path is None or not path.is_file():
+            return unavailable
+        try:
+            if path.stat().st_size > PROJECT_PROGRESS_MAX_BYTES:
+                raise ValueError("the project overview is too large")
+            value = _read_json(path)
+            if (
+                not isinstance(value, dict)
+                or value.get("schema") != PROJECT_PROGRESS_SCHEMA
+            ):
+                raise ValueError("the project overview schema is invalid")
+            updated_at = self._project_overview_timestamp(value.get("updated_at_utc"))
+            summary = self._project_overview_text(value.get("summary"), "summary", 600)
+            distinction = self._project_overview_text(
+                value.get("distinction"), "distinction", 1_200
+            )
+            scientific = self._project_overview_stages(
+                value.get("scientific_stages"), "scientific"
+            )
+            engineering = self._project_overview_stages(
+                value.get("engineering_stages"), "engineering"
+            )
+            notes_value = value.get("notes", [])
+            if not isinstance(notes_value, list) or len(notes_value) > 20:
+                raise ValueError("the project overview notes are invalid")
+            notes = [
+                self._project_overview_text(note, "note", 600) for note in notes_value
+            ]
+            age = (datetime.now(UTC) - updated_at).total_seconds()
+            telemetry = "stale" if age > self.stale_after_seconds else "observed"
+            return {
+                "schema": PROJECT_PROGRESS_SCHEMA,
+                "telemetry": telemetry,
+                "state": "available" if telemetry == "observed" else "stale",
+                "updated_at_utc": updated_at.replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "summary": summary,
+                "distinction": distinction,
+                "scientific_stages": scientific,
+                "engineering_stages": engineering,
+                "notes": notes,
+                "live_metrics": self._project_live_metrics(streaming),
+            }
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return {
+                **unavailable,
+                "telemetry": "invalid",
+                "summary": "Project overview is unavailable because its status record is invalid.",
+            }
+
+    @staticmethod
+    def _project_overview_timestamp(value: Any) -> datetime:
+        if not isinstance(value, str):
+            raise ValueError("the project overview timestamp is invalid")
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("the project overview timestamp has no time zone")
+        return parsed.astimezone(UTC)
+
+    @staticmethod
+    def _project_overview_text(value: Any, name: str, maximum: int) -> str:
+        if not isinstance(value, str) or not value.strip() or len(value) > maximum:
+            raise ValueError(f"the project overview {name} is invalid")
+        return value.strip()
+
+    def _project_overview_stages(
+        self, value: Any, diagram: str
+    ) -> list[dict[str, str]]:
+        expected_ids = PROJECT_PROGRESS_STAGE_IDS[diagram]
+        if not isinstance(value, list) or len(value) != len(expected_ids):
+            raise ValueError(f"the {diagram} project stages are invalid")
+        stages: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for stage in value:
+            if not isinstance(stage, dict):
+                raise ValueError(f"a {diagram} project stage is invalid")
+            stage_id = stage.get("id")
+            status = stage.get("status")
+            if (
+                not isinstance(stage_id, str)
+                or not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,47}", stage_id)
+                or stage_id in seen
+                or status not in PROJECT_PROGRESS_STATUSES
+            ):
+                raise ValueError(f"a {diagram} project stage identity is invalid")
+            seen.add(stage_id)
+            stages.append(
+                {
+                    "id": stage_id,
+                    "label": self._project_overview_text(
+                        stage.get("label"), "stage label", 80
+                    ),
+                    "status": status,
+                    "explanation": self._project_overview_text(
+                        stage.get("explanation"), "stage explanation", 1_200
+                    ),
+                    "next_action": self._project_overview_text(
+                        stage.get("next_action"), "stage next action", 600
+                    ),
+                }
+            )
+        if tuple(stage["id"] for stage in stages) != expected_ids:
+            raise ValueError(f"the {diagram} project stage sequence is invalid")
+        return stages
+
+    @staticmethod
+    def _project_live_metrics(streaming: dict[str, Any]) -> dict[str, Any]:
+        observed = streaming.get("telemetry") == "observed"
+        counts = streaming.get("counts") or {}
+        broker = streaming.get("broker") or {}
+
+        def integer(mapping: dict[str, Any], key: str) -> int | None:
+            if not observed or key not in mapping:
+                return None
+            value = mapping[key]
+            if isinstance(value, bool):
+                return None
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return None
+            return parsed if parsed >= 0 else None
+
+        return {
+            "source": "viewer_validated_pipeline_records",
+            "telemetry": streaming.get("telemetry", "absent"),
+            "spent_usd": broker.get("spent_usd") if observed else None,
+            "reserved_usd": broker.get("reserved_usd") if observed else None,
+            "ambiguous_reserved_usd": (
+                broker.get("ambiguous_reserved_usd") if observed else None
+            ),
+            "generation_submissions": integer(broker, "generation_submissions"),
+            "inflight": integer(broker, "inflight"),
+            "eligible": integer(counts, "eligible"),
+            "excluded": integer(counts, "excluded"),
+            "unresolved": integer(counts, "unresolved"),
+            "accepted_qa": integer(counts, "accepted_qa"),
+        }
+
     def _apply_source_overlay(
         self, connection: sqlite3.Connection, links: dict[str, str]
     ) -> None:
@@ -1204,6 +1386,7 @@ class CorpusArtifacts:
             ("Streaming budget policy", self.streaming_budget_policy_file),
             ("Streaming progress", self.streaming_progress_file),
             ("Validated dataset metadata", self.dataset_metadata_file),
+            ("Project progress overview", self.project_overview_file),
         ]
         rows = []
         for label, path in paths:
@@ -1316,6 +1499,7 @@ class CorpusArtifacts:
         connection = self._gemini_connection()
         gemini["connection"] = connection
         streaming = self._streaming_state()
+        project_overview = self._project_overview(streaming)
         historical_gemini = {
             "state": gemini.get("state"),
             "updated_at_utc": gemini.get("updated_at_utc"),
@@ -1503,6 +1687,7 @@ class CorpusArtifacts:
             "access_readiness": access,
             "gemini_screening": gemini,
             "streaming_pipeline": streaming,
+            "project_overview": project_overview,
             "artifacts": artifacts,
             "data_revision": self._small_fingerprint or self._base_fingerprint(),
             "readiness": {
@@ -1862,6 +2047,7 @@ def serve_corpus_viewer(
     streaming_budget_policy_file: Path | None,
     streaming_progress_file: Path | None,
     dataset_metadata_file: Path | None,
+    project_overview_file: Path | None,
     host: str,
     port: int,
     stale_after_seconds: int,
@@ -1884,6 +2070,7 @@ def serve_corpus_viewer(
         streaming_budget_policy_file=streaming_budget_policy_file,
         streaming_progress_file=streaming_progress_file,
         dataset_metadata_file=dataset_metadata_file,
+        project_overview_file=project_overview_file,
         stale_after_seconds=stale_after_seconds,
         process_stale_after_seconds=process_stale_after_seconds,
     )
@@ -1916,6 +2103,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--streaming-budget-policy-file", type=Path)
     parser.add_argument("--streaming-progress-file", type=Path)
     parser.add_argument("--dataset-metadata-file", type=Path)
+    parser.add_argument("--project-overview-file", type=Path)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--stale-after-seconds", type=int, default=86400)
@@ -1936,6 +2124,7 @@ def main(argv: list[str] | None = None) -> int:
         streaming_budget_policy_file=args.streaming_budget_policy_file,
         streaming_progress_file=args.streaming_progress_file,
         dataset_metadata_file=args.dataset_metadata_file,
+        project_overview_file=args.project_overview_file,
         host=args.host,
         port=args.port,
         stale_after_seconds=args.stale_after_seconds,
