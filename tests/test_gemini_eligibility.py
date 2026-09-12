@@ -544,3 +544,26 @@ def test_invalid_config_fails_closed(tmp_path: Path) -> None:
     write_json(path, value)
     with pytest.raises(ValueError, match="no verified price record"):
         _config(path)
+
+
+def test_config_requires_low_thinking_for_bounded_structured_output(
+    tmp_path: Path,
+) -> None:
+    config_path = ROOT / "config" / "gemini-eligibility-v1.json"
+    value = json.loads(config_path.read_text())
+
+    assert _config(config_path)["thinking_level"] == "low"
+    assert value["maximum_output_tokens"] == 8192
+
+    value["thinking_level"] = "medium"
+    changed_path = tmp_path / "medium-thinking.json"
+    write_json(changed_path, value)
+    with pytest.raises(ValueError, match="thinking level must be low"):
+        _config(changed_path)
+
+    value["thinking_level"] = "low"
+    value["config_id"] = "arctic-gemini-eligibility-r1-config-v1"
+    changed_path = tmp_path / "old-config-revision.json"
+    write_json(changed_path, value)
+    with pytest.raises(ValueError, match="config revision is not approved"):
+        _config(changed_path)

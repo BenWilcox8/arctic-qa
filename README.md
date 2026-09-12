@@ -417,6 +417,9 @@ The adapter stops when the price record is not active.
 
 The adapter calls `countTokens` with the completed request before generation.
 It reserves the maximum configured output and thinking cost before transmission.
+Configuration revision v2 requires low thinking for every structured Gemini request.
+The output caps stay unchanged.
+See [the structured-output budget correction](docs/GEMINI_STRUCTURED_OUTPUT_BUDGET.md).
 An unknown transmitted outcome keeps its full reservation.
 The adapter never retries that ambiguous job automatically.
 The initial phase permits three generation submissions and ten count requests.

@@ -112,6 +112,9 @@ Nine QA and distractor calls immediately follow an eligible decision.
 | Full new-paper total | 10 | Ten separately counted inputs | 26,624 maximum requested output tokens across calls |
 
 The broker reserves each request from its exact counted input and configured output cap.
+The approved provider configuration requires low thinking for all ten structured calls.
+The fixed output limits still include both candidate and thinking tokens.
+See [the Gemini structured-output budget correction](GEMINI_STRUCTURED_OUTPUT_BUDGET.md).
 The verified price record uses USD 0.75 per million input tokens.
 It uses USD 3.75 per million output and thinking tokens.
 Each request must reserve no more than USD 0.25.

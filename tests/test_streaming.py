@@ -342,6 +342,17 @@ class InvalidEligibilityEvidenceTransport(ScriptedBrokerTransport):
         return response
 
 
+class LowThinkingStructuredTransport(ScriptedBrokerTransport):
+    def __init__(self) -> None:
+        super().__init__()
+        self.generation_configs: list[dict] = []
+
+    def post(self, model: str, method: str, body: dict) -> dict:
+        if method == "generateContent":
+            self.generation_configs.append(body["generationConfig"])
+        return super().post(model, method, body)
+
+
 def shared_broker(tmp_path: Path, transport: ScriptedBrokerTransport):
     gate = tmp_path / "broker-gate.json"
     write_json(
@@ -644,6 +655,46 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
     assert (
         sum(job.get("execution_authority") == "shared_gemini_broker" for job in jobs)
         == 1
+    )
+
+
+def test_low_thinking_counterfactual_completes_the_structured_stream(
+    tmp_path: Path,
+) -> None:
+    access, eligibility = streaming_fixture(tmp_path)
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+    transport = LowThinkingStructuredTransport()
+    broker = shared_broker(tmp_path, transport)
+    provider = BrokerProvider(
+        broker=broker,
+        phase="live_test",
+        invocation_run_id="low-thinking-counterfactual",
+    )
+
+    result = run_stream(
+        database,
+        paths.namespace,
+        run_id="low-thinking-counterfactual",
+        campaign_id="streaming-commission",
+        access_run_dir=access,
+        eligibility_run_dir=eligibility,
+        author=provider,
+        verifier=provider,
+        max_papers=1,
+        **broker_eligibility_inputs(tmp_path),
+    )
+
+    assert result["counts"]["accepted_base_questions"] == 1
+    assert len(transport.generation_configs) == 10
+    assert all(
+        config["thinkingConfig"] == {"thinkingLevel": "low"}
+        for config in transport.generation_configs
+    )
+    assert transport.generation_configs[0]["maxOutputTokens"] == 8192
+    assert all(
+        config["maxOutputTokens"] == 2048 for config in transport.generation_configs[1:]
     )
 
 

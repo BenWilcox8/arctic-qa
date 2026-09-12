@@ -89,6 +89,10 @@ Do not derive this ID from a run name or a display title.
 
 The broker permits only text inputs and structured JSON output.
 
+The approved Gemini configuration requires low thinking.
+
+The broker does not increase the fixed output cap to make room for thinking.
+
 It rejects tools, provider storage, fallback models, and requests above the output limit.
 
 It counts tokens before it reserves a paid submission.

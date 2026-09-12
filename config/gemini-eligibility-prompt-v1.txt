@@ -4,6 +4,10 @@ Do not use tools or outside knowledge.
 Apply only the supplied frozen policy.
 Return JSON that matches the supplied schema.
 For each criterion, cite an exact quote and its supplied locator.
+Use the shortest exact quote that proves each status.
+Use more than one quote only when one quote is insufficient.
+Do not repeat article text outside the evidence quotes.
+Use short reason codes and missing-context values.
 Use uncertain when the supplied material does not support a decision.
 Repeat each supplied known_context_gaps value in known_missing_context.
 Missing coverage does not cause exclusion unless the frozen policy makes it material.

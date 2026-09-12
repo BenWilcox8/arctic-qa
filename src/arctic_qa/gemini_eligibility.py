@@ -50,6 +50,8 @@ def _config(path: Path) -> dict[str, Any]:
     value = _read(path)
     if value.get("schema") != "gemini-eligibility-config-v1":
         raise ValueError("unsupported Gemini eligibility config schema")
+    if value.get("config_id") != "arctic-gemini-eligibility-r1-config-v2":
+        raise ValueError("the Gemini eligibility config revision is not approved")
     if value.get("model") != "gemini-3.8-flash":
         raise ValueError("the Gemini model has no verified price record")
     if value.get("fallback_model") is not None:
@@ -58,8 +60,8 @@ def _config(path: Path) -> dict[str, Any]:
         raise ValueError("the Gemini API base is not the approved HTTPS endpoint")
     if value.get("api_key_environment_variable") != "GEMINI_API_KEY":
         raise ValueError("the Gemini credential variable changed")
-    if value.get("thinking_level") not in {"low", "medium", "high"}:
-        raise ValueError("unsupported Gemini thinking level")
+    if value.get("thinking_level") != "low":
+        raise ValueError("the Gemini thinking level must be low")
     for field in ("maximum_input_tokens", "maximum_output_tokens"):
         if not isinstance(value.get(field), int) or value[field] <= 0:
             raise ValueError(f"Gemini {field} must be positive")
