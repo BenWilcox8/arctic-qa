@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .errors import SourceURLError
 from .storage import SafeHTTPSRedirectHandler
 from .util import atomic_json, atomic_write, canonical_json, sha256_bytes, sha256_file
 
@@ -447,6 +448,12 @@ def _network_fetch(url: str, *, max_bytes: int, timeout: float) -> dict[str, Any
                 "media_type": response.headers.get_content_type().casefold(),
                 "body": body,
             }
+    except SourceURLError:
+        return {
+            "state": "error",
+            "reason_code": "redirect_url_not_https",
+            "retryable": False,
+        }
     except urllib.error.HTTPError as error:
         return {
             "state": "error",
@@ -497,7 +504,16 @@ def _process_item(
             "reason_code": "no_open_access_source_url",
             "scientific_eligibility": "unreviewed",
         }
-    _validate_source_url(url)
+    try:
+        _validate_source_url(url)
+    except ValueError:
+        return {
+            **base,
+            "completed_at_utc": _now(),
+            "access_state": "unattempted_unsafe_source_url",
+            "reason_code": "source_url_not_https",
+            "scientific_eligibility": "unreviewed",
+        }
     limits = manifest["limits"]
     if len(prior_attempts) > limits["maximum_attempts_per_source"]:
         raise ValueError("source-pass attempt receipts exceed the configured limit")
@@ -697,16 +713,37 @@ def run_source_pass(
             return paused
         if made_network_request and (candidate.get("open_access") or {}).get("url"):
             sleep_fn(float(manifest["limits"]["minimum_seconds_between_requests"]))
-        item = _process_item(
-            candidate=candidate,
-            manifest=manifest,
-            output_dir=output_dir,
-            fetcher=fetch,
-            sleep_fn=sleep_fn,
-        )
+        try:
+            item = _process_item(
+                candidate=candidate,
+                manifest=manifest,
+                output_dir=output_dir,
+                fetcher=fetch,
+                sleep_fn=sleep_fn,
+            )
+        except Exception as error:
+            failed = _progress_payload(
+                manifest,
+                "error",
+                receipts,
+                f"Source retrieval stopped with {type(error).__name__}: {str(error)[:300]}",
+                started_at=started_at,
+            )
+            atomic_json(output_dir / "progress.json", failed)
+            _write_viewer_progress(viewer_progress_file, failed)
+            raise
         made_network_request = made_network_request or bool(item.get("attempts"))
         aggregate_bytes += int(item.get("bytes") or 0)
         if aggregate_bytes > manifest["limits"]["maximum_aggregate_new_bytes"]:
+            failed = _progress_payload(
+                manifest,
+                "error",
+                receipts,
+                "Source retrieval stopped because the aggregate source size limit was exceeded.",
+                started_at=started_at,
+            )
+            atomic_json(output_dir / "progress.json", failed)
+            _write_viewer_progress(viewer_progress_file, failed)
             raise ValueError("source pass exceeded its aggregate source size")
         atomic_json(
             output_dir / "items" / f"item-{position:06d}.json",

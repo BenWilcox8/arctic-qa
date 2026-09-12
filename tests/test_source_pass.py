@@ -266,6 +266,61 @@ def test_interrupted_success_is_not_downloaded_twice(tmp_path: Path) -> None:
     assert "https://example.test/2" not in calls
 
 
+def test_unsafe_declared_url_stays_unattempted(tmp_path: Path) -> None:
+    queue, candidates_file, protocol, screening, policy = fixture_inputs(tmp_path)
+    candidates = json.loads(candidates_file.read_text())
+    source_two = next(
+        row for row in candidates if row["candidate_key"] == "10.1234/source-2"
+    )
+    source_two["open_access"]["url"] = "http://example.test/2"
+    write_json(candidates_file, candidates)
+    calls: list[str] = []
+    result = run_source_pass(
+        action="smoke",
+        queue_file=queue,
+        candidates_file=candidates_file,
+        protocol_file=protocol,
+        prior_screening_file=screening,
+        policy_file=policy,
+        output_dir=tmp_path / "run",
+        run_id="fixture-source-r1",
+        code_commit="deadbeef",
+        fetcher=fixture_fetcher(calls),
+        sleep_fn=lambda _: None,
+    )
+    first = json.loads((tmp_path / "run" / "items" / "item-000001.json").read_text())
+    assert result["state"] == "paused"
+    assert first["access_state"] == "unattempted_unsafe_source_url"
+    assert "http://example.test/2" not in calls
+
+
+def test_unexpected_fetch_error_updates_progress(tmp_path: Path) -> None:
+    queue, candidates, protocol, screening, policy = fixture_inputs(tmp_path)
+
+    def failed_fetch(*_: object, **__: object) -> dict[str, object]:
+        raise RuntimeError("controlled fixture failure")
+
+    with pytest.raises(RuntimeError, match="controlled fixture failure"):
+        run_source_pass(
+            action="smoke",
+            queue_file=queue,
+            candidates_file=candidates,
+            protocol_file=protocol,
+            prior_screening_file=screening,
+            policy_file=policy,
+            output_dir=tmp_path / "run",
+            run_id="fixture-source-r1",
+            code_commit="deadbeef",
+            viewer_progress_file=tmp_path / "viewer-progress.json",
+            fetcher=failed_fetch,
+            sleep_fn=lambda _: None,
+        )
+    progress = json.loads((tmp_path / "run" / "progress.json").read_text())
+    viewer = json.loads((tmp_path / "viewer-progress.json").read_text())
+    assert progress["state"] == "error"
+    assert viewer["state"] == "error"
+
+
 def proposal(root: Path, *, eligibility: str, geography: str, quote: str) -> Path:
     item = next(
         json.loads(path.read_text())
