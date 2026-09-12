@@ -256,8 +256,13 @@ def _write_progress(
     started_at: str | None = None,
     completed_at: str | None = None,
     receipts: dict[int, dict[str, Any]] | None = None,
+    active: list[dict[str, Any]] | None = None,
+    write_overlay: bool = True,
 ) -> dict[str, Any]:
     receipts = receipts if receipts is not None else _receipts(output_dir)
+    counts = _counts(manifest, receipts)
+    counts["checking"] = len(active or [])
+    counts["not_checked"] = max(counts["not_checked"] - len(active or []), 0)
     progress = {
         "schema": PROGRESS_SCHEMA,
         "state": state,
@@ -269,11 +274,14 @@ def _write_progress(
         "started_at_utc": started_at,
         "completed_at_utc": completed_at,
         "message": message,
-        "counts": _counts(manifest, receipts),
+        "counts": counts,
+        "active": active or [],
+        "latest_event_at_utc": _now(),
         "selection_keys_sha256": manifest["selection_keys_sha256"],
     }
     atomic_json(output_dir / "progress.json", progress)
-    _write_overlay(output_dir, receipts)
+    if write_overlay:
+        _write_overlay(output_dir, receipts)
     return progress
 
 
@@ -329,14 +337,25 @@ class HostPacer:
         self.delay = delay
         self._lock = threading.Lock()
         self._last: dict[str, float] = {}
+        self._cooldown_until: dict[str, float] = {}
 
     def wait(self, url: str) -> None:
         host = urllib.parse.urlsplit(url).hostname or ""
         with self._lock:
+            remaining = self._cooldown_until.get(host, 0.0) - time.monotonic()
+            if remaining > 0:
+                raise RuntimeError(f"source host is in cooldown for {remaining:.1f} seconds")
             delay = self.delay - (time.monotonic() - self._last.get(host, 0.0))
             if delay > 0:
                 time.sleep(delay)
             self._last[host] = time.monotonic()
+
+    def cool_down(self, url: str, seconds: float) -> None:
+        host = urllib.parse.urlsplit(url).hostname or ""
+        with self._lock:
+            self._cooldown_until[host] = max(
+                self._cooldown_until.get(host, 0.0), time.monotonic() + seconds
+            )
 
 
 def fetch_public(
@@ -351,7 +370,10 @@ def fetch_public(
     _public_url(url)
     last: dict[str, Any] = {}
     for attempt in range(1, 4):
-        pacer.wait(url)
+        try:
+            pacer.wait(url)
+        except RuntimeError as error:
+            return {"state": "retryable_error", "reason_code": "host_cooldown", "error": str(error), "attempt": attempt}
         request = urllib.request.Request(
             url,
             headers={
@@ -401,8 +423,9 @@ def fetch_public(
             if not retryable or attempt == 3:
                 return last
             retry_after = error.headers.get("Retry-After") if error.headers else None
-            if retry_after and retry_after.isdigit():
-                time.sleep(min(int(retry_after), maximum_retry_after))
+            delay = min(int(retry_after), maximum_retry_after) if retry_after and retry_after.isdigit() else min(2**attempt, maximum_retry_after)
+            pacer.cool_down(url, delay)
+            return last
         except (OSError, TimeoutError, urllib.error.URLError, ValueError) as error:
             last = {
                 "state": "retryable_error",
@@ -412,6 +435,8 @@ def fetch_public(
             }
             if attempt == 3:
                 return last
+            pacer.cool_down(url, min(2**attempt, maximum_retry_after))
+            return last
     return last
 
 
@@ -537,12 +562,18 @@ def _process(
         }
     attempts = []
     landing: dict[str, Any] | None = None
+    candidate_deadline = time.monotonic() + float(
+        manifest["limits"]["maximum_network_seconds_per_candidate"]
+    )
     for kind, url in urls:
+        if time.monotonic() >= candidate_deadline:
+            attempts.append({"url": url, "provenance_kind": kind, "state": "retryable_error", "reason_code": "candidate_network_deadline"})
+            break
         try:
             result = fetcher(
                 url,
                 max_bytes=int(manifest["limits"]["maximum_bytes_per_source"]),
-                timeout=float(manifest["limits"]["request_timeout_seconds"]),
+                timeout=min(float(manifest["limits"]["request_timeout_seconds"]), max(candidate_deadline - time.monotonic(), 1.0)),
                 maximum_redirects=int(manifest["limits"]["maximum_redirects"]),
                 maximum_retry_after=int(
                     manifest["limits"]["maximum_retry_after_seconds"]
@@ -755,6 +786,20 @@ def run_access_readiness(
                 futures[
                     pool.submit(_process, row, manifest, output_dir, fetch, pacer)
                 ] = row
+                active = [
+                    {"position": int(item["position"]), "candidate_key": item["candidate_key"], "event": "checking"}
+                    for item in futures.values()
+                ]
+                _write_progress(
+                    output_dir,
+                    manifest,
+                    "running",
+                    f"Access readiness is checking {len(active)} candidate records.",
+                    started_at=started_at,
+                    receipts=receipts,
+                    active=active,
+                    write_overlay=False,
+                )
             if not futures:
                 break
             future = next(as_completed(futures))
@@ -771,6 +816,20 @@ def run_access_readiness(
                 immutable=True,
             )
             receipts[int(row["position"])] = item
+            active = [
+                {"position": int(value["position"]), "candidate_key": value["candidate_key"], "event": "checking"}
+                for value in futures.values()
+            ]
+            _write_progress(
+                output_dir,
+                manifest,
+                "running",
+                f"Access readiness recorded item {int(row['position'])}. {len(active)} candidate records remain active.",
+                started_at=started_at,
+                receipts=receipts,
+                active=active,
+                write_overlay=False,
+            )
         for future in futures:
             future.cancel()
     complete_target = all(position in receipts for position in range(1, target + 1))

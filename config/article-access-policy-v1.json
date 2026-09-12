@@ -14,6 +14,7 @@
   "maximum_new_bytes_per_invocation": 107374182400,
   "minimum_free_bytes": 53687091200,
   "maximum_network_seconds_per_invocation": 3600,
+  "maximum_network_seconds_per_candidate": 120,
   "request_timeout_seconds": 30,
   "minimum_seconds_between_host_requests": 1.0,
   "maximum_retry_after_seconds": 60

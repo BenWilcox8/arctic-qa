@@ -314,6 +314,82 @@ PYTHONPATH=src python -m arctic_qa --json smoke \
   --run-id smoke-r1
 ```
 
+## Full article access readiness
+
+The article-access stage selects the frozen metadata target.
+The target contains 16,339 `retained_article_type` records and two separate `priority_seed` records.
+It does not select the other discovery records.
+
+Prepare an immutable manifest before network access:
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json article-access \
+  --action prepare \
+  --queue-file "$METADATA_RUN/review-queue.ndjson" \
+  --candidates-file "$CORPUS_RUN/deduplicated-candidates.json" \
+  --protocol-file "$CORPUS_ROOT/protocol/protocol-v2.json" \
+  --policy-file config/article-access-policy-v1.json \
+  --output-dir "$ACCESS_RUN" \
+  --run-id "$ACCESS_RUN_ID" \
+  --code-commit "$CODE_COMMIT" \
+  --reuse-source-run-dir "$HISTORICAL_SOURCE_RUN"
+```
+
+Run the two network gates in order:
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json article-access --action smoke10  ...
+PYTHONPATH=src python -m arctic_qa --json article-access --action smoke100 ...
+```
+
+Then continue the full target with bounded invocations:
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json article-access \
+  --action continue ... \
+  --max-network-seconds 3600 \
+  --max-new-bytes 107374182400
+```
+
+Each invocation keeps at least 50 GiB free.
+Each source is limited to 50 MiB.
+The run uses two workers and records a checkpoint after each invocation.
+`full_text_ready` requires extraction hashes and a matched source identity.
+A working landing page does not meet that condition.
+
+## Gemini eligibility adapter
+
+The adapter uses `gemini-3.8-flash` by default.
+It has no automatic model fallback.
+The adapter sends one complete extracted text in one request.
+It does not use tools, search, URL context, caching, or context compression.
+
+Run the offline status check without an API key:
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json gemini-eligibility \
+  --action doctor \
+  --access-run-dir "$ACCESS_RUN" \
+  --run-dir "$GEMINI_RUN" \
+  --policy-file "$CORPUS_ROOT/protocol/protocol-v2.json" \
+  --max-cost-usd 1000
+```
+
+Use `--action dry-run` to build local requests and cost estimates.
+The dry run does not call Gemini.
+The local project ledger has a hard USD 1,000 cap.
+Each run must also declare its allocation with `--max-cost-usd`.
+
+Store `GEMINI_API_KEY` in private environment storage before a later live run.
+Do not put the key in a command argument, report, note, log, or browser.
+The live command fails closed when the key is absent.
+The live command also fails when the versioned price record is expired.
+
+The adapter calls `countTokens` with the completed request before generation.
+It reserves the maximum configured output and thinking cost before transmission.
+An unknown transmitted outcome keeps its full reservation.
+The adapter never retries that ambiguous job automatically.
+
 Add two bounded public Crossref lookups:
 
 ```bash

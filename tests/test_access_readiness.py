@@ -35,6 +35,7 @@ def manifest(tmp_path: Path) -> dict:
             "request_timeout_seconds": 1,
             "maximum_redirects": 2,
             "maximum_retry_after_seconds": 0,
+            "maximum_network_seconds_per_candidate": 10,
         },
     }
 
