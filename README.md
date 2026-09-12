@@ -234,6 +234,8 @@ For each newly ready paper, it runs Gemini eligibility and immediately continues
 It resumes from an existing valid eligibility receipt without repeating the call.
 Offline mode uses fake response scripts.
 Live-test and production modes use only the shared Gemini broker.
+Brokered progress hash-links the invariant-checked broker status and budget policy after each ledger change.
+The final progress record also hash-links the export manifest under the same campaign run ID.
 
 The checked-in live gate is disabled.
 Do not enable it before the exact integrated commit passes independent review.

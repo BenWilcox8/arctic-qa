@@ -34,6 +34,11 @@ The default progress file is:
 It uses the `streaming-dataset-progress-v1` schema.
 The file contains the full-text-ready, eligible, rejected, and accepted-QA counts.
 It keeps at most 100 recent paper records.
+For a brokered run, it also contains `broker_status_sha256` and `budget_policy_sha256`.
+The broker refreshes those custody hashes after each durable ledger change.
+After export, `dataset_metadata_sha256` binds the progress record to the export manifest.
+The progress and export manifest use the campaign ID as their shared `run_id`.
+The progress record keeps the command run ID separately as `invocation_run_id`.
 
 Article-access item records can omit catalog fields that remain in the ordered selection.
 The scheduler carries the selected authors and year into the source record.

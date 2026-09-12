@@ -6,6 +6,7 @@ import re
 import stat
 import time
 import urllib.error
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -206,6 +207,7 @@ class SharedGeminiBroker:
         self.config = _config(self.price_config_file)
         self.prior = _money(prior_construction_spend_usd, "prior construction spend")
         self.transport = transport
+        self._status_observer: Callable[[Path], None] | None = None
         self._initialize()
 
     @property
@@ -852,6 +854,14 @@ class SharedGeminiBroker:
 
     def _publish_status(self, ledger: dict[str, Any]) -> None:
         atomic_json(self._status_file, self._status_payload(ledger))
+        if self._status_observer is not None:
+            self._status_observer(self._status_file)
+
+    def set_status_observer(self, observer: Callable[[Path], None] | None) -> None:
+        """Refresh a derived custody record after each durable broker state."""
+        self._status_observer = observer
+        if observer is not None:
+            observer(self._status_file)
 
     def _commit_ledger(self, ledger: dict[str, Any]) -> None:
         self._validate_ledger(ledger)

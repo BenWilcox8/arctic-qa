@@ -77,7 +77,8 @@ def run_stream(
             raise ValueError("the ordered selection does not match its access item")
     progress = _Progress(
         progress_file or namespace / "streaming-dataset-r1" / "progress.json",
-        run_id=run_id,
+        run_id=campaign_id,
+        invocation_run_id=run_id,
         counts={
             "full_text_ready": len(access_items),
             "eligible": sum(
@@ -92,6 +93,12 @@ def run_stream(
             "accepted_qa": _accepted_count(db, campaign_id),
         },
     )
+    author_broker = getattr(author, "broker", None)
+    verifier_broker = getattr(verifier, "broker", None)
+    if author_broker is not None or verifier_broker is not None:
+        if author_broker is None or author_broker is not verifier_broker:
+            raise ValueError("streaming live providers must use one shared broker")
+        progress.attach_broker(author_broker)
     progress.write("running", "eligibility", "Streaming pipeline started.")
     counts = {
         "accepted_base_questions": 0,
@@ -317,6 +324,9 @@ def run_stream(
             "error", "export", f"Streaming stopped on {type(error).__name__}."
         )
         raise
+    progress.set_dataset_metadata(
+        namespace / "exports" / exported["export_id"] / "manifest.json"
+    )
     same_model_roles = author.name == verifier.name and author.model == verifier.model
     live_provider = bool(getattr(author, "externally_metered", False))
     result = {
@@ -365,26 +375,70 @@ def _accepted_count(db: Database, run_id: str) -> int:
 
 
 class _Progress:
-    def __init__(self, path: Path, *, run_id: str, counts: dict[str, int]) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        run_id: str,
+        invocation_run_id: str,
+        counts: dict[str, int],
+    ) -> None:
         self.path = path.resolve()
         self.run_id = run_id
+        self.invocation_run_id = invocation_run_id
         self.counts = counts
         self.recent: list[dict[str, Any]] = []
+        self.state = "running"
+        self.stage = "eligibility"
+        self.message = "Streaming pipeline started."
+        self.broker_status_file: Path | None = None
+        self.budget_policy_file: Path | None = None
+        self.dataset_metadata_file: Path | None = None
 
     def write(self, state: str, stage: str, message: str) -> None:
+        self.state = state
+        self.stage = stage
+        self.message = message
+        custody: dict[str, str] = {}
+        if self.broker_status_file is not None:
+            custody["broker_status_sha256"] = sha256_file(self.broker_status_file)
+            custody["budget_policy_sha256"] = sha256_file(self.budget_policy_file)
+        if self.dataset_metadata_file is not None:
+            custody["dataset_metadata_sha256"] = sha256_file(self.dataset_metadata_file)
         atomic_json(
             self.path,
             {
                 "schema": "streaming-dataset-progress-v1",
                 "state": state,
                 "run_id": self.run_id,
+                "invocation_run_id": self.invocation_run_id,
                 "current_stage": stage,
                 "updated_at_utc": now(),
                 "message": message,
                 "counts": self.counts,
                 "recent_papers": self.recent[-100:],
+                **custody,
             },
         )
+
+    def attach_broker(self, broker: Any) -> None:
+        self.broker_status_file = broker.ledger_file.with_name(
+            f"{broker.ledger_file.stem}.status.json"
+        )
+        self.budget_policy_file = broker.policy_file
+        broker.set_status_observer(self._broker_state_changed)
+
+    def _broker_state_changed(self, status_file: Path) -> None:
+        if status_file != self.broker_status_file:
+            raise ValueError("the broker status observer received another ledger")
+        self.write(self.state, self.stage, self.message)
+
+    def set_dataset_metadata(self, path: Path) -> None:
+        metadata = _read(path)
+        if metadata.get("run_id") != self.run_id:
+            raise ValueError("the dataset metadata and progress run IDs do not match")
+        self.dataset_metadata_file = path.resolve()
+        self.write(self.state, self.stage, self.message)
 
     def increment(self, name: str) -> None:
         self.counts[name] = int(self.counts.get(name, 0)) + 1
@@ -613,8 +667,7 @@ def _import_source(
         "discipline": access.get("discipline")
         or selected.get("discipline")
         or "unclassified",
-        "source_version": access.get("source_version")
-        or access["source_content_hash"],
+        "source_version": access.get("source_version") or access["source_content_hash"],
         "retrieval_url": access.get("final_url"),
         "license": access.get("license"),
         "paper_family_id": family_id,

@@ -17,7 +17,7 @@ from arctic_qa.model_broker import SharedGeminiBroker
 from arctic_qa.paths import DataPaths
 from arctic_qa.providers import FakeProvider
 from arctic_qa.streaming import run_stream
-from arctic_qa.util import stable_id
+from arctic_qa.util import sha256_file, stable_id
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -199,8 +199,16 @@ class ScriptedBrokerTransport:
             "gemini-3.8-flash", verifier_script or FIXTURES / "fake-verifier.jsonl"
         )
         self.methods: list[str] = []
+        self.custody_paths: tuple[Path, Path, Path] | None = None
+        self.custody_checks = 0
 
     def post(self, model: str, method: str, body: dict) -> dict:
+        if self.custody_paths is not None:
+            progress_path, status_path, policy_path = self.custody_paths
+            progress = json.loads(progress_path.read_text(encoding="utf-8"))
+            assert progress["broker_status_sha256"] == sha256_file(status_path)
+            assert progress["budget_policy_sha256"] == sha256_file(policy_path)
+            self.custody_checks += 1
         self.methods.append(method)
         if method == "countTokens":
             return {"totalTokens": 100}
@@ -414,6 +422,10 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
     database.migrate(paths.namespace / "backups")
     transport = ScriptedBrokerTransport()
     broker = shared_broker(tmp_path, transport)
+    progress_path = paths.namespace / "streaming-dataset-r1" / "progress.json"
+    status_path = tmp_path / "shared-ledger.status.json"
+    policy_path = REPO / "config" / "streaming-dataset-budget-policy-v1.json"
+    transport.custody_paths = (progress_path, status_path, policy_path)
     provider = BrokerProvider(
         broker=broker,
         phase="live_test",
@@ -445,6 +457,7 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
     status = broker.status()
     assert status["generation_submissions"] == 10
     assert status["accepted_question_count"] == 1
+    assert transport.custody_checks == 20
     access_item = json.loads(next((access / "items").glob("*.json")).read_text())
     family_id = stable_id("family", access_item["candidate_key"])
     assert set(status["papers"]) == {family_id}
@@ -473,6 +486,15 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
     assert source["year"] == 2026
     assert source["discipline"] == "unclassified"
     assert source["source_version"] == access_item["source_content_hash"]
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    dataset_metadata = (
+        paths.namespace / "exports" / result["export"]["export_id"] / "manifest.json"
+    )
+    assert progress["run_id"] == "streaming-commission"
+    assert progress["invocation_run_id"] == "live-test-r1"
+    assert progress["broker_status_sha256"] == sha256_file(status_path)
+    assert progress["budget_policy_sha256"] == sha256_file(policy_path)
+    assert progress["dataset_metadata_sha256"] == sha256_file(dataset_metadata)
     scope_evidence = json.loads(source["scope_evidence_json"])
     eligibility_job_key = scope_evidence["eligibility_job_key"]
     assert re.fullmatch(r"[a-f0-9]{64}", eligibility_job_key)
