@@ -513,6 +513,45 @@ def test_streaming_cli_moves_one_eligible_paper_to_validated_export(
         "incomplete_non_mcq": 0,
         "processed": 1,
     }
+
+
+def test_finding_prompt_requires_one_exact_contiguous_source_quote(
+    tmp_path: Path,
+) -> None:
+    access, eligibility = streaming_fixture(tmp_path)
+    author_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-author.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    author_events[0]["require_prompt_contains"] = [
+        "Copy evidence_quote exactly from one chunk text.",
+        "Do not remove, reorder, or merge text.",
+        "Use character offsets in that same chunk.",
+    ]
+    author_script = tmp_path / "exact-finding-prompt-author.jsonl"
+    author_script.write_text(
+        "\n".join(json.dumps(event) for event in author_events) + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        tmp_path,
+        "stream",
+        "--run-id",
+        "stream-exact-finding-prompt",
+        "--access-run-dir",
+        str(access),
+        "--eligibility-run-dir",
+        str(eligibility),
+        "--author-script",
+        str(author_script),
+        "--verifier-script",
+        str(FIXTURES / "fake-verifier.jsonl"),
+    )
+
+    assert result["counts"]["accepted_base_questions"] == 1
     assert result["export"]["short_answer_count"] == 1
     assert result["export"]["mcq_count"] == 2
     assert result["provider_policy"] == {
@@ -528,7 +567,7 @@ def test_streaming_cli_moves_one_eligible_paper_to_validated_export(
     )
     assert progress["schema"] == "streaming-dataset-progress-v1"
     assert progress["state"] == "completed"
-    assert progress["run_id"] == "stream-fixture"
+    assert progress["run_id"] == "stream-exact-finding-prompt"
     run_manifest = next(
         (tmp_path / "arctic-qa" / "streaming-dataset-r1" / "runs").glob(
             "*/run-manifest.json"

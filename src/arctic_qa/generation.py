@@ -19,7 +19,7 @@ from .util import canonical_json, normalize_text, stable_id
 from .validation import numeric_equal, numeric_rule_is_source_bound
 
 
-PROMPT_VERSION = "arctic-qa-generation-v2"
+PROMPT_VERSION = "arctic-qa-generation-v3"
 FINDING_POLICY_VERSION = "one-finding-per-paper-full-context-v2"
 MAX_FINDING_CONTEXT_CHARS = 3_000_000
 SYSTEM = """You construct source-bounded scientific question records.
@@ -364,7 +364,10 @@ def generate_candidate(
             run_id,
             stable_id("finding-selection", source_id, FINDING_POLICY_VERSION),
             "extractor",
-            context + "\nExtract one bounded answer record.",
+            context
+            + "\nExtract one bounded answer record. Copy evidence_quote exactly "
+            "from one chunk text. Use character offsets in that same chunk. "
+            "Do not remove, reorder, or merge text.",
             parameters,
             reservation,
             timeout,
