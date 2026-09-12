@@ -102,6 +102,7 @@ class FakeProvider:
             response_payload = _replace(
                 response_payload, "{{chunk_id}}", match.group(1)
             )
+        response_payload = _hydrate_source_span_ids(response_payload, prompt)
         response_payload = _hydrate_locators(response_payload, prompt)
         return ProviderResult(
             payload=response_payload,
@@ -740,6 +741,47 @@ def _hydrate_locators(value: Any, prompt: str) -> Any:
                     locator["chunk_id"] = matching.get("chunk_id")
                     locator["start_offset"] = start
                     locator["end_offset"] = start + len(quote)
+            for child in item.values():
+                walk(child)
+        elif isinstance(item, list):
+            for child in item:
+                walk(child)
+
+    walk(value)
+    return value
+
+
+def _hydrate_source_span_ids(value: Any, prompt: str) -> Any:
+    match = re.search(r"SOURCE_DATA_BEGIN\n(.*?)\nSOURCE_DATA_END", prompt, flags=re.S)
+    if not match:
+        return value
+    try:
+        source_data = json.loads(match.group(1))
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return value
+    chunks = source_data.get("chunks") if isinstance(source_data, dict) else None
+    if not isinstance(chunks, list):
+        return value
+    spans = [
+        span
+        for chunk in chunks
+        if isinstance(chunk, dict)
+        for span in chunk.get("evidence_spans", [])
+        if isinstance(span, dict)
+        and isinstance(span.get("span_id"), str)
+        and isinstance(span.get("text"), str)
+    ]
+
+    def walk(item: Any) -> None:
+        if isinstance(item, dict):
+            if item.get("source_span_id") == "{{span_id}}":
+                answer_text = str(item.get("text") or "")
+                selected = next(
+                    (span for span in spans if answer_text in span["text"]),
+                    spans[0] if spans else None,
+                )
+                if selected is not None:
+                    item["source_span_id"] = selected["span_id"]
             for child in item.values():
                 walk(child)
         elif isinstance(item, list):

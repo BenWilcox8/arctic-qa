@@ -110,10 +110,7 @@ def _short_answer(candidate: dict[str, Any]) -> dict[str, Any]:
             candidate["answer"]["text"],
             *candidate["answer"].get("variants", []),
         ],
-        "evidence": {
-            "quote": candidate["answer"]["evidence_quote"],
-            "locator": candidate["answer"]["locator"],
-        },
+        "evidence": _answer_evidence(candidate["answer"]),
         "source": candidate["source"],
         "scope": candidate["answer"]["scope"],
         "release_label": candidate["release_label"],
@@ -147,11 +144,22 @@ def _present_mcq(
         "options": options,
         "release_label": "machine_accepted_unverified",
         "source": candidate["source"],
-        "answer_evidence": {
-            "quote": candidate["answer"]["evidence_quote"],
-            "locator": candidate["answer"]["locator"],
-        },
+        "answer_evidence": _answer_evidence(candidate["answer"]),
     }
+
+
+def _answer_evidence(answer: dict[str, Any]) -> dict[str, Any]:
+    evidence = {
+        "quote": answer["evidence_quote"],
+        "locator": answer["locator"],
+    }
+    span_fields = {
+        "source_span_id": answer.get("source_span_id"),
+        "span_contract_version": answer.get("span_contract_version"),
+        "text_sha256": answer.get("evidence_text_sha256"),
+    }
+    evidence.update({key: value for key, value in span_fields.items() if value})
+    return evidence
 
 
 def _absent_mcq(

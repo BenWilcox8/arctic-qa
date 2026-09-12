@@ -1334,7 +1334,6 @@ def _validate_response_v2(
         errors.append("criteria_invalid")
     by_id: dict[str, dict[str, Any]] = {}
     resolved: list[dict[str, Any]] = []
-    selected_globally: set[str] = set()
     for row in criteria:
         if not isinstance(row, dict) or set(row) != {
             "criterion_id",
@@ -1383,11 +1382,9 @@ def _validate_response_v2(
             if (
                 len(span_ids) != len(set(span_ids))
                 or selected_for_criterion.intersection(span_ids)
-                or selected_globally.intersection(span_ids)
             ):
                 errors.append(f"evidence_span_duplicate:{criterion}")
             selected_for_criterion.update(span_ids)
-            selected_globally.update(span_ids)
             unknown = [span_id for span_id in span_ids if span_id not in catalog]
             if unknown:
                 errors.append(f"evidence_span_unknown:{criterion}")

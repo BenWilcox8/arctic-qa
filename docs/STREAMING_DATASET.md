@@ -205,7 +205,9 @@ PYTHONPATH=src python -m arctic_qa --json stream \
 Version 4 renders each complete source text once with short scoped span IDs.
 The internal immutable manifest binds each ID to the extraction hash, block hash, span hash, and UTF-8 byte range.
 The response selects one or more IDs for each criterion.
-The validator rejects unknown IDs, duplicate IDs, changed bindings, and out-of-range bindings.
+The validator rejects unknown IDs, changed bindings, out-of-range bindings, and repeated IDs within one criterion.
+One verified span can support separate criteria.
+Cross-criterion reuse does not change the span identity, hash, location, or scientific acceptance rules.
 The validator copies the exact source bytes into the resolved evidence record.
 It does not accept a generated or normalized quote.
 Multiple IDs support findings that PDF extraction separates with text from another column.
@@ -214,6 +216,16 @@ The program derives the decision from the five criterion statuses with mapping `
 This mapping does not change the scientific criteria.
 Span location proves source provenance, but it does not prove scientific entailment.
 The existing evidence and scope gates still decide whether the selected text supports the status.
+
+Generation prompt version 4 uses immutable source spans for finding extraction.
+The program splits extracted lines at PDF column gaps of at least three spaces.
+It binds each span ID to one chunk, exact character offsets, and the SHA-256 value of the span text.
+The extractor selects one span ID and cannot supply replacement quote text or offsets.
+The program copies the selected span into the answer evidence record.
+The candidate retains the span ID, contract version, and text hash.
+An unknown span ID rejects the candidate with `finding_evidence_span_not_found`.
+This change prevents a model from joining visually adjacent text across PDF columns.
+It does not prove that the selected span entails the answer.
 See [the shared model broker guide](SHARED_MODEL_BROKER.md) for the exact command and rules.
 An immutable-event failure republishes broker status with `halted` set to `true` and `integrity_valid` set to `false`.
 The broker observer updates streaming progress to bind that halted status.

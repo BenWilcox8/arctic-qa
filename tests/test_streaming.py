@@ -515,7 +515,7 @@ def test_streaming_cli_moves_one_eligible_paper_to_validated_export(
     }
 
 
-def test_finding_prompt_requires_one_exact_contiguous_source_quote(
+def test_finding_prompt_requires_one_exact_source_span(
     tmp_path: Path,
 ) -> None:
     access, eligibility = streaming_fixture(tmp_path)
@@ -526,9 +526,8 @@ def test_finding_prompt_requires_one_exact_contiguous_source_quote(
         .splitlines()
     ]
     author_events[0]["require_prompt_contains"] = [
-        "Copy evidence_quote exactly from one chunk text.",
-        "Do not remove, reorder, or merge text.",
-        "Use character offsets in that same chunk.",
+        "Select one source_span_id.",
+        "Do not combine text from different spans.",
     ]
     author_script = tmp_path / "exact-finding-prompt-author.jsonl"
     author_script.write_text(
@@ -592,6 +591,62 @@ def test_finding_prompt_requires_one_exact_contiguous_source_quote(
             "final_reason": "machine_accepted_unverified",
         }
     ]
+
+
+def test_finding_span_id_resolves_to_exact_source_evidence(tmp_path: Path) -> None:
+    access, eligibility = streaming_fixture(tmp_path)
+    author_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-author.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    answer = author_events[0]["response"]["answer"]
+    answer.pop("evidence_quote", None)
+    answer.pop("locator", None)
+    answer["source_span_id"] = "{{span_id}}"
+    author_events[0]["require_prompt_contains"] = [
+        '"evidence_spans"',
+        '"span_id"',
+        '"span_contract_version":"finding-evidence-span-v1"',
+        '"text_sha256"',
+        "Select one source_span_id.",
+    ]
+    author_script = tmp_path / "finding-span-author.jsonl"
+    author_script.write_text(
+        "\n".join(json.dumps(event) for event in author_events) + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        tmp_path,
+        "stream",
+        "--run-id",
+        "stream-finding-span",
+        "--access-run-dir",
+        str(access),
+        "--eligibility-run-dir",
+        str(eligibility),
+        "--author-script",
+        str(author_script),
+        "--verifier-script",
+        str(FIXTURES / "fake-verifier.jsonl"),
+    )
+
+    assert result["counts"]["accepted_base_questions"] == 1
+    short_answer_path = tmp_path / "arctic-qa" / result["export"]["files"][
+        "short_answer"
+    ]
+    record = json.loads(short_answer_path.read_text(encoding="utf-8"))
+    assert record["evidence"]["quote"] == (
+        "The reported water depth was 2.0 m with a source-grounded tolerance of 0.1 m."
+    )
+    assert record["evidence"]["locator"]["end_offset"] > record["evidence"]["locator"][
+        "start_offset"
+    ]
+    assert record["evidence"]["span_contract_version"] == "finding-evidence-span-v1"
+    assert record["evidence"]["source_span_id"].startswith("finding-evidence-span-v1-")
+    assert len(record["evidence"]["text_sha256"]) == 64
 
 
 def test_streaming_run_manifest_rejects_changed_resume_inputs(tmp_path: Path) -> None:
@@ -1567,11 +1622,9 @@ def test_streaming_records_invalid_finding_and_advances_to_next_paper(
         .splitlines()
     ]
     invalid_extractor = json.loads(json.dumps(author_events[0]))
-    invalid_extractor["response"]["answer"]["evidence_quote"] = (
-        "This generated sentence is absent from the source."
+    invalid_extractor["response"]["answer"]["source_span_id"] = (
+        "evidence-span-does-not-exist"
     )
-    invalid_extractor["response"]["answer"]["locator"]["start_offset"] = 0
-    invalid_extractor["response"]["answer"]["locator"]["end_offset"] = 1
     author_script = tmp_path / "invalid-finding-then-valid-author.jsonl"
     author_script.write_text(
         "\n".join(
@@ -1604,7 +1657,7 @@ def test_streaming_records_invalid_finding_and_advances_to_next_paper(
     assert result["paper_results"][0] == {
         "candidate_key": "test-only:invalid-finding",
         "disposition": "generation_rejected",
-        "reason_codes": ["finding_evidence_not_located"],
+        "reason_codes": ["finding_evidence_span_not_found"],
         "source_id": stable_id("src", "test-only:invalid-finding"),
     }
     rejection_path = tmp_path / "arctic-qa" / result["export"]["files"][
@@ -1612,7 +1665,7 @@ def test_streaming_records_invalid_finding_and_advances_to_next_paper(
     ]
     rejections = [json.loads(line) for line in rejection_path.read_text().splitlines()]
     assert [row["reason_code"] for row in rejections] == [
-        "finding_evidence_not_located"
+        "finding_evidence_span_not_found"
     ]
 
 

@@ -155,11 +155,31 @@ def test_v2_rejects_unknown_and_duplicate_selected_span_ids() -> None:
     assert repeated_result["valid"] is False
     assert "evidence_span_duplicate:study_geography" in repeated_result["errors"]
 
-    cross_criterion = json.loads(json.dumps(selected))
-    cross_criterion["study_geography"] = cross_criterion["stable_identity_version"]
-    cross_result = _validate(_response("request-v2", hashes, cross_criterion), blocks)
-    assert cross_result["valid"] is False
-    assert "evidence_span_duplicate:study_geography" in cross_result["errors"]
+
+
+def test_v2_allows_one_verified_span_to_support_separate_criteria() -> None:
+    text, blocks, selected = _case()
+    manifest = eligibility._span_manifest_v2(blocks)
+    hashes = _hashes(
+        sha256(text.encode()).hexdigest(),
+        sha256(eligibility.canonical_json(manifest).encode()).hexdigest(),
+    )
+    selected["study_geography"] = selected["stable_identity_version"]
+
+    result = _validate(_response("request-v2", hashes, selected), blocks)
+
+    assert result["valid"] is True
+    identity = next(
+        row
+        for row in result["resolved_evidence"]
+        if row["criterion"] == "stable_identity_version"
+    )
+    geography = next(
+        row
+        for row in result["resolved_evidence"]
+        if row["criterion"] == "study_geography"
+    )
+    assert geography["span_ids"] == identity["span_ids"]
 
 
 def test_v2_rejects_changed_and_out_of_bounds_internal_bindings() -> None:
