@@ -136,6 +136,7 @@ def run_stream(
     counts = {
         "accepted_base_questions": 0,
         "eligibility_rejected": 0,
+        "eligibility_unresolved": 0,
         "generation_rejected": 0,
         "incomplete_non_mcq": 0,
         "processed": 0,
@@ -218,6 +219,7 @@ def run_stream(
                 )
         progress.write("running", "eligibility", f"Checking {candidate_key}.")
         try:
+            deterministic_unresolved = False
             if verifier_broker is not None:
                 validation = _validate_brokered_eligibility(
                     eligibility,
@@ -232,7 +234,14 @@ def run_stream(
                     "state": "completed" if validation["valid"] else "screening_error",
                     "validation": validation,
                 }
-            _validate_pair(access, eligibility)
+                deterministic_unresolved = validation["valid"] is not True
+            if deterministic_unresolved:
+                if validation.get("decision") != "uncertain":
+                    raise ValueError(
+                        "invalid deterministic eligibility must remain uncertain"
+                    )
+            else:
+                _validate_pair(access, eligibility)
         except Exception as error:
             progress.error(candidate_key, access.get("title"), "eligibility", error)
             raise
@@ -254,8 +263,17 @@ def run_stream(
                 ),
             )
         if decision != "eligible":
-            reason_codes = eligibility["parsed_response"].get(
-                "overall_reason_codes", ["eligibility_unresolved"]
+            validation = eligibility["validation"]
+            unresolved = validation["valid"] is not True or decision == "uncertain"
+            reason_codes = (
+                validation.get("errors") or ["eligibility_validation_unresolved"]
+                if validation["valid"] is not True
+                else eligibility["parsed_response"].get(
+                    "overall_reason_codes", ["eligibility_unresolved"]
+                )
+            )
+            disposition = (
+                "eligibility_unresolved" if unresolved else "eligibility_rejected"
             )
             for reason_code in reason_codes:
                 with db.transaction():
@@ -276,6 +294,9 @@ def run_stream(
                                 {
                                     "candidate_key": candidate_key,
                                     "eligibility_job_key": eligibility["job_key"],
+                                    "decision": decision,
+                                    "validation_valid": validation["valid"],
+                                    "validation_errors": validation.get("errors", []),
                                     "selection": selected,
                                 }
                             ),
@@ -285,18 +306,18 @@ def run_stream(
             paper_results.append(
                 {
                     "candidate_key": candidate_key,
-                    "disposition": "eligibility_rejected",
+                    "disposition": disposition,
                     "reason_codes": reason_codes,
                     "source_id": None,
                 }
             )
-            counts["eligibility_rejected"] += 1
+            counts[disposition] += 1
             counts["processed"] += 1
             progress.paper(
                 paper_id=candidate_key,
                 title=access.get("title"),
                 current_stage="completed",
-                final_state="rejected",
+                final_state="unresolved" if unresolved else "rejected",
                 final_reason=reason_codes[0],
             )
             continue
@@ -825,8 +846,6 @@ def _validate_brokered_eligibility(
         },
         response_schema=schema,
     )
-    if not validation["valid"]:
-        raise ValueError("the brokered eligibility failed deterministic validation")
     return validation
 
 

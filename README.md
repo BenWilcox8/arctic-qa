@@ -235,6 +235,7 @@ It resumes from an existing eligibility receipt without repeating the call only 
 Unbrokered eligibility records cannot skip the live eligibility stage.
 Each resume reruns deterministic eligibility validation from the frozen extraction and broker response.
 Saved eligibility state and validation fields have no acceptance authority.
+An exact-evidence validation failure records `eligibility_unresolved` and advances to the next frozen paper without a replay or downstream QA call.
 Offline mode uses fake response scripts.
 Live-test and production modes use only the shared Gemini broker.
 Brokered progress hash-links the invariant-checked broker status and budget policy after each ledger change.

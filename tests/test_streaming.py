@@ -343,6 +343,50 @@ class InvalidEligibilityEvidenceTransport(ScriptedBrokerTransport):
         return response
 
 
+class FirstInvalidEligibilityEvidenceTransport(ScriptedBrokerTransport):
+    def __init__(self) -> None:
+        super().__init__()
+        self.eligibility_responses = 0
+
+    def post(self, model: str, method: str, body: dict) -> dict:
+        response = super().post(model, method, body)
+        schema = body.get("generationConfig", {}).get("responseJsonSchema", {})
+        if method == "generateContent" and "criteria" in schema.get("properties", {}):
+            self.eligibility_responses += 1
+            if self.eligibility_responses == 1:
+                payload = json.loads(
+                    response["candidates"][0]["content"]["parts"][0]["text"]
+                )
+                geography = next(
+                    row
+                    for row in payload["criteria"]
+                    if row["criterion_id"] == "study_geography"
+                )
+                geography["evidence"][0]["quote"] = (
+                    "quote absent from the synthetic extraction"
+                )
+                response["candidates"][0]["content"]["parts"][0]["text"] = json.dumps(
+                    payload
+                )
+            else:
+                payload = json.loads(
+                    response["candidates"][0]["content"]["parts"][0]["text"]
+                )
+                payload["overall"] = "excluded"
+                payload["overall_reason_codes"] = ["test_only_excluded"]
+                geography = next(
+                    row
+                    for row in payload["criteria"]
+                    if row["criterion_id"] == "study_geography"
+                )
+                geography["status"] = "failed"
+                geography["reason_codes"] = ["test_only_excluded"]
+                response["candidates"][0]["content"]["parts"][0]["text"] = json.dumps(
+                    payload
+                )
+        return response
+
+
 class LowThinkingStructuredTransport(ScriptedBrokerTransport):
     def __init__(self) -> None:
         super().__init__()
@@ -430,6 +474,7 @@ def test_streaming_cli_moves_one_eligible_paper_to_validated_export(
     assert result["counts"] == {
         "accepted_base_questions": 1,
         "eligibility_rejected": 0,
+        "eligibility_unresolved": 0,
         "generation_rejected": 0,
         "incomplete_non_mcq": 0,
         "processed": 1,
@@ -524,8 +569,15 @@ def test_streaming_revalidates_brokered_eligibility_on_resume(tmp_path: Path) ->
         **broker_eligibility_inputs(tmp_path),
     }
 
-    with pytest.raises(ValueError, match="deterministic validation"):
-        run_stream(**arguments)
+    result = run_stream(**arguments)
+    assert result["paper_results"] == [
+        {
+            "candidate_key": "test-only:streaming-paper",
+            "disposition": "eligibility_unresolved",
+            "reason_codes": ["evidence_unmatched_or_ambiguous:study_geography"],
+            "source_id": None,
+        }
+    ]
     job_path = next(
         path
         for path in (eligibility / "jobs").glob("*.json")
@@ -542,11 +594,147 @@ def test_streaming_revalidates_brokered_eligibility_on_resume(tmp_path: Path) ->
     }
     write_json(job_path, job)
 
-    with pytest.raises(ValueError, match="deterministic validation"):
-        run_stream(**arguments)
+    resumed = run_stream(**arguments)
 
+    assert resumed["paper_results"] == result["paper_results"]
     assert transport.methods.count("generateContent") == 1
     assert broker.status()["generation_submissions"] == 1
+
+
+def test_streaming_advances_after_uncertain_brokered_eligibility(
+    tmp_path: Path,
+) -> None:
+    access, eligibility = streaming_fixture(tmp_path)
+    first_item_path = access / "items" / "item-000001.json"
+    second_item_path = access / "items" / "item-000002.json"
+    second_item = json.loads(first_item_path.read_text(encoding="utf-8"))
+    second_source = access / "originals" / "source-2.html"
+    second_source.write_bytes(
+        Path(second_item["source_path"]).read_bytes()
+        + b"\n<!-- second test-only source -->\n"
+    )
+    second_extraction = access / "extracted" / "text-2.txt"
+    second_extraction.write_text(
+        second_source.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    second_item.update(
+        {
+            "position": 2,
+            "candidate_key": "test-only:streaming-paper-2",
+            "title": "Second synthetic Arctic extraction fixture",
+            "source_path": str(second_source),
+            "source_content_hash": sha256(second_source.read_bytes()).hexdigest(),
+            "extraction_path": str(second_extraction),
+            "extraction_sha256": sha256(second_extraction.read_bytes()).hexdigest(),
+        }
+    )
+    write_json(second_item_path, second_item)
+    manifest_path = access / "run-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["target_total"] = 2
+    manifest["selection"].append(
+        {
+            "position": 2,
+            "candidate_key": second_item["candidate_key"],
+            "subgroup": "test_only",
+            "authors": ["Arctic QA test suite"],
+            "year": 2026,
+        }
+    )
+    write_json(manifest_path, manifest)
+
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+    transport = FirstInvalidEligibilityEvidenceTransport()
+    broker = shared_broker(tmp_path, transport)
+    provider = BrokerProvider(
+        broker=broker,
+        phase="live_test",
+        invocation_run_id="uncertain-then-next",
+    )
+    arguments = {
+        "db": database,
+        "namespace": paths.namespace,
+        "run_id": "uncertain-then-next",
+        "campaign_id": "uncertain-then-next-campaign",
+        "access_run_dir": access,
+        "eligibility_run_dir": eligibility,
+        "author": provider,
+        "verifier": provider,
+        "max_papers": 2,
+        **broker_eligibility_inputs(tmp_path),
+    }
+
+    result = run_stream(**arguments)
+
+    assert result["state"] == "completed"
+    assert result["counts"] == {
+        "accepted_base_questions": 0,
+        "eligibility_rejected": 1,
+        "eligibility_unresolved": 1,
+        "generation_rejected": 0,
+        "incomplete_non_mcq": 0,
+        "processed": 2,
+    }
+    assert result["paper_results"][0] == {
+        "candidate_key": "test-only:streaming-paper",
+        "disposition": "eligibility_unresolved",
+        "reason_codes": ["evidence_unmatched_or_ambiguous:study_geography"],
+        "source_id": None,
+    }
+    assert result["paper_results"][1]["candidate_key"] == second_item["candidate_key"]
+    assert result["paper_results"][1]["disposition"] == "eligibility_rejected"
+    progress = json.loads(
+        (paths.namespace / "streaming-dataset-r1" / "progress.json").read_text()
+    )
+    assert progress["recent_papers"][0]["final_state"] == "unresolved"
+    assert progress["recent_papers"][0]["final_reason"] == (
+        "evidence_unmatched_or_ambiguous:study_geography"
+    )
+
+    status = broker.status()
+    assert status["generation_submissions"] == 2
+    assert status["stages"]["eligibility"]["submissions"] == 2
+    first_family = stable_id("family", "test-only:streaming-paper")
+    second_family = stable_id("family", second_item["candidate_key"])
+    ledger = json.loads((tmp_path / "shared-ledger.json").read_text())
+    assert (
+        sum(row["family_id"] == first_family for row in ledger["requests"].values())
+        == 1
+    )
+    assert (
+        sum(row["family_id"] == second_family for row in ledger["requests"].values())
+        == 1
+    )
+    request_keys = set(ledger["requests"])
+    receipt_hashes = {
+        path.name: sha256_file(path)
+        for path in (tmp_path / "model-receipts").glob("*.json")
+    }
+
+    resumed = run_stream(**arguments)
+
+    assert resumed["paper_results"] == result["paper_results"]
+    resumed_status = broker.status()
+    assert resumed_status["generation_submissions"] == 2
+    assert (
+        set(json.loads((tmp_path / "shared-ledger.json").read_text())["requests"])
+        == request_keys
+    )
+    assert {
+        path.name: sha256_file(path)
+        for path in (tmp_path / "model-receipts").glob("*.json")
+    } == receipt_hashes
+    assert transport.methods.count("generateContent") == 2
+    rejection = database.one(
+        "SELECT reason_code,detail_json FROM rejection_ledger "
+        "WHERE stage='scientific_eligibility'"
+    )
+    assert rejection["reason_code"] == (
+        "evidence_unmatched_or_ambiguous:study_geography"
+    )
+    assert json.loads(rejection["detail_json"])["decision"] == "uncertain"
 
 
 def test_streaming_uses_one_shared_broker_for_all_ten_stages(
@@ -1126,6 +1314,7 @@ def test_streaming_cli_stops_after_eligibility_rejection(tmp_path: Path) -> None
     assert result["counts"] == {
         "accepted_base_questions": 0,
         "eligibility_rejected": 1,
+        "eligibility_unresolved": 0,
         "generation_rejected": 0,
         "incomplete_non_mcq": 0,
         "processed": 1,

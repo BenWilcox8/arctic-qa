@@ -47,6 +47,11 @@ Article-access item records can omit catalog fields that remain in the ordered s
 The scheduler carries the selected authors and year into the source record.
 It records a missing discipline as `unclassified` and does not guess a subject from the title or venue.
 It skips items that are not `full_text_ready` and continues to the next ready item in the frozen order.
+It also continues after a brokered response fails deterministic evidence validation.
+That paper receives `eligibility_unresolved` with the exact validation errors.
+The scheduler makes no downstream QA call for that paper.
+It does not normalize or accept unmatched evidence.
+Request identity, receipt, transport, accounting, and integrity failures still stop the run.
 
 ## Live command boundary
 
@@ -158,6 +163,8 @@ An eligibility job resumes without another call only when its exact request and 
 Standalone or fabricated eligibility jobs cannot skip the brokered eligibility call.
 Each resume reruns deterministic eligibility validation against the frozen full extraction and the broker receipt response.
 Saved job state and validation fields have no acceptance authority.
+An invalid evidence result stays uncertain and nonaccepted.
+The result remains resumable without another request and does not block the next frozen paper.
 Completed receipts are reused only after the broker validates that each immutable event remains present in its ledger.
 Ambiguous receipts stop the scheduler.
 Do not replay an ambiguous request.
