@@ -419,6 +419,9 @@ The adapter calls `countTokens` with the completed request before generation.
 It reserves the maximum configured output and thinking cost before transmission.
 Configuration revision v2 requires low thinking for every structured Gemini request.
 The output caps stay unchanged.
+New eligibility requests use `config/gemini-eligibility-prompt-v2.txt`.
+This prompt states the required `schema_version` value as text.
+Prompt version 1 remains unchanged for the saved NDVI response path.
 See [the structured-output budget correction](docs/GEMINI_STRUCTURED_OUTPUT_BUDGET.md).
 If the central ledger predates this revision, use a reviewed configuration transition.
 The transition preserves the initial identity, spend, submission counts, and immutable receipts.

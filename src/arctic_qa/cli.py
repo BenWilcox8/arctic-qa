@@ -174,7 +174,7 @@ def parser() -> argparse.ArgumentParser:
     gemini.add_argument(
         "--prompt-file",
         type=Path,
-        default=Path("config/gemini-eligibility-prompt-v1.txt"),
+        default=Path("config/gemini-eligibility-prompt-v2.txt"),
     )
     gemini.add_argument(
         "--schema-file",
@@ -319,7 +319,7 @@ def parser() -> argparse.ArgumentParser:
     stream.add_argument(
         "--eligibility-prompt-file",
         type=Path,
-        default=Path("config/gemini-eligibility-prompt-v1.txt"),
+        default=Path("config/gemini-eligibility-prompt-v2.txt"),
     )
     stream.add_argument(
         "--eligibility-schema-file",

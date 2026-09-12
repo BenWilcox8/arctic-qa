@@ -45,6 +45,26 @@ The response schema and deterministic evidence checks stay unchanged.
 The strict parser still rejects malformed JSON.
 The broker still records completed billed responses and makes no automatic retry.
 
+## Saved-response contract correction
+
+The second live eligibility response returned complete JSON.
+Its `request_id` and all four input hashes matched the request.
+Its `schema_version` value was `1.0.0` instead of `eligibility-response-v1`.
+Prompt version 1 did not state the required schema value as text.
+
+Three proposed evidence strings were not exact source substrings.
+The model removed layout whitespace or joined text from different columns.
+Prompt version 1 already required exact quotes and supplied source-block locators.
+These three errors are model noncompliance, not a missing evidence rule.
+
+Prompt version 2 adds only the missing schema-value instruction.
+It does not normalize quotes or relax deterministic evidence checks.
+Prompt version 1 remains unchanged for the saved-response rejection path.
+New requests use prompt version 2 by default.
+
+This correction does not make the saved response valid.
+It does not assign a scientific eligibility label.
+
 ## Offline counterfactual
 
 The test `test_low_thinking_counterfactual_completes_the_structured_stream` uses the public streaming boundary.

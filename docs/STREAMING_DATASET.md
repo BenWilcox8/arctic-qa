@@ -80,6 +80,7 @@ PYTHONPATH=src python -m arctic_qa --json stream \
   --campaign-id streaming-commission-r1 \
   --access-run-dir /mnt/crdata/research-abstention/arctic-qa/ARTICLE_ACCESS_RUN \
   --eligibility-run-dir /mnt/crdata/research-abstention/arctic-qa/ELIGIBILITY_RUN \
+  --eligibility-prompt-file config/gemini-eligibility-prompt-v2.txt \
   --eligibility-policy-file /mnt/crdata/research-abstention/arctic-qa/ELIGIBILITY_POLICY.json \
   --credential-file /PRIVATE/DIRECTORY/gemini.key \
   --prior-construction-spend-usd KNOWN_VALUE \
@@ -166,6 +167,9 @@ After settlement, the provider adapter can resume the same eligibility job from 
 The view binds the reconciliation event, both original receipt hashes, settled usage, and settled cost.
 The local ambiguous call entry becomes complete only after the saved JSON passes schema validation.
 This resume path does not call token counting or generation, including after a process restart.
+The saved NDVI response binds prompt version 1.
+Its continuation command must specify `--eligibility-prompt-file config/gemini-eligibility-prompt-v1.txt`.
+New requests use prompt version 2.
 See [the shared model broker guide](SHARED_MODEL_BROKER.md) for the exact command and rules.
 An immutable-event failure republishes broker status with `halted` set to `true` and `integrity_valid` set to `false`.
 The broker observer updates streaming progress to bind that halted status.

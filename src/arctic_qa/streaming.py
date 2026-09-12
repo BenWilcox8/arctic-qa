@@ -679,7 +679,7 @@ def _run_eligibility(
         role="eligibility",
         system=system,
         prompt=user_prompt,
-        prompt_version="gemini-eligibility-prompt-v1",
+        prompt_version=prompt_file.stem,
         parameters=parameters,
         response_schema=schema,
         reservation=Decimal("0"),

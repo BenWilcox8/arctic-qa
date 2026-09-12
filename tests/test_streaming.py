@@ -396,7 +396,7 @@ def broker_eligibility_inputs(tmp_path: Path) -> dict[str, Path]:
     policy = tmp_path / "eligibility-policy.json"
     write_json(policy, {"protocol_id": "test-only-policy"})
     return {
-        "eligibility_prompt_file": REPO / "config" / "gemini-eligibility-prompt-v1.txt",
+        "eligibility_prompt_file": REPO / "config" / "gemini-eligibility-prompt-v2.txt",
         "eligibility_schema_file": REPO
         / "schemas"
         / "gemini-eligibility.v1.schema.json",
@@ -616,6 +616,10 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
         database.one("SELECT * FROM budgets WHERE run_id='streaming-commission'")
         is None
     )
+    eligibility_call = database.one(
+        "SELECT prompt_version FROM calls WHERE role='eligibility'"
+    )
+    assert eligibility_call["prompt_version"] == "gemini-eligibility-prompt-v2"
     source = database.one("SELECT * FROM sources")
     assert source["geography_confidence"] == "model_reviewed_unverified"
     assert source["year"] == 2026
@@ -674,6 +678,9 @@ def test_streaming_resumes_reconciled_eligibility_after_process_restart(
     access, eligibility = streaming_fixture(tmp_path)
     (eligibility / "jobs" / "fixture-job.json").unlink()
     inputs = broker_eligibility_inputs(tmp_path)
+    inputs["eligibility_prompt_file"] = (
+        REPO / "config" / "gemini-eligibility-prompt-v1.txt"
+    )
     paths = DataPaths.open(tmp_path, test_mode=True)
     database = Database(paths.database)
     database.migrate(paths.namespace / "backups")
