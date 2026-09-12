@@ -461,12 +461,54 @@ def test_access_and_gemini_state_are_separate_and_filterable(tmp_path: Path) -> 
             "counts": {"queued": 1, "completed": 0},
         },
     )
+    gemini_overlay = gemini_run / "gemini-overlay.ndjson"
+    gemini_overlay.write_text(
+        json.dumps(
+            {
+                "schema": "gemini-eligibility-overlay-row-v1",
+                "run_id": "gemini",
+                "ready_source_keys_sha256": None,
+                "candidate_key": "10.1234/test",
+                "gemini_status": "queued",
+                "gemini_decision": None,
+                "job_key": None,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    gemini_progress = json.loads((gemini_run / "progress.json").read_text())
+    gemini_progress["overlay"] = {
+        "file": "gemini-overlay.ndjson",
+        "sha256": sha256_file(gemini_overlay),
+        "rows": 1,
+        "ready_source_keys_sha256": None,
+    }
+    write_json(gemini_run / "progress.json", gemini_progress)
+    connection = tmp_path / "gemini-connection.json"
+    write_json(
+        connection,
+        {
+            "schema": "gemini-readonly-connection-check-v1",
+            "checked_at": datetime.now(UTC).isoformat(),
+            "method": "GET",
+            "model": "gemini-3.8-flash",
+            "generation_requests": 0,
+            "article_uploads": 0,
+            "http_status": 200,
+            "authentication_verified": True,
+            "returned_model": "models/gemini-3.8-flash",
+            "input_token_limit": 1048576,
+            "output_token_limit": 65536,
+        },
+    )
     artifacts = CorpusArtifacts(
         tmp_path,
         "test-run",
         tmp_path / "runtime",
         access_run_dir=access_run,
         gemini_run_dir=gemini_run,
+        gemini_connection_file=connection,
     )
     state = artifacts.state()
     assert state["progress"]["stage"] == "article_access_readiness"
@@ -475,7 +517,12 @@ def test_access_and_gemini_state_are_separate_and_filterable(tmp_path: Path) -> 
         {"access_readiness": ["full_text_ready"], "page_size": ["10"]}
     )
     assert ready["total"] == 1
-    assert ready["records"][0]["gemini_status"] == "not_started"
+    assert state["gemini_screening"]["connection"]["state"] == (
+        "authenticated_read_only"
+    )
+    assert ready["records"][0]["gemini_status"] == "queued"
+    queued = artifacts.candidates({"gemini_status": ["queued"], "page_size": ["10"]})
+    assert queued["total"] == 1
 
     progress["counts"]["checked"] = 2
     progress["counts"]["checking"] = 0

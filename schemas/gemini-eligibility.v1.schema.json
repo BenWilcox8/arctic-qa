@@ -1,40 +1,72 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Gemini eligibility result v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["criteria", "overall", "reason_codes", "sufficient_context"],
+  "required": ["schema_version", "request_id", "overall", "overall_reason_codes", "criteria", "known_missing_context", "correction_metadata_used", "input_echo"],
   "properties": {
+    "schema_version": {"const": "eligibility-response-v1"},
+    "request_id": {"type": "string"},
+    "overall": {"enum": ["eligible", "excluded", "uncertain"]},
+    "overall_reason_codes": {"type": "array", "items": {"type": "string"}, "minItems": 1},
     "criteria": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": {"$ref": "#/$defs/criterion"}
+    },
+    "known_missing_context": {"type": "array", "items": {"type": "string"}},
+    "correction_metadata_used": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["published_primary_findings", "stable_identity_version", "study_geography", "access_rights_evidence", "correction_retraction_coverage"],
+      "required": ["provided", "source", "as_of", "known_status"],
       "properties": {
-        "published_primary_findings": {"$ref": "#/$defs/criterion"},
-        "stable_identity_version": {"$ref": "#/$defs/criterion"},
-        "study_geography": {"$ref": "#/$defs/criterion"},
-        "access_rights_evidence": {"$ref": "#/$defs/criterion"},
-        "correction_retraction_coverage": {"$ref": "#/$defs/criterion"}
+        "provided": {"type": "boolean"},
+        "source": {"type": ["string", "null"]},
+        "as_of": {"type": ["string", "null"]},
+        "known_status": {"enum": ["clear", "correction", "retraction", "unknown"]}
       }
     },
-    "overall": {"enum": ["eligible", "excluded", "uncertain"]},
-    "reason_codes": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-    "sufficient_context": {"type": "boolean"}
+    "input_echo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy_sha256", "source_version_sha256", "extracted_text_sha256", "metadata_sha256"],
+      "properties": {
+        "policy_sha256": {"type": "string"},
+        "source_version_sha256": {"type": "string"},
+        "extracted_text_sha256": {"type": "string"},
+        "metadata_sha256": {"type": "string"}
+      }
+    }
   },
   "$defs": {
     "criterion": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["decision", "evidence"],
+      "required": ["criterion_id", "status", "reason_codes", "evidence", "missing_context"],
       "properties": {
-        "decision": {"enum": ["yes", "no", "unknown", "not_applicable"]},
+        "criterion_id": {"enum": ["published_primary_findings", "stable_identity_version", "study_geography", "access_rights_evidence", "correction_retraction_coverage"]},
+        "status": {"enum": ["satisfied", "failed", "uncertain"]},
+        "reason_codes": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "missing_context": {"type": "array", "items": {"type": "string"}},
         "evidence": {
           "type": "array",
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["locator", "quote"],
-            "properties": {"locator": {"type": "string"}, "quote": {"type": "string"}}
+            "required": ["quote", "locator"],
+            "properties": {
+              "quote": {"type": "string"},
+              "locator": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["source_block_id", "page_id", "section_id"],
+                "properties": {
+                  "source_block_id": {"type": "string"},
+                  "page_id": {"type": ["string", "null"]},
+                  "section_id": {"type": "string"}
+                }
+              }
+            }
           }
         }
       }

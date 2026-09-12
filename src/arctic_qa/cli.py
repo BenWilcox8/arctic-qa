@@ -75,6 +75,7 @@ def parser() -> argparse.ArgumentParser:
     viewer.add_argument("--source-run-dir", type=Path)
     viewer.add_argument("--access-run-dir", type=Path)
     viewer.add_argument("--gemini-run-dir", type=Path)
+    viewer.add_argument("--gemini-connection-file", type=Path)
     viewer.add_argument("--host", default="127.0.0.1")
     viewer.add_argument("--port", type=int, default=8787)
     viewer.add_argument("--stale-after-seconds", type=int, default=86400)
@@ -156,6 +157,13 @@ def parser() -> argparse.ArgumentParser:
         default=Path("schemas/gemini-eligibility.v1.schema.json"),
     )
     gemini.add_argument("--policy-file", type=Path, required=True)
+    gemini.add_argument("--safety-policy-file", type=Path, required=True)
+    gemini.add_argument("--project-ledger-file", type=Path, required=True)
+    gemini.add_argument(
+        "--credential-file",
+        type=Path,
+        default=Path("/home/ben/.config/arctic-qa/gemini-api-key"),
+    )
     gemini.add_argument("--max-cost-usd", type=Decimal, required=True)
 
     discover = commands.add_parser(
@@ -289,6 +297,7 @@ def main(argv: list[str] | None = None) -> int:
                 source_run_dir=args.source_run_dir,
                 access_run_dir=args.access_run_dir,
                 gemini_run_dir=args.gemini_run_dir,
+                gemini_connection_file=args.gemini_connection_file,
                 host=args.host,
                 port=args.port,
                 stale_after_seconds=args.stale_after_seconds,
@@ -356,7 +365,10 @@ def main(argv: list[str] | None = None) -> int:
                     prompt_file=args.prompt_file,
                     schema_file=args.schema_file,
                     policy_file=args.policy_file,
+                    safety_policy_file=args.safety_policy_file,
+                    project_ledger_file=args.project_ledger_file,
                     max_cost_usd=args.max_cost_usd,
+                    credential_file=args.credential_file,
                 ),
             )
         paths, db = _open(args)

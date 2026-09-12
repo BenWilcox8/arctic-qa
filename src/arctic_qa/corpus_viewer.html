@@ -228,7 +228,7 @@
         <div class="field"><label for="pending_reason">Pending reason</label><select id="pending_reason" name="pending_reason"><option value="all">All reasons</option><option value="unreviewed">Unreviewed</option><option value="access-pending">Access pending</option><option value="geography-pending">Geography pending</option><option value="other-pending">Other pending</option></select></div>
         <div class="field"><label for="metadata_disposition">Metadata disposition</label><select id="metadata_disposition" name="metadata_disposition"><option value="all">All dispositions</option><option value="priority_seed">Priority seed</option><option value="retained_article_type">Retained article type</option><option value="flagged_nonresearch_type">Flagged nonresearch type</option><option value="unresolved_missing_type">Unresolved missing type</option><option value="unresolved_mixed_type">Unresolved mixed type</option><option value="unresolved_other_type">Unresolved other type</option></select></div>
         <div class="field"><label for="access_readiness">Access readiness</label><select id="access_readiness" name="access_readiness"><option value="all">All states</option><option value="not_checked">Not checked</option><option value="full_text_ready">Ready for eligibility</option><option value="working_landing_page_only">Landing page only</option><option value="access_pending">Access pending</option><option value="retryable_error">Retryable error</option><option value="extraction_pending">Extraction pending</option><option value="OCR_required">OCR required</option><option value="identity_pending">Identity pending</option><option value="no_source_found">No source found</option></select></div>
-        <div class="field"><label for="gemini_status">Gemini decision</label><select id="gemini_status" name="gemini_status"><option value="all">All states</option><option value="not_started">Not started</option><option value="eligible">Eligible</option><option value="excluded">Excluded</option><option value="uncertain">Uncertain</option><option value="screening_error">Validation error</option><option value="too_large_not_ready">Too large</option></select></div>
+        <div class="field"><label for="gemini_status">Gemini decision</label><select id="gemini_status" name="gemini_status"><option value="all">All states</option><option value="not_started">Not started</option><option value="queued">Queued</option><option value="eligible">Eligible</option><option value="excluded">Excluded</option><option value="uncertain">Uncertain</option><option value="screening_error">Validation error</option><option value="too_large_not_ready">Too large</option><option value="ambiguous_charge">Ambiguous charge</option></select></div>
         <div class="field"><label for="page_size">Rows per page</label><select id="page_size" name="page_size"><option>10</option><option selected>25</option><option>50</option><option>100</option></select></div>
         <button class="filter-action" type="submit">Apply</button>
       </form>
@@ -357,17 +357,18 @@
           box.append(text('span', label(name)), text('strong', formatNumber(data.source_pass_counts?.[name]))); return box;
         }));
         const access = data.access_readiness;
-        setBadge($('access-state'), access.state || access.telemetry);
+        setBadge($('access-state'), access.quality_notice?.status || access.state || access.telemetry);
         $('access-detail').textContent = access.message;
-        $('access-meta').textContent = `Run ${access.run_id || 'not selected'} | Target ${formatNumber(access.counts?.target)} | Updated ${dateText(access.updated_at_utc)}`;
+        $('access-meta').textContent = `Run ${access.run_id || 'not selected'} | Target ${formatNumber(access.counts?.target)} | ${access.quality_notice ? `Reported ready ${formatNumber(access.quality_notice.reported_full_text_ready)} is not authoritative | ` : ''}Updated ${dateText(access.updated_at_utc)}`;
         const accessOrder = ['checked', 'working_links', 'full_text_ready', 'access_pending', 'retryable_error', 'unchecked'];
         $('access-counts').replaceChildren(...accessOrder.map((name) => { const box = document.createElement('div'); box.className = 'count'; box.append(text('span', label(name)), text('strong', formatNumber(data.access_counts?.[name]))); return box; }));
         const gemini = data.gemini_screening;
         setBadge($('gemini-state'), gemini.state || gemini.telemetry);
         $('gemini-detail').textContent = gemini.message || 'Gemini eligibility screening is not started.';
         const budget = gemini.budget || {};
-        $('gemini-meta').textContent = `Model ${gemini.model || 'not configured'} | Fallback none | Allocation USD ${budget.run_allocation_usd || 'not set'} | Reserved USD ${budget.reserved_usd || '0'} | Spent USD ${budget.spent_usd || '0'} | Updated ${dateText(gemini.updated_at_utc)}`;
-        const geminiOrder = ['queued', 'completed', 'eligible', 'excluded', 'uncertain', 'screening_error'];
+        const connection = gemini.connection || {};
+        $('gemini-meta').textContent = `Model ${gemini.model || connection.model || 'not configured'} | Connection ${label(connection.state)} at ${dateText(connection.checked_at_utc)} | Generation requests ${formatNumber(connection.generation_requests)} | Fallback none | Allocation USD ${budget.run_allocation_usd || 'not set'} | Reserved USD ${budget.reserved_usd || '0'} | Spent USD ${budget.spent_usd || '0'} | Ambiguous USD ${budget.ambiguous_reserved_usd || '0'} | Phase remaining USD ${budget.initial_phase_remaining_usd || 'not set'} | Project remaining USD ${budget.project_remaining_usd || 'not set'} | Updated ${dateText(gemini.updated_at_utc)}`;
+        const geminiOrder = ['queued', 'completed', 'eligible', 'excluded', 'uncertain', 'screening_error', 'too_large_not_ready', 'ambiguous_charge'];
         $('gemini-counts').replaceChildren(...geminiOrder.map((name) => { const box = document.createElement('div'); box.className = 'count'; box.append(text('span', label(name)), text('strong', formatNumber(data.gemini_counts?.[name]))); return box; }));
         setBadge($('discovery-verdict'), data.readiness.metadata_discovery.verdict);
         $('discovery-condition').textContent = data.readiness.metadata_discovery.completion_condition;

@@ -363,8 +363,11 @@ The adapter uses `gemini-3.8-flash` by default.
 It has no automatic model fallback.
 The adapter sends one complete extracted text in one request.
 It does not use tools, search, URL context, caching, or context compression.
+The adapter starts only after the article-access stage is complete.
+The current safety policy disables live generation.
+A stored key does not authorize generation.
 
-Run the offline status check without an API key:
+Run the offline doctor command:
 
 ```bash
 PYTHONPATH=src python -m arctic_qa --json gemini-eligibility \
@@ -372,23 +375,33 @@ PYTHONPATH=src python -m arctic_qa --json gemini-eligibility \
   --access-run-dir "$ACCESS_RUN" \
   --run-dir "$GEMINI_RUN" \
   --policy-file "$CORPUS_ROOT/protocol/protocol-v2.json" \
-  --max-cost-usd 1000
+  --safety-policy-file "$SAFETY_POLICY" \
+  --project-ledger-file "$PROJECT_LEDGER" \
+  --max-cost-usd 1
 ```
 
 Use `--action dry-run` to build local requests and cost estimates.
 The dry run does not call Gemini.
-The local project ledger has a hard USD 1,000 cap.
-Each run must also declare its allocation with `--max-cost-usd`.
+The project ledger uses one explicit path for all runs.
+The lifetime ceiling is USD 1,000.
+The initial-phase ceiling is USD 1.
+Each run can allocate at most USD 1.
+Each request can reserve at most USD 0.25.
 
-Store `GEMINI_API_KEY` in private environment storage before a later live run.
-Do not put the key in a command argument, report, note, log, or browser.
-The live command fails closed when the key is absent.
-The live command also fails when the versioned price record is expired.
+Keep the credential file private with mode `0600` in a private directory.
+Do not put the key in a command, report, note, log, or browser.
+The doctor command reads file metadata only.
+The adapter reads the key only for an authorized live action.
+The adapter stops when the price record is not active.
 
 The adapter calls `countTokens` with the completed request before generation.
 It reserves the maximum configured output and thinking cost before transmission.
 An unknown transmitted outcome keeps its full reservation.
 The adapter never retries that ambiguous job automatically.
+The initial phase permits three generation submissions and ten count requests.
+Only one generation request can be active.
+Generation submissions are at least 60 seconds apart.
+The adapter stops after the first error or ambiguous charge.
 
 Add two bounded public Crossref lookups:
 

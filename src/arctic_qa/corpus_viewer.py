@@ -7,6 +7,7 @@ import os
 import re
 import sqlite3
 import threading
+from collections import Counter
 from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -51,6 +52,7 @@ GEMINI_FILTERS = {
     "uncertain",
     "screening_error",
     "too_large_not_ready",
+    "ambiguous_charge",
 }
 METADATA_DISPOSITION_FILTERS = {"all", *DISPOSITIONS}
 CACHE_SCHEMA_VERSION = "corpus-view-cache-v4"
@@ -170,6 +172,7 @@ class CorpusArtifacts:
         source_run_dir: Path | None = None,
         access_run_dir: Path | None = None,
         gemini_run_dir: Path | None = None,
+        gemini_connection_file: Path | None = None,
         stale_after_seconds: int = 86400,
         process_stale_after_seconds: int = 300,
     ) -> None:
@@ -191,6 +194,9 @@ class CorpusArtifacts:
         self.source_run_dir = source_run_dir.resolve() if source_run_dir else None
         self.access_run_dir = access_run_dir.resolve() if access_run_dir else None
         self.gemini_run_dir = gemini_run_dir.resolve() if gemini_run_dir else None
+        self.gemini_connection_file = (
+            gemini_connection_file.resolve() if gemini_connection_file else None
+        )
         self.stale_after_seconds = stale_after_seconds
         self.process_stale_after_seconds = process_stale_after_seconds
         self.run_dir = self.corpus_root / "ledgers" / f"run-{run_id}"
@@ -267,9 +273,17 @@ class CorpusArtifacts:
                 if self.access_run_dir
                 else None
             ),
-            _directory_fingerprint(
-                self.gemini_run_dir / "jobs" if self.gemini_run_dir else None
+            _file_fingerprint(
+                self.access_run_dir / "quality-notice-r1.json"
+                if self.access_run_dir
+                else None
             ),
+            _file_fingerprint(
+                self.gemini_run_dir / "gemini-overlay.ndjson"
+                if self.gemini_run_dir
+                else None
+            ),
+            _file_fingerprint(self.gemini_connection_file),
         ]
         return hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
@@ -532,20 +546,99 @@ class CorpusArtifacts:
                     raise ValueError("an access-readiness key does not match discovery")
 
     def _apply_gemini_overlay(self, connection: sqlite3.Connection) -> None:
-        jobs = self.gemini_run_dir / "jobs" if self.gemini_run_dir else None
-        if jobs is None or not jobs.is_dir():
+        overlay = (
+            self.gemini_run_dir / "gemini-overlay.ndjson"
+            if self.gemini_run_dir
+            else None
+        )
+        if overlay is None or not overlay.is_file():
             return
-        for path in jobs.glob("*.json"):
-            item = _read_json(path)
-            validation = item.get("validation") or {}
-            decision = (
-                validation.get("decision") if validation.get("valid") else "uncertain"
+        progress = _read_json(self.gemini_run_dir / "progress.json")
+        descriptor = progress.get("overlay") or {}
+        if descriptor.get("file") != overlay.name or descriptor.get(
+            "sha256"
+        ) != sha256_file(overlay):
+            raise ValueError("the Gemini overlay does not match its progress record")
+        seen: set[str] = set()
+        observed: Counter[str] = Counter()
+        with overlay.open(encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, 1):
+                if not line.strip():
+                    continue
+                item = json.loads(line)
+                key = str(item.get("candidate_key") or "")
+                status = item.get("gemini_status")
+                decision = item.get("gemini_decision")
+                if (
+                    item.get("schema") != "gemini-eligibility-overlay-row-v1"
+                    or item.get("run_id") != self.gemini_run_dir.name
+                    or item.get("ready_source_keys_sha256")
+                    != descriptor.get("ready_source_keys_sha256")
+                    or status not in GEMINI_FILTERS - {"all", "not_started"}
+                    or decision not in {None, "eligible", "excluded", "uncertain"}
+                    or key in seen
+                ):
+                    raise ValueError(
+                        f"the Gemini overlay row is invalid at line {line_number}"
+                    )
+                seen.add(key)
+                observed[str(status)] += 1
+                cursor = connection.execute(
+                    "UPDATE candidates SET gemini_status=?,gemini_decision=? WHERE candidate_key=?",
+                    (status, decision, key),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("a Gemini overlay key does not match discovery")
+        if len(seen) != descriptor.get("rows"):
+            raise ValueError("the Gemini overlay row count does not match progress")
+        counts = progress.get("counts") or {}
+        for status in GEMINI_FILTERS - {"all", "not_started"}:
+            if int(counts.get(status, 0)) != observed[status]:
+                raise ValueError(
+                    "the Gemini overlay state counts do not match progress"
+                )
+
+    def _gemini_connection(self) -> dict[str, Any]:
+        absent = {
+            "state": "not_checked",
+            "message": "No read-only Gemini connection receipt is selected.",
+        }
+        path = self.gemini_connection_file
+        if path is None or not path.is_file():
+            return absent
+        try:
+            value = _read_json(path)
+            if (
+                value.get("schema") != "gemini-readonly-connection-check-v1"
+                or value.get("method") != "GET"
+                or value.get("generation_requests") != 0
+                or value.get("article_uploads") != 0
+            ):
+                raise ValueError("unsupported connection receipt")
+            authenticated = bool(
+                value.get("authentication_verified") is True
+                and value.get("http_status") == 200
+                and value.get("returned_model") == f"models/{value.get('model')}"
             )
-            status = decision if item.get("state") == "completed" else "screening_error"
-            connection.execute(
-                "UPDATE candidates SET gemini_status=?,gemini_decision=? WHERE candidate_key=?",
-                (status, decision, item.get("candidate_key")),
-            )
+            return {
+                "state": "authenticated_read_only" if authenticated else "error",
+                "message": (
+                    "The read-only model check authenticated. Paid generation remains disabled."
+                    if authenticated
+                    else "The read-only model check did not authenticate."
+                ),
+                "checked_at_utc": value.get("checked_at"),
+                "model": value.get("model"),
+                "input_token_limit": value.get("input_token_limit"),
+                "output_token_limit": value.get("output_token_limit"),
+                "generation_requests": 0,
+                "article_uploads": 0,
+            }
+        except (OSError, ValueError, json.JSONDecodeError, TypeError) as error:
+            return {
+                "state": "invalid",
+                "message": f"Read-only Gemini connection record error: {error}",
+            }
 
     def _apply_source_overlay(
         self, connection: sqlite3.Connection, links: dict[str, str]
@@ -943,6 +1036,7 @@ class CorpusArtifacts:
                 if self.gemini_run_dir
                 else None,
             ),
+            ("Gemini read-only connection", self.gemini_connection_file),
         ]
         rows = []
         for label, path in paths:
@@ -1010,6 +1104,31 @@ class CorpusArtifacts:
                 "message": f"Progress record error: {error}",
             }
 
+    def _access_quality_notice(self) -> dict[str, Any] | None:
+        path = (
+            self.access_run_dir / "quality-notice-r1.json"
+            if self.access_run_dir
+            else None
+        )
+        if path is None or not path.is_file():
+            return None
+        value = _read_json(path)
+        if (
+            value.get("schema") != "article-access-quality-notice-v1"
+            or value.get("run_id") != self.access_run_dir.name.removeprefix("run-")
+            or value.get("status") != "superseded_quarantined"
+        ):
+            raise ValueError("the article-access quality notice is invalid")
+        return {
+            "status": value["status"],
+            "message": value.get("message"),
+            "reported_full_text_ready": value.get("reported_full_text_ready"),
+            "authoritative_full_text_ready": value.get(
+                "authoritative_full_text_ready"
+            ),
+            "recorded_at_utc": value.get("recorded_at_utc"),
+        }
+
     def state(self) -> dict[str, Any]:
         self.refresh()
         artifacts = self._artifact_rows()
@@ -1020,11 +1139,16 @@ class CorpusArtifacts:
             "article-access-progress-v1",
             "No article-access run is selected.",
         )
+        quality_notice = self._access_quality_notice()
+        if quality_notice:
+            access["quality_notice"] = quality_notice
+            access["message"] = quality_notice["message"]
         gemini = self._stage_record(
             self.gemini_run_dir,
             "gemini-eligibility-progress-v1",
             "Gemini eligibility screening is not started.",
         )
+        gemini["connection"] = self._gemini_connection()
         process = self._progress()
         if (
             metadata.get("state") == "completed"
@@ -1083,6 +1207,31 @@ class CorpusArtifacts:
                 "total": (access.get("counts") or {}).get("target"),
                 "started_at_utc": access.get("started_at_utc"),
                 "completed_at_utc": access.get("completed_at_utc"),
+            }
+        if gemini.get("telemetry") == "observed" and gemini.get("state") in {
+            "running",
+            "paused",
+            "error",
+            "completed",
+        }:
+            process = {
+                "schema": "corpus-progress-v1",
+                "telemetry": "observed",
+                "state": gemini.get("state"),
+                "stage": "scientific_eligibility",
+                "updated_at_utc": gemini.get("updated_at_utc"),
+                "message": gemini.get("message"),
+                "run_id": self.gemini_run_dir.name if self.gemini_run_dir else None,
+                "processed": sum(
+                    int((gemini.get("counts") or {}).get(name, 0))
+                    for name in (
+                        "completed",
+                        "screening_error",
+                        "too_large_not_ready",
+                        "ambiguous_charge",
+                    )
+                ),
+                "total": (gemini.get("counts") or {}).get("full_text_ready"),
             }
         available_dates = [
             row["updated_at_utc"]
@@ -1458,6 +1607,7 @@ def serve_corpus_viewer(
     source_run_dir: Path | None,
     access_run_dir: Path | None,
     gemini_run_dir: Path | None,
+    gemini_connection_file: Path | None,
     host: str,
     port: int,
     stale_after_seconds: int,
@@ -1475,6 +1625,7 @@ def serve_corpus_viewer(
         source_run_dir=source_run_dir,
         access_run_dir=access_run_dir,
         gemini_run_dir=gemini_run_dir,
+        gemini_connection_file=gemini_connection_file,
         stale_after_seconds=stale_after_seconds,
         process_stale_after_seconds=process_stale_after_seconds,
     )
@@ -1502,6 +1653,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-run-dir", type=Path)
     parser.add_argument("--access-run-dir", type=Path)
     parser.add_argument("--gemini-run-dir", type=Path)
+    parser.add_argument("--gemini-connection-file", type=Path)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--stale-after-seconds", type=int, default=86400)
@@ -1517,6 +1669,7 @@ def main(argv: list[str] | None = None) -> int:
         source_run_dir=args.source_run_dir,
         access_run_dir=args.access_run_dir,
         gemini_run_dir=args.gemini_run_dir,
+        gemini_connection_file=args.gemini_connection_file,
         host=args.host,
         port=args.port,
         stale_after_seconds=args.stale_after_seconds,
