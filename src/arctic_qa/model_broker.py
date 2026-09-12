@@ -330,6 +330,7 @@ class SharedGeminiBroker:
         authorization: dict[str, Any],
         *,
         identity: dict[str, Any],
+        ledger: dict[str, Any],
     ) -> None:
         if (
             not isinstance(authorization, dict)
@@ -347,6 +348,15 @@ class SharedGeminiBroker:
             raise ValueError("the price configuration transition identity changed")
         if authorization["expected_ledger_sha256"] != sha256_file(self.ledger_file):
             raise ValueError("the price configuration transition ledger hash changed")
+        if (
+            ledger["halted"]
+            or ledger["inflight"] != 0
+            or _money(ledger["reserved_usd"], "reserved") != 0
+            or _money(ledger["ambiguous_reserved_usd"], "ambiguous") != 0
+        ):
+            raise ValueError(
+                "a price configuration transition requires a settled ledger"
+            )
         if authorization["expected_identity_sha256"] != sha256_file(
             self._identity_file
         ):
@@ -381,7 +391,9 @@ class SharedGeminiBroker:
         if authorized.tzinfo is None:
             raise ValueError("the price configuration transition time is invalid")
 
-    def _authorize_active_config(self, identity: dict[str, Any]) -> None:
+    def _authorize_active_config(
+        self, identity: dict[str, Any], ledger: dict[str, Any]
+    ) -> None:
         initial_hash = identity["price_config_sha256"]
         active_hash = self.active_price_config_sha256
         if active_hash == initial_hash:
@@ -421,7 +433,9 @@ class SharedGeminiBroker:
                 "the active price configuration requires a reviewed transition"
             )
         authorization = _read(self.config_transition_file)
-        self._validate_transition_authorization(authorization, identity=identity)
+        self._validate_transition_authorization(
+            authorization, identity=identity, ledger=ledger
+        )
         authorization_hash = sha256_bytes(canonical_json(authorization).encode())
         event_path = self.receipts_dir / f"config-transition-{authorization_hash}.json"
         atomic_json(
@@ -455,7 +469,7 @@ class SharedGeminiBroker:
                 ledger = _read(self.ledger_file)
                 self._validate_initial_identity(identity, ledger)
                 ledger = self._validated_ledger()
-                self._authorize_active_config(identity)
+                self._authorize_active_config(identity, ledger)
                 self._publish_status(ledger)
                 return
             if self._identity_file.exists():

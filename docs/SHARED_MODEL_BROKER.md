@@ -70,6 +70,8 @@ It must contain these fields:
 
 The broker validates the ledger and all prior receipts before it applies the transition.
 
+The ledger must have no halt, inflight request, reservation, or ambiguous charge when the broker first applies the transition.
+
 It also validates the private gate and the exact independent review record.
 
 The broker writes one immutable `config-transition-*.json` event in the receipt directory.
