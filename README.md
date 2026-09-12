@@ -349,8 +349,11 @@ It has no automatic model fallback.
 The adapter sends one complete extracted text in one request.
 It does not use tools, search, URL context, caching, or context compression.
 The adapter starts only after the article-access stage is complete.
-The current safety policy disables live generation.
+Standalone Gemini `run` and `resume` actions are disabled.
+
 A stored key does not authorize generation.
+
+The integrated streaming command must use the shared broker and its one central ledger.
 
 Run the offline doctor command:
 
@@ -367,10 +370,10 @@ PYTHONPATH=src python -m arctic_qa --json gemini-eligibility \
 
 Use `--action dry-run` to build local requests and cost estimates.
 The dry run does not call Gemini.
-The project ledger uses one explicit path for all runs.
-The lifetime ceiling is USD 1,000.
-The initial-phase ceiling is USD 1.
-Each run can allocate at most USD 1.
+The old standalone USD 1 setup is historical.
+
+The current shared policy sets a USD 25 away-session cap and a USD 10 live-test subcap.
+
 Each request can reserve at most USD 0.25.
 
 Keep the credential file private with mode `0600` in a private directory.

@@ -294,6 +294,7 @@ class SharedGeminiBroker:
                 "accepted_question_count": 0,
                 "accepted_families": {},
                 "family_bindings": {},
+                "paper_bindings": {},
                 "live_test_papers": {},
                 "recent_submission_times_utc": [],
                 "requests": {},
@@ -360,6 +361,14 @@ class SharedGeminiBroker:
             ) from error
 
     def _validate_immutable_events(self, ledger: dict[str, Any]) -> None:
+        for path in self.receipts_dir.iterdir():
+            match = re.fullmatch(
+                r"([a-f0-9]{64})(?:\.(?:submitted|received))?\.json", path.name
+            )
+            if match and match.group(1) not in ledger["requests"]:
+                raise ValueError(
+                    "an immutable paid-call event is absent from the ledger"
+                )
         base_fields = (
             "request_key",
             "request_sha256",
@@ -450,6 +459,7 @@ class SharedGeminiBroker:
             "accepted_question_count",
             "accepted_families",
             "family_bindings",
+            "paper_bindings",
             "live_test_papers",
             "recent_submission_times_utc",
             "requests",
@@ -464,8 +474,10 @@ class SharedGeminiBroker:
             raise ValueError("the shared paid-call ledger fields changed")
         if ledger["schema"] != "shared-paid-call-ledger-v1":
             raise ValueError("the shared paid-call ledger schema changed")
-        if not isinstance(ledger["requests"], dict) or not isinstance(
-            ledger["family_bindings"], dict
+        if (
+            not isinstance(ledger["requests"], dict)
+            or not isinstance(ledger["family_bindings"], dict)
+            or not isinstance(ledger["paper_bindings"], dict)
         ):
             raise ValueError("the shared paid-call ledger mappings are invalid")
         if not isinstance(ledger["halted"], bool):
@@ -611,6 +623,7 @@ class SharedGeminiBroker:
                     target["thinking_tokens"] += usage["thoughtsTokenCount"]
 
         source_bindings: dict[str, str] = {}
+        expected_paper_bindings: dict[str, dict[str, str]] = {}
         for family_id, binding in ledger["family_bindings"].items():
             if (
                 not isinstance(family_id, str)
@@ -629,6 +642,17 @@ class SharedGeminiBroker:
                 raise ValueError(
                     "one source version is bound to multiple paper families"
                 )
+            paper_binding = {
+                "family_id": family_id,
+                "source_version_id": binding["source_version_id"],
+            }
+            previous_paper = expected_paper_bindings.setdefault(
+                binding["paper_id"], paper_binding
+            )
+            if previous_paper != paper_binding:
+                raise ValueError("one paper ID is bound to multiple paper families")
+        if ledger["paper_bindings"] != expected_paper_bindings:
+            raise ValueError("the paid-call paper bindings are inconsistent")
         for name, value in {
             "reserved_usd": totals["reserved"],
             "spent_usd": totals["spent"],
@@ -946,7 +970,17 @@ class SharedGeminiBroker:
                     raise ValueError(
                         "the source version is already bound to another paper family"
                     )
+            paper_binding = {
+                "family_id": base["family_id"],
+                "source_version_id": base["source_version_id"],
+            }
+            old_paper_binding = ledger["paper_bindings"].get(base["paper_id"])
+            if old_paper_binding is not None and old_paper_binding != paper_binding:
+                raise ValueError(
+                    "the paper ID is already bound to another family or source version"
+                )
             ledger["family_bindings"].setdefault(base["family_id"], binding)
+            ledger["paper_bindings"].setdefault(base["paper_id"], paper_binding)
             ledger["count_requests"] += 1
             ledger["requests"][request_key] = {**base, "state": "counting"}
             ledger["updated_at_utc"] = _now()

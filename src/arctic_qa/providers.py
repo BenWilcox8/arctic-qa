@@ -194,39 +194,8 @@ class GeminiProvider:
         parameters: dict[str, Any],
         timeout: float,
     ) -> ProviderResult:
-        key = os.environ.get("GEMINI_API_KEY")
-        if not key:
-            raise ProviderError("GEMINI_API_KEY is not set")
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(self.model, safe='')}:generateContent"
-        body = canonical_json(
-            {
-                "system_instruction": {"parts": [{"text": system}]},
-                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "temperature": parameters.get("temperature", 0),
-                    "maxOutputTokens": parameters.get("max_tokens", 2048),
-                    "responseMimeType": "application/json",
-                    "responseJsonSchema": parameters["json_schema"],
-                },
-            }
-        ).encode()
-        request = urllib.request.Request(
-            url,
-            data=body,
-            method="POST",
-            headers={"content-type": "application/json", "x-goog-api-key": key},
-        )
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = json.loads(response.read())
-        text = raw["candidates"][0]["content"]["parts"][0]["text"]
-        usage = raw.get("usageMetadata", {})
-        return ProviderResult(
-            json.loads(_json_object(text)),
-            self.model,
-            raw.get("responseId"),
-            usage.get("promptTokenCount"),
-            usage.get("candidatesTokenCount"),
-            None,
+        raise ProviderError(
+            "legacy Gemini generation is disabled; use the shared streaming broker"
         )
 
 
@@ -242,7 +211,9 @@ def make_provider(name: str, model: str, script: Path | None) -> Provider:
     if name == "claude":
         return ClaudeProvider(model)
     if name == "gemini":
-        return GeminiProvider(model)
+        raise ValueError(
+            "legacy Gemini generation is disabled; use the shared streaming broker"
+        )
     raise ValueError(f"unknown provider: {name}")
 
 

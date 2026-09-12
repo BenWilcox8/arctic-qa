@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from arctic_qa.model_broker import SharedGeminiBroker, broker_request_key
+from arctic_qa.providers import GeminiProvider, ProviderError, make_provider
 
 
 ROOT = Path(__file__).parents[1]
@@ -30,6 +31,13 @@ def payload() -> dict:
         },
         "store": False,
     }
+
+
+def test_legacy_gemini_provider_cannot_bypass_shared_broker() -> None:
+    with pytest.raises(ValueError, match="shared streaming broker"):
+        make_provider("gemini", "gemini-3.8-flash", None)
+    with pytest.raises(ProviderError, match="shared streaming broker"):
+        GeminiProvider("gemini-3.8-flash").invoke("verifier", "system", "prompt", {}, 1)
 
 
 class Transport:
@@ -285,6 +293,36 @@ def test_source_version_cannot_move_to_an_alias_family(tmp_path: Path):
     assert transport.methods == ["countTokens", "generateContent"]
 
 
+def test_paper_cannot_move_to_a_new_family_and_source_version(tmp_path: Path):
+    transport = Transport()
+    broker = fixture(tmp_path, transport=transport)["broker"]
+    for stage in (
+        "eligibility",
+        "finding_answer_extraction",
+        "question_generation",
+        "blinded_reconstruction",
+    ):
+        assert (
+            execute(
+                broker,
+                stage=stage,
+                paper="canonical",
+                family="family-1",
+                source="source-v1",
+            )["state"]
+            == "completed"
+        )
+    with pytest.raises(ValueError, match="paper ID is already bound"):
+        execute(
+            broker,
+            stage="answer_verification",
+            paper="canonical",
+            family="family-2",
+            source="source-v2",
+        )
+    assert transport.methods == ["countTokens", "generateContent"] * 4
+
+
 def test_received_response_is_recovered_after_final_receipt_write_crash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -325,6 +363,25 @@ def test_received_response_is_recovered_after_final_receipt_write_crash(
     )
     assert final["response"]["usageMetadata"]["totalTokenCount"] == 115
     assert transport.methods == ["countTokens", "generateContent"]
+
+
+def test_deleted_request_cannot_orphan_immutable_spend_events(tmp_path: Path):
+    values = fixture(tmp_path, transport=Transport())
+    assert execute(values["broker"])["state"] == "completed"
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    ledger["requests"] = {}
+    ledger["family_bindings"] = {}
+    ledger["paper_bindings"] = {}
+    ledger["stages"] = {}
+    ledger["papers"] = {}
+    ledger["live_test_papers"] = {}
+    ledger["spent_usd"] = "0"
+    ledger["generation_submissions"] = 0
+    ledger["count_requests"] = 0
+    ledger["recent_submission_times_utc"] = []
+    write_json(values["ledger"], ledger)
+    with pytest.raises(ValueError, match="immutable paid-call event"):
+        fixture(tmp_path, transport=Transport())
 
 
 def test_production_spend_does_not_renew_or_inflate_live_test(tmp_path: Path):

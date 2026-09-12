@@ -16,6 +16,10 @@ The ledger schema is `shared-paid-call-ledger-v1`.
 
 Do not create a new ledger for a new process, run, phase, or stage.
 
+The legacy Gemini provider and standalone Gemini `run` and `resume` actions are disabled.
+
+They cannot send paid requests outside this ledger.
+
 The adjacent immutable identity record makes a missing ledger fail closed.
 
 The broker also validates ledger totals against immutable request receipts.

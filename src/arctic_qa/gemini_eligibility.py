@@ -1247,6 +1247,10 @@ def run_gemini_eligibility(
 ) -> dict[str, Any]:
     if action not in {"doctor", "dry-run", "run", "resume", "pause", "status"}:
         raise ValueError("Gemini eligibility action is not supported")
+    if action in {"run", "resume"} and transport is None:
+        raise ValueError(
+            "standalone Gemini execution is disabled; use the shared streaming broker"
+        )
     config = _config(config_file)
     safety = _safety(safety_policy_file)
     if (

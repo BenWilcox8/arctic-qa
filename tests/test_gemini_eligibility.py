@@ -133,6 +133,14 @@ def call(paths: dict[str, Path], action: str, transport=None) -> dict:
     )
 
 
+def test_standalone_live_actions_require_shared_broker(tmp_path: Path) -> None:
+    paths = fixture(tmp_path, live=True)
+    with pytest.raises(ValueError, match="shared streaming broker"):
+        call(paths, "run")
+    with pytest.raises(ValueError, match="shared streaming broker"):
+        call(paths, "resume")
+
+
 def response_value(
     request_id: str, hashes: dict, quote: str, known_gaps: list[str] | None = None
 ) -> dict:
