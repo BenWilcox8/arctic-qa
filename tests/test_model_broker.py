@@ -86,19 +86,26 @@ def fixture(tmp_path: Path, *, enabled: bool = True, transport=None) -> dict:
     return {"broker": broker, "gate": gate, "ledger": tmp_path / "shared-ledger.json"}
 
 
-def execute(broker: SharedGeminiBroker, *, stage: str = "eligibility", paper="p1"):
+def execute(
+    broker: SharedGeminiBroker,
+    *,
+    stage: str = "eligibility",
+    paper="p1",
+    phase="live_test",
+    run_id="run-1",
+):
     body = payload()
     key = broker_request_key(
         model="gemini-3.8-flash",
-        run_id="run-1",
+        run_id=run_id,
         stage=stage,
         paper_id=paper,
         family_id=f"family-{paper}",
         payload=body,
     )
     return broker.execute(
-        phase="live_test",
-        run_id="run-1",
+        phase=phase,
+        run_id=run_id,
         stage=stage,
         paper_id=paper,
         family_id=f"family-{paper}",
@@ -113,6 +120,16 @@ def test_disabled_gate_prevents_any_transport_call(tmp_path: Path):
     with pytest.raises(ValueError, match="disabled"):
         execute(broker)
     assert transport.methods == []
+
+
+def test_missing_credential_does_not_create_a_request_state(tmp_path: Path):
+    values = fixture(tmp_path, transport=None)
+    (tmp_path / "private" / "gemini.key").unlink()
+    with pytest.raises(ValueError, match="credential"):
+        execute(values["broker"])
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    assert ledger["requests"] == {}
+    assert ledger["count_requests"] == 0
 
 
 def test_all_stages_share_one_durable_ledger(tmp_path: Path):
@@ -209,6 +226,35 @@ def test_one_accepted_item_per_family_survives_restart(tmp_path: Path):
     assert resumed.status()["accepted_question_count"] == 1
     with pytest.raises(ValueError, match="already"):
         resumed.record_accepted(family_id="family-1", item_id="item-2")
+
+
+def test_new_run_id_cannot_replay_the_same_request(tmp_path: Path):
+    transport = Transport()
+    broker = fixture(tmp_path, transport=transport)["broker"]
+    assert execute(broker)["state"] == "completed"
+    with pytest.raises(ValueError, match="already exists"):
+        execute(broker, run_id="renamed-run")
+    assert transport.methods == ["countTokens", "generateContent"]
+
+
+def test_production_spend_does_not_renew_or_inflate_live_test(tmp_path: Path):
+    transport = Transport()
+    values = fixture(tmp_path, transport=transport)
+    assert execute(values["broker"])["state"] == "completed"
+    gate = json.loads(values["gate"].read_text(encoding="utf-8"))
+    gate["allowed_phase"] = "away_production"
+    write_json(values["gate"], gate)
+    assert (
+        execute(
+            values["broker"],
+            phase="away_production",
+            stage="question_generation",
+        )["state"]
+        == "completed"
+    )
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    assert ledger["live_test_papers"]["p1"]["spent_usd"] == "0.000132"
+    assert ledger["generation_submissions"] == 2
 
 
 def test_initialized_ledger_cannot_silently_reset(tmp_path: Path):

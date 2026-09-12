@@ -30,6 +30,10 @@ Later constructors require both files and require the same frozen inputs.
 
 Create the request key from the exact request identity.
 
+The request identity does not use the run ID.
+
+Thus, a new run cannot replay the same paper, stage, model, and payload.
+
 Then call the broker one time.
 
 ```python

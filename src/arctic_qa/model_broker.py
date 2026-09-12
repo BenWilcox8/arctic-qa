@@ -4,6 +4,7 @@ import fcntl
 import json
 import re
 import stat
+import time
 import urllib.error
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -169,7 +170,6 @@ def broker_request_key(
         canonical_json(
             {
                 "model": model,
-                "run_id": run_id,
                 "stage": stage,
                 "paper_id": paper_id,
                 "family_id": family_id,
@@ -356,6 +356,10 @@ class SharedGeminiBroker:
             old = ledger["accepted_families"].get(family_id)
             if old and old != item_id:
                 raise ValueError("a paper family already has an accepted item")
+            if not old and len(ledger["accepted_families"]) >= int(
+                self.policy["accepted_question_target"]
+            ):
+                raise ValueError("the accepted-question target is complete")
             ledger["accepted_families"][family_id] = item_id
             ledger["accepted_question_count"] = len(ledger["accepted_families"])
             ledger["updated_at_utc"] = _now()
@@ -398,6 +402,26 @@ class SharedGeminiBroker:
             ledger["requests"][request_key] = {**base, "state": "counting"}
             ledger["updated_at_utc"] = _now()
             atomic_json(self.ledger_file, ledger)
+
+    def _pace(self) -> None:
+        """Wait until the frozen per-minute submission window has room."""
+        while True:
+            ledger = _read(self.ledger_file)
+            cutoff = datetime.now(UTC) - timedelta(minutes=1)
+            recent = sorted(
+                datetime.fromisoformat(value.replace("Z", "+00:00"))
+                for value in ledger["recent_submission_times_utc"]
+                if datetime.fromisoformat(value.replace("Z", "+00:00")) > cutoff
+            )
+            limit = int(self.policy["maximum_generation_requests_per_minute"])
+            if len(recent) < limit:
+                return
+            wait_seconds = max(
+                (recent[0] + timedelta(minutes=1) - datetime.now(UTC)).total_seconds(),
+                0,
+            )
+            if wait_seconds:
+                time.sleep(min(wait_seconds + 0.01, 60.0))
 
     def _reserve(
         self,
@@ -576,8 +600,12 @@ class SharedGeminiBroker:
             stage["reserved_usd"] = str(
                 _money(stage["reserved_usd"], "stage reserved") - reserved
             )
-            live = ledger["live_test_papers"].get(request["paper_id"])
-            if request["phase"] == "live_test" and live:
+            live = (
+                ledger["live_test_papers"].get(request["paper_id"])
+                if request["phase"] == "live_test"
+                else None
+            )
+            if live:
                 live["reserved_usd"] = str(
                     _money(live["reserved_usd"], "live reserved") - reserved
                 )
@@ -690,10 +718,11 @@ class SharedGeminiBroker:
                 raise ValueError(
                     "an interrupted paid request became an ambiguous charge"
                 )
-            self._count_event(request_key, base)
+            self._pace()
             client = self.transport or GeminiTransport(
                 self.config["api_base"], _load_key(self.credential_file)
             )
+            self._count_event(request_key, base)
             try:
                 counted = client.post(
                     self.config["model"],
