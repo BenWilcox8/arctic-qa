@@ -71,8 +71,8 @@ def _validate_policy(policy: dict[str, Any]) -> None:
         raise ValueError("article-access source limit exceeds 50 MiB")
     if int(policy.get("minimum_free_bytes", 0)) < 50 * 1024 * 1024 * 1024:
         raise ValueError("article-access free-space guard is less than 50 GiB")
-    if int(policy.get("maximum_new_bytes_per_invocation", 0)) > 100 * 1024**3:
-        raise ValueError("article-access invocation limit exceeds 100 GiB")
+    if int(policy.get("maximum_new_bytes_total", 0)) > 100 * 1024**3:
+        raise ValueError("article-access total size limit exceeds 100 GiB")
 
 
 def _load_target(
@@ -140,6 +140,7 @@ def prepare_access_run(
     run_id: str,
     code_commit: str,
     reuse_source_run_dir: Path | None = None,
+    reuse_access_run_dir: Path | None = None,
 ) -> dict[str, Any]:
     policy = _read_json(policy_file)
     protocol = _read_json(protocol_file)
@@ -174,6 +175,9 @@ def prepare_access_run(
         "smoke_sizes": policy["smoke_sizes"],
         "reuse_source_run_dir": str(reuse_source_run_dir.resolve())
         if reuse_source_run_dir
+        else None,
+        "reuse_access_run_dir": str(reuse_access_run_dir.resolve())
+        if reuse_access_run_dir
         else None,
         "selection": selection,
     }
@@ -507,6 +511,38 @@ def _reuse(candidate: dict[str, Any], source_run: Path | None) -> dict[str, Any]
     return None
 
 
+def _reuse_access(
+    candidate: dict[str, Any], access_run: Path | None
+) -> dict[str, Any] | None:
+    if access_run is None or not access_run.is_dir():
+        return None
+    path = access_run / "items" / f"item-{int(candidate['position']):06d}.json"
+    if not path.is_file():
+        return None
+    row = _read_json(path)
+    if (
+        row.get("candidate_key") != candidate["candidate_key"]
+        or row.get("access_state") not in STATES
+    ):
+        raise ValueError("a reused access receipt does not match the frozen selection")
+    if row.get("access_state") == "full_text_ready":
+        source = Path(str(row.get("source_path") or ""))
+        extraction = Path(str(row.get("extraction_path") or ""))
+        if not source.is_file() or not extraction.is_file():
+            raise ValueError("a reused ready source object is missing")
+        if sha256_file(source) != row.get("source_content_hash") or sha256_file(
+            extraction
+        ) != row.get("extraction_sha256"):
+            raise ValueError("a reused ready source hash changed")
+    return {
+        **row,
+        "schema": ITEM_SCHEMA,
+        "completed_at_utc": _now(),
+        "reused_from": str(path),
+        "new_bytes": 0,
+    }
+
+
 def _process(
     candidate: dict[str, Any],
     manifest: dict[str, Any],
@@ -524,6 +560,14 @@ def _process(
         "doi": candidate.get("doi"),
         "started_at_utc": _now(),
     }
+    prior_access = _reuse_access(
+        candidate,
+        Path(manifest["reuse_access_run_dir"])
+        if manifest.get("reuse_access_run_dir")
+        else None,
+    )
+    if prior_access:
+        return {**base, **prior_access, "run_id": manifest["run_id"]}
     reused = _reuse(
         candidate,
         Path(manifest["reuse_source_run_dir"])
@@ -705,6 +749,7 @@ def run_access_readiness(
     run_id: str,
     code_commit: str,
     reuse_source_run_dir: Path | None = None,
+    reuse_access_run_dir: Path | None = None,
     max_items: int | None = None,
     max_network_seconds: int | None = None,
     max_new_bytes: int | None = None,
@@ -721,6 +766,7 @@ def run_access_readiness(
         run_id=run_id,
         code_commit=code_commit,
         reuse_source_run_dir=reuse_source_run_dir,
+        reuse_access_run_dir=reuse_access_run_dir,
     )
     _verify_inputs(manifest)
     receipts = _receipts(output_dir)
@@ -749,10 +795,13 @@ def run_access_readiness(
         ),
         int(manifest["limits"]["maximum_network_seconds_per_invocation"]),
     )
-    byte_cap = min(
-        int(max_new_bytes or manifest["limits"]["maximum_new_bytes_per_invocation"]),
-        int(manifest["limits"]["maximum_new_bytes_per_invocation"]),
+    existing_new_bytes = sum(
+        int(row.get("new_bytes") or 0) for row in receipts.values()
     )
+    total_remaining = max(
+        int(manifest["limits"]["maximum_new_bytes_total"]) - existing_new_bytes, 0
+    )
+    byte_cap = min(int(max_new_bytes or total_remaining), total_remaining)
     deadline = time.monotonic() + seconds
     new_bytes = 0
     pacer = HostPacer(

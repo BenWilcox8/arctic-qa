@@ -127,6 +127,7 @@ def parser() -> argparse.ArgumentParser:
     access.add_argument("--run-id", required=True)
     access.add_argument("--code-commit", required=True)
     access.add_argument("--reuse-source-run-dir", type=Path)
+    access.add_argument("--reuse-access-run-dir", type=Path)
     access.add_argument("--max-items", type=int)
     access.add_argument("--max-network-seconds", type=int)
     access.add_argument("--max-new-bytes", type=int)
@@ -338,6 +339,7 @@ def main(argv: list[str] | None = None) -> int:
                     run_id=args.run_id,
                     code_commit=args.code_commit,
                     reuse_source_run_dir=args.reuse_source_run_dir,
+                    reuse_access_run_dir=args.reuse_access_run_dir,
                     max_items=args.max_items,
                     max_network_seconds=args.max_network_seconds,
                     max_new_bytes=args.max_new_bytes,

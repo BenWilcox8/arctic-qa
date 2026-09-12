@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
-from arctic_qa.access_readiness import HostPacer, _process, _public_url
+from arctic_qa.access_readiness import HostPacer, _process, _public_url, _reuse_access
 
 
 def public_resolver(host, port, type):
@@ -109,3 +110,20 @@ def test_missing_url_stays_distinct_from_exclusion(tmp_path: Path):
     )
     assert result["access_state"] == "no_source_found"
     assert "eligibility" not in result
+
+
+def test_prior_access_receipt_is_reused_without_network(tmp_path: Path):
+    prior = tmp_path / "prior"
+    receipt = {
+        "candidate_key": "10.1/example",
+        "access_state": "working_landing_page_only",
+        "reason_code": "working_page_has_no_retrieved_full_text",
+        "new_bytes": 0,
+    }
+    path = prior / "items" / "item-000001.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+    reused = _reuse_access(candidate(), prior)
+    assert reused is not None
+    assert reused["access_state"] == "working_landing_page_only"
+    assert reused["reused_from"] == str(path)
