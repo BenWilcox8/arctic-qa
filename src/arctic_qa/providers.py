@@ -587,8 +587,14 @@ def _hydrate_locators(value: Any, prompt: str) -> Any:
     if not match:
         return value
     try:
-        source_text = json.loads(match.group(1))["text"]
+        source_data = json.loads(match.group(1))
     except (json.JSONDecodeError, KeyError, TypeError):
+        return value
+    if isinstance(source_data, dict) and isinstance(source_data.get("text"), str):
+        source_chunks = [source_data]
+    elif isinstance(source_data, dict) and isinstance(source_data.get("chunks"), list):
+        source_chunks = source_data["chunks"]
+    else:
         return value
 
     def walk(item: Any) -> None:
@@ -600,9 +606,21 @@ def _hydrate_locators(value: Any, prompt: str) -> Any:
                 and isinstance(locator, dict)
                 and locator.get("start_offset") == "auto"
             ):
-                start = source_text.find(quote)
-                locator["start_offset"] = start
-                locator["end_offset"] = start + len(quote) if start >= 0 else -1
+                matching = next(
+                    (
+                        chunk
+                        for chunk in source_chunks
+                        if isinstance(chunk, dict)
+                        and isinstance(chunk.get("text"), str)
+                        and quote in chunk["text"]
+                    ),
+                    None,
+                )
+                if matching is not None:
+                    start = matching["text"].find(quote)
+                    locator["chunk_id"] = matching.get("chunk_id")
+                    locator["start_offset"] = start
+                    locator["end_offset"] = start + len(quote)
             for child in item.values():
                 walk(child)
         elif isinstance(item, list):

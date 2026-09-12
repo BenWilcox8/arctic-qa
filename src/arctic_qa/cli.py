@@ -35,6 +35,7 @@ from .providers import make_provider
 from .screening import screen_source
 from .source_pass import run_source_pass
 from .storage import fetch_source, store_original
+from .streaming import run_stream
 from .util import atomic_json, canonical_json
 from .validation import validate_candidate
 
@@ -278,6 +279,17 @@ def parser() -> argparse.ArgumentParser:
     )
     smoke.add_argument("--fixture-dir", type=Path, default=Path("fixtures"))
     smoke.add_argument("--run-id", default="smoke-r1")
+
+    stream = commands.add_parser(
+        "stream", help="Move eligible full-text papers through validated export."
+    )
+    stream.add_argument("--run-id", required=True)
+    stream.add_argument("--campaign-id")
+    stream.add_argument("--access-run-dir", type=Path, required=True)
+    stream.add_argument("--eligibility-run-dir", type=Path, required=True)
+    stream.add_argument("--author-script", type=Path, required=True)
+    stream.add_argument("--verifier-script", type=Path, required=True)
+    stream.add_argument("--max-papers", type=int, default=1)
     return root
 
 
@@ -637,6 +649,26 @@ def _status(args, paths: DataPaths, db: Database) -> dict[str, Any]:
             "SELECT * FROM budgets WHERE run_id=?", (args.run_id,)
         )
     return result
+
+
+def _stream(args, paths: DataPaths, db: Database) -> dict[str, Any]:
+    author = make_provider(
+        "fake", "fake-gemini-3.8-flash", args.author_script.resolve()
+    )
+    verifier = make_provider(
+        "fake", "fake-gemini-3.8-flash", args.verifier_script.resolve()
+    )
+    return run_stream(
+        db,
+        paths.namespace,
+        run_id=args.run_id,
+        campaign_id=args.campaign_id or args.run_id,
+        access_run_dir=args.access_run_dir.resolve(),
+        eligibility_run_dir=args.eligibility_run_dir.resolve(),
+        author=author,
+        verifier=verifier,
+        max_papers=args.max_papers,
+    )
 
 
 def _smoke(args, paths: DataPaths, db: Database) -> dict[str, Any]:
