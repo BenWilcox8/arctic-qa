@@ -139,6 +139,8 @@ The broker rejects partial, mismatched, or additional changes.
 Every v2 transition keeps the cumulative USD 5 live-test ceiling.
 
 The command must still set `--max-papers` to the intended fixed-order input bound.
+The immutable input manifest's `target_total` is the maximum accepted value.
+There is no separate fixed 500-paper CLI ceiling.
 
 The checked-in default policy remains at 20 papers and 100 submissions.
 

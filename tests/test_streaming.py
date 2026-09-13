@@ -1149,10 +1149,23 @@ def test_streaming_advances_after_uncertain_brokered_eligibility(
         "eligibility_run_dir": eligibility,
         "author": provider,
         "verifier": provider,
-        "max_papers": 2,
+        "max_papers": 1,
         **broker_eligibility_inputs(tmp_path),
     }
 
+    first = run_stream(**arguments)
+
+    assert first["counts"]["processed"] == 1
+    assert first["paper_results"][0]["candidate_key"] == ("test-only:streaming-paper")
+    assert broker.status()["generation_submissions"] == 1
+    first_ledger = json.loads((tmp_path / "shared-ledger.json").read_text())
+    first_request_keys = set(first_ledger["requests"])
+    first_receipt_hashes = {
+        path.name: sha256_file(path)
+        for path in (tmp_path / "model-receipts").glob("*.json")
+    }
+
+    arguments["max_papers"] = 2
     result = run_stream(**arguments)
 
     assert result["state"] == "completed"
@@ -1195,6 +1208,12 @@ def test_streaming_advances_after_uncertain_brokered_eligibility(
     first_family = stable_id("family", "test-only:streaming-paper")
     second_family = stable_id("family", second_item["candidate_key"])
     ledger = json.loads((tmp_path / "shared-ledger.json").read_text())
+    assert first_request_keys < set(ledger["requests"])
+    assert len(set(ledger["requests"]) - first_request_keys) == 1
+    assert all(
+        sha256_file(tmp_path / "model-receipts" / name) == digest
+        for name, digest in first_receipt_hashes.items()
+    )
     assert (
         sum(row["family_id"] == first_family for row in ledger["requests"].values())
         == 1
@@ -1231,6 +1250,66 @@ def test_streaming_advances_after_uncertain_brokered_eligibility(
         "evidence_unmatched_or_ambiguous:study_geography"
     )
     assert json.loads(rejection["detail_json"])["decision"] == "uncertain"
+
+
+def test_streaming_maximum_comes_from_immutable_input_count(tmp_path: Path) -> None:
+    access = tmp_path / "access-501"
+    eligibility = tmp_path / "eligibility-501"
+    selection = []
+    for position in range(1, 502):
+        candidate_key = f"test-only:unavailable-{position:03d}"
+        selection.append(
+            {
+                "position": position,
+                "candidate_key": candidate_key,
+                "subgroup": "test_only_unavailable",
+            }
+        )
+        write_json(
+            access / "items" / f"item-{position:06d}.json",
+            {
+                "run_id": "access-501",
+                "position": position,
+                "candidate_key": candidate_key,
+                "subgroup": "test_only_unavailable",
+                "access_state": "unavailable",
+            },
+        )
+    write_json(
+        access / "run-manifest.json",
+        {
+            "run_id": "access-501",
+            "target_total": len(selection),
+            "selection": selection,
+        },
+    )
+    write_json(access / "progress.json", {"state": "completed"})
+    write_json(access / "run-receipt.json", {"state": "completed"})
+    empty_script = tmp_path / "empty-provider.jsonl"
+    empty_script.write_text("", encoding="utf-8")
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+    arguments = {
+        "db": database,
+        "namespace": paths.namespace,
+        "run_id": "input-bounded-501",
+        "campaign_id": "input-bounded-501",
+        "access_run_dir": access,
+        "eligibility_run_dir": eligibility,
+        "author": FakeProvider("fake-gemini", empty_script),
+        "verifier": FakeProvider("fake-gemini", empty_script),
+        "max_papers": 501,
+    }
+
+    result = run_stream(**arguments)
+
+    assert result["state"] == "completed"
+    assert result["counts"]["processed"] == 0
+    with pytest.raises(
+        ValueError, match="max papers cannot exceed the ordered selection count"
+    ):
+        run_stream(**{**arguments, "max_papers": 502})
 
 
 def test_streaming_uses_one_shared_broker_for_all_ten_stages(

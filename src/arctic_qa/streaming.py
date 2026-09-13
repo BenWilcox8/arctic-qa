@@ -47,8 +47,8 @@ def run_stream(
     eligibility_schema_file: Path | None = None,
     eligibility_policy_file: Path | None = None,
 ) -> dict[str, Any]:
-    if not 1 <= max_papers <= 500:
-        raise ValueError("max papers must be between 1 and 500")
+    if max_papers < 1:
+        raise ValueError("max papers must be at least 1")
     access_manifest = _read(access_run_dir / "run-manifest.json")
     if _read(access_run_dir / "progress.json").get("state") != "completed":
         raise ValueError("the article-access run is not complete")
@@ -74,6 +74,8 @@ def run_stream(
         raise ValueError("the article-access selection is missing")
     if len(selection) != access_manifest.get("target_total"):
         raise ValueError("the ordered selection count is inconsistent")
+    if max_papers > len(selection):
+        raise ValueError("max papers cannot exceed the ordered selection count")
     for position, selected in enumerate(selection, start=1):
         access = access_items.get(selected.get("candidate_key"))
         if (
