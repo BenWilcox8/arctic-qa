@@ -62,6 +62,7 @@ POLICY_TRANSITION_CHANGES = (
 )
 CEILING_EXTENSION_CHANGE: dict[str, Any] = {}
 AUTHORIZED_CAP_REASON = "the paid request exceeds the authorized live-test cap"
+PER_REQUEST_CAP_REASON = "the paid request exceeds USD 0.25"
 ALLOWED_LIVE_TEST_LIMITS = {(20, 100), (40, 100), (41, 101), (None, None)}
 STREAM_INPUT_BINDING_VERSION = "stream-input-binding-v1"
 STREAM_INPUT_GATE_FIELDS = {
@@ -2327,7 +2328,7 @@ class SharedGeminiBroker:
             if reserved > _money(
                 self.policy["maximum_request_reserved_cost_usd"], "request"
             ):
-                raise ValueError("the paid request exceeds USD 0.25")
+                raise ValueError(PER_REQUEST_CAP_REASON)
             used = sum(
                 _money(ledger[name], name)
                 for name in ("reserved_usd", "spent_usd", "ambiguous_reserved_usd")

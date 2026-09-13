@@ -17,10 +17,14 @@ from arctic_qa import generation as generation_module
 from arctic_qa import streaming as streaming_module
 from arctic_qa.broker_provider import BrokerProvider
 from arctic_qa.db import Database
-from arctic_qa.errors import AmbiguousChargeError
+from arctic_qa.errors import AmbiguousChargeError, BudgetError
 from arctic_qa.exporting import export_run
 from arctic_qa.generation import ROLE_SCHEMAS
-from arctic_qa.model_broker import SharedGeminiBroker
+from arctic_qa.model_broker import (
+    AUTHORIZED_CAP_REASON,
+    PER_REQUEST_CAP_REASON,
+    SharedGeminiBroker,
+)
 from arctic_qa.paths import DataPaths
 from arctic_qa.providers import FakeProvider
 from arctic_qa.streaming import run_stream
@@ -2335,6 +2339,47 @@ def test_streaming_cli_reports_the_eligibility_rejection_reason(
             "source_id": None,
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("message", "skipped"),
+    [(PER_REQUEST_CAP_REASON, True), (AUTHORIZED_CAP_REASON, False)],
+)
+def test_streaming_skips_only_a_request_above_the_per_request_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    message: str,
+    skipped: bool,
+) -> None:
+    access, eligibility = streaming_fixture(tmp_path)
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+
+    def budget_stop(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise BudgetError(message)
+
+    monkeypatch.setattr(streaming_module, "generate_candidate", budget_stop)
+    arguments = {
+        "db": database,
+        "namespace": paths.namespace,
+        "run_id": "request-bound",
+        "campaign_id": "request-bound",
+        "access_run_dir": access,
+        "eligibility_run_dir": eligibility,
+        "author": FakeProvider("fake-gemini", FIXTURES / "fake-author.jsonl"),
+        "verifier": FakeProvider("fake-gemini", FIXTURES / "fake-verifier.jsonl"),
+        "max_papers": 1,
+    }
+    if not skipped:
+        with pytest.raises(BudgetError, match=re.escape(message)):
+            run_stream(**arguments)
+        return
+
+    result = run_stream(**arguments)
+
+    assert result["paper_results"][0]["disposition"] == "generation_rejected"
+    assert result["paper_results"][0]["reason_codes"] == ["request_cost_bound_exceeded"]
 
 
 def test_streaming_cli_resumes_without_a_duplicate_model_call(tmp_path: Path) -> None:

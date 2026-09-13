@@ -7,7 +7,7 @@ from typing import Any
 
 from .db import Database, now
 from .discovery import manual_record
-from .errors import CandidateRejectedError
+from .errors import BudgetError, CandidateRejectedError
 from .exporting import export_run
 from .extraction import extract_source
 from .generation import generate_candidate
@@ -25,7 +25,7 @@ from .gemini_eligibility import (
     validate_response,
 )
 from .providers import Provider, call_provider
-from .model_broker import broker_request_key
+from .model_broker import PER_REQUEST_CAP_REASON, broker_request_key
 from .storage import store_original
 from .util import atomic_json, canonical_json, sha256_bytes, sha256_file, stable_id
 from .validation import validate_candidate
@@ -505,6 +505,55 @@ def run_stream(
             )
         except CandidateRejectedError as error:
             reason_code = error.reason_code
+            with db.transaction():
+                db.connection.execute(
+                    """INSERT OR IGNORE INTO rejection_ledger
+                    (rejection_id,item_id,source_id,stage,reason_code,detail_json,created_at)
+                    VALUES (?,NULL,?,'generation',?,?,?)""",
+                    (
+                        stable_id(
+                            "rejection",
+                            campaign_id,
+                            candidate_key,
+                            "generation",
+                            reason_code,
+                        ),
+                        source_id,
+                        reason_code,
+                        canonical_json(
+                            {
+                                "candidate_key": candidate_key,
+                                "error": str(error),
+                                "selection": selected,
+                            }
+                        ),
+                        now(),
+                    ),
+                )
+            counts["generation_rejected"] += 1
+            counts["processed"] += 1
+            progress.increment("generation_rejected")
+            paper_results.append(
+                {
+                    "candidate_key": candidate_key,
+                    "disposition": "generation_rejected",
+                    "reason_codes": [reason_code],
+                    "source_id": source_id,
+                }
+            )
+            progress.paper(
+                paper_id=source_id,
+                title=access.get("title"),
+                current_stage="completed",
+                final_state="generation_rejected",
+                final_reason=reason_code,
+            )
+            continue
+        except BudgetError as error:
+            if str(error) != PER_REQUEST_CAP_REASON:
+                progress.error(source_id, access.get("title"), "generation", error)
+                raise
+            reason_code = "request_cost_bound_exceeded"
             with db.transaction():
                 db.connection.execute(
                     """INSERT OR IGNORE INTO rejection_ledger
