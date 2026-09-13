@@ -135,7 +135,7 @@ def _row(connection: sqlite3.Connection, candidate: dict[str, Any], source: sqli
     }
 
 
-def export_publication_package(state_db: Path, output_dir: Path, *, run_id: str, seed: str) -> dict[str, Any]:
+def export_publication_package(state_db: Path, output_dir: Path, *, run_id: str, seed: str, prompt_templates: list[Path] | None = None) -> dict[str, Any]:
     """Read a state database and write reviewer JSONL, CSV, and a hashed manifest."""
     connection = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
@@ -160,6 +160,13 @@ def export_publication_package(state_db: Path, output_dir: Path, *, run_id: str,
     benchmark_csv = output_dir / "benchmark-inputs.csv"
     scoring_jsonl = output_dir / "scoring-labels.jsonl"
     scoring_csv = output_dir / "scoring-labels.csv"
+    template_dir = output_dir / "prompt-templates"
+    templates = []
+    for path in prompt_templates or []:
+        destination = template_dir / path.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(path.read_bytes())
+        templates.append({"stage": path.stem, "path": str(destination.relative_to(output_dir)), "sha256": _sha256(destination)})
     jsonl_path.write_text("".join(canonical_json(row) + "\n" for row in records), encoding="utf-8")
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
         fields = ["item_id", "question_id", "variant_id", "doi", "title", "selection_reason", "question", "question_rationale", "reference_answer", "answer_selection_rationale", "answer_rationale", "reconstruction_rationale", "verification_rationale", "option_a", "option_a_generation_rationale", "option_a_rationale", "option_a_verdict", "option_b", "option_b_generation_rationale", "option_b_rationale", "option_b_verdict", "option_c", "option_c_generation_rationale", "option_c_rationale", "option_c_verdict", "option_d", "option_d_generation_rationale", "option_d_rationale", "option_d_verdict", "correct_option", "reference_answer_json", "options_json", "selection_json", "validation_json", "provenance_json", "rationale_availability_json"]
@@ -196,7 +203,7 @@ def export_publication_package(state_db: Path, output_dir: Path, *, run_id: str,
             for value in values:
                 writer.writerow({name: (canonical_json(value["options"]) if name == "options_json" and "options" in value else value.get(name)) for name in fields})
     files = {"reviewer_jsonl": jsonl_path, "reviewer_csv": csv_path, "benchmark_jsonl": benchmark_jsonl, "benchmark_csv": benchmark_csv, "scoring_jsonl": scoring_jsonl, "scoring_csv": scoring_csv}
-    manifest = {"schema_version": SCHEMA_VERSION, "shuffle_seed": seed, "reviewer_item_count": len(records), "benchmark_item_count": len(benchmark), "files": {name: {"path": path.name, "sha256": _sha256(path)} for name, path in files.items()}, "limitations": ["Benchmark inputs contain no labels, rationales, evidence, or provenance.", "Reviewer files are not model-facing benchmark inputs.", "The package excludes full papers, extracted source blobs, and submitted prompts.", "Missing rationale fields remain explicit missing values."]}
+    manifest = {"schema_version": SCHEMA_VERSION, "shuffle_seed": seed, "reviewer_item_count": len(records), "benchmark_item_count": len(benchmark), "files": {name: {"path": path.name, "sha256": _sha256(path)} for name, path in files.items()}, "prompt_templates": templates, "limitations": ["Benchmark inputs contain no labels, rationales, evidence, or provenance.", "Reviewer files are not model-facing benchmark inputs.", "The package excludes full papers, extracted source blobs, and submitted prompts.", "Missing rationale fields remain explicit missing values."]}
     (output_dir / "manifest.json").write_text(canonical_json(manifest) + "\n", encoding="utf-8")
     return manifest
 
@@ -207,8 +214,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--shuffle-seed", default="publication-review-v1")
+    parser.add_argument("--prompt-template", type=Path, action="append", default=[])
     args = parser.parse_args(argv)
-    export_publication_package(args.state_db, args.output_dir, run_id=args.run_id, seed=args.shuffle_seed)
+    export_publication_package(args.state_db, args.output_dir, run_id=args.run_id, seed=args.shuffle_seed, prompt_templates=args.prompt_template)
     return 0
 
 
