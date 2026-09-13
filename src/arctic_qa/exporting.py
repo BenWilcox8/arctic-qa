@@ -39,14 +39,12 @@ def export_run(
         candidate["release_label"] = "machine_accepted_unverified"
         short_answers.append(_short_answer(candidate))
         accepted = [
-            item
-            for item in validation_details["distractors"]
-            if item["accepted"] and item["deterministic"]
+            item for item in validation_details["distractors"] if item["accepted"]
         ]
-        if len(accepted) >= 3:
+        if validation_details["labels"].get("mcq_eligible") and len(accepted) >= 3:
             mcqs.append(_present_mcq(candidate, accepted[:3], seed))
-        if len(accepted) >= 4:
-            mcqs.append(_absent_mcq(candidate, accepted[:4], seed))
+            if len(accepted) >= 4:
+                mcqs.append(_absent_mcq(candidate, accepted[:4], seed))
     for row in incomplete_rows:
         candidate = json.loads(row["candidate_json"])
         candidate["release_label"] = "incomplete_non_mcq"

@@ -1755,18 +1755,36 @@ def test_validation_accepts_complete_option_receipt_response(tmp_path: Path) -> 
 def test_three_independently_model_verified_distractors_are_mcq_eligible(
     tmp_path: Path,
 ) -> None:
-    smoke(tmp_path, "model-verified-options-run")
+    run_id = "model-verified-options-run"
+    smoke(tmp_path, run_id)
     item = candidate(tmp_path)
     for distractor in item["distractors"]:
         distractor["deterministic"] = {"kind": "model_verified_only"}
-    path = write_candidate(tmp_path, item, "model-verified-options.json")
+    with database(tmp_path) as connection:
+        connection.execute(
+            "UPDATE candidates SET candidate_json=? WHERE item_id=?",
+            (canonical_json(item), item["item_id"]),
+        )
 
-    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+    result = json.loads(cli(tmp_path, "validate", "--item-id", item["item_id"]).stdout)
 
     assert result["final_label"] == "machine_accepted_unverified"
     assert result["labels"]["mcq_eligible"] is True
     assert result["labels"]["model_verified"] is True
     assert result["labels"]["deterministic_contradiction"] is False
+
+    exported = json.loads(cli(tmp_path, "export", "--run-id", run_id).stdout)
+
+    assert exported["short_answer_count"] == 1
+    assert exported["mcq_count"] == 2
+    mcq_path = tmp_path / "arctic-qa" / exported["files"]["mcq"]
+    mcqs = [json.loads(line) for line in mcq_path.read_text().splitlines()]
+    assert all(
+        option.get("verification_label") == "model-verified"
+        for row in mcqs
+        for option in row["options"]
+        if not option["is_correct"]
+    )
 
 
 @pytest.mark.parametrize(
