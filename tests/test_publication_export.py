@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+import csv
 from pathlib import Path
 
 
@@ -37,3 +38,7 @@ def test_reviewer_preserves_verdict_rationale_while_benchmark_hides_labels(tmp_p
     assert any(option.get("verdict") for option in reviewer["options"])
     assert "is_correct" not in benchmark["options"][0]
     assert "rationale" not in (tmp_path / "package" / "benchmark-inputs.jsonl").read_text()
+    with (tmp_path / "package" / "reviewer-items.csv").open(newline="", encoding="utf-8") as handle:
+        csv_row = next(csv.DictReader(handle))
+    assert csv_row["reference_answer"] == "Correct"
+    assert csv_row["option_a_verdict"] or csv_row["option_b_verdict"]

@@ -155,15 +155,23 @@ def export_publication_package(state_db: Path, output_dir: Path, *, run_id: str,
     scoring_csv = output_dir / "scoring-labels.csv"
     jsonl_path.write_text("".join(canonical_json(row) + "\n" for row in records), encoding="utf-8")
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
-        fields = ["item_id", "question_id", "variant_id", "doi", "title", "question", "option_a", "option_b", "option_c", "option_d", "correct_option", "reference_answer_json", "options_json", "selection_json", "validation_json", "provenance_json", "rationale_availability_json"]
+        fields = ["item_id", "question_id", "variant_id", "doi", "title", "selection_reason", "question", "reference_answer", "answer_rationale", "option_a", "option_a_rationale", "option_a_verdict", "option_b", "option_b_rationale", "option_b_verdict", "option_c", "option_c_rationale", "option_c_verdict", "option_d", "option_d_rationale", "option_d_verdict", "correct_option", "reference_answer_json", "options_json", "selection_json", "validation_json", "provenance_json", "rationale_availability_json"]
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for row in records:
             options = row["options"]
+            readable_options = {}
+            for index, letter in enumerate("abcd"):
+                option = options[index]
+                verdict = option.get("verdict") or {}
+                readable_options[f"option_{letter}"] = option["text"]
+                readable_options[f"option_{letter}_rationale"] = verdict.get("rationale")
+                readable_options[f"option_{letter}_verdict"] = canonical_json(verdict) if verdict else None
             writer.writerow({
                 "item_id": row["item_id"], "question_id": row["question_id"], "variant_id": row["variant_id"],
-                "doi": row["paper"]["doi"], "title": row["paper"]["title"], "question": row["question"],
-                **{f"option_{letter}": options[index]["text"] for index, letter in enumerate("abcd")},
+                "doi": row["paper"]["doi"], "title": row["paper"]["title"], "selection_reason": row["selection"]["inclusion_reason"],
+                "question": row["question"], "reference_answer": row["reference_answer"].get("text"), "answer_rationale": row["reference_answer"].get("rationale"),
+                **readable_options,
                 "correct_option": next("abcd"[index] for index, option in enumerate(options) if option["is_correct"]),
                 "reference_answer_json": canonical_json(row["reference_answer"]), "options_json": canonical_json(options),
                 "selection_json": canonical_json(row["selection"]), "validation_json": canonical_json(row["validation"]),
