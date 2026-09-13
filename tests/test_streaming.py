@@ -116,7 +116,7 @@ def test_source_bound_numeric_rule_accepts_supported_literal_formats(
             "unit": unit,
             "tolerance": tolerance,
             "tolerance_basis": basis,
-            "reported_precision": "source reported",
+            "reported_precision": basis.removeprefix("± "),
             "rounding_rule": "none",
             "conversion_rule": "direct source literal",
         },
@@ -146,12 +146,14 @@ def test_compound_unit_rule_without_source_tolerance_remains_rejected() -> None:
 def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
     properties = generation_module.NUMERIC_RULE_SCHEMA["properties"]
 
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v6"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v7"
     assert (
         generation_module.NUMERIC_RULE_CONTRACT_VERSION
         == "numeric-rule-source-support-v2"
     )
-    assert generation_module.SCOPE_CONTRACT_VERSION == "source-literal-scope-v1"
+    assert (
+        generation_module.SCOPE_CONTRACT_VERSION == "selected-evidence-literal-scope-v2"
+    )
     assert (
         generation_module.ANSWER_SCHEMA["properties"]["required_question_phrases"][
             "minItems"
@@ -159,7 +161,7 @@ def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
         == 1
     )
     assert (
-        "Exact source text"
+        "Exact selected-span text"
         in generation_module.SCOPE_SCHEMA["properties"]["method"]["description"]
     )
     assert "selected source span" in properties["canonical_value"]["description"]

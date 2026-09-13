@@ -788,7 +788,7 @@ def _hydrate_source_span_ids(value: Any, prompt: str) -> Any:
     def walk(item: Any) -> None:
         if isinstance(item, dict):
             if item.get("source_span_id") == "{{span_id}}":
-                answer_text = str(item.get("text") or "")
+                answer_text = str(item.get("text") or item.get("answer") or "")
                 selected = next(
                     (
                         span

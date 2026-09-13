@@ -514,6 +514,38 @@ def test_numeric_rule_must_match_source_and_displayed_answer(tmp_path: Path) -> 
     assert accepted["final_label"] == "machine_accepted_unverified"
 
 
+@pytest.mark.parametrize(
+    ("field", "invented_value"),
+    [
+        ("reported_precision", "invented precision"),
+        ("rounding_rule", "invented rounding rule"),
+        ("conversion_rule", "invented conversion rule"),
+    ],
+)
+def test_numeric_metadata_must_be_source_bound_before_export(
+    tmp_path: Path, field: str, invented_value: str
+) -> None:
+    run_id = f"numeric-metadata-{field}"
+    receipt = smoke(tmp_path, run_id)
+    item = candidate(tmp_path)
+    item["answer"]["numeric_rule"][field] = invented_value
+    with database(tmp_path) as connection:
+        connection.execute(
+            "UPDATE candidates SET candidate_json=? WHERE item_id=?",
+            (canonical_json(item), receipt["item_id"]),
+        )
+
+    result = json.loads(
+        cli(tmp_path, "validate", "--item-id", receipt["item_id"]).stdout
+    )
+    exported = json.loads(cli(tmp_path, "export", "--run-id", run_id).stdout)
+
+    assert result["final_label"] == "rejected"
+    assert result["reasons"] == ["source_bound_numeric_rule_missing"]
+    assert exported["short_answer_count"] == 0
+    assert exported["mcq_count"] == 0
+
+
 def test_all_null_scope_is_rejected(tmp_path: Path) -> None:
     smoke(tmp_path)
     item = candidate(tmp_path)
@@ -555,6 +587,38 @@ def test_scope_alias_not_present_in_source_is_rejected(tmp_path: Path) -> None:
     assert result["reasons"] == ["answer_scope_not_source_bound"]
 
 
+def test_scope_must_be_bound_to_each_role_selected_evidence_before_export(
+    tmp_path: Path,
+) -> None:
+    run_id = "selected-evidence-scope"
+    receipt = smoke(tmp_path, run_id)
+    item = candidate(tmp_path)
+    for role in ("answer", "reconstruction", "answer_verification"):
+        item[role]["scope"]["geography"] = "71.3 N"
+    bind_qa_verification_receipts(tmp_path, item)
+    bind_option_verdicts(
+        item,
+        item["answer"]["evidence_quote"],
+        item["answer"]["locator"],
+        receipt_root=tmp_path,
+    )
+    with database(tmp_path) as connection:
+        connection.execute(
+            "UPDATE candidates SET candidate_json=? WHERE item_id=?",
+            (canonical_json(item), receipt["item_id"]),
+        )
+
+    result = json.loads(
+        cli(tmp_path, "validate", "--item-id", receipt["item_id"]).stdout
+    )
+    exported = json.loads(cli(tmp_path, "export", "--run-id", run_id).stdout)
+
+    assert result["final_label"] == "rejected"
+    assert result["reasons"] == ["answer_scope_not_source_bound"]
+    assert exported["short_answer_count"] == 0
+    assert exported["mcq_count"] == 0
+
+
 def test_stored_qa_gate_failure_preserves_all_generation_reasons(
     tmp_path: Path,
 ) -> None:
@@ -571,12 +635,21 @@ def test_stored_qa_gate_failure_preserves_all_generation_reasons(
             "UPDATE candidates SET candidate_json=?,status=? WHERE item_id=?",
             (canonical_json(item), "qa_gate_failed", receipt["item_id"]),
         )
-    path = write_candidate(tmp_path, item, "stored-qa-gate-failure.json")
-
-    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+    result = json.loads(
+        cli(tmp_path, "validate", "--item-id", receipt["item_id"]).stdout
+    )
 
     assert result["final_label"] == "rejected"
     assert result["reasons"] == item["qa_gate_reasons"]
+    exported = json.loads(cli(tmp_path, "export", "--run-id", "test-smoke").stdout)
+    rejection_path = tmp_path / "arctic-qa" / exported["files"]["rejections"]
+    rejection_rows = [
+        json.loads(line) for line in rejection_path.read_text().splitlines()
+    ]
+    assert exported["rejection_count"] == 2
+    assert {row["reason_code"] for row in rejection_rows} == set(
+        item["qa_gate_reasons"]
+    )
 
 
 def test_empty_required_question_phrases_are_rejected(tmp_path: Path) -> None:
@@ -589,6 +662,63 @@ def test_empty_required_question_phrases_are_rejected(tmp_path: Path) -> None:
 
     assert result["final_label"] == "rejected"
     assert result["reasons"] == ["scope_qualifier_missing"]
+
+
+def test_question_qualifier_must_be_bound_to_selected_evidence_before_export(
+    tmp_path: Path,
+) -> None:
+    run_id = "source-bound-question-qualifier"
+    receipt = smoke(tmp_path, run_id)
+    item = candidate(tmp_path)
+    item["answer"]["required_question_phrases"] = ["invented qualifier"]
+    item["question"] = f"{item['question']} Invented qualifier."
+    with database(tmp_path) as connection:
+        connection.execute(
+            "UPDATE candidates SET candidate_json=? WHERE item_id=?",
+            (canonical_json(item), receipt["item_id"]),
+        )
+
+    result = json.loads(
+        cli(tmp_path, "validate", "--item-id", receipt["item_id"]).stdout
+    )
+    exported = json.loads(cli(tmp_path, "export", "--run-id", run_id).stdout)
+
+    assert result["final_label"] == "rejected"
+    assert result["reasons"] == ["scope_qualifier_not_source_bound"]
+    assert exported["short_answer_count"] == 0
+    assert exported["mcq_count"] == 0
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "prompt_version",
+        "numeric_rule_contract_version",
+        "scope_contract_version",
+    ],
+)
+def test_generation_contract_versions_must_match_before_export(
+    tmp_path: Path, field: str
+) -> None:
+    run_id = f"generation-contract-{field}"
+    receipt = smoke(tmp_path, run_id)
+    item = candidate(tmp_path)
+    item["provenance"][field] = "tampered-contract-version"
+    with database(tmp_path) as connection:
+        connection.execute(
+            "UPDATE candidates SET candidate_json=? WHERE item_id=?",
+            (canonical_json(item), receipt["item_id"]),
+        )
+
+    result = json.loads(
+        cli(tmp_path, "validate", "--item-id", receipt["item_id"]).stdout
+    )
+    exported = json.loads(cli(tmp_path, "export", "--run-id", run_id).stdout)
+
+    assert result["final_label"] == "rejected"
+    assert result["reasons"] == ["generation_contract_version_mismatch"]
+    assert exported["short_answer_count"] == 0
+    assert exported["mcq_count"] == 0
 
 
 def test_self_asserted_typed_distractor_rules_are_not_deterministic(
@@ -706,17 +836,31 @@ def test_source_bound_typed_distractor_controls(
     smoke(tmp_path)
     item = candidate(tmp_path)
     locator = source_locator_for_quote(tmp_path, item["source"]["source_id"], quote)
+    scope_phrase = {
+        "unique_categorical": "substrate category",
+        "directional_contradiction": "reported trend",
+        "scope_excluded": "included region",
+    }[kind]
+    source_bound_scope = {
+        "geography": None,
+        "population": None,
+        "period": None,
+        "method": scope_phrase,
+        "comparison": None,
+        "uncertainty": None,
+    }
     item["answer"].update(
         {
             "text": answer_text,
             "variants": [],
-            "required_question_phrases": ["source-bounded value"],
+            "scope": source_bound_scope,
+            "required_question_phrases": [scope_phrase],
             "deterministic_rule": answer_rule,
         }
     )
     bind_source_span(item["answer"], quote, locator)
     item["answer"].pop("numeric_rule", None)
-    item["question"] = "What source-bounded value was reported?"
+    item["question"] = f"What {scope_phrase} was documented?"
     item["reconstruction"] = {
         "answer": answer_text,
         "evidence_quote": quote,
@@ -1181,13 +1325,14 @@ def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> No
     command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(verifier)
     generated = json.loads(cli(tmp_path, *command).stdout)
     assert generated["status"] == "qa_gate_failed"
-    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v6"
+    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v7"
     assert (
         generated["provenance"]["numeric_rule_contract_version"]
         == "numeric-rule-source-support-v2"
     )
     assert (
-        generated["provenance"]["scope_contract_version"] == "source-literal-scope-v1"
+        generated["provenance"]["scope_contract_version"]
+        == "selected-evidence-literal-scope-v2"
     )
     assert generated["distractors"] == []
     assert generated["qa_gate_reasons"] == [
@@ -1231,7 +1376,7 @@ def test_generation_arms_share_one_frozen_finding(tmp_path: Path) -> None:
                     {
                         "role": "direct_joint",
                         "response": {
-                            "question": "At 71.3 N, what reported water depth was documented?",
+                            "question": "What reported water depth was documented?",
                             "answer": first["answer"],
                         },
                     }

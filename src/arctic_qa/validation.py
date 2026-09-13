@@ -20,6 +20,9 @@ UNIT_FACTORS: dict[tuple[str, str], Decimal] = {
     ("g", "kg"): Decimal("0.001"),
 }
 SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v1"
+GENERATION_PROMPT_VERSION = "arctic-qa-generation-v7"
+NUMERIC_RULE_CONTRACT_VERSION = "numeric-rule-source-support-v2"
+SCOPE_CONTRACT_VERSION = "selected-evidence-literal-scope-v2"
 
 DIRECTION_PAIRS = {
     ("increased", "decreased"),
@@ -205,8 +208,19 @@ def validate_candidate(
             [],
             "rejected",
         )
-    if not scope_is_source_bound(
-        candidate["answer"].get("scope"), list(chunks.values())
+    provenance = candidate.get("provenance")
+    expected_contract = {
+        "prompt_version": GENERATION_PROMPT_VERSION,
+        "numeric_rule_contract_version": NUMERIC_RULE_CONTRACT_VERSION,
+        "scope_contract_version": SCOPE_CONTRACT_VERSION,
+    }
+    if not isinstance(provenance, dict) or any(
+        provenance.get(key) != value for key, value in expected_contract.items()
+    ):
+        reasons.append("generation_contract_version_mismatch")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
+    if not scope_is_evidence_bound(
+        candidate["answer"].get("scope"), candidate["answer"]
     ):
         reasons.append("answer_scope_not_source_bound")
         return _finish(db, candidate, labels, reasons, [], "rejected")
@@ -217,13 +231,26 @@ def validate_candidate(
         return _finish(db, candidate, labels, reasons, [], "rejected")
     labels["evidence_located"] = True
     required_phrases = candidate["answer"].get("required_question_phrases")
-    if not isinstance(required_phrases, list) or not required_phrases:
+    if (
+        not isinstance(required_phrases, list)
+        or not required_phrases
+        or any(
+            not isinstance(phrase, str) or not normalize_text(phrase)
+            for phrase in required_phrases
+        )
+    ):
         reasons.append("scope_qualifier_missing")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
+    answer_evidence = normalize_text(str(candidate["answer"].get("evidence_quote", "")))
+    if any(
+        normalize_text(phrase) not in answer_evidence for phrase in required_phrases
+    ):
+        reasons.append("scope_qualifier_not_source_bound")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     missing_scope = [
         phrase
         for phrase in required_phrases
-        if normalize_text(str(phrase)) not in normalize_text(candidate["question"])
+        if normalize_text(phrase) not in normalize_text(candidate["question"])
     ]
     if missing_scope:
         reasons.append("scope_qualifier_missing")
@@ -233,14 +260,14 @@ def validate_candidate(
     if not evidence_resolves(reconstruction, chunks):
         reasons.append("reconstruction_evidence_not_located")
         return _finish(db, candidate, labels, reasons, [], "rejected")
-    if not scope_is_source_bound(reconstruction.get("scope"), list(chunks.values())):
+    if not scope_is_evidence_bound(reconstruction.get("scope"), reconstruction):
         reasons.append("reconstruction_scope_not_source_bound")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     verification = candidate.get("answer_verification") or {}
     if not evidence_resolves(verification, chunks):
         reasons.append("answer_verifier_evidence_not_located")
         return _finish(db, candidate, labels, reasons, [], "rejected")
-    if not scope_is_source_bound(verification.get("scope"), list(chunks.values())):
+    if not scope_is_evidence_bound(verification.get("scope"), verification):
         reasons.append("answer_verifier_scope_not_source_bound")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     if reconstruction.get("scope") != candidate["answer"].get("scope"):
@@ -914,6 +941,7 @@ def numeric_rule_is_source_bound(answer: dict[str, Any]) -> bool:
         and _contains_quantity(displayed, answer_value, unit)
         and _contains_quantity(evidence, answer_value, unit)
         and _contains_quantity(evidence, tolerance, unit)
+        and _numeric_metadata_is_source_bound(rule, evidence, displayed)
     )
 
 
@@ -933,6 +961,15 @@ def scope_is_source_bound(
     )
     return bool(
         source_text and all(value in source_text for value in normalized_values)
+    )
+
+
+def scope_is_evidence_bound(
+    scope: dict[str, Any] | None, evidence_record: dict[str, Any]
+) -> bool:
+    return scope_is_source_bound(
+        scope,
+        [{"text": str(evidence_record.get("evidence_quote", ""))}],
     )
 
 
@@ -1020,6 +1057,94 @@ def _contains_quantity(text: str, expected: Decimal, expected_unit: str) -> bool
                 return True
         except (InvalidOperation, ValueError):
             continue
+    return False
+
+
+def _numeric_metadata_is_source_bound(
+    rule: dict[str, Any], evidence: str, displayed: str
+) -> bool:
+    try:
+        value = Decimal(str(rule["canonical_value"]))
+        unit = str(rule["unit"])
+        reported_precision = normalize_text(str(rule["reported_precision"]))
+        rounding_rule = normalize_text(str(rule["rounding_rule"]))
+        conversion_rule = normalize_text(str(rule["conversion_rule"]))
+    except (KeyError, InvalidOperation, ValueError):
+        return False
+    exact_literal = _contains_quantity_literal(evidence, value, unit)
+    displayed_literal = _contains_quantity_literal(displayed, value, unit)
+    precision_bound = bool(
+        _statement_quantity_is_source_bound(reported_precision, evidence, unit)
+        or (
+            exact_literal
+            and displayed_literal
+            and _rounding_rule_matches_literal(
+                reported_precision, str(rule["canonical_value"])
+            )
+        )
+    )
+    rounding_bound = bool(
+        exact_literal
+        and displayed_literal
+        and _rounding_rule_matches_literal(rounding_rule, str(rule["canonical_value"]))
+    )
+    conversion_bound = bool(
+        exact_literal
+        and displayed_literal
+        and conversion_rule == "direct source literal"
+    )
+    return precision_bound and rounding_bound and conversion_bound
+
+
+def _rounding_rule_matches_literal(rounding_rule: str, value: str) -> bool:
+    if rounding_rule == "none":
+        return True
+    literal = value.replace(",", "").casefold()
+    if "e" in literal:
+        return False
+    decimal_places = len(literal.rsplit(".", 1)[1]) if "." in literal else 0
+    if decimal_places == 0:
+        return False
+    count = next(
+        (word for word, number in INTEGER_WORDS.items() if number == decimal_places),
+        str(decimal_places),
+    )
+    unit = "place" if decimal_places == 1 else "places"
+    return rounding_rule in {
+        f"{decimal_places} decimal {unit}",
+        f"{count} decimal {unit}",
+    }
+
+
+def _contains_quantity_literal(
+    text: str, expected: Decimal, expected_unit: str
+) -> bool:
+    for match in NUMERIC_LITERAL_PATTERN.finditer(text):
+        try:
+            value = Decimal(match.group("value").replace(",", "").replace("−", "-"))
+        except (InvalidOperation, ValueError):
+            continue
+        if value == expected and _unit_literal_starts(
+            text[match.end() :], expected_unit
+        ):
+            return True
+    return False
+
+
+def _statement_quantity_is_source_bound(
+    statement: str, evidence: str, expected_unit: str
+) -> bool:
+    if statement not in normalize_text(evidence):
+        return False
+    for match in NUMERIC_LITERAL_PATTERN.finditer(statement):
+        try:
+            value = Decimal(match.group("value").replace(",", "").replace("−", "-"))
+        except (InvalidOperation, ValueError):
+            continue
+        if _unit_literal_starts(statement[match.end() :], expected_unit) and (
+            _contains_quantity_literal(evidence, value, expected_unit)
+        ):
+            return True
     return False
 
 
