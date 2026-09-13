@@ -1912,6 +1912,55 @@ def test_reviewed_ceiling_extension_resumes_one_not_submitted_request_and_restar
     assert transport.methods == ["countTokens"]
 
 
+def test_reviewed_live_test_budget_extension_chains_from_ten_to_twenty(
+    tmp_path: Path,
+) -> None:
+    values = prepared_ceiling_extension(tmp_path)
+    ten_dollar = SharedGeminiBroker(
+        policy_file=values["budget_policy"],
+        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=Transport(),
+        config_transition_file=values["ten_dollar_transition"],
+    )
+    predecessor = ten_dollar.status()["config_transition_sha256"]
+    policy_value = json.loads(values["budget_policy"].read_text(encoding="utf-8"))
+    policy_value["live_test_suballocation_usd"] = "20.00"
+    twenty_policy = tmp_path / "streaming-dataset-budget-policy-twenty.json"
+    write_json(twenty_policy, policy_value)
+    twenty_transition = reviewed_policy_transition(
+        tmp_path,
+        values,
+        twenty_policy,
+        from_config_transition_sha256=predecessor,
+        from_policy=values["budget_policy"],
+        changed_policy_fields={
+            "live_test_suballocation_usd": {"from": "10.00", "to": "20.00"}
+        },
+        maximum_authorized_cumulative_tranche_usd="20.00",
+        reason="Raise only the captain-authorized live-test budget.",
+    )
+
+    extended = SharedGeminiBroker(
+        policy_file=twenty_policy,
+        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=Transport(),
+        config_transition_file=twenty_transition,
+    )
+
+    assert extended.status()["limits"]["authorized_live_test_ceiling_usd"] == "20.00"
+    assert extended.status()["limits"]["live_test_suballocation_usd"] == "20.00"
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [

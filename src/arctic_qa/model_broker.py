@@ -49,16 +49,21 @@ CONFIG_TRANSITION_V2_FIELDS = CONFIG_TRANSITION_V1_FIELDS | {
     "changed_policy_fields",
     "maximum_authorized_cumulative_tranche_usd",
 }
+UNBOUNDED_COUNT_CHANGE = {
+    "live_test_maximum_papers": {"from": 41, "to": None},
+    "live_test_maximum_generation_submissions": {"from": 101, "to": None},
+}
+LIVE_TEST_BUDGET_EXTENSION_CHANGE = {
+    "live_test_suballocation_usd": {"from": "10.00", "to": "20.00"}
+}
 POLICY_TRANSITION_CHANGES = (
     {"live_test_maximum_papers": {"from": 20, "to": 40}},
     {
         "live_test_maximum_papers": {"from": 40, "to": 41},
         "live_test_maximum_generation_submissions": {"from": 100, "to": 101},
     },
-    {
-        "live_test_maximum_papers": {"from": 41, "to": None},
-        "live_test_maximum_generation_submissions": {"from": 101, "to": None},
-    },
+    UNBOUNDED_COUNT_CHANGE,
+    LIVE_TEST_BUDGET_EXTENSION_CHANGE,
 )
 CEILING_EXTENSION_CHANGE: dict[str, Any] = {}
 AUTHORIZED_CAP_REASON = "the paid request exceeds the authorized live-test cap"
@@ -156,13 +161,23 @@ def _validate_policy(path: Path) -> dict[str, Any]:
         "dataset_construction_allocation_usd": Decimal("500"),
         "construction_review_checkpoint_usd": Decimal("250"),
         "away_session_total_ceiling_usd": Decimal("25"),
-        "live_test_suballocation_usd": Decimal("10"),
         "maximum_request_reserved_cost_usd": Decimal("0.25"),
         "maximum_paper_cost_usd": Decimal("1"),
     }
     for field, expected in exact_money.items():
         if _money(value.get(field), field, positive=True) != expected:
             raise ValueError(f"streaming budget value changed: {field}")
+    live_test_suballocation = _money(
+        value.get("live_test_suballocation_usd"),
+        "live_test_suballocation_usd",
+        positive=True,
+    )
+    if live_test_suballocation not in {Decimal("10"), Decimal("20")}:
+        raise ValueError("streaming budget value changed: live_test_suballocation_usd")
+    if live_test_suballocation > _money(
+        value["away_session_total_ceiling_usd"], "away_session_total_ceiling_usd"
+    ):
+        raise ValueError("the live-test budget exceeds the away-session budget")
     exact_int = {
         "accepted_question_target": 500,
         "away_maximum_generation_submissions": 5000,
@@ -479,9 +494,10 @@ class SharedGeminiBroker:
         if gate_phase not in PHASES:
             raise ValueError("the configuration transition gate phase is invalid")
         gate = _validate_gate(self.execution_gate_file, gate_phase)
-        if authorization.get("changed_policy_fields") == POLICY_TRANSITION_CHANGES[
-            -1
-        ] or self._is_ceiling_extension(authorization):
+        if authorization.get("changed_policy_fields") in (
+            UNBOUNDED_COUNT_CHANGE,
+            LIVE_TEST_BUDGET_EXTENSION_CHANGE,
+        ) or self._is_ceiling_extension(authorization):
             self._validate_stream_input_gate(gate)
         if (
             authorization["execution_gate_sha256"]
@@ -568,8 +584,7 @@ class SharedGeminiBroker:
                     prior = event["authorization"]
                     if (
                         self._transition_pairs(prior, identity)[1] == from_pair
-                        and prior.get("changed_policy_fields")
-                        == POLICY_TRANSITION_CHANGES[-1]
+                        and prior.get("changed_policy_fields") == UNBOUNDED_COUNT_CHANGE
                         and _money(
                             prior.get("maximum_authorized_cumulative_tranche_usd"),
                             "predecessor tranche",
@@ -581,7 +596,12 @@ class SharedGeminiBroker:
                 if len(matching_predecessors) != 1:
                     raise ValueError("the policy transition predecessor changed")
             else:
-                if from_pair[1] == to_pair[1] or tranche != Decimal("5"):
+                expected_tranche = (
+                    Decimal("20")
+                    if changed_policy_fields == LIVE_TEST_BUDGET_EXTENSION_CHANGE
+                    else Decimal("5")
+                )
+                if from_pair[1] == to_pair[1] or tranche != expected_tranche:
                     raise ValueError("the policy transition identity changed")
                 expected_value = dict(source_value)
                 for field, limits in changed_policy_fields.items():
@@ -598,13 +618,30 @@ class SharedGeminiBroker:
                 else:
                     matching_predecessors = []
                     for path in self.receipts_dir.glob("config-transition-*.json"):
+                        if sha256_file(path) != predecessor:
+                            continue
                         event = self._read_transition_event(path)
                         prior = event["authorization"]
-                        if self._transition_pairs(prior, identity)[1] == from_pair:
+                        valid_budget_predecessor = (
+                            changed_policy_fields != LIVE_TEST_BUDGET_EXTENSION_CHANGE
+                            or (
+                                self._is_ceiling_extension(prior)
+                                and _money(
+                                    prior.get(
+                                        "maximum_authorized_cumulative_tranche_usd"
+                                    ),
+                                    "predecessor tranche",
+                                    positive=True,
+                                )
+                                == Decimal("10")
+                            )
+                        )
+                        if (
+                            self._transition_pairs(prior, identity)[1] == from_pair
+                            and valid_budget_predecessor
+                        ):
                             matching_predecessors.append(path)
-                    if len(matching_predecessors) != 1 or predecessor != sha256_file(
-                        matching_predecessors[0]
-                    ):
+                    if len(matching_predecessors) != 1:
                         raise ValueError("the policy transition predecessor changed")
         if authorization["expected_ledger_sha256"] != sha256_file(self.ledger_file):
             raise ValueError("the configuration transition ledger hash changed")
@@ -998,8 +1035,7 @@ class SharedGeminiBroker:
                         not self._is_ceiling_extension(authorization)
                         or existing_hashes != {predecessor}
                         or prior is None
-                        or prior.get("changed_policy_fields")
-                        != POLICY_TRANSITION_CHANGES[-1]
+                        or prior.get("changed_policy_fields") != UNBOUNDED_COUNT_CHANGE
                         or _money(
                             prior.get("maximum_authorized_cumulative_tranche_usd"),
                             "predecessor tranche",
@@ -1026,15 +1062,34 @@ class SharedGeminiBroker:
                 else:
                     if not self._is_ceiling_extension(authorization):
                         prior_hashes = transition_events_by_pair.get(from_pair, set())
-                        expected_predecessor = (
-                            None
-                            if from_pair == initial_pair
-                            else next(iter(prior_hashes))
-                        )
-                        if (
-                            authorization["from_config_transition_sha256"]
-                            != expected_predecessor
-                        ):
+                        predecessor = authorization["from_config_transition_sha256"]
+                        if from_pair == initial_pair:
+                            valid_predecessor = predecessor is None
+                        else:
+                            if predecessor not in prior_hashes:
+                                continue
+                            valid_predecessor = predecessor in prior_hashes
+                            if (
+                                valid_predecessor
+                                and authorization.get("changed_policy_fields")
+                                == LIVE_TEST_BUDGET_EXTENSION_CHANGE
+                            ):
+                                prior = transition_authorizations_by_hash.get(
+                                    predecessor
+                                )
+                                valid_predecessor = bool(
+                                    prior
+                                    and self._is_ceiling_extension(prior)
+                                    and _money(
+                                        prior.get(
+                                            "maximum_authorized_cumulative_tranche_usd"
+                                        ),
+                                        "predecessor tranche",
+                                        positive=True,
+                                    )
+                                    == Decimal("10")
+                                )
+                        if not valid_predecessor:
                             raise ValueError(
                                 "the policy transition predecessor changed"
                             )
