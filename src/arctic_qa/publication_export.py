@@ -114,14 +114,26 @@ def _row(connection: sqlite3.Connection, candidate: dict[str, Any], source: sqli
         },
         "selection": {"source_selection": _source_selection(source), "inclusion_reason": source["inclusion_reason"]},
         "question": candidate["question"],
+        "question_rationale": candidate.get("question_rationale"),
         "reference_answer": candidate["answer"],
+        "rationales": {
+            "answer_selection": candidate.get("answer", {}).get("selection_rationale"),
+            "answer_generation": candidate.get("answer", {}).get("rationale"),
+            "reconstruction": candidate.get("reconstruction", {}).get("reconstruction_rationale"),
+            "answer_verification": candidate.get("answer_verification", {}).get("verification_rationale"),
+        },
         "options": review_options,
         "validation": validation,
         "provenance": candidate.get("provenance"),
         "receipt_trace": _receipt_trace(connection, candidate),
         "correction_history": candidate.get("correction_history", []),
         "rationale_availability": {
-            "question_selection": False, "answer_generation": False, "distractor_generation": False,
+            "question": bool(candidate.get("question_rationale")),
+            "answer_selection": bool(candidate.get("answer", {}).get("selection_rationale")),
+            "answer_generation": bool(candidate.get("answer", {}).get("rationale")),
+            "reconstruction": bool(candidate.get("reconstruction", {}).get("reconstruction_rationale")),
+            "answer_verification": bool(candidate.get("answer_verification", {}).get("verification_rationale")),
+            "distractor_generation": any(option["distractor"] and option["distractor"].get("generation_rationale") for option in review_options),
             "option_verdict": any(option["verdict"] and option["verdict"].get("rationale") for option in review_options),
             "note": "Null rationale fields mean that this input did not retain that rationale. They do not mean that a rationale passed.",
         },
@@ -155,7 +167,7 @@ def export_publication_package(state_db: Path, output_dir: Path, *, run_id: str,
     scoring_csv = output_dir / "scoring-labels.csv"
     jsonl_path.write_text("".join(canonical_json(row) + "\n" for row in records), encoding="utf-8")
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
-        fields = ["item_id", "question_id", "variant_id", "doi", "title", "selection_reason", "question", "reference_answer", "answer_rationale", "option_a", "option_a_rationale", "option_a_verdict", "option_b", "option_b_rationale", "option_b_verdict", "option_c", "option_c_rationale", "option_c_verdict", "option_d", "option_d_rationale", "option_d_verdict", "correct_option", "reference_answer_json", "options_json", "selection_json", "validation_json", "provenance_json", "rationale_availability_json"]
+        fields = ["item_id", "question_id", "variant_id", "doi", "title", "selection_reason", "question", "question_rationale", "reference_answer", "answer_selection_rationale", "answer_rationale", "reconstruction_rationale", "verification_rationale", "option_a", "option_a_generation_rationale", "option_a_rationale", "option_a_verdict", "option_b", "option_b_generation_rationale", "option_b_rationale", "option_b_verdict", "option_c", "option_c_generation_rationale", "option_c_rationale", "option_c_verdict", "option_d", "option_d_generation_rationale", "option_d_rationale", "option_d_verdict", "correct_option", "reference_answer_json", "options_json", "selection_json", "validation_json", "provenance_json", "rationale_availability_json"]
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for row in records:
@@ -165,12 +177,13 @@ def export_publication_package(state_db: Path, output_dir: Path, *, run_id: str,
                 option = options[index]
                 verdict = option.get("verdict") or {}
                 readable_options[f"option_{letter}"] = option["text"]
+                readable_options[f"option_{letter}_generation_rationale"] = (option.get("distractor") or {}).get("generation_rationale")
                 readable_options[f"option_{letter}_rationale"] = verdict.get("rationale")
                 readable_options[f"option_{letter}_verdict"] = canonical_json(verdict) if verdict else None
             writer.writerow({
                 "item_id": row["item_id"], "question_id": row["question_id"], "variant_id": row["variant_id"],
                 "doi": row["paper"]["doi"], "title": row["paper"]["title"], "selection_reason": row["selection"]["inclusion_reason"],
-                "question": row["question"], "reference_answer": row["reference_answer"].get("text"), "answer_rationale": row["reference_answer"].get("rationale"),
+                "question": row["question"], "question_rationale": row["question_rationale"], "reference_answer": row["reference_answer"].get("text"), "answer_selection_rationale": row["rationales"]["answer_selection"], "answer_rationale": row["rationales"]["answer_generation"], "reconstruction_rationale": row["rationales"]["reconstruction"], "verification_rationale": row["rationales"]["answer_verification"],
                 **readable_options,
                 "correct_option": next("abcd"[index] for index, option in enumerate(options) if option["is_correct"]),
                 "reference_answer_json": canonical_json(row["reference_answer"]), "options_json": canonical_json(options),
