@@ -83,6 +83,107 @@ def _source_records(
     return records
 
 
+def _frozen_source_records(path: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8") as handle:
+        for expected_position, line in enumerate(handle, start=1):
+            selected = json.loads(line)
+            if (
+                not isinstance(selected, dict)
+                or selected.get("manifest_position") != expected_position
+            ):
+                raise ValueError("the frozen source manifest position is inconsistent")
+            candidate_key = selected.get("candidate_key")
+            if not isinstance(candidate_key, str) or not candidate_key:
+                raise ValueError("the frozen source manifest has no candidate key")
+            receipt = selected.get("access_receipt")
+            if not isinstance(receipt, dict):
+                raise ValueError("the frozen source manifest has no access receipt")
+            records.append(
+                {
+                    "position": expected_position,
+                    "source_id": str(selected.get("doi") or candidate_key),
+                    "candidate_key": candidate_key,
+                    "source_content_hash": receipt.get("source_sha256"),
+                    "extraction_sha256": receipt.get("extraction_sha256"),
+                }
+            )
+    if not records:
+        raise ValueError("the frozen source manifest is empty")
+    return records
+
+
+def build_frozen_manifest_draft(
+    *,
+    source_manifest_file: Path,
+    descriptor_file: Path,
+    run_id: str,
+    campaign_id: str,
+    ledger_file: Path,
+    budget_policy_file: Path,
+    price_config_file: Path,
+    execution_gate_file: Path,
+    planning_cumulative_budget_usd: Decimal,
+    phase: str = "away_production",
+) -> dict[str, Any]:
+    """Return a planning-only draft for an immutable JSONL source freeze."""
+    if not run_id or not campaign_id or planning_cumulative_budget_usd <= 0:
+        raise ValueError("future IDs and a positive planning budget are required")
+    if phase not in {"live_test", "away_production"}:
+        raise ValueError("the planned phase must be live_test or away_production")
+    descriptor = _read_json(descriptor_file)
+    sources = _frozen_source_records(source_manifest_file)
+    expected_total = (descriptor.get("counts") or {}).get("manifest_records")
+    if expected_total != len(sources):
+        raise ValueError(
+            "the frozen descriptor count does not match its source manifest"
+        )
+    ledger = _read_json(ledger_file)
+    return {
+        "schema": "arctic-qa-full-run-plan-v1",
+        "planning_only": True,
+        "activation": {"state": "not_activated", "money_spent_by_plan_usd": "0.000000"},
+        "future_scientific_run": {
+            "run_id": run_id,
+            "campaign_id": campaign_id,
+            "phase": phase,
+        },
+        "input": {
+            "frozen_source_manifest": _file_identity(source_manifest_file),
+            "frozen_manifest_descriptor": _file_identity(descriptor_file),
+            "freeze_id": descriptor.get("freeze_id"),
+            "target_total": len(sources),
+            "ordered_sources": sources,
+        },
+        "selection": {
+            "method": "frozen_manifest_order",
+            "seed": None,
+            "explicit_smaller_selection": False,
+            "planned_source_count": len(sources),
+        },
+        "generation_configuration": {
+            "generation_arm": "answer_first",
+            "provider": "shared_gemini_broker",
+            "price_config": _file_identity(price_config_file),
+            "budget_policy": _file_identity(budget_policy_file),
+            "execution_gate": _file_identity(execution_gate_file),
+        },
+        "budget_and_ledger": {
+            "planning_cumulative_cap_usd": _decimal_text(
+                planning_cumulative_budget_usd
+            ),
+            "funding_state": "not_authorized_by_plan",
+            "ledger": _file_identity(ledger_file),
+            "ledger_status": _file_identity(
+                ledger_file.with_name(f"{ledger_file.stem}.status.json"), required=False
+            ),
+            **_ledger_summary(ledger, planning_cumulative_budget_usd),
+        },
+        "stream_command_argv": None,
+        "stream_command_status": "Builder must materialize this frozen JSONL input as a supported access run before stream execution.",
+    }
+
+
 def build_plan(
     *,
     data_root: Path,
@@ -282,31 +383,52 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--phase", choices=("live_test", "away_production"), default="away_production"
     )
+    result.add_argument("--frozen-source-manifest-file", type=Path)
+    result.add_argument("--frozen-manifest-descriptor-file", type=Path)
     return result
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
-    plan = build_plan(
-        data_root=args.data_root,
-        access_run_dir=args.access_run_dir,
-        eligibility_run_dir=args.eligibility_run_dir,
-        run_id=args.run_id,
-        campaign_id=args.campaign_id,
-        credential_file=args.credential_file,
-        ledger_file=args.shared_ledger_file,
-        model_receipts_dir=args.model_receipts_dir,
-        budget_policy_file=args.streaming_budget_policy_file,
-        price_config_file=args.price_config_file,
-        execution_gate_file=args.execution_gate_file,
-        eligibility_prompt_file=args.eligibility_prompt_file,
-        eligibility_schema_file=args.eligibility_schema_file,
-        eligibility_policy_file=args.eligibility_policy_file,
-        planning_cumulative_budget_usd=args.planning_cumulative_budget_usd,
-        max_papers=args.max_papers,
-        selection_seed=args.selection_seed,
-        phase=args.phase,
-    )
+    if args.frozen_source_manifest_file or args.frozen_manifest_descriptor_file:
+        if (
+            not args.frozen_source_manifest_file
+            or not args.frozen_manifest_descriptor_file
+        ):
+            raise ValueError("both frozen manifest files are required")
+        plan = build_frozen_manifest_draft(
+            source_manifest_file=args.frozen_source_manifest_file,
+            descriptor_file=args.frozen_manifest_descriptor_file,
+            run_id=args.run_id,
+            campaign_id=args.campaign_id,
+            ledger_file=args.shared_ledger_file,
+            budget_policy_file=args.streaming_budget_policy_file,
+            price_config_file=args.price_config_file,
+            execution_gate_file=args.execution_gate_file,
+            planning_cumulative_budget_usd=args.planning_cumulative_budget_usd,
+            phase=args.phase,
+        )
+    else:
+        plan = build_plan(
+            data_root=args.data_root,
+            access_run_dir=args.access_run_dir,
+            eligibility_run_dir=args.eligibility_run_dir,
+            run_id=args.run_id,
+            campaign_id=args.campaign_id,
+            credential_file=args.credential_file,
+            ledger_file=args.shared_ledger_file,
+            model_receipts_dir=args.model_receipts_dir,
+            budget_policy_file=args.streaming_budget_policy_file,
+            price_config_file=args.price_config_file,
+            execution_gate_file=args.execution_gate_file,
+            eligibility_prompt_file=args.eligibility_prompt_file,
+            eligibility_schema_file=args.eligibility_schema_file,
+            eligibility_policy_file=args.eligibility_policy_file,
+            planning_cumulative_budget_usd=args.planning_cumulative_budget_usd,
+            max_papers=args.max_papers,
+            selection_seed=args.selection_seed,
+            phase=args.phase,
+        )
     args.json_out.write_text(
         json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
