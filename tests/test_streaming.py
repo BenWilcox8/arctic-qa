@@ -152,13 +152,22 @@ def test_compound_unit_rule_without_source_tolerance_remains_rejected() -> None:
 def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
     properties = generation_module.NUMERIC_RULE_SCHEMA["properties"]
 
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v10"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v11"
     assert (
         generation_module.NUMERIC_RULE_CONTRACT_VERSION
         == "numeric-rule-source-support-v2"
     )
     assert (
         generation_module.SCOPE_CONTRACT_VERSION == "selected-evidence-literal-scope-v2"
+    )
+    distractor_array = generation_module.ROLE_SCHEMAS["distractor_writer"][
+        "properties"
+    ]["distractors"]
+    assert distractor_array["minItems"] == 4
+    assert distractor_array["maxItems"] == 6
+    assert "Avoid explicit negation" in generation_module.DISTRACTOR_WRITER_INSTRUCTIONS
+    assert "exactly one displayed number and unit" in (
+        generation_module.DISTRACTOR_WRITER_INSTRUCTIONS
     )
     assert (
         generation_module.ANSWER_SCHEMA["properties"]["required_question_phrases"][
@@ -2016,25 +2025,23 @@ def test_short_answer_without_three_distractors_is_not_counted_as_accepted(
     tmp_path: Path,
 ) -> None:
     access, eligibility = streaming_fixture(tmp_path)
-    author_events = [
+    verifier_events = [
         json.loads(line)
-        for line in (FIXTURES / "fake-author.jsonl")
+        for line in (FIXTURES / "fake-verifier.jsonl")
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    author_events[2]["response"]["distractors"] = author_events[2]["response"][
-        "distractors"
-    ][:2]
-    author_script = tmp_path / "two-distractor-author.jsonl"
-    author_script.write_text(
-        "\n".join(json.dumps(event) for event in author_events) + "\n",
+    verifier_events[2]["response"]["question_admits_option_as_correct"] = True
+    verifier_events[3]["response"]["question_admits_option_as_correct"] = True
+    verifier_script = tmp_path / "two-accepted-distractor-verifier.jsonl"
+    verifier_script.write_text(
+        "\n".join(json.dumps(event) for event in verifier_events) + "\n",
         encoding="utf-8",
     )
     paths = DataPaths.open(tmp_path, test_mode=True)
     database = Database(paths.database)
     database.migrate(paths.namespace / "backups")
-    transport = ScriptedBrokerTransport()
-    transport.author = FakeProvider("gemini-3.8-flash", author_script)
+    transport = ScriptedBrokerTransport(verifier_script=verifier_script)
     broker = shared_broker(tmp_path, transport)
     provider = BrokerProvider(
         broker=broker,

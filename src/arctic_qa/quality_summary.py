@@ -35,7 +35,9 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _export_file(manifest: dict[str, Any], manifest_path: Path, name: str) -> Path | None:
+def _export_file(
+    manifest: dict[str, Any], manifest_path: Path, name: str
+) -> Path | None:
     files = manifest.get("files")
     if not isinstance(files, dict) or name not in files:
         return None
@@ -61,8 +63,10 @@ def _unavailable(reason: str) -> dict[str, Any]:
 
 def _has_evidence(row: dict[str, Any]) -> bool:
     evidence = row.get("evidence") or row.get("answer_evidence")
-    return isinstance(evidence, dict) and bool(evidence.get("quote")) and isinstance(
-        evidence.get("locator"), dict
+    return (
+        isinstance(evidence, dict)
+        and bool(evidence.get("quote"))
+        and isinstance(evidence.get("locator"), dict)
     )
 
 
@@ -78,10 +82,16 @@ def _quality_result(row: dict[str, Any], names: Iterable[str]) -> bool | None:
     return None
 
 
-def _observed_check(rows: Iterable[dict[str, Any]], names: Iterable[str]) -> dict[str, Any]:
-    values = [result for row in rows if (result := _quality_result(row, names)) is not None]
+def _observed_check(
+    rows: Iterable[dict[str, Any]], names: Iterable[str]
+) -> dict[str, Any]:
+    values = [
+        result for row in rows if (result := _quality_result(row, names)) is not None
+    ]
     if not values:
-        return _unavailable("The selected export does not retain this automated result.")
+        return _unavailable(
+            "The selected export does not retain this automated result."
+        )
     return _rate(sum(values), len(values))
 
 
@@ -119,7 +129,9 @@ def _fixture_input(manifest: dict[str, Any], status: dict[str, Any] | None) -> b
     )
 
 
-def _spend(ledger: dict[str, Any] | None, status: dict[str, Any] | None) -> dict[str, Any]:
+def _spend(
+    ledger: dict[str, Any] | None, status: dict[str, Any] | None
+) -> dict[str, Any]:
     source = ledger or {}
     if not source and status:
         budget = status.get("budget")
@@ -140,7 +152,9 @@ def _spend(ledger: dict[str, Any] | None, status: dict[str, Any] | None) -> dict
         if source.get(name) is not None
     }
     if not values:
-        return _unavailable("The selected ledger or status has no recognized spend fields.")
+        return _unavailable(
+            "The selected ledger or status has no recognized spend fields."
+        )
     result: dict[str, Any] = {"available": True, **values}
     if "prior_construction_spend_usd" in values and "spent_usd" in values:
         try:
@@ -154,11 +168,19 @@ def _spend(ledger: dict[str, Any] | None, status: dict[str, Any] | None) -> dict
 
 
 def _configuration(
-    manifest: dict[str, Any], ledger: dict[str, Any] | None, status: dict[str, Any] | None
+    manifest: dict[str, Any],
+    ledger: dict[str, Any] | None,
+    status: dict[str, Any] | None,
 ) -> dict[str, Any]:
     result = {
         name: manifest.get(name)
-        for name in ("schema_version", "export_id", "run_id", "shuffle_seed", "release_label_ceiling")
+        for name in (
+            "schema_version",
+            "export_id",
+            "run_id",
+            "shuffle_seed",
+            "release_label_ceiling",
+        )
         if manifest.get(name) is not None
     }
     for source in (ledger, status):
@@ -182,15 +204,31 @@ def build_summary(
     manifest = _read_json(export_manifest)
     ledger = _read_json(ledger_file) if ledger_file else None
     status = _read_json(status_file) if status_file else None
-    short_answers = _read_jsonl(_export_file(manifest, export_manifest, "short_answer")) if _export_file(manifest, export_manifest, "short_answer") else []
-    incomplete = _read_jsonl(_export_file(manifest, export_manifest, "incomplete_short_answer")) if _export_file(manifest, export_manifest, "incomplete_short_answer") else []
-    mcqs = _read_jsonl(_export_file(manifest, export_manifest, "mcq")) if _export_file(manifest, export_manifest, "mcq") else []
+    short_answers = (
+        _read_jsonl(_export_file(manifest, export_manifest, "short_answer"))
+        if _export_file(manifest, export_manifest, "short_answer")
+        else []
+    )
+    incomplete = (
+        _read_jsonl(_export_file(manifest, export_manifest, "incomplete_short_answer"))
+        if _export_file(manifest, export_manifest, "incomplete_short_answer")
+        else []
+    )
+    mcqs = (
+        _read_jsonl(_export_file(manifest, export_manifest, "mcq"))
+        if _export_file(manifest, export_manifest, "mcq")
+        else []
+    )
     rejection_file = _export_file(manifest, export_manifest, "rejections")
     rejections = _read_jsonl(rejection_file) if rejection_file else []
 
     base_items = [*short_answers, *incomplete]
     source_evidence_rows = [row for row in base_items if _has_evidence(row)]
-    reference_answers = [row for row in base_items if isinstance(row.get("reference_answers"), list) and row["reference_answers"]]
+    reference_answers = [
+        row
+        for row in base_items
+        if isinstance(row.get("reference_answers"), list) and row["reference_answers"]
+    ]
     distractors = [
         option
         for row in mcqs
@@ -207,10 +245,15 @@ def build_summary(
         str(row.get("reason_code", "unknown")) for row in rejections
     )
     stage_counts = Counter(str(row.get("stage", "unknown")) for row in rejections)
-    disagreements = sum("disagreement" in reason for reason in reason_counts for _ in range(reason_counts[reason]))
+    disagreements = sum(
+        "disagreement" in reason
+        for reason in reason_counts
+        for _ in range(reason_counts[reason])
+    )
     all_export_rows = [*base_items, *mcqs]
     agreement = _observed_check(
-        all_export_rows, ("reconstruction_agreement", "automated_agreement", "agreement")
+        all_export_rows,
+        ("reconstruction_agreement", "automated_agreement", "agreement"),
     )
     qa_pass = _observed_check(
         all_export_rows, ("qa_check_passed", "automated_check_passed")
@@ -242,7 +285,9 @@ def build_summary(
         "check_coverage": {
             "source_evidence": _rate(len(source_evidence_rows), len(base_items)),
             "reference_answers": _rate(len(reference_answers), len(base_items)),
-            "distractor_falsity_evidence": _rate(len(documented_distractors), len(distractors)),
+            "distractor_falsity_evidence": _rate(
+                len(documented_distractors), len(distractors)
+            ),
             "recorded_qa_check_pass": qa_pass,
             "recorded_automated_agreement": agreement,
         },
@@ -270,7 +315,11 @@ def build_summary(
             "Automated check pass rates and model agreement do not establish scientific accuracy.",
             "Construction and verification models can share training data, prompts, or systematic blind spots.",
             "Missing fields are reported as unavailable. The reporter does not infer a pass from release membership.",
-            *( ["This input is a fixture. It is not live research evidence."] if fixture else [] ),
+            *(
+                ["This input is a fixture. It is not live research evidence."]
+                if fixture
+                else []
+            ),
         ],
     }
 
@@ -284,7 +333,9 @@ def render_markdown(summary: dict[str, Any]) -> str:
     spend = summary["spend"]
     lines = ["# Arctic QA quality summary", ""]
     if summary["input"]["evidence_mode"] == "fixture":
-        lines.extend(["> Fixture input. This report is not live research evidence.", ""])
+        lines.extend(
+            ["> Fixture input. This report is not live research evidence.", ""]
+        )
     lines.extend(
         [
             "## Dataset",
@@ -302,15 +353,21 @@ def render_markdown(summary: dict[str, Any]) -> str:
     for name, value in coverage.items():
         label = name.replace("_", " ")
         if value["available"]:
-            rate = "not estimable" if value["percent"] is None else f"{value['percent']}%"
+            rate = (
+                "not estimable" if value["percent"] is None else f"{value['percent']}%"
+            )
             lines.append(f"- {label}: {value['passed']}/{value['total']} ({rate})")
         else:
             lines.append(f"- {label}: unavailable. {value['reason']}")
     lines.extend(["", "## Rejections and disagreement", ""])
     if rejections["available"]:
         lines.append(f"- Rejections: {rejections['count']}")
-        lines.append(f"- Recorded disagreement rejections: {rejections['recorded_disagreement_count']}")
-        lines.append(f"- Rejection stages: {json.dumps(rejections['by_stage'], sort_keys=True)}")
+        lines.append(
+            f"- Recorded disagreement rejections: {rejections['recorded_disagreement_count']}"
+        )
+        lines.append(
+            f"- Rejection stages: {json.dumps(rejections['by_stage'], sort_keys=True)}"
+        )
     else:
         lines.append("- Rejections: unavailable. The export has no rejection file.")
     lines.extend(["", "## Spend", ""])
@@ -347,15 +404,21 @@ def render_markdown(summary: dict[str, Any]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Write an offline Arctic QA quality summary.")
+    parser = argparse.ArgumentParser(
+        description="Write an offline Arctic QA quality summary."
+    )
     parser.add_argument("--export-manifest", type=Path, required=True)
     parser.add_argument("--ledger", type=Path)
     parser.add_argument("--status", type=Path)
     parser.add_argument("--json-out", type=Path, required=True)
     parser.add_argument("--markdown-out", type=Path, required=True)
     args = parser.parse_args(argv)
-    summary = build_summary(args.export_manifest, ledger_file=args.ledger, status_file=args.status)
-    args.json_out.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    summary = build_summary(
+        args.export_manifest, ledger_file=args.ledger, status_file=args.status
+    )
+    args.json_out.write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     args.markdown_out.write_text(render_markdown(summary), encoding="utf-8")
     return 0
 

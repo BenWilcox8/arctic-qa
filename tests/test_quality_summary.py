@@ -14,7 +14,9 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
 
-def test_module_reports_fixture_coverage_spend_and_accuracy_limit(tmp_path: Path) -> None:
+def test_module_reports_fixture_coverage_spend_and_accuracy_limit(
+    tmp_path: Path,
+) -> None:
     short_answers = tmp_path / "short_answer.jsonl"
     mcqs = tmp_path / "mcq.jsonl"
     rejections = tmp_path / "rejections.jsonl"
@@ -39,14 +41,29 @@ def test_module_reports_fixture_coverage_spend_and_accuracy_limit(tmp_path: Path
                 "source": {"source_id": "source-1"},
                 "options": [
                     {"text": "Ice", "is_correct": True},
-                    {"text": "Sand", "is_correct": False, "falsity_evidence": {"quote": "Ice forms."}},
-                    {"text": "Rock", "is_correct": False, "falsity_evidence": {"quote": "Ice forms."}},
-                    {"text": "Rain", "is_correct": False, "falsity_evidence": {"quote": "Ice forms."}},
+                    {
+                        "text": "Sand",
+                        "is_correct": False,
+                        "falsity_evidence": {"quote": "Ice forms."},
+                    },
+                    {
+                        "text": "Rock",
+                        "is_correct": False,
+                        "falsity_evidence": {"quote": "Ice forms."},
+                    },
+                    {
+                        "text": "Rain",
+                        "is_correct": False,
+                        "falsity_evidence": {"quote": "Ice forms."},
+                    },
                 ],
             }
         ],
     )
-    _write_jsonl(rejections, [{"stage": "validation", "reason_code": "reconstruction_disagreement"}])
+    _write_jsonl(
+        rejections,
+        [{"stage": "validation", "reason_code": "reconstruction_disagreement"}],
+    )
     manifest = tmp_path / "manifest.json"
     manifest.write_text(
         json.dumps(
@@ -55,15 +72,23 @@ def test_module_reports_fixture_coverage_spend_and_accuracy_limit(tmp_path: Path
                 "export_id": "fixture-export",
                 "run_id": "fixture-run",
                 "test_only": True,
-                "files": {"short_answer": short_answers.name, "mcq": mcqs.name, "rejections": rejections.name},
+                "files": {
+                    "short_answer": short_answers.name,
+                    "mcq": mcqs.name,
+                    "rejections": rejections.name,
+                },
             }
         ),
         encoding="utf-8",
     )
     ledger = tmp_path / "ledger.json"
-    ledger.write_text(json.dumps({"spent_usd": "1.25", "reserved_usd": "0.25"}), encoding="utf-8")
+    ledger.write_text(
+        json.dumps({"spent_usd": "1.25", "reserved_usd": "0.25"}), encoding="utf-8"
+    )
     status = tmp_path / "status.json"
-    status.write_text(json.dumps({"provider_policy": {"same_model_roles": True}}), encoding="utf-8")
+    status.write_text(
+        json.dumps({"provider_policy": {"same_model_roles": True}}), encoding="utf-8"
+    )
     json_out = tmp_path / "summary.json"
     markdown_out = tmp_path / "summary.md"
     environment = os.environ.copy()
@@ -104,7 +129,10 @@ def test_module_reports_fixture_coverage_spend_and_accuracy_limit(tmp_path: Path
     assert summary["rejections"]["recorded_disagreement_count"] == 1
     assert summary["spend"]["spent_usd"] == "1.25"
     assert summary["validity"]["target_validity_percent"] == 95
-    assert summary["validity"]["independently_established_scientific_accuracy"] == "unknown_not_yet_estimable"
+    assert (
+        summary["validity"]["independently_established_scientific_accuracy"]
+        == "unknown_not_yet_estimable"
+    )
     markdown = markdown_out.read_text(encoding="utf-8")
     assert "Fixture input" in markdown
     assert "not scientific accuracy" in markdown
