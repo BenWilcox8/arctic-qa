@@ -8,7 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from .util import sha256_file
+from .util import atomic_json, canonical_json, sha256_bytes, sha256_file
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -181,6 +181,180 @@ def build_frozen_manifest_draft(
         },
         "stream_command_argv": None,
         "stream_command_status": "Builder must materialize this frozen JSONL input as a supported access run before stream execution.",
+    }
+
+
+def materialize_frozen_access_run(
+    *,
+    source_manifest_file: Path,
+    descriptor_file: Path,
+    output_dir: Path,
+) -> dict[str, Any]:
+    """Write a supported access run that references an immutable source freeze."""
+    descriptor = _read_json(descriptor_file)
+    if (
+        descriptor.get("schema") != "full-text-ready-freeze-descriptor-v1"
+        or descriptor.get("state") != "frozen_offline"
+        or not descriptor.get("freeze_id")
+    ):
+        raise ValueError("the frozen manifest descriptor is invalid")
+    frozen_rows = _frozen_source_records(source_manifest_file)
+    expected_total = (descriptor.get("counts") or {}).get("manifest_records")
+    if expected_total != len(frozen_rows):
+        raise ValueError(
+            "the frozen descriptor count does not match its source manifest"
+        )
+
+    source_manifest_sha256 = sha256_file(source_manifest_file)
+    descriptor_sha256 = sha256_file(descriptor_file)
+    run_id = output_dir.resolve().name
+    if not run_id:
+        raise ValueError("the materialized access run has no run ID")
+    selection: list[dict[str, Any]] = []
+    items: list[dict[str, Any]] = []
+    candidate_keys: set[str] = set()
+    family_keys: set[str] = set()
+    with source_manifest_file.open(encoding="utf-8") as handle:
+        for position, line in enumerate(handle, start=1):
+            frozen = json.loads(line)
+            candidate_key = frozen["candidate_key"]
+            family_key = str(frozen.get("family_key") or candidate_key)
+            if candidate_key in candidate_keys:
+                raise ValueError("the frozen source manifest has a duplicate candidate")
+            candidate_keys.add(candidate_key)
+            family_keys.add(family_key)
+            receipt = frozen["access_receipt"]
+            source_path = Path(str(receipt.get("source_path") or ""))
+            extraction_path = Path(str(receipt.get("extraction_path") or ""))
+            source_sha256 = receipt.get("source_sha256")
+            extraction_sha256 = receipt.get("extraction_sha256")
+            if (
+                receipt.get("access_state") != "full_text_ready"
+                or receipt.get("identity_verified") is not True
+                or not source_path.is_absolute()
+                or not source_path.is_file()
+                or not extraction_path.is_absolute()
+                or not extraction_path.is_file()
+                or not isinstance(source_sha256, str)
+                or len(source_sha256) != 64
+                or not isinstance(extraction_sha256, str)
+                or len(extraction_sha256) != 64
+            ):
+                raise ValueError("the frozen source receipt is not ready")
+            subgroup = "frozen_full_text_manifest"
+            selected = {
+                "authors": frozen.get("authors") or [],
+                "candidate_key": candidate_key,
+                "doi": frozen.get("doi"),
+                "extraction_sha256": extraction_sha256,
+                "family_key": family_key,
+                "frozen_manifest_position": position,
+                "position": position,
+                "priority_tier": frozen.get("priority_tier"),
+                "priority_tier_position": frozen.get("tier_position"),
+                "scientific_eligibility": frozen.get(
+                    "scientific_eligibility", "unresolved"
+                ),
+                "source_content_hash": source_sha256,
+                "subgroup": subgroup,
+                "title": frozen.get("title"),
+                "year": frozen.get("year"),
+            }
+            item = {
+                **selected,
+                "access_state": "full_text_ready",
+                "extraction_bytes": receipt.get("extraction_bytes"),
+                "extraction_coverage": {
+                    "article_body_recognized": True,
+                    "figures": "unknown_not_extracted",
+                    "ocr": "unknown",
+                    "supplements": "unknown_not_extracted",
+                    "tables": "unknown_not_extracted",
+                },
+                "extraction_path": str(extraction_path),
+                "final_url": (
+                    f"https://doi.org/{frozen['doi']}"
+                    if frozen.get("doi")
+                    else source_path.as_uri()
+                ),
+                "identity_verified": True,
+                "license": None,
+                "media_type": receipt.get("media_type"),
+                "run_id": run_id,
+                "schema": "article-access-item-v1",
+                "source_bytes": receipt.get("source_bytes"),
+                "source_path": str(source_path),
+                "upstream_access_position": frozen.get("upstream_access_position"),
+                "upstream_item_sha256": receipt.get("item_sha256"),
+            }
+            selection.append(selected)
+            items.append(item)
+
+    expected_families = (descriptor.get("counts") or {}).get("unique_paper_families")
+    if expected_families != len(family_keys):
+        raise ValueError("the frozen descriptor family count is inconsistent")
+    selection_keys_sha256 = sha256_bytes(
+        canonical_json([row["candidate_key"] for row in selection]).encode()
+    )
+    manifest = {
+        "schema": "article-access-manifest-v1",
+        "run_id": run_id,
+        "target_total": len(selection),
+        "selection_keys_sha256": selection_keys_sha256,
+        "remaining_order_sha256": selection_keys_sha256,
+        "frozen_manifest_sha256": source_manifest_sha256,
+        "frozen_manifest_descriptor_sha256": descriptor_sha256,
+        "freeze_id": descriptor["freeze_id"],
+        "purpose": "Full scientific-run planning from the frozen full-text manifest.",
+        "scientific_eligibility_effect": "none",
+        "selection": selection,
+    }
+    output_dir = output_dir.resolve()
+    atomic_json(output_dir / "run-manifest.json", manifest, immutable=True)
+    for position, item in enumerate(items, start=1):
+        atomic_json(
+            output_dir / "items" / f"item-{position:06d}.json",
+            item,
+            immutable=True,
+        )
+    counts = {
+        "checked": len(items),
+        "full_text_ready": len(items),
+        "ready_for_eligibility": len(items),
+        "target": len(items),
+    }
+    progress = {
+        "schema": "article-access-progress-v1",
+        "state": "completed",
+        "run_id": run_id,
+        "current_stage": "materialized_from_frozen_manifest",
+        "counts": counts,
+        "model_calls": 0,
+        "paid_calls": 0,
+    }
+    atomic_json(output_dir / "progress.json", progress, immutable=True)
+    receipt = {
+        "schema": "article-access-run-receipt-v1",
+        "state": "completed",
+        "run_id": run_id,
+        "run_manifest_sha256": sha256_file(output_dir / "run-manifest.json"),
+        "frozen_manifest_sha256": source_manifest_sha256,
+        "frozen_manifest_descriptor_sha256": descriptor_sha256,
+        "selection_keys_sha256": selection_keys_sha256,
+        "remaining_order_sha256": selection_keys_sha256,
+        "counts": counts,
+        "model_calls": 0,
+        "paid_calls": 0,
+        "scientific_eligibility_effect": "none",
+    }
+    atomic_json(output_dir / "run-receipt.json", receipt, immutable=True)
+    return {
+        "access_run_dir": str(output_dir),
+        "run_id": run_id,
+        "target_total": len(items),
+        "run_manifest_sha256": receipt["run_manifest_sha256"],
+        "frozen_manifest_sha256": source_manifest_sha256,
+        "selection_keys_sha256": selection_keys_sha256,
     }
 
 
@@ -385,29 +559,74 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--frozen-source-manifest-file", type=Path)
     result.add_argument("--frozen-manifest-descriptor-file", type=Path)
+    result.add_argument("--materialized-access-run-dir", type=Path)
     return result
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    if args.materialized_access_run_dir and not args.frozen_source_manifest_file:
+        raise ValueError("access materialization requires both frozen manifest files")
     if args.frozen_source_manifest_file or args.frozen_manifest_descriptor_file:
         if (
             not args.frozen_source_manifest_file
             or not args.frozen_manifest_descriptor_file
         ):
             raise ValueError("both frozen manifest files are required")
-        plan = build_frozen_manifest_draft(
-            source_manifest_file=args.frozen_source_manifest_file,
-            descriptor_file=args.frozen_manifest_descriptor_file,
-            run_id=args.run_id,
-            campaign_id=args.campaign_id,
-            ledger_file=args.shared_ledger_file,
-            budget_policy_file=args.streaming_budget_policy_file,
-            price_config_file=args.price_config_file,
-            execution_gate_file=args.execution_gate_file,
-            planning_cumulative_budget_usd=args.planning_cumulative_budget_usd,
-            phase=args.phase,
-        )
+        if args.materialized_access_run_dir:
+            materialization = materialize_frozen_access_run(
+                source_manifest_file=args.frozen_source_manifest_file,
+                descriptor_file=args.frozen_manifest_descriptor_file,
+                output_dir=args.materialized_access_run_dir,
+            )
+            plan = build_plan(
+                data_root=args.data_root,
+                access_run_dir=args.materialized_access_run_dir,
+                eligibility_run_dir=args.eligibility_run_dir,
+                run_id=args.run_id,
+                campaign_id=args.campaign_id,
+                credential_file=args.credential_file,
+                ledger_file=args.shared_ledger_file,
+                model_receipts_dir=args.model_receipts_dir,
+                budget_policy_file=args.streaming_budget_policy_file,
+                price_config_file=args.price_config_file,
+                execution_gate_file=args.execution_gate_file,
+                eligibility_prompt_file=args.eligibility_prompt_file,
+                eligibility_schema_file=args.eligibility_schema_file,
+                eligibility_policy_file=args.eligibility_policy_file,
+                planning_cumulative_budget_usd=args.planning_cumulative_budget_usd,
+                max_papers=args.max_papers,
+                selection_seed=args.selection_seed,
+                phase=args.phase,
+            )
+            descriptor = _read_json(args.frozen_manifest_descriptor_file)
+            plan["input"].update(
+                {
+                    "freeze_id": descriptor["freeze_id"],
+                    "frozen_source_manifest": _file_identity(
+                        args.frozen_source_manifest_file
+                    ),
+                    "frozen_manifest_descriptor": _file_identity(
+                        args.frozen_manifest_descriptor_file
+                    ),
+                    "materialization": materialization,
+                }
+            )
+            plan["selection"]["method"] = "frozen_manifest_order"
+            plan["stream_command_status"] = "supported_not_activated"
+        else:
+            plan = build_frozen_manifest_draft(
+                source_manifest_file=args.frozen_source_manifest_file,
+                descriptor_file=args.frozen_manifest_descriptor_file,
+                run_id=args.run_id,
+                campaign_id=args.campaign_id,
+                ledger_file=args.shared_ledger_file,
+                budget_policy_file=args.streaming_budget_policy_file,
+                price_config_file=args.price_config_file,
+                execution_gate_file=args.execution_gate_file,
+                planning_cumulative_budget_usd=args.planning_cumulative_budget_usd,
+                phase=args.phase,
+            )
     else:
         plan = build_plan(
             data_root=args.data_root,

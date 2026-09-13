@@ -102,13 +102,17 @@ It keeps all 4,420 records in frozen order.
 It records the USD 20 planning cap and current shared ledger values.
 It does not authorize funding or provider calls.
 
-Create the same draft with this command:
+## Materialize the supported access run
+
+Run this command from the repository root.
+The command creates a separate access run for all 4,420 frozen records.
+It also replaces the planning draft with a plan that has a concrete stream argv array.
 
 ```bash
 PYTHONPATH=src python -m arctic_qa.full_run_plan \
   --json-out /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/full-run-plans/proposed-full-scientific-run-4420-r1.json \
   --data-root /mnt/crdata/research-abstention \
-  --access-run-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/trial-inputs/full-manifest-continuation-4420-minus41-r1 \
+  --access-run-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/full-run-inputs/full-scientific-access-4420-r1 \
   --eligibility-run-dir /mnt/crdata/research-abstention/arctic-qa/gemini-eligibility-r1/proposed-full-scientific-run-4420-r1 \
   --run-id proposed-full-scientific-run-4420-r1 \
   --campaign-id proposed-full-scientific-campaign-r1 \
@@ -123,14 +127,29 @@ PYTHONPATH=src python -m arctic_qa.full_run_plan \
   --eligibility-policy-file /mnt/crdata/research-abstention/arctic-qa/corpus-search-r1/protocol/protocol-v2.json \
   --planning-cumulative-budget-usd 20 \
   --frozen-source-manifest-file /mnt/crdata/research-abstention/arctic-qa/corpus-freeze-r1/full-text-ready-4420-seed20260912-r1/full-text-ready-manifest.jsonl \
-  --frozen-manifest-descriptor-file /mnt/crdata/research-abstention/arctic-qa/corpus-freeze-r1/full-text-ready-4420-seed20260912-r1/manifest-descriptor.json
+  --frozen-manifest-descriptor-file /mnt/crdata/research-abstention/arctic-qa/corpus-freeze-r1/full-text-ready-4420-seed20260912-r1/manifest-descriptor.json \
+  --materialized-access-run-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/full-run-inputs/full-scientific-access-4420-r1 \
+  --phase away_production
 ```
+
+The materializer writes the access manifest, item receipts, progress, and completion receipt.
+It does not copy, download, or hash a source file or extraction file.
+Each item refers to the original immutable path and its recorded SHA-256 value.
+An exact repeated command is idempotent.
+Changed data at an existing materialization path causes an error.
+
+Make sure that the plan has `stream_command_status` set to `supported_not_activated`.
+Make sure that `input.target_total` and `selection.planned_source_count` are both 4,420.
+Make sure that the materialized run contains 4,420 item receipts.
+
+CAUTION: Do not run the stream argv array with the current gate.
+The current gate does not authorize the proposed production identities or allocation.
+
+The captain must select the final source count and production budget.
+Then create a reviewed production gate for the exact plan identities and access artifact.
+Do not change the frozen order or recorded source hashes.
 
 The current accepted trial export is `export-61975ae865dbb1f2333e`.
 It has one short-answer item and two MCQ items.
 Use it as trial evidence only.
 Its release label remains `machine_accepted_unverified`.
-
-The builder must materialize the frozen JSONL source list as a supported access run.
-Then the planner can write a supported stream argv array.
-The only deferred captain choices are the final size or selection and the production allocation.
