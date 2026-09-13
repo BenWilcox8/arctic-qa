@@ -52,6 +52,12 @@ INTEGER_WORDS = {
     "nineteen": 19,
     "twenty": 20,
 }
+NUMERIC_LITERAL_PATTERN = re.compile(
+    r"(?<![\w.])"
+    r"(?P<value>[+\-\u2212]?(?:(?:\d{1,3}(?:,\d{3})+)|\d+)"
+    r"(?:\.\d+)?(?:[eE][+\-\u2212]?\d+)?)"
+    r"(?![\d.,])"
+)
 
 REQUIRED_ITEM_KEYS = {
     "schema_version",
@@ -178,15 +184,43 @@ def validate_candidate(
     if not source_span_evidence_resolves(candidate["answer"], chunks):
         reasons.append("answer_evidence_span_invalid")
         return _finish(db, candidate, labels, reasons, [], "rejected")
+    qa_gate_reasons = candidate.get("qa_gate_reasons")
+    stored_candidate = db.one(
+        "SELECT candidate_json FROM candidates WHERE item_id=?",
+        (candidate.get("item_id"),),
+    )
+    if (
+        candidate.get("status") == "qa_gate_failed"
+        and isinstance(qa_gate_reasons, list)
+        and qa_gate_reasons
+        and all(isinstance(reason, str) and reason for reason in qa_gate_reasons)
+        and stored_candidate
+        and stored_candidate["candidate_json"] == canonical_json(candidate)
+    ):
+        return _finish(
+            db,
+            candidate,
+            labels,
+            list(dict.fromkeys(qa_gate_reasons)),
+            [],
+            "rejected",
+        )
+    if not scope_is_source_bound(candidate["answer"].get("scope"), list(chunks.values())):
+        reasons.append("answer_scope_not_source_bound")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
     if candidate["answer"].get("numeric_rule") and not numeric_rule_is_source_bound(
         candidate["answer"]
     ):
         reasons.append("source_bound_numeric_rule_missing")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     labels["evidence_located"] = True
+    required_phrases = candidate["answer"].get("required_question_phrases")
+    if not isinstance(required_phrases, list) or not required_phrases:
+        reasons.append("scope_qualifier_missing")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
     missing_scope = [
         phrase
-        for phrase in candidate["answer"].get("required_question_phrases", [])
+        for phrase in required_phrases
         if normalize_text(str(phrase)) not in normalize_text(candidate["question"])
     ]
     if missing_scope:
@@ -197,9 +231,15 @@ def validate_candidate(
     if not evidence_resolves(reconstruction, chunks):
         reasons.append("reconstruction_evidence_not_located")
         return _finish(db, candidate, labels, reasons, [], "rejected")
+    if not scope_is_source_bound(reconstruction.get("scope"), list(chunks.values())):
+        reasons.append("reconstruction_scope_not_source_bound")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
     verification = candidate.get("answer_verification") or {}
     if not evidence_resolves(verification, chunks):
         reasons.append("answer_verifier_evidence_not_located")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
+    if not scope_is_source_bound(verification.get("scope"), list(chunks.values())):
+        reasons.append("answer_verifier_scope_not_source_bound")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     if reconstruction.get("scope") != candidate["answer"].get("scope"):
         reasons.append("reconstruction_scope_mismatch")
@@ -875,6 +915,23 @@ def numeric_rule_is_source_bound(answer: dict[str, Any]) -> bool:
     )
 
 
+def scope_is_source_bound(
+    scope: dict[str, Any] | None, chunks: list[dict[str, Any]]
+) -> bool:
+    if not isinstance(scope, dict):
+        return False
+    values = [value for value in scope.values() if value is not None]
+    if not values or any(not isinstance(value, str) for value in values):
+        return False
+    normalized_values = [normalize_text(value) for value in values]
+    if any(not value for value in normalized_values):
+        return False
+    source_text = normalize_text(
+        " ".join(str(chunk.get("text", "")) for chunk in chunks)
+    )
+    return bool(source_text and all(value in source_text for value in normalized_values))
+
+
 def _is_exact_integer_count_rule(rule: dict[str, Any]) -> bool:
     try:
         value = Decimal(str(rule["canonical_value"]))
@@ -944,15 +1001,33 @@ def _bare_count_alias_matches(
 
 
 def _contains_quantity(text: str, expected: Decimal, expected_unit: str) -> bool:
-    for value, unit in re.findall(
-        r"(?<![\w.])([-+]?\d+(?:\.\d+)?)\s*(°?[A-Za-z]+|%)(?!\w)", text
-    ):
+    for match in NUMERIC_LITERAL_PATTERN.finditer(text):
         try:
-            if convert(Decimal(value), unit, expected_unit) == expected:
+            value = Decimal(
+                match.group("value").replace(",", "").replace("−", "-")
+            )
+        except (InvalidOperation, ValueError):
+            continue
+        suffix = text[match.end() :]
+        if value == expected and _unit_literal_starts(suffix, expected_unit):
+            return True
+        unit_match = re.match(r"\s*(°?[A-Za-z]+|%)(?!\w)", suffix)
+        if not unit_match:
+            continue
+        try:
+            if convert(value, unit_match.group(1), expected_unit) == expected:
                 return True
         except (InvalidOperation, ValueError):
             continue
     return False
+
+
+def _unit_literal_starts(text: str, expected_unit: str) -> bool:
+    unit_parts = normalize_text(expected_unit).split()
+    if not unit_parts:
+        return False
+    pattern = r"^\s*" + r"\s+".join(re.escape(part) for part in unit_parts)
+    return bool(re.match(pattern + r"(?!\w)", text.casefold()))
 
 
 def _finish(

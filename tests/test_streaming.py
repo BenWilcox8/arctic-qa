@@ -71,6 +71,102 @@ def test_unqualified_exact_percentage_remains_not_source_bound() -> None:
     assert validation_module.numeric_rule_is_source_bound(answer) is False
 
 
+@pytest.mark.parametrize(
+    ("displayed", "evidence", "canonical_value", "unit", "tolerance", "basis"),
+    [
+        (
+            "4.2 mg/L",
+            "The concentration was 4.2 mg/L with a tolerance of 0.1 mg/L.",
+            "4.2",
+            "mg/L",
+            "0.1",
+            "0.1 mg/L",
+        ),
+        (
+            "1.2e-3 m",
+            "The displacement was 1.2e-3 m with a tolerance of 1e-4 m.",
+            "0.0012",
+            "m",
+            "0.0001",
+            "1e-4 m",
+        ),
+        (
+            "1,000 m",
+            "The transect length was 1,000 m ± 10 m.",
+            "1000",
+            "m",
+            "10",
+            "± 10 m",
+        ),
+    ],
+)
+def test_source_bound_numeric_rule_accepts_supported_literal_formats(
+    displayed: str,
+    evidence: str,
+    canonical_value: str,
+    unit: str,
+    tolerance: str,
+    basis: str,
+) -> None:
+    answer = {
+        "text": displayed,
+        "evidence_quote": evidence,
+        "numeric_rule": {
+            "canonical_value": canonical_value,
+            "unit": unit,
+            "tolerance": tolerance,
+            "tolerance_basis": basis,
+            "reported_precision": "source reported",
+            "rounding_rule": "none",
+            "conversion_rule": "direct source literal",
+        },
+    }
+
+    assert validation_module.numeric_rule_is_source_bound(answer) is True
+
+
+def test_compound_unit_rule_without_source_tolerance_remains_rejected() -> None:
+    answer = {
+        "text": "4.2 mg/L",
+        "evidence_quote": "The concentration was 4.2 mg/L.",
+        "numeric_rule": {
+            "canonical_value": "4.2",
+            "unit": "mg/L",
+            "tolerance": "0.1",
+            "tolerance_basis": "0.1 mg/L",
+            "reported_precision": "0.1 mg/L",
+            "rounding_rule": "none",
+            "conversion_rule": "direct source literal",
+        },
+    }
+
+    assert validation_module.numeric_rule_is_source_bound(answer) is False
+
+
+def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
+    properties = generation_module.NUMERIC_RULE_SCHEMA["properties"]
+
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v6"
+    assert (
+        generation_module.NUMERIC_RULE_CONTRACT_VERSION
+        == "numeric-rule-source-support-v2"
+    )
+    assert generation_module.SCOPE_CONTRACT_VERSION == "source-literal-scope-v1"
+    assert (
+        generation_module.ANSWER_SCHEMA["properties"]["required_question_phrases"][
+            "minItems"
+        ]
+        == 1
+    )
+    assert "Exact source text" in generation_module.SCOPE_SCHEMA["properties"][
+        "method"
+    ]["description"]
+    assert "selected source span" in properties["canonical_value"]["description"]
+    assert "selected source span" in properties["tolerance"]["description"]
+    assert "Exact source text" in properties["tolerance_basis"]["description"]
+    assert "Do not invent" in properties["rounding_rule"]["description"]
+
+
 def test_numeric_format_alias_is_not_a_competing_reconstruction_answer() -> None:
     answer = {
         "text": "three ramping experiments",

@@ -514,6 +514,83 @@ def test_numeric_rule_must_match_source_and_displayed_answer(tmp_path: Path) -> 
     assert accepted["final_label"] == "machine_accepted_unverified"
 
 
+def test_all_null_scope_is_rejected(tmp_path: Path) -> None:
+    smoke(tmp_path)
+    item = candidate(tmp_path)
+    empty_scope = {
+        "geography": None,
+        "population": None,
+        "period": None,
+        "method": None,
+        "comparison": None,
+        "uncertainty": None,
+    }
+    item["answer"]["scope"] = empty_scope
+    item["answer"]["required_question_phrases"] = []
+    item["reconstruction"]["scope"] = empty_scope
+    item["answer_verification"]["scope"] = empty_scope
+    path = write_candidate(tmp_path, item, "all-null-scope.json")
+
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+
+    assert result["final_label"] == "rejected"
+    assert result["reasons"] == ["answer_scope_not_source_bound"]
+
+
+def test_scope_alias_not_present_in_source_is_rejected(tmp_path: Path) -> None:
+    smoke(tmp_path)
+    item = candidate(tmp_path)
+    unsupported_scope = {
+        **item["answer"]["scope"],
+        "method": "laboratory experiment",
+    }
+    item["answer"]["scope"] = unsupported_scope
+    item["reconstruction"]["scope"] = unsupported_scope
+    item["answer_verification"]["scope"] = unsupported_scope
+    path = write_candidate(tmp_path, item, "unsupported-scope-alias.json")
+
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+
+    assert result["final_label"] == "rejected"
+    assert result["reasons"] == ["answer_scope_not_source_bound"]
+
+
+def test_stored_qa_gate_failure_preserves_all_generation_reasons(
+    tmp_path: Path,
+) -> None:
+    receipt = smoke(tmp_path)
+    item = candidate(tmp_path)
+    item["answer"]["scope"]["method"] = "laboratory experiment"
+    item["status"] = "qa_gate_failed"
+    item["qa_gate_reasons"] = [
+        "answer_scope_not_source_bound",
+        "reconstruction_scope_mismatch",
+    ]
+    with database(tmp_path) as connection:
+        connection.execute(
+            "UPDATE candidates SET candidate_json=?,status=? WHERE item_id=?",
+            (canonical_json(item), "qa_gate_failed", receipt["item_id"]),
+        )
+    path = write_candidate(tmp_path, item, "stored-qa-gate-failure.json")
+
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+
+    assert result["final_label"] == "rejected"
+    assert result["reasons"] == item["qa_gate_reasons"]
+
+
+def test_empty_required_question_phrases_are_rejected(tmp_path: Path) -> None:
+    smoke(tmp_path)
+    item = candidate(tmp_path)
+    item["answer"]["required_question_phrases"] = []
+    path = write_candidate(tmp_path, item, "empty-question-phrases.json")
+
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+
+    assert result["final_label"] == "rejected"
+    assert result["reasons"] == ["scope_qualifier_missing"]
+
+
 def test_self_asserted_typed_distractor_rules_are_not_deterministic(
     tmp_path: Path,
 ) -> None:
@@ -633,7 +710,7 @@ def test_source_bound_typed_distractor_controls(
         {
             "text": answer_text,
             "variants": [],
-            "required_question_phrases": [],
+            "required_question_phrases": ["source-bounded value"],
             "deterministic_rule": answer_rule,
         }
     )
@@ -1088,6 +1165,7 @@ def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> No
         .splitlines()
     ]
     events[0]["response"]["alternatives"] = ["another source-supported answer"]
+    events[0]["response"]["scope"]["method"] = "a conflicting method"
     verifier = tmp_path / "ambiguous-verifier.jsonl"
     verifier.write_text(
         "\n".join(json.dumps(event) for event in events[:2]) + "\n",
@@ -1103,7 +1181,27 @@ def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> No
     command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(verifier)
     generated = json.loads(cli(tmp_path, *command).stdout)
     assert generated["status"] == "qa_gate_failed"
+    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v6"
+    assert (
+        generated["provenance"]["numeric_rule_contract_version"]
+        == "numeric-rule-source-support-v2"
+    )
+    assert (
+        generated["provenance"]["scope_contract_version"]
+        == "source-literal-scope-v1"
+    )
     assert generated["distractors"] == []
+    assert generated["qa_gate_reasons"] == [
+        "reconstruction_alternative_answer_present",
+        "reconstruction_scope_not_source_bound",
+        "reconstruction_scope_mismatch",
+    ]
+    candidate_path = tmp_path / "qa-gate-failed-candidate.json"
+    candidate_path.write_text(json.dumps(generated), encoding="utf-8")
+    validation = json.loads(
+        cli(tmp_path, "validate", "--candidate", str(candidate_path)).stdout
+    )
+    assert validation["reasons"] == generated["qa_gate_reasons"]
     with database(tmp_path) as connection:
         roles = [
             row[0]
@@ -1134,7 +1232,7 @@ def test_generation_arms_share_one_frozen_finding(tmp_path: Path) -> None:
                     {
                         "role": "direct_joint",
                         "response": {
-                            "question": "For the synthetic calibration at 71.3 N, which water depth was reported?",
+                            "question": "At 71.3 N, what reported water depth was documented?",
                             "answer": first["answer"],
                         },
                     }
