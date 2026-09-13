@@ -1168,6 +1168,10 @@ def test_streaming_advances_after_uncertain_brokered_eligibility(
     }
 
     progress_path = paths.namespace / "streaming-dataset-r1" / "progress.json"
+    foreign_progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    foreign_progress["invocation_run_id"] = "different-invocation"
+    foreign_progress["counts"]["eligibility_completed"] = 999
+    write_json(progress_path, foreign_progress)
     observed_progress_counts: list[dict[str, int]] = []
     original_atomic_json = streaming_module.atomic_json
 
@@ -1210,8 +1214,9 @@ def test_streaming_advances_after_uncertain_brokered_eligibility(
         "accepted_qa": 0,
     }
     assert observed_progress_counts
+    assert observed_progress_counts[0]["eligibility_completed"] == 1
     assert all(
-        counts["eligibility_completed"] >= 1 for counts in observed_progress_counts
+        1 <= counts["eligibility_completed"] <= 2 for counts in observed_progress_counts
     )
     assert progress["recent_papers"][0]["final_state"] == "unresolved"
     assert progress["recent_papers"][0]["final_reason"] == (
