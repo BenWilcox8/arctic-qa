@@ -19,8 +19,8 @@ UNIT_FACTORS: dict[tuple[str, str], Decimal] = {
     ("kg", "g"): Decimal("1000"),
     ("g", "kg"): Decimal("0.001"),
 }
-SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v1"
-GENERATION_PROMPT_VERSION = "arctic-qa-generation-v8"
+SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v2"
+GENERATION_PROMPT_VERSION = "arctic-qa-generation-v9"
 NUMERIC_RULE_CONTRACT_VERSION = "numeric-rule-source-support-v2"
 SCOPE_CONTRACT_VERSION = "selected-evidence-literal-scope-v2"
 

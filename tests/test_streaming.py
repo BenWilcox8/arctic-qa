@@ -152,7 +152,7 @@ def test_compound_unit_rule_without_source_tolerance_remains_rejected() -> None:
 def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
     properties = generation_module.NUMERIC_RULE_SCHEMA["properties"]
 
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v8"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v9"
     assert (
         generation_module.NUMERIC_RULE_CONTRACT_VERSION
         == "numeric-rule-source-support-v2"
@@ -854,7 +854,7 @@ def test_finding_span_id_resolves_to_exact_source_evidence(tmp_path: Path) -> No
     author_events[0]["require_prompt_contains"] = [
         '"evidence_spans"',
         '"span_id"',
-        '"span_contract_version":"finding-evidence-span-v1"',
+        '"span_contract_version":"finding-evidence-span-v2"',
         '"text_sha256"',
         "Select one source_span_id.",
     ]
@@ -884,16 +884,33 @@ def test_finding_span_id_resolves_to_exact_source_evidence(tmp_path: Path) -> No
         tmp_path / "arctic-qa" / result["export"]["files"]["short_answer"]
     )
     record = json.loads(short_answer_path.read_text(encoding="utf-8"))
-    assert record["evidence"]["quote"] == (
+    assert (
         "The reported water depth was 2.0 m with a source-grounded tolerance of 0.1 m."
+        in record["evidence"]["quote"]
     )
     assert (
         record["evidence"]["locator"]["end_offset"]
         > record["evidence"]["locator"]["start_offset"]
     )
-    assert record["evidence"]["span_contract_version"] == "finding-evidence-span-v1"
-    assert record["evidence"]["source_span_id"].startswith("finding-evidence-span-v1-")
+    assert record["evidence"]["span_contract_version"] == "finding-evidence-span-v2"
+    assert record["evidence"]["source_span_id"].startswith("finding-evidence-span-v2-")
     assert len(record["evidence"]["text_sha256"]) == 64
+
+
+def test_finding_spans_keep_wrapped_prose_sentence_together() -> None:
+    text = (
+        "Quantitatively, the RMS error in reconstruction of ITP 103 is\n"
+        "0.030 km compared to 0.078 km for ITP 104. This is due to\n"
+        "the larger motion magnitude.\n\nNEXT SECTION"
+    )
+    chunk = {"chunk_id": "chunk-wrapped", "text": text}
+
+    spans = generation_module._finding_spans(chunk)
+
+    expected = text[: text.index("\n\n")]
+    assert any(span["text"] == expected for span in spans)
+    span = next(span for span in spans if span["text"] == expected)
+    assert text[span["start_offset"] : span["end_offset"]] == expected
 
 
 def test_streaming_resolves_every_role_evidence_from_source_spans(
@@ -911,7 +928,7 @@ def test_streaming_resolves_every_role_evidence_from_source_spans(
         distractor.pop("locator", None)
         distractor["source_span_id"] = "{{span_id}}"
     author_events[2]["require_prompt_contains"] = [
-        '"span_contract_version":"finding-evidence-span-v1"',
+        '"span_contract_version":"finding-evidence-span-v2"',
         "Select source_span_id for each evidence record.",
     ]
     verifier_events = [
@@ -966,8 +983,9 @@ def test_streaming_resolves_every_role_evidence_from_source_spans(
     for option in answer_present["options"]:
         if option["is_correct"]:
             continue
-        assert option["falsity_evidence"]["quote"] == (
+        assert (
             "The reported water depth was 2.0 m with a source-grounded tolerance of 0.1 m."
+            in option["falsity_evidence"]["quote"]
         )
 
 

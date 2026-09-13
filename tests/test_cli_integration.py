@@ -155,7 +155,7 @@ def source_locator_for_quote(root: Path, source_id: str, quote: str) -> dict:
 
 
 def bind_source_span(record: dict, quote: str, locator: dict) -> None:
-    contract = "finding-evidence-span-v1"
+    contract = "finding-evidence-span-v2"
     text_sha256 = sha256_bytes(quote.encode("utf-8"))
     record.update(
         {
@@ -344,13 +344,16 @@ def test_geography_requires_valid_source_bound_complete_site_evidence(
     smoke(tmp_path)
     item = candidate(tmp_path)
     source_id = item["source"]["source_id"]
+    unrelated_quote = (
+        "The reported water depth was 2.0 m with a source-grounded tolerance of 0.1 m."
+    )
     unrelated = {
         "evidence_kind": "site_coordinates",
         "latitudes": [71.3],
         "named_regions": [],
         "source_content_hash": item["source"]["content_hash"],
-        "evidence_quote": item["answer"]["evidence_quote"],
-        "locator": item["answer"]["locator"],
+        "evidence_quote": unrelated_quote,
+        "locator": source_locator_for_quote(tmp_path, source_id, unrelated_quote),
         "site_coverage": "complete",
     }
     geography_quote = "The complete study site was at 71.3 N."
@@ -603,7 +606,7 @@ def test_scope_must_be_bound_to_each_role_selected_evidence_before_export(
     run_id = "selected-evidence-scope"
     receipt = smoke(tmp_path, run_id)
     item = candidate(tmp_path)
-    item[role]["scope"]["geography"] = "71.3 N"
+    item[role]["scope"]["geography"] = "71.4 N"
     bind_qa_verification_receipts(tmp_path, item)
     bind_option_verdicts(
         item,
@@ -1334,7 +1337,7 @@ def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> No
     command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(verifier)
     generated = json.loads(cli(tmp_path, *command).stdout)
     assert generated["status"] == "qa_gate_failed"
-    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v7"
+    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v9"
     assert (
         generated["provenance"]["numeric_rule_contract_version"]
         == "numeric-rule-source-support-v2"
@@ -1753,7 +1756,7 @@ def test_validation_accepts_complete_option_receipt_response(tmp_path: Path) -> 
 @pytest.mark.parametrize(
     ("field", "tampered_value"),
     [
-        ("source_span_id", "finding-evidence-span-v1-forged"),
+        ("source_span_id", "finding-evidence-span-v2-forged"),
         ("evidence_text_sha256", "0" * 64),
         ("span_contract_version", "finding-evidence-span-forged"),
         ("evidence_quote", "A changed quote."),
@@ -1793,7 +1796,7 @@ def test_stored_answer_span_tampering_blocks_validation_and_export(
 @pytest.mark.parametrize(
     ("field", "tampered_value"),
     [
-        ("source_span_id", "finding-evidence-span-v1-forged"),
+        ("source_span_id", "finding-evidence-span-v2-forged"),
         ("evidence_text_sha256", "0" * 64),
         ("span_contract_version", "finding-evidence-span-forged"),
         ("evidence_quote", "A changed quote."),
