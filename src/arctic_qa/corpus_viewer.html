@@ -327,7 +327,7 @@
       </section>
       <section class="panel" aria-labelledby="gemini-title">
         <div class="metadata-head">
-          <div><h2 id="gemini-title">Current Gemini eligibility</h2><p id="gemini-detail">Loading Gemini state...</p><div class="meta" id="gemini-meta"></div></div>
+          <div><h2 id="gemini-title">Current invocation eligibility</h2><p id="gemini-detail">Loading Gemini state...</p><div class="meta" id="gemini-meta"></div></div>
           <span class="badge" id="gemini-state">Loading</span>
         </div>
         <div class="source-counts" id="gemini-counts"></div>
@@ -340,6 +340,7 @@
         <span class="badge" id="streaming-state">Loading</span>
       </div>
       <div class="source-counts" id="streaming-counts" aria-label="Streaming pipeline counts"></div>
+      <p class="meta" id="streaming-count-scope">Pipeline counts describe the current incremental invocation. They are not cumulative scientific totals. Shared ledger counts and costs are cumulative.</p>
       <div class="source-counts" id="budget-counts" aria-label="Shared budget counts"></div>
       <div class="telemetry-grid">
         <div><h3>Actual cost by model stage</h3><div class="compact-table" id="stage-costs"><div class="loading">No shared ledger selected.</div></div></div>
@@ -800,7 +801,7 @@
         $('streaming-detail').textContent = streaming.message || 'No integrated pipeline progress is available.';
         const broker = streaming.broker || {};
         const policy = streaming.budget_policy || {};
-        $('streaming-meta').textContent = `Run ${streaming.run_id || 'not selected'} | Current stage ${label(streaming.current_stage)} | Updated ${dateText(streaming.updated_at_utc || broker.updated_at_utc)} | Submissions ${formatNumber(broker.generation_submissions)} | In flight ${formatNumber(broker.inflight)} | Stop reason ${broker.halt_reason || streaming.stop_reason || 'none recorded'}`;
+        $('streaming-meta').textContent = `Progress record ${streaming.run_id || 'not selected'} | Invocation ${streaming.invocation_run_id || 'not recorded'} | Current stage ${label(streaming.current_stage)} | Updated ${dateText(streaming.updated_at_utc || broker.updated_at_utc)} | Cumulative submissions ${formatNumber(broker.generation_submissions)} | In flight ${formatNumber(broker.inflight)} | Stop reason ${broker.halt_reason || streaming.stop_reason || 'none recorded'}`;
         const streamingOrder = ['full_text_ready', 'eligibility_completed', 'eligible', 'excluded', 'unresolved', 'generation_rejected', 'legacy_rejected_or_unresolved', 'accepted_qa'];
         $('streaming-counts').replaceChildren(...streamingOrder.map((name) => { const box = document.createElement('div'); box.className = 'count'; box.append(text('span', label(name)), text('strong', formatNumber(streaming.counts?.[name]))); return box; }));
         const usage = broker.usage || {};

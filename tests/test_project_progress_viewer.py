@@ -189,6 +189,7 @@ def test_existing_page_contains_progress_anchor_and_inline_svg_targets() -> None
     assert "In progress" in page
     assert "Not finished" in page
     assert "textContent" in page
+    assert "current incremental invocation" in page
 
 
 def test_project_overview_uses_streaming_counts_as_separate_live_metrics(
@@ -223,6 +224,8 @@ def test_project_overview_uses_streaming_counts_as_separate_live_metrics(
     assert overview["live_metrics"] == {
         "source": "viewer_validated_pipeline_records",
         "telemetry": "observed",
+        "scientific_count_scope": "current_incremental_invocation",
+        "accepted_qa_scope": "shared_ledger_cumulative",
         "spent_usd": None,
         "reserved_usd": None,
         "ambiguous_reserved_usd": None,
@@ -231,7 +234,7 @@ def test_project_overview_uses_streaming_counts_as_separate_live_metrics(
         "eligible": 0,
         "excluded": 1,
         "unresolved": 3,
-        "accepted_qa": 0,
+        "accepted_qa": None,
     }
 
 

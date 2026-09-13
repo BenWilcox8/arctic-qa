@@ -1149,6 +1149,8 @@ class CorpusArtifacts:
         return {
             "source": "viewer_validated_pipeline_records",
             "telemetry": streaming.get("telemetry", "absent"),
+            "scientific_count_scope": "current_incremental_invocation",
+            "accepted_qa_scope": "shared_ledger_cumulative",
             "spent_usd": broker.get("spent_usd") if observed else None,
             "reserved_usd": broker.get("reserved_usd") if observed else None,
             "ambiguous_reserved_usd": (
@@ -1159,7 +1161,7 @@ class CorpusArtifacts:
             "eligible": integer(counts, "eligible"),
             "excluded": integer(counts, "excluded"),
             "unresolved": integer(counts, "unresolved"),
-            "accepted_qa": integer(counts, "accepted_qa"),
+            "accepted_qa": integer(broker, "accepted_question_count"),
         }
 
     def _apply_source_overlay(

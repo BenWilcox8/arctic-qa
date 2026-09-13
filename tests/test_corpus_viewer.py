@@ -862,6 +862,8 @@ def test_streaming_budget_and_progress_are_bounded_and_read_only(
         "too_large_not_ready": 0,
         "ambiguous_charge": 0,
     }
+    assert streaming["counts"]["accepted_qa"] == 1
+    assert state["project_overview"]["live_metrics"]["accepted_qa"] == 0
     assert b"<script>" not in _safe_json_bytes(streaming)
     assert json.loads(artifacts.dataset_metadata())["export_id"] == "export-1"
 
