@@ -17,7 +17,11 @@ from .providers import (
     provider_prompt_hash,
 )
 from .util import canonical_json, normalize_text, sha256_bytes, stable_id
-from .validation import numeric_equal, numeric_rule_is_source_bound
+from .validation import (
+    numeric_equal,
+    numeric_rule_is_source_bound,
+    reconstruction_has_competing_alternatives,
+)
 
 
 PROMPT_VERSION = "arctic-qa-generation-v5"
@@ -911,7 +915,7 @@ def _qa_gate_reasons(
         reasons.append("answer_verifier_evidence_not_located")
     if reconstruction.get("ambiguity_label") != "one_answer":
         reasons.append("answer_ambiguous")
-    if reconstruction.get("alternatives"):
+    if reconstruction_has_competing_alternatives(answer, reconstruction):
         reasons.append("reconstruction_alternative_answer_present")
     proposed = [answer.get("text", ""), *answer.get("variants", [])]
     text_matches = normalize_text(str(reconstruction.get("answer", ""))) in {

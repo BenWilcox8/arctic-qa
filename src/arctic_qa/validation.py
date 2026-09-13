@@ -29,6 +29,29 @@ DIRECTION_PAIRS = {
     ("north", "south"),
     ("greater", "less"),
 }
+INTEGER_WORDS = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+}
 
 REQUIRED_ITEM_KEYS = {
     "schema_version",
@@ -217,7 +240,7 @@ def validate_candidate(
         reasons.append("answer_ambiguous")
         labels["unresolved"] = True
         return _finish(db, candidate, labels, reasons, [], "unresolved")
-    if reconstruction.get("alternatives"):
+    if reconstruction_has_competing_alternatives(candidate["answer"], reconstruction):
         reasons.append("reconstruction_alternative_answer_present")
         labels["unresolved"] = True
         return _finish(db, candidate, labels, reasons, [], "unresolved")
@@ -350,6 +373,29 @@ def reconstruction_matches(
     numeric = answer.get("numeric_rule")
     rebuilt_numeric = reconstruction.get("numeric")
     return bool(numeric and rebuilt_numeric and numeric_equal(numeric, rebuilt_numeric))
+
+
+def reconstruction_has_competing_alternatives(
+    answer: dict[str, Any], reconstruction: dict[str, Any]
+) -> bool:
+    alternatives = reconstruction.get("alternatives") or []
+    aliases = {
+        normalize_text(str(value))
+        for value in [
+            answer.get("text", ""),
+            *answer.get("variants", []),
+            reconstruction.get("answer", ""),
+        ]
+        if normalize_text(str(value))
+    }
+    for alternative in alternatives:
+        normalized = normalize_text(str(alternative))
+        if normalized in aliases:
+            continue
+        if _bare_count_alias_matches(answer, reconstruction, normalized):
+            continue
+        return True
+    return False
 
 
 def numeric_equal(left: dict[str, Any], right: dict[str, Any]) -> bool:
@@ -814,6 +860,11 @@ def numeric_rule_is_source_bound(answer: dict[str, Any]) -> bool:
         return False
     evidence = str(answer.get("evidence_quote", ""))
     displayed = str(answer.get("text", ""))
+    if _is_exact_integer_count_rule(rule):
+        return bool(
+            _contains_count_quantity(displayed, answer_value, unit)
+            and _contains_count_quantity(evidence, answer_value, unit)
+        )
     return bool(
         tolerance >= 0
         and tolerance_basis
@@ -822,6 +873,74 @@ def numeric_rule_is_source_bound(answer: dict[str, Any]) -> bool:
         and _contains_quantity(evidence, answer_value, unit)
         and _contains_quantity(evidence, tolerance, unit)
     )
+
+
+def _is_exact_integer_count_rule(rule: dict[str, Any]) -> bool:
+    try:
+        value = Decimal(str(rule["canonical_value"]))
+        tolerance = Decimal(str(rule["tolerance"]))
+    except (KeyError, InvalidOperation, ValueError):
+        return False
+    return bool(
+        value >= 0
+        and value == value.to_integral_value()
+        and tolerance == 0
+        and normalize_text(str(rule.get("tolerance_basis", ""))) == "count"
+        and normalize_text(str(rule.get("reported_precision", "")))
+        == "exact integer"
+        and normalize_text(str(rule.get("rounding_rule", ""))) == "none"
+        and normalize_text(str(rule.get("conversion_rule", ""))).startswith(
+            "direct count"
+        )
+    )
+
+
+def _contains_count_quantity(text: str, expected: Decimal, expected_unit: str) -> bool:
+    normalized_unit = normalize_text(expected_unit)
+    if not re.fullmatch(r"[a-z][a-z-]*", normalized_unit):
+        return False
+    pattern = (
+        r"(?<![\w.])([-+]?\d+|"
+        + "|".join(INTEGER_WORDS)
+        + r")(?:\s+[a-z][a-z-]*){0,2}\s+"
+        + re.escape(normalized_unit)
+        + r"\b"
+    )
+    for raw_value in re.findall(pattern, text.casefold()):
+        try:
+            value = Decimal(INTEGER_WORDS.get(raw_value, raw_value))
+        except (InvalidOperation, ValueError):
+            continue
+        if value == expected:
+            return True
+    return False
+
+
+def _bare_count_alias_matches(
+    answer: dict[str, Any], reconstruction: dict[str, Any], alternative: str
+) -> bool:
+    rule = answer.get("numeric_rule")
+    rebuilt = reconstruction.get("numeric")
+    if not isinstance(rule, dict) or not isinstance(rebuilt, dict):
+        return False
+    if not _is_exact_integer_count_rule(rule):
+        return False
+    try:
+        expected = Decimal(str(rule["canonical_value"]))
+        rebuilt_value = Decimal(str(rebuilt["canonical_value"]))
+    except (KeyError, InvalidOperation, ValueError):
+        return False
+    if normalize_text(str(rebuilt.get("unit", ""))) != normalize_text(
+        str(rule.get("unit", ""))
+    ):
+        return False
+    if rebuilt_value != expected:
+        return False
+    raw_value: str | int = INTEGER_WORDS.get(alternative, alternative)
+    try:
+        return Decimal(str(raw_value)) == expected
+    except InvalidOperation:
+        return False
 
 
 def _contains_quantity(text: str, expected: Decimal, expected_unit: str) -> bool:

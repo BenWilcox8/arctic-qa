@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from arctic_qa import cli as cli_module
+from arctic_qa import generation as generation_module
 from arctic_qa.broker_provider import BrokerProvider
 from arctic_qa.db import Database
 from arctic_qa.errors import AmbiguousChargeError
@@ -22,6 +23,7 @@ from arctic_qa.paths import DataPaths
 from arctic_qa.providers import FakeProvider
 from arctic_qa.streaming import run_stream
 from arctic_qa.util import sha256_file, stable_id
+from arctic_qa import validation as validation_module
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -31,6 +33,143 @@ FIXTURES = REPO / "fixtures"
 def write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
+
+
+def test_exact_integer_count_is_source_bound_without_a_written_zero_tolerance() -> None:
+    answer = {
+        "text": "three ramping experiments",
+        "evidence_quote": "we could run three ramping experiments",
+        "numeric_rule": {
+            "canonical_value": "3",
+            "unit": "experiments",
+            "tolerance": "0",
+            "tolerance_basis": "count",
+            "reported_precision": "exact integer",
+            "rounding_rule": "none",
+            "conversion_rule": "Direct count of the specified ramping experiments",
+        },
+    }
+
+    assert validation_module.numeric_rule_is_source_bound(answer) is True
+
+
+def test_unqualified_exact_percentage_remains_not_source_bound() -> None:
+    answer = {
+        "text": "10.5 %",
+        "evidence_quote": "The cost function was reduced by 10.5 %.",
+        "numeric_rule": {
+            "canonical_value": "10.5",
+            "unit": "%",
+            "tolerance": "0",
+            "tolerance_basis": "exact percentage reported",
+            "reported_precision": "10.5",
+            "rounding_rule": "exact_match",
+            "conversion_rule": "Directly reported percentage value.",
+        },
+    }
+
+    assert validation_module.numeric_rule_is_source_bound(answer) is False
+
+
+def test_numeric_format_alias_is_not_a_competing_reconstruction_answer() -> None:
+    answer = {
+        "text": "three ramping experiments",
+        "variants": ["3 ramping experiments", "three"],
+        "numeric_rule": {
+            "canonical_value": "3",
+            "unit": "experiments",
+            "tolerance": "0",
+            "tolerance_basis": "count",
+            "reported_precision": "exact integer",
+            "rounding_rule": "none",
+            "conversion_rule": "Direct count of the specified ramping experiments",
+        },
+    }
+    reconstruction = {
+        "answer": "three",
+        "numeric": {"canonical_value": "3", "unit": "experiments"},
+        "alternatives": ["3"],
+    }
+
+    assert (
+        validation_module.reconstruction_has_competing_alternatives(
+            answer, reconstruction
+        )
+        is False
+    )
+    reconstruction["alternatives"] = ["four"]
+    assert (
+        validation_module.reconstruction_has_competing_alternatives(
+            answer, reconstruction
+        )
+        is True
+    )
+
+
+def test_position_1043_counterfactual_keeps_scope_rejection() -> None:
+    quote = "proposed approach, we could run three ramping experiments"
+    chunk = {"chunk_id": "retained-1043", "text": quote}
+    answer_scope = {
+        "comparison": None,
+        "geography": None,
+        "method": "proposed approach simulation",
+        "period": None,
+        "population": "ramping experiments",
+        "uncertainty": None,
+    }
+    verifier_scope = {
+        **answer_scope,
+        "method": "proposed approach",
+        "population": "ramping experiments with fast to intermediate rates",
+    }
+    locator = {"chunk_id": "retained-1043", "start_offset": 0, "end_offset": len(quote)}
+    answer = {
+        "text": "three ramping experiments",
+        "variants": ["3 ramping experiments", "three"],
+        "claim_type": "observation",
+        "evidence_quote": quote,
+        "locator": locator,
+        "required_question_phrases": [],
+        "scope": answer_scope,
+        "numeric_rule": {
+            "canonical_value": "3",
+            "unit": "experiments",
+            "tolerance": "0",
+            "tolerance_basis": "count",
+            "reported_precision": "exact integer",
+            "rounding_rule": "none",
+            "conversion_rule": "Direct count of the specified ramping experiments",
+        },
+    }
+    reconstruction = {
+        "answer": "three",
+        "numeric": {"canonical_value": "3", "unit": "experiments"},
+        "alternatives": ["3"],
+        "ambiguity_label": "one_answer",
+        "question_claim_type": "observation",
+        "evidence_quote": quote,
+        "locator": locator,
+        "scope": verifier_scope,
+    }
+    verification = {
+        "source_entailment_model_verified": True,
+        "relation_scope_match": True,
+        "ambiguity_resolved": True,
+        "alternative_answer_search_passed": True,
+        "question_claim_type": "observation",
+        "evidence_quote": quote,
+        "locator": locator,
+        "scope": verifier_scope,
+    }
+
+    reasons = generation_module._qa_gate_reasons(
+        chunk, "How many ramping experiments?", answer, reconstruction, verification
+    )
+
+    assert "reconstruction_alternative_answer_present" not in reasons
+    assert "source_bound_numeric_rule_missing" not in reasons
+    assert "reconstruction_scope_mismatch" in reasons
+    assert "answer_verifier_scope_mismatch" in reasons
 
 
 def run_cli(root: Path, *arguments: str, expected: int = 0) -> dict:
