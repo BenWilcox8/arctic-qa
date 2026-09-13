@@ -153,7 +153,7 @@ def build_plan(
     ledger_identity = _file_identity(ledger_file)
     ledger = _read_json(ledger_file)
     status_identity = _file_identity(
-        ledger_file.with_name(f"{ledger_file.name}.status.json"), required=False
+        ledger_file.with_name(f"{ledger_file.stem}.status.json"), required=False
     )
     configuration = {
         "generation_arm": "answer_first",

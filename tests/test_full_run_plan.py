@@ -52,7 +52,8 @@ def test_plan_is_deterministic_and_never_changes_its_inputs(tmp_path: Path) -> N
             "prior_construction_spend_usd": "0",
         },
     )
-    _write_json(ledger.with_name("shared-ledger.json.status.json"), {"state": "ready"})
+    status = ledger.with_name("shared-ledger.status.json")
+    _write_json(status, {"state": "ready"})
     config = tmp_path / "config"
     for name in ("budget", "price", "gate", "prompt", "schema", "policy"):
         (config / name).parent.mkdir(parents=True, exist_ok=True)
@@ -85,6 +86,8 @@ def test_plan_is_deterministic_and_never_changes_its_inputs(tmp_path: Path) -> N
     assert {path: path.read_bytes() for path in inputs} == before
     assert first["planning_only"] is True
     assert first["activation"]["money_spent_by_plan_usd"] == "0.000000"
+    assert first["budget_and_ledger"]["ledger_status"]["path"] == str(status)
+    assert first["budget_and_ledger"]["ledger_status"]["sha256"] is not None
     assert [source["source_id"] for source in first["input"]["ordered_sources"]] == [
         "doi:one",
         "doi:two",
