@@ -741,6 +741,43 @@ def test_all_stages_share_one_durable_ledger(tmp_path: Path):
     assert Decimal(status["spent_usd"]) > 0
 
 
+def test_submitted_request_retains_exact_safe_trace(tmp_path: Path):
+    values = fixture(tmp_path, transport=Transport())
+    body = payload()
+
+    receipt = execute(values["broker"], body=body)
+
+    trace_path = tmp_path / "receipts" / f"{receipt['request_key']}.request-trace.json"
+    trace = json.loads(trace_path.read_text(encoding="utf-8"))
+    assert trace["schema"] == "pipeline-model-request-trace-v1"
+    assert trace["request_key"] == receipt["request_key"]
+    assert trace["request_sha256"] == sha256_bytes(canonical_json(body).encode())
+    assert trace["provider_method"] == "generateContent"
+    assert trace["payload"] == body
+    assert "unused-test-key" not in trace_path.read_text(encoding="utf-8")
+
+
+def test_trace_failure_does_not_strand_accounting_or_block_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    transport = Transport()
+    values = fixture(tmp_path, transport=transport)
+
+    def fail_trace(*args, **kwargs):
+        raise OSError("simulated trace storage failure")
+
+    monkeypatch.setattr("arctic_qa.model_broker.record_model_request_trace", fail_trace)
+
+    receipt = execute(values["broker"])
+
+    assert receipt["state"] == "completed"
+    status = values["broker"].status()
+    assert status["inflight"] == 0
+    assert status["reserved_usd"] == "0.000000"
+    assert Decimal(status["spent_usd"]) > 0
+    assert transport.methods == ["countTokens", "generateContent"]
+
+
 def test_inconsistent_ledger_totals_fail_closed_on_restart(tmp_path: Path):
     transport = Transport()
     values = fixture(tmp_path, transport=transport)

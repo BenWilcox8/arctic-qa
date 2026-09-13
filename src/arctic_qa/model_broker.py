@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .gemini_eligibility import GeminiTransport, _config, _cost
+from .pipeline_trace import record_model_request_trace
 from .util import atomic_json, canonical_json, sha256_bytes, sha256_file
 
 
@@ -2879,6 +2880,19 @@ class SharedGeminiBroker:
                 submitted,
                 immutable=True,
             )
+            # Observability is deliberately outside the accounting transaction.
+            # A missing trace must not change request dispatch or ledger state.
+            try:
+                record_model_request_trace(
+                    self.receipts_dir,
+                    identity=base,
+                    payload=payload,
+                    submitted_at_utc=submitted["submitted_at_utc"],
+                )
+            except Exception:
+                # The trace is explicitly non-authoritative. Even an unexpected
+                # observability failure cannot strand a paid reservation.
+                pass
             try:
                 response = client.post(self.config["model"], "generateContent", payload)
             except urllib.error.HTTPError as error:
