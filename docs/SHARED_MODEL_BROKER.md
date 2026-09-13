@@ -86,6 +86,12 @@ Each transitioned request binds its ledger record and immutable receipts to the 
 
 Later restarts require this binding before they accept a historical transition.
 
+Before each request, the broker validates the authorized gate and review bindings again.
+
+It validates the gate hash, commit, review path, review hash, and review file content.
+
+It does not compare the one-time ledger snapshot after the first transitioned request.
+
 A replaced event or an additional matching event causes an integrity halt.
 
 The status record reports the initial hash, the active hash, and the transition event hash.

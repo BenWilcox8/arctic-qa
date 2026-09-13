@@ -1188,6 +1188,108 @@ def test_transition_review_is_rechecked_before_first_submission(tmp_path: Path):
     assert active_transport.methods == []
 
 
+def test_transition_gate_binding_is_rechecked_after_first_submission(tmp_path: Path):
+    values = fixture(tmp_path, transport=Transport())
+    assert execute(values["broker"])["state"] == "completed"
+    active_policy = policy_with_paper_limit(tmp_path)
+    transition = reviewed_policy_transition(tmp_path, values, active_policy)
+    active_transport = Transport()
+    transitioned = SharedGeminiBroker(
+        policy_file=active_policy,
+        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=active_transport,
+        config_transition_file=transition,
+    )
+    assert execute(transitioned, paper="p2")["state"] == "completed"
+    active_transport.methods.clear()
+    gate = json.loads(values["gate"].read_text(encoding="utf-8"))
+    gate["integrated_code_commit"] = "different-commit"
+    write_json(values["gate"], gate)
+
+    with pytest.raises(ValueError, match="configuration transition review changed"):
+        execute(transitioned, paper="p3")
+
+    assert active_transport.methods == []
+
+
+def test_transition_review_file_is_rechecked_after_first_submission(tmp_path: Path):
+    values = fixture(tmp_path, transport=Transport())
+    assert execute(values["broker"])["state"] == "completed"
+    active_policy = policy_with_paper_limit(tmp_path)
+    transition = reviewed_policy_transition(tmp_path, values, active_policy)
+    active_transport = Transport()
+    transitioned = SharedGeminiBroker(
+        policy_file=active_policy,
+        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=active_transport,
+        config_transition_file=transition,
+    )
+    assert execute(transitioned, paper="p2")["state"] == "completed"
+    active_transport.methods.clear()
+    gate = json.loads(values["gate"].read_text(encoding="utf-8"))
+    Path(gate["review_record"]).write_text(
+        "The review record changed after the first request.\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="configuration transition review is invalid"):
+        execute(transitioned, paper="p3")
+
+    assert active_transport.methods == []
+
+
+def test_transition_restart_with_unchanged_review_allows_downstream(tmp_path: Path):
+    values = fixture(tmp_path, transport=Transport())
+    assert execute(values["broker"])["state"] == "completed"
+    active_policy = policy_with_paper_limit(tmp_path)
+    transition = reviewed_policy_transition(tmp_path, values, active_policy)
+    transitioned = SharedGeminiBroker(
+        policy_file=active_policy,
+        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=Transport(),
+        config_transition_file=transition,
+    )
+    assert execute(transitioned, paper="p2")["state"] == "completed"
+    restarted_transport = Transport()
+    restarted = SharedGeminiBroker(
+        policy_file=active_policy,
+        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=restarted_transport,
+    )
+
+    downstream = execute(
+        restarted,
+        paper="p2",
+        stage="question_generation",
+        body={
+            **payload(),
+            "contents": [{"role": "user", "parts": [{"text": "Downstream payload."}]}],
+        },
+    )
+
+    assert downstream["state"] == "completed"
+    assert restarted_transport.methods == ["countTokens", "generateContent"]
+
+
 def test_transition_does_not_apply_to_an_unsettled_ledger(tmp_path: Path):
     values = fixture(tmp_path, transport=Transport("generate"))
     assert execute(values["broker"])["state"] == "ambiguous_charge"

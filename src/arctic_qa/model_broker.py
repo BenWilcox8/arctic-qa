@@ -426,6 +426,27 @@ class SharedGeminiBroker:
             raise ValueError("the applied price configuration transition changed")
         return event
 
+    def _validate_transition_durable_bindings(
+        self, authorization: dict[str, Any]
+    ) -> None:
+        gate_phase = _read(self.execution_gate_file).get("allowed_phase")
+        if gate_phase not in PHASES:
+            raise ValueError("the configuration transition gate phase is invalid")
+        gate = _validate_gate(self.execution_gate_file, gate_phase)
+        if (
+            authorization["execution_gate_sha256"]
+            != sha256_file(self.execution_gate_file)
+            or authorization["integrated_code_commit"] != gate["integrated_code_commit"]
+            or authorization["review_record"] != gate["review_record"]
+            or authorization["review_record_sha256"] != gate.get("review_record_sha256")
+        ):
+            raise ValueError("the configuration transition review changed")
+        review_path = Path(authorization["review_record"]).resolve()
+        if not review_path.is_file() or authorization[
+            "review_record_sha256"
+        ] != sha256_file(review_path):
+            raise ValueError("the configuration transition review is invalid")
+
     def _validate_transition_authorization(
         self,
         authorization: dict[str, Any],
@@ -516,23 +537,7 @@ class SharedGeminiBroker:
             self._identity_file
         ):
             raise ValueError("the configuration transition identity hash changed")
-        gate_phase = _read(self.execution_gate_file).get("allowed_phase")
-        if gate_phase not in PHASES:
-            raise ValueError("the configuration transition gate phase is invalid")
-        gate = _validate_gate(self.execution_gate_file, gate_phase)
-        if (
-            authorization["execution_gate_sha256"]
-            != sha256_file(self.execution_gate_file)
-            or authorization["integrated_code_commit"] != gate["integrated_code_commit"]
-            or authorization["review_record"] != gate["review_record"]
-            or authorization["review_record_sha256"] != gate.get("review_record_sha256")
-        ):
-            raise ValueError("the configuration transition review changed")
-        review_path = Path(authorization["review_record"]).resolve()
-        if not review_path.is_file() or authorization[
-            "review_record_sha256"
-        ] != sha256_file(review_path):
-            raise ValueError("the configuration transition review is invalid")
+        self._validate_transition_durable_bindings(authorization)
         if not str(authorization["reason"]).strip():
             raise ValueError("the configuration transition reason is absent")
         try:
@@ -598,7 +603,9 @@ class SharedGeminiBroker:
                 raise ValueError(
                     "a paid-call request lacks its authorized config transition"
                 )
-            if not active_requests:
+            if active_requests:
+                self._validate_transition_durable_bindings(authorization)
+            else:
                 self._validate_transition_authorization(
                     authorization, identity=identity, ledger=ledger
                 )
@@ -816,7 +823,9 @@ class SharedGeminiBroker:
             )
             == active_pair
         ]
-        if not active_requests:
+        if active_requests:
+            self._validate_transition_durable_bindings(authorization)
+        else:
             self._validate_transition_authorization(
                 authorization, identity=identity, ledger=ledger
             )
