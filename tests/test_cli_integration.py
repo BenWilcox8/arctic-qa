@@ -1752,6 +1752,23 @@ def test_validation_accepts_complete_option_receipt_response(tmp_path: Path) -> 
     assert all(row["accepted"] is True for row in result["distractors"])
 
 
+def test_three_independently_model_verified_distractors_are_mcq_eligible(
+    tmp_path: Path,
+) -> None:
+    smoke(tmp_path, "model-verified-options-run")
+    item = candidate(tmp_path)
+    for distractor in item["distractors"]:
+        distractor["deterministic"] = {"kind": "model_verified_only"}
+    path = write_candidate(tmp_path, item, "model-verified-options.json")
+
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+
+    assert result["final_label"] == "machine_accepted_unverified"
+    assert result["labels"]["mcq_eligible"] is True
+    assert result["labels"]["model_verified"] is True
+    assert result["labels"]["deterministic_contradiction"] is False
+
+
 @pytest.mark.parametrize(
     ("field", "tampered_value"),
     [

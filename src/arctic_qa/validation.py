@@ -357,8 +357,6 @@ def validate_candidate(
     )
     if len(accepted) < 3:
         reasons.append("insufficient_verified_distractors")
-    elif strict_release and not all(result["deterministic"] for result in accepted[:3]):
-        reasons.append("model_only_distractor_verification")
     else:
         labels["mcq_eligible"] = True
     labels["machine_accepted_unverified"] = True
