@@ -11,15 +11,17 @@ REPO = Path(__file__).resolve().parents[1]
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
 
 def test_module_reports_fixture_coverage_spend_and_accuracy_limit(
     tmp_path: Path,
 ) -> None:
-    short_answers = tmp_path / "short_answer.jsonl"
-    mcqs = tmp_path / "mcq.jsonl"
-    rejections = tmp_path / "rejections.jsonl"
+    export_dir = tmp_path / "exports" / "fixture-export"
+    short_answers = export_dir / "short_answer.jsonl"
+    mcqs = export_dir / "mcq.jsonl"
+    rejections = export_dir / "rejections.jsonl"
     _write_jsonl(
         short_answers,
         [
@@ -73,9 +75,9 @@ def test_module_reports_fixture_coverage_spend_and_accuracy_limit(
                 "run_id": "fixture-run",
                 "test_only": True,
                 "files": {
-                    "short_answer": short_answers.name,
-                    "mcq": mcqs.name,
-                    "rejections": rejections.name,
+                    "short_answer": "exports/fixture-export/short_answer.jsonl",
+                    "mcq": "exports/fixture-export/mcq.jsonl",
+                    "rejections": "exports/fixture-export/rejections.jsonl",
                 },
             }
         ),
@@ -100,6 +102,8 @@ def test_module_reports_fixture_coverage_spend_and_accuracy_limit(
             "arctic_qa.quality_summary",
             "--export-manifest",
             str(manifest),
+            "--source-root",
+            str(tmp_path),
             "--ledger",
             str(ledger),
             "--status",

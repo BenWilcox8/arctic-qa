@@ -8,6 +8,7 @@ Run the module with two explicit output paths.
 ```sh
 PYTHONPATH=src python -m arctic_qa.quality_summary \
   --export-manifest /path/to/exports/EXPORT_ID/manifest.json \
+  --source-root /path/to/arctic-qa \
   --ledger /path/to/shared-paid-call-ledger.json \
   --status /path/to/shared-paid-call-ledger.status.json \
   --json-out /path/to/quality-summary.json \
@@ -15,6 +16,8 @@ PYTHONPATH=src python -m arctic_qa.quality_summary \
 ```
 
 The `--ledger` and `--status` inputs are optional.
+The `--source-root` value is required for relative export file paths.
+Set it to the Arctic QA data namespace that contains the `exports` directory.
 Use `--ledger` for known spend, reservations, and ambiguous charges.
 Use `--status` for provider configuration and a status budget.
 

@@ -35,9 +35,7 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _export_file(
-    manifest: dict[str, Any], manifest_path: Path, name: str
-) -> Path | None:
+def _export_file(manifest: dict[str, Any], source_root: Path, name: str) -> Path | None:
     files = manifest.get("files")
     if not isinstance(files, dict) or name not in files:
         return None
@@ -45,7 +43,7 @@ def _export_file(
     if not isinstance(value, str) or not value:
         raise ValueError(f"the export manifest file entry for {name} is invalid")
     path = Path(value)
-    return path if path.is_absolute() else manifest_path.parent / path
+    return path if path.is_absolute() else source_root / path
 
 
 def _rate(passed: int, total: int) -> dict[str, Any]:
@@ -197,6 +195,7 @@ def _configuration(
 def build_summary(
     export_manifest: Path,
     *,
+    source_root: Path,
     ledger_file: Path | None = None,
     status_file: Path | None = None,
 ) -> dict[str, Any]:
@@ -204,22 +203,13 @@ def build_summary(
     manifest = _read_json(export_manifest)
     ledger = _read_json(ledger_file) if ledger_file else None
     status = _read_json(status_file) if status_file else None
-    short_answers = (
-        _read_jsonl(_export_file(manifest, export_manifest, "short_answer"))
-        if _export_file(manifest, export_manifest, "short_answer")
-        else []
-    )
-    incomplete = (
-        _read_jsonl(_export_file(manifest, export_manifest, "incomplete_short_answer"))
-        if _export_file(manifest, export_manifest, "incomplete_short_answer")
-        else []
-    )
-    mcqs = (
-        _read_jsonl(_export_file(manifest, export_manifest, "mcq"))
-        if _export_file(manifest, export_manifest, "mcq")
-        else []
-    )
-    rejection_file = _export_file(manifest, export_manifest, "rejections")
+    short_answer_file = _export_file(manifest, source_root, "short_answer")
+    incomplete_file = _export_file(manifest, source_root, "incomplete_short_answer")
+    mcq_file = _export_file(manifest, source_root, "mcq")
+    rejection_file = _export_file(manifest, source_root, "rejections")
+    short_answers = _read_jsonl(short_answer_file) if short_answer_file else []
+    incomplete = _read_jsonl(incomplete_file) if incomplete_file else []
+    mcqs = _read_jsonl(mcq_file) if mcq_file else []
     rejections = _read_jsonl(rejection_file) if rejection_file else []
 
     base_items = [*short_answers, *incomplete]
@@ -269,6 +259,7 @@ def build_summary(
         "report_schema": "arctic-qa-quality-summary-v1",
         "input": {
             "export_manifest": str(export_manifest),
+            "source_root": str(source_root),
             "ledger": str(ledger_file) if ledger_file else None,
             "status": str(status_file) if status_file else None,
             "evidence_mode": "fixture" if fixture else "selected_export",
@@ -408,13 +399,17 @@ def main(argv: list[str] | None = None) -> int:
         description="Write an offline Arctic QA quality summary."
     )
     parser.add_argument("--export-manifest", type=Path, required=True)
+    parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--ledger", type=Path)
     parser.add_argument("--status", type=Path)
     parser.add_argument("--json-out", type=Path, required=True)
     parser.add_argument("--markdown-out", type=Path, required=True)
     args = parser.parse_args(argv)
     summary = build_summary(
-        args.export_manifest, ledger_file=args.ledger, status_file=args.status
+        args.export_manifest,
+        source_root=args.source_root,
+        ledger_file=args.ledger,
+        status_file=args.status,
     )
     args.json_out.write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
