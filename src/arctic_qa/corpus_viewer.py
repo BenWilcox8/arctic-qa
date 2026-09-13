@@ -2378,7 +2378,7 @@ def serve_corpus_viewer(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Serve the read-only corpus-stage monitor."
+        description="Serve the read-only corpus and pipeline monitor."
     )
     parser.add_argument("--corpus-root", type=Path, required=True)
     parser.add_argument("--run-id", required=True)

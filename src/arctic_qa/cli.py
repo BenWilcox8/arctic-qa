@@ -68,7 +68,7 @@ def parser() -> argparse.ArgumentParser:
     )
 
     viewer = commands.add_parser(
-        "corpus-view", help="Serve the read-only corpus-stage monitor."
+        "corpus-view", help="Serve the read-only corpus and pipeline monitor."
     )
     viewer.add_argument("--corpus-root", type=Path, required=True)
     viewer.add_argument("--run-id", required=True)
