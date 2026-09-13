@@ -14,7 +14,7 @@ REPO = Path(__file__).resolve().parents[1]
 FIXTURES = REPO / "fixtures"
 sys.path.insert(0, str(REPO / "src"))
 
-from arctic_qa.util import canonical_json, stable_id  # noqa: E402
+from arctic_qa.util import canonical_json, sha256_bytes, stable_id  # noqa: E402
 
 
 def cli(
@@ -152,6 +152,26 @@ def source_locator_for_quote(root: Path, source_id: str, quote: str) -> dict:
                 "end_offset": start + len(quote),
             }
     raise AssertionError(f"quote not found in extracted chunks: {quote}")
+
+
+def bind_source_span(record: dict, quote: str, locator: dict) -> None:
+    contract = "finding-evidence-span-v1"
+    text_sha256 = sha256_bytes(quote.encode("utf-8"))
+    record.update(
+        {
+            "evidence_quote": quote,
+            "locator": locator,
+            "evidence_text_sha256": text_sha256,
+            "span_contract_version": contract,
+            "source_span_id": stable_id(
+                contract,
+                locator["chunk_id"],
+                locator["start_offset"],
+                locator["end_offset"],
+                text_sha256,
+            ),
+        }
+    )
 
 
 def sync_option_receipt(root: Path, item: dict, index: int) -> None:
@@ -407,7 +427,7 @@ def test_geography_requires_valid_source_bound_complete_site_evidence(
 @pytest.mark.parametrize(
     ("mutation", "reason", "label"),
     [
-        ("wrong_quote", "answer_evidence_not_located", "rejected"),
+        ("wrong_quote", "answer_evidence_span_invalid", "rejected"),
         ("qualifier_loss", "scope_qualifier_missing", "rejected"),
         ("ambiguous", "answer_ambiguous", "unresolved"),
         ("causal_overclaim", "causal_overclaim", "rejected"),
@@ -613,12 +633,11 @@ def test_source_bound_typed_distractor_controls(
         {
             "text": answer_text,
             "variants": [],
-            "evidence_quote": quote,
-            "locator": locator,
             "required_question_phrases": [],
             "deterministic_rule": answer_rule,
         }
     )
+    bind_source_span(item["answer"], quote, locator)
     item["answer"].pop("numeric_rule", None)
     item["question"] = "What source-bounded value was reported?"
     item["reconstruction"] = {
@@ -646,15 +665,13 @@ def test_source_bound_typed_distractor_controls(
             predicate["candidate_relation"] = "decreased"
         else:
             predicate["candidate_value"] = option
-        item["distractors"].append(
-            {
-                "text": option,
-                "type": kind,
-                "evidence_quote": quote,
-                "locator": locator,
-                "deterministic": predicate,
-            }
-        )
+        distractor = {
+            "text": option,
+            "type": kind,
+            "deterministic": predicate,
+        }
+        bind_source_span(distractor, quote, locator)
+        item["distractors"].append(distractor)
     bind_option_verdicts(item, quote, locator, receipt_root=tmp_path)
     path = write_candidate(tmp_path, item, f"valid-{kind}.json")
     result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
@@ -1480,6 +1497,89 @@ def test_validation_accepts_complete_option_receipt_response(tmp_path: Path) -> 
     assert result["final_label"] == "machine_accepted_unverified"
     assert result["labels"]["mcq_eligible"] is True
     assert all(row["accepted"] is True for row in result["distractors"])
+
+
+@pytest.mark.parametrize(
+    ("field", "tampered_value"),
+    [
+        ("source_span_id", "finding-evidence-span-v1-forged"),
+        ("evidence_text_sha256", "0" * 64),
+        ("span_contract_version", "finding-evidence-span-forged"),
+        ("evidence_quote", "A changed quote."),
+        ("locator", {"chunk_id": "forged", "start_offset": 0, "end_offset": 1}),
+    ],
+)
+def test_stored_answer_span_tampering_blocks_validation_and_export(
+    tmp_path: Path, field: str, tampered_value: object
+) -> None:
+    receipt = smoke(tmp_path, f"answer-span-{field}")
+    item = candidate(tmp_path)
+    control_path = write_candidate(tmp_path, item, f"answer-control-{field}.json")
+    control = json.loads(
+        cli(tmp_path, "validate", "--candidate", str(control_path)).stdout
+    )
+    assert control["final_label"] == "machine_accepted_unverified"
+
+    item["answer"][field] = tampered_value
+    with database(tmp_path) as connection:
+        connection.execute(
+            "UPDATE candidates SET candidate_json=? WHERE item_id=?",
+            (canonical_json(item), receipt["item_id"]),
+        )
+
+    result = json.loads(
+        cli(tmp_path, "validate", "--item-id", receipt["item_id"]).stdout
+    )
+    assert result["final_label"] == "rejected"
+    assert "answer_evidence_span_invalid" in result["reasons"]
+    exported = json.loads(
+        cli(tmp_path, "export", "--run-id", f"answer-span-{field}").stdout
+    )
+    assert exported["short_answer_count"] == 0
+    assert exported["mcq_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("field", "tampered_value"),
+    [
+        ("source_span_id", "finding-evidence-span-v1-forged"),
+        ("evidence_text_sha256", "0" * 64),
+        ("span_contract_version", "finding-evidence-span-forged"),
+        ("evidence_quote", "A changed quote."),
+        ("locator", {"chunk_id": "forged", "start_offset": 0, "end_offset": 1}),
+    ],
+)
+def test_stored_distractor_span_tampering_excludes_that_option_from_export(
+    tmp_path: Path, field: str, tampered_value: object
+) -> None:
+    run_id = f"distractor-span-{field}"
+    receipt = smoke(tmp_path, run_id)
+    item = candidate(tmp_path)
+    control_path = write_candidate(tmp_path, item, f"distractor-control-{field}.json")
+    control = json.loads(
+        cli(tmp_path, "validate", "--candidate", str(control_path)).stdout
+    )
+    assert control["labels"]["mcq_eligible"] is True
+
+    tampered_text = item["distractors"][0]["text"]
+    item["distractors"][0][field] = tampered_value
+    with database(tmp_path) as connection:
+        connection.execute(
+            "UPDATE candidates SET candidate_json=? WHERE item_id=?",
+            (canonical_json(item), receipt["item_id"]),
+        )
+
+    result = json.loads(
+        cli(tmp_path, "validate", "--item-id", receipt["item_id"]).stdout
+    )
+    tampered = next(
+        row for row in result["distractors"] if row["text"] == tampered_text
+    )
+    assert tampered["accepted"] is False
+    assert "distractor_proposal_evidence_span_invalid" in tampered["reasons"]
+    exported = json.loads(cli(tmp_path, "export", "--run-id", run_id).stdout)
+    assert exported["short_answer_count"] == 1
+    assert exported["mcq_count"] == 1
 
 
 def test_external_candidate_validation_cannot_change_stored_candidate_status(

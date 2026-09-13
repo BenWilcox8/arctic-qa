@@ -1744,6 +1744,80 @@ def test_streaming_records_invalid_finding_and_advances_to_next_paper(
     ]
 
 
+@pytest.mark.parametrize(
+    ("role", "event_index", "reason_code"),
+    [
+        ("reconstructor", 0, "reconstruction_evidence_span_not_found"),
+        ("answer_verifier", 1, "answer_verifier_evidence_span_not_found"),
+        ("distractor_writer", 2, "distractor_evidence_span_not_found"),
+        ("option_verifier", 2, "option_verifier_evidence_span_not_found"),
+    ],
+)
+def test_streaming_rejects_invalid_downstream_source_span_selection(
+    tmp_path: Path, role: str, event_index: int, reason_code: str
+) -> None:
+    access, eligibility = streaming_fixture(tmp_path)
+    author_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-author.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    verifier_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-verifier.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    events = author_events if role == "distractor_writer" else verifier_events
+    response = events[event_index]["response"]
+    if role == "distractor_writer":
+        response["distractors"][0]["source_span_id"] = "unknown-source-span"
+    else:
+        response["source_span_id"] = "unknown-source-span"
+    author_script = tmp_path / f"invalid-{role}-author.jsonl"
+    verifier_script = tmp_path / f"invalid-{role}-verifier.jsonl"
+    author_script.write_text(
+        "\n".join(json.dumps(event) for event in author_events) + "\n",
+        encoding="utf-8",
+    )
+    verifier_script.write_text(
+        "\n".join(json.dumps(event) for event in verifier_events) + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        tmp_path,
+        "stream",
+        "--run-id",
+        f"stream-invalid-{role}",
+        "--access-run-dir",
+        str(access),
+        "--eligibility-run-dir",
+        str(eligibility),
+        "--author-script",
+        str(author_script),
+        "--verifier-script",
+        str(verifier_script),
+    )
+
+    assert result["counts"]["accepted_base_questions"] == 0
+    assert result["counts"]["generation_rejected"] == 1
+    assert result["paper_results"] == [
+        {
+            "candidate_key": "test-only:streaming-paper",
+            "disposition": "generation_rejected",
+            "reason_codes": [reason_code],
+            "source_id": stable_id("src", "test-only:streaming-paper"),
+        }
+    ]
+    rejection_path = tmp_path / "arctic-qa" / result["export"]["files"][
+        "rejections"
+    ]
+    rejections = [json.loads(line) for line in rejection_path.read_text().splitlines()]
+    assert [row["reason_code"] for row in rejections] == [reason_code]
+
+
 def test_streaming_cli_reports_the_eligibility_rejection_reason(
     tmp_path: Path,
 ) -> None:

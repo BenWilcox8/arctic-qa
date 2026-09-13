@@ -19,6 +19,7 @@ UNIT_FACTORS: dict[tuple[str, str], Decimal] = {
     ("kg", "g"): Decimal("1000"),
     ("g", "kg"): Decimal("0.001"),
 }
+SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v1"
 
 DIRECTION_PAIRS = {
     ("increased", "decreased"),
@@ -151,8 +152,8 @@ def validate_candidate(
     except Exception:
         reasons.append("source_chunks_missing")
         return _finish(db, candidate, labels, reasons, [], "rejected")
-    if not evidence_resolves(candidate["answer"], chunks):
-        reasons.append("answer_evidence_not_located")
+    if not source_span_evidence_resolves(candidate["answer"], chunks):
+        reasons.append("answer_evidence_span_invalid")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     if candidate["answer"].get("numeric_rule") and not numeric_rule_is_source_bound(
         candidate["answer"]
@@ -305,6 +306,38 @@ def evidence_resolves(
     return 0 <= start < end <= len(chunk["text"]) and chunk["text"][start:end] == quote
 
 
+def source_span_evidence_resolves(
+    record: dict[str, Any], chunks: dict[str, dict[str, Any]]
+) -> bool:
+    if not evidence_resolves(record, chunks):
+        return False
+    quote = record.get("evidence_quote")
+    locator = record.get("locator")
+    text_sha256 = record.get("evidence_text_sha256")
+    contract = record.get("span_contract_version")
+    span_id = record.get("source_span_id")
+    if not isinstance(quote, str) or not isinstance(locator, dict):
+        return False
+    if text_sha256 != sha256_bytes(quote.encode("utf-8")):
+        return False
+    if contract != SOURCE_SPAN_CONTRACT_VERSION:
+        return False
+    try:
+        chunk_id = locator["chunk_id"]
+        start = locator["start_offset"]
+        end = locator["end_offset"]
+    except KeyError:
+        return False
+    if (
+        not isinstance(chunk_id, str)
+        or not chunk_id
+        or type(start) is not int
+        or type(end) is not int
+    ):
+        return False
+    return span_id == stable_id(contract, chunk_id, start, end, text_sha256)
+
+
 def reconstruction_matches(
     answer: dict[str, Any], reconstruction: dict[str, Any]
 ) -> bool:
@@ -397,6 +430,9 @@ def validate_distractor(
         if numeric_display_issue:
             result["reasons"].append(numeric_display_issue)
             return result
+    if not source_span_evidence_resolves(distractor, chunks):
+        result["reasons"].append("distractor_proposal_evidence_span_invalid")
+        return result
     if (
         numeric
         and answer.get("numeric_rule")
@@ -632,7 +668,7 @@ def _response_matches_resolved_record(response: Any, record: Any) -> bool:
         return False
     if text_sha256 != sha256_bytes(quote.encode("utf-8")):
         return False
-    if contract != "finding-evidence-span-v1":
+    if contract != SOURCE_SPAN_CONTRACT_VERSION:
         return False
     if not isinstance(locator, dict) or set(locator) != {
         "chunk_id",
