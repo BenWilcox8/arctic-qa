@@ -1375,6 +1375,7 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
         "distractor_generation": 1,
         "option_verification": 4,
     }
+
     assert (
         database.one("SELECT * FROM budgets WHERE run_id='streaming-commission'")
         is None
@@ -1433,6 +1434,125 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
         sum(job.get("execution_authority") == "shared_gemini_broker" for job in jobs)
         == 1
     )
+
+
+def test_streaming_live_gate_binds_reviewed_access_input_before_transport(
+    tmp_path: Path,
+) -> None:
+    reviewed_access, reviewed_eligibility = streaming_fixture(tmp_path / "reviewed")
+    substituted_access, _ = streaming_fixture(tmp_path / "substituted")
+    manifest_path = reviewed_access / "run-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(
+        {
+            "schema": "article-access-manifest-v1",
+            "frozen_manifest_sha256": "test-only-frozen-manifest",
+            "remaining_order_sha256": "test-only-frozen-order",
+        }
+    )
+    write_json(manifest_path, manifest)
+    receipt_path = reviewed_access / "run-receipt.json"
+    write_json(
+        receipt_path,
+        {
+            "schema": "article-access-run-receipt-v1",
+            "state": "completed",
+            "run_id": manifest["run_id"],
+            "run_manifest_sha256": sha256_file(manifest_path),
+            "remaining_order_sha256": manifest["remaining_order_sha256"],
+            "counts": {"target": manifest["target_total"]},
+        },
+    )
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    paths = DataPaths.open(run_root, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+    transport = ScriptedBrokerTransport()
+    broker = shared_broker(run_root, transport)
+    eligibility_inputs = broker_eligibility_inputs(run_root)
+    gate_path = run_root / "broker-gate.json"
+    gate = json.loads(gate_path.read_text(encoding="utf-8"))
+    gate.update(
+        {
+            "continuation_input_binding_version": "stream-input-binding-v1",
+            "continuation_artifact": str(reviewed_access.resolve()),
+            "continuation_access_run_id": manifest["run_id"],
+            "continuation_run_manifest_sha256": sha256_file(manifest_path),
+            "continuation_run_receipt_sha256": sha256_file(receipt_path),
+            "continuation_frozen_manifest_sha256": manifest["frozen_manifest_sha256"],
+            "continuation_order_sha256": manifest["remaining_order_sha256"],
+            "continuation_family_count": manifest["target_total"],
+            "authorized_new_run_id": "input-bound-live-test",
+            "authorized_campaign_id": "input-bound-live-test",
+            "eligibility_prompt_sha256": sha256_file(
+                eligibility_inputs["eligibility_prompt_file"]
+            ),
+            "eligibility_schema_sha256": sha256_file(
+                eligibility_inputs["eligibility_schema_file"]
+            ),
+            "eligibility_policy_sha256": sha256_file(
+                eligibility_inputs["eligibility_policy_file"]
+            ),
+        }
+    )
+    write_json(gate_path, gate)
+    provider = BrokerProvider(
+        broker=broker,
+        phase="live_test",
+        invocation_run_id="input-bound-live-test",
+    )
+    arguments = {
+        "db": database,
+        "namespace": paths.namespace,
+        "run_id": "input-bound-live-test",
+        "campaign_id": "input-bound-live-test",
+        "eligibility_run_dir": reviewed_eligibility,
+        "author": provider,
+        "verifier": provider,
+        "max_papers": 1,
+        **eligibility_inputs,
+    }
+
+    with pytest.raises(ValueError, match="reviewed continuation input"):
+        run_stream(**arguments, access_run_dir=substituted_access)
+    assert transport.methods == []
+    substituted_prompt = run_root / "substituted-eligibility-prompt.txt"
+    substituted_prompt.write_text(
+        eligibility_inputs["eligibility_prompt_file"].read_text(encoding="utf-8")
+        + "\nsubstituted\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="reviewed continuation eligibility inputs"):
+        run_stream(
+            **{
+                **arguments,
+                "access_run_dir": reviewed_access,
+                "eligibility_prompt_file": substituted_prompt,
+            }
+        )
+    with pytest.raises(ValueError, match="reviewed continuation run identity"):
+        run_stream(
+            **{
+                **arguments,
+                "access_run_dir": reviewed_access,
+                "run_id": "substituted-run",
+            }
+        )
+    with pytest.raises(ValueError, match="reviewed continuation run identity"):
+        run_stream(
+            **{
+                **arguments,
+                "access_run_dir": reviewed_access,
+                "campaign_id": "substituted-campaign",
+            }
+        )
+    assert transport.methods == []
+
+    result = run_stream(**arguments, access_run_dir=reviewed_access)
+
+    assert result["counts"]["accepted_base_questions"] == 1
+    assert transport.methods.count("generateContent") == 10
 
 
 def test_streaming_resumes_reconciled_eligibility_after_process_restart(

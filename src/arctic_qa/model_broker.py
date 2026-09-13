@@ -61,6 +61,21 @@ POLICY_TRANSITION_CHANGES = (
     },
 )
 ALLOWED_LIVE_TEST_LIMITS = {(20, 100), (40, 100), (41, 101), (None, None)}
+STREAM_INPUT_BINDING_VERSION = "stream-input-binding-v1"
+STREAM_INPUT_GATE_FIELDS = {
+    "continuation_artifact",
+    "continuation_access_run_id",
+    "continuation_run_manifest_sha256",
+    "continuation_run_receipt_sha256",
+    "continuation_frozen_manifest_sha256",
+    "continuation_order_sha256",
+    "continuation_family_count",
+    "authorized_new_run_id",
+    "authorized_campaign_id",
+    "eligibility_prompt_sha256",
+    "eligibility_schema_sha256",
+    "eligibility_policy_sha256",
+}
 USAGE_RECONCILIATION_FIELDS = {
     "schema",
     "request_key",
@@ -304,6 +319,7 @@ class SharedGeminiBroker:
         self._config_transition_event_path: Path | None = None
         self._authorized_live_test_ceiling_usd: Decimal | None = None
         self._status_observer: Callable[[Path], None] | None = None
+        self._stream_input_binding: dict[str, Any] | None = None
         self._initialize()
 
     @property
@@ -447,6 +463,8 @@ class SharedGeminiBroker:
         if gate_phase not in PHASES:
             raise ValueError("the configuration transition gate phase is invalid")
         gate = _validate_gate(self.execution_gate_file, gate_phase)
+        if authorization.get("changed_policy_fields") == POLICY_TRANSITION_CHANGES[-1]:
+            self._validate_stream_input_gate(gate)
         if (
             authorization["execution_gate_sha256"]
             != sha256_file(self.execution_gate_file)
@@ -1552,6 +1570,117 @@ class SharedGeminiBroker:
         if observer is not None:
             observer(self._status_file)
 
+    @staticmethod
+    def _validate_stream_input_gate(gate: dict[str, Any]) -> None:
+        version = gate.get("continuation_input_binding_version")
+        if version != STREAM_INPUT_BINDING_VERSION:
+            raise ValueError("the reviewed continuation input version changed")
+        if any(field not in gate for field in STREAM_INPUT_GATE_FIELDS):
+            raise ValueError("the reviewed continuation input binding is incomplete")
+
+    def _validate_stream_input_binding(
+        self,
+        gate: dict[str, Any],
+        binding: dict[str, Any] | None,
+        *,
+        request_run_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        version = gate.get("continuation_input_binding_version")
+        if version is None:
+            return None
+        self._validate_stream_input_gate(gate)
+        if binding is None:
+            raise ValueError("the reviewed continuation input is not bound")
+        expected_dir = Path(str(gate["continuation_artifact"])).resolve()
+        access_run_dir = binding["access_run_dir"]
+        if access_run_dir.resolve() != expected_dir:
+            raise ValueError("the reviewed continuation input directory changed")
+        if (
+            binding["run_id"] != gate["authorized_new_run_id"]
+            or binding["campaign_id"] != gate["authorized_campaign_id"]
+            or (
+                request_run_id is not None
+                and request_run_id != gate["authorized_new_run_id"]
+            )
+        ):
+            raise ValueError("the reviewed continuation run identity changed")
+        for field, gate_field in (
+            ("eligibility_prompt_file", "eligibility_prompt_sha256"),
+            ("eligibility_schema_file", "eligibility_schema_sha256"),
+            ("eligibility_policy_file", "eligibility_policy_sha256"),
+        ):
+            path = binding[field]
+            if not path.is_file() or sha256_file(path) != gate[gate_field]:
+                raise ValueError("the reviewed continuation eligibility inputs changed")
+        manifest_path = expected_dir / "run-manifest.json"
+        receipt_path = expected_dir / "run-receipt.json"
+        if (
+            not manifest_path.is_file()
+            or not receipt_path.is_file()
+            or sha256_file(manifest_path) != gate["continuation_run_manifest_sha256"]
+            or sha256_file(receipt_path) != gate["continuation_run_receipt_sha256"]
+        ):
+            raise ValueError("the reviewed continuation input receipts changed")
+        manifest = _read(manifest_path)
+        receipt = _read(receipt_path)
+        family_count = gate["continuation_family_count"]
+        selection = manifest.get("selection")
+        if (
+            isinstance(family_count, bool)
+            or not isinstance(family_count, int)
+            or family_count < 1
+            or manifest.get("schema") != "article-access-manifest-v1"
+            or manifest.get("run_id") != gate["continuation_access_run_id"]
+            or manifest.get("target_total") != family_count
+            or not isinstance(selection, list)
+            or len(selection) != family_count
+            or manifest.get("frozen_manifest_sha256")
+            != gate["continuation_frozen_manifest_sha256"]
+            or manifest.get("remaining_order_sha256")
+            != gate["continuation_order_sha256"]
+            or receipt.get("schema") != "article-access-run-receipt-v1"
+            or receipt.get("state") != "completed"
+            or receipt.get("run_id") != manifest.get("run_id")
+            or receipt.get("run_manifest_sha256") != sha256_file(manifest_path)
+            or receipt.get("frozen_manifest_sha256")
+            not in (None, gate["continuation_frozen_manifest_sha256"])
+            or receipt.get("remaining_order_sha256")
+            != gate["continuation_order_sha256"]
+            or (receipt.get("counts") or {}).get("target") != family_count
+        ):
+            raise ValueError("the reviewed continuation input identity changed")
+        return binding
+
+    def bind_stream_input(
+        self,
+        access_run_dir: Path,
+        *,
+        phase: str,
+        run_id: str,
+        campaign_id: str,
+        eligibility_prompt_file: Path,
+        eligibility_schema_file: Path,
+        eligibility_policy_file: Path,
+    ) -> None:
+        """Bind a reviewed live continuation input before provider use."""
+        gate = _validate_gate(self.execution_gate_file, phase)
+        binding = {
+            "access_run_dir": access_run_dir.resolve(),
+            "run_id": run_id,
+            "campaign_id": campaign_id,
+            "eligibility_prompt_file": eligibility_prompt_file.resolve(),
+            "eligibility_schema_file": eligibility_schema_file.resolve(),
+            "eligibility_policy_file": eligibility_policy_file.resolve(),
+        }
+        self._stream_input_binding = self._validate_stream_input_binding(gate, binding)
+
+    def stream_input_binding_required(self) -> bool:
+        """Report whether this gate uses the versioned input contract."""
+        return (
+            _read(self.execution_gate_file).get("continuation_input_binding_version")
+            is not None
+        )
+
     def _commit_ledger(self, ledger: dict[str, Any]) -> None:
         self._validate_ledger(ledger)
         atomic_json(self.ledger_file, ledger)
@@ -2321,7 +2450,10 @@ class SharedGeminiBroker:
             raise ValueError("another paid broker operation is active") from error
         try:
             self._recover_orphans()
-            _validate_gate(self.execution_gate_file, phase)
+            gate = _validate_gate(self.execution_gate_file, phase)
+            self._validate_stream_input_binding(
+                gate, self._stream_input_binding, request_run_id=run_id
+            )
             self._pace()
             client = self.transport or GeminiTransport(
                 self.config["api_base"], _load_key(self.credential_file)

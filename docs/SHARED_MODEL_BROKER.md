@@ -90,6 +90,14 @@ Before each request, the broker validates the authorized gate and review binding
 
 It validates the gate hash, commit, review path, review hash, and review file content.
 
+The budget-bounded null/null transition also requires a complete
+`stream-input-binding-v1` gate. That gate binds the reviewed access manifest,
+completion receipt, frozen order and identity, eligibility prompt, eligibility
+schema, eligibility policy, invocation run ID, and campaign ID. The stream
+checks the complete binding before work. The broker checks the bound files and
+run identity again before each paid request. A changed or substituted approved
+input stops before `countTokens`.
+
 It does not compare the one-time ledger snapshot after the first transitioned request.
 
 A replaced event or an additional matching event causes an integrity halt.

@@ -99,6 +99,16 @@ def run_stream(
             )
         ):
             raise ValueError("streaming live eligibility inputs are required")
+        if author_broker.stream_input_binding_required():
+            author_broker.bind_stream_input(
+                access_run_dir,
+                phase=str(getattr(author, "phase", "")),
+                run_id=run_id,
+                campaign_id=campaign_id,
+                eligibility_prompt_file=eligibility_prompt_file,
+                eligibility_schema_file=eligibility_schema_file,
+                eligibility_policy_file=eligibility_policy_file,
+            )
     run_manifest_file = _write_run_manifest(
         namespace,
         run_id=run_id,

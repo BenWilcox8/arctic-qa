@@ -314,6 +314,68 @@ def prepared_budget_bounded_transition(tmp_path: Path) -> dict:
         submission_limit=None,
         source_policy=values["proposed_policy"],
     )
+    access = tmp_path / "reviewed-stream-input"
+    manifest = access / "run-manifest.json"
+    receipt = access / "run-receipt.json"
+    write_json(
+        manifest,
+        {
+            "schema": "article-access-manifest-v1",
+            "run_id": "reviewed-stream-input",
+            "target_total": 1,
+            "selection": [{"candidate_key": "p2", "position": 1}],
+            "frozen_manifest_sha256": "test-only-frozen-manifest",
+            "remaining_order_sha256": "test-only-frozen-order",
+        },
+    )
+    write_json(
+        receipt,
+        {
+            "schema": "article-access-run-receipt-v1",
+            "state": "completed",
+            "run_id": "reviewed-stream-input",
+            "run_manifest_sha256": sha256_file(manifest),
+            "frozen_manifest_sha256": "test-only-frozen-manifest",
+            "remaining_order_sha256": "test-only-frozen-order",
+            "counts": {"target": 1},
+        },
+    )
+    eligibility_policy = tmp_path / "eligibility-policy.json"
+    write_json(eligibility_policy, {"protocol_id": "test-only"})
+    stream_binding = {
+        "access_run_dir": access,
+        "phase": "live_test",
+        "run_id": "run-1",
+        "campaign_id": "campaign-1",
+        "eligibility_prompt_file": ROOT / "config" / "gemini-eligibility-prompt-v4.txt",
+        "eligibility_schema_file": ROOT
+        / "schemas"
+        / "gemini-eligibility.v2.schema.json",
+        "eligibility_policy_file": eligibility_policy,
+    }
+    gate = json.loads(values["gate"].read_text(encoding="utf-8"))
+    gate.update(
+        {
+            "continuation_input_binding_version": "stream-input-binding-v1",
+            "continuation_artifact": str(access.resolve()),
+            "continuation_access_run_id": "reviewed-stream-input",
+            "continuation_run_manifest_sha256": sha256_file(manifest),
+            "continuation_run_receipt_sha256": sha256_file(receipt),
+            "continuation_frozen_manifest_sha256": "test-only-frozen-manifest",
+            "continuation_order_sha256": "test-only-frozen-order",
+            "continuation_family_count": 1,
+            "authorized_new_run_id": stream_binding["run_id"],
+            "authorized_campaign_id": stream_binding["campaign_id"],
+            "eligibility_prompt_sha256": sha256_file(
+                stream_binding["eligibility_prompt_file"]
+            ),
+            "eligibility_schema_sha256": sha256_file(
+                stream_binding["eligibility_schema_file"]
+            ),
+            "eligibility_policy_sha256": sha256_file(eligibility_policy),
+        }
+    )
+    write_json(values["gate"], gate)
     budget_transition = reviewed_policy_transition(
         tmp_path,
         values,
@@ -333,6 +395,7 @@ def prepared_budget_bounded_transition(tmp_path: Path) -> dict:
         "budget_policy": budget_policy,
         "budget_predecessor": predecessor,
         "budget_transition": budget_transition,
+        "stream_binding": stream_binding,
     }
 
 
@@ -369,6 +432,10 @@ def execute(
         request_key=key,
         payload=body,
     )
+
+
+def bind_budget_stream_input(broker: SharedGeminiBroker, values: dict) -> None:
+    broker.bind_stream_input(**values["stream_binding"])
 
 
 def test_disabled_gate_prevents_any_transport_call(tmp_path: Path):
@@ -1564,6 +1631,7 @@ def test_budget_bounded_transition_removes_live_count_caps_and_survives_restart(
         transport=transport,
         config_transition_file=values["budget_transition"],
     )
+    bind_budget_stream_input(broker, values)
 
     status = broker.status()
     assert status["limits"]["live_test_maximum_papers"] is None
@@ -1639,6 +1707,7 @@ def test_budget_bounded_transition_stops_at_cumulative_trial_amount(
         transport=transport,
         config_transition_file=values["budget_transition"],
     )
+    bind_budget_stream_input(broker, values)
     body = payload()
     body["generationConfig"]["maxOutputTokens"] = 8_192
     for position in range(2, 22):
@@ -1678,6 +1747,7 @@ def test_budget_bounded_transition_rechecks_gate_after_request(
         transport=transport,
         config_transition_file=values["budget_transition"],
     )
+    bind_budget_stream_input(broker, values)
     assert execute(broker, paper="p2")["state"] == "completed"
     transport.methods.clear()
     gate = json.loads(values["gate"].read_text(encoding="utf-8"))
@@ -1715,6 +1785,31 @@ def test_budget_bounded_transition_rejects_partial_limit_removal(
         )
 
     assert transport.methods == []
+
+
+def test_budget_bounded_transition_requires_complete_stream_input_gate(
+    tmp_path: Path,
+) -> None:
+    values = prepared_budget_bounded_transition(tmp_path)
+    gate = json.loads(values["gate"].read_text(encoding="utf-8"))
+    del gate["continuation_input_binding_version"]
+    write_json(values["gate"], gate)
+    authorization = json.loads(values["budget_transition"].read_text(encoding="utf-8"))
+    authorization["execution_gate_sha256"] = sha256_file(values["gate"])
+    write_json(values["budget_transition"], authorization)
+
+    with pytest.raises(ValueError, match="reviewed continuation input version"):
+        SharedGeminiBroker(
+            policy_file=values["budget_policy"],
+            price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+            execution_gate_file=values["gate"],
+            ledger_file=values["ledger"],
+            receipts_dir=tmp_path / "receipts",
+            credential_file=tmp_path / "private" / "gemini.key",
+            prior_construction_spend_usd=Decimal("0"),
+            transport=Transport(),
+            config_transition_file=values["budget_transition"],
+        )
 
 
 @pytest.mark.parametrize(

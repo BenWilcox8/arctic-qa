@@ -142,6 +142,14 @@ The command must still set `--max-papers` to the intended fixed-order input boun
 The immutable input manifest's `target_total` is the maximum accepted value.
 There is no separate fixed 500-paper CLI ceiling.
 
+A new live continuation gate can set `continuation_input_binding_version` to
+`stream-input-binding-v1`. The gate must then bind the access directory, access
+run ID, manifest and completion-receipt hashes, frozen-manifest hash, remaining
+order hash, and family count. The stream validates this binding before work.
+The broker validates it again before every paid request. A substituted or
+changed input stops before provider transport. Historical gates without this
+version marker keep their existing behavior.
+
 The checked-in default policy remains at 20 papers and 100 submissions.
 
 Each expanded policy requires an accepted transition for an existing ledger.
