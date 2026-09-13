@@ -106,11 +106,21 @@ PYTHONPATH=src python -m arctic_qa --json stream \
   --max-papers 20
 ```
 
-Use `--ledger-config-transition-file` only when an existing ledger has a different initial configuration hash.
+Use `--ledger-config-transition-file` only when an existing ledger has a reviewed configuration change.
 
 The transition must bind the current ledger, identity record, private gate, exact code revision, and independent review record.
 
 The broker applies the transition without resetting prior spend or submission counts.
+
+Schema v1 authorizes a reviewed price configuration change.
+
+Schema v2 can authorize only the exact live-test paper limit change from 20 to 40.
+
+The v2 transition keeps the cumulative USD 5 live-test ceiling.
+
+The command must still set `--max-papers` to the intended fixed-order input bound.
+
+The active checked-in policy remains at 20 until an accepted transition exists.
 
 The first transitioned request binds its ledger record and receipts to the exact transition event.
 

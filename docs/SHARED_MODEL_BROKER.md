@@ -42,17 +42,17 @@ The constructor creates the first ledger and its immutable identity record.
 
 Later constructors require both files and require the same frozen inputs.
 
-## Reviewed price configuration transition
+## Reviewed configuration transitions
 
 The immutable identity record keeps the hash of the initial price configuration.
 
 Do not replace this record or reset the ledger after a reviewed configuration change.
 
-If the active configuration hash differs, provide `config_transition_file` when you construct the broker.
+If an active configuration hash differs, provide `config_transition_file` when you construct the broker.
 
 The CLI option is `--ledger-config-transition-file`.
 
-The transition file must use the `shared-paid-call-config-transition-v1` schema.
+Use schema `shared-paid-call-config-transition-v1` for a price configuration change.
 
 It must contain these fields:
 
@@ -93,6 +93,51 @@ The status record reports the initial hash, the active hash, and the transition 
 Each new request receipt records the active price configuration hash and its transition event hash.
 
 An absent, altered, or unreviewed transition stops the broker before it reads the credential.
+
+### Exact live-test paper limit transition
+
+Schema `shared-paid-call-config-transition-v2` permits one policy change.
+
+It changes `live_test_maximum_papers` from 20 to 40.
+
+It does not permit a different value or a second policy field change.
+
+Use the same `config_transition_file` constructor argument and CLI option.
+
+The v2 file contains all v1 fields and these fields:
+
+- `from_config_transition_sha256`
+- `from_policy_file`
+- `from_policy_sha256`
+- `to_policy_sha256`
+- `changed_policy_fields`
+- `maximum_authorized_cumulative_tranche_usd`
+
+The change set must contain only the exact 20-to-40 paper limit change.
+
+The source policy must remain present and match `from_policy_sha256`.
+
+The target policy must equal that source except for the paper limit.
+
+The price configuration must not change in this transition.
+
+The cumulative live-test ceiling in this transition must be USD 5.
+
+This ceiling includes all earlier live-test spend in the shared ledger.
+
+If a v1 price transition exists, v2 must name its event hash as the predecessor.
+
+The broker keeps the identity record, spend, requests, receipts, and family counts.
+
+The initial 20-paper policy remains the default for a new ledger.
+
+A 40-paper policy cannot create a new ledger.
+
+The broker records the active policy hash in each new request and receipt.
+
+The status record shows the initial and active policy hashes.
+
+It also shows the authorized cumulative live-test ceiling.
 
 Create the request key from the exact request identity.
 

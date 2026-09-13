@@ -163,6 +163,63 @@ def reviewed_transition(
     return transition
 
 
+def policy_with_paper_limit(tmp_path: Path, limit: int = 40) -> Path:
+    policy = json.loads(
+        (ROOT / "config" / "streaming-dataset-budget-policy-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    policy["live_test_maximum_papers"] = limit
+    path = tmp_path / "streaming-dataset-budget-policy-v2.json"
+    write_json(path, policy)
+    return path
+
+
+def reviewed_policy_transition(
+    tmp_path: Path,
+    values: dict,
+    active_policy: Path,
+    active_config: Path | None = None,
+    from_config_transition_sha256: str | None = None,
+    **changes: object,
+) -> Path:
+    identity = tmp_path / ".shared-ledger.json.identity.json"
+    identity_value = json.loads(identity.read_text(encoding="utf-8"))
+    review = tmp_path / "policy-review.md"
+    review.write_text("Exact policy transition passed.\n", encoding="utf-8")
+    gate = json.loads(values["gate"].read_text(encoding="utf-8"))
+    gate["review_record"] = str(review)
+    gate["review_record_sha256"] = sha256_file(review)
+    write_json(values["gate"], gate)
+    active_config = active_config or ROOT / "config" / "gemini-eligibility-v1.json"
+    authorization = {
+        "schema": "shared-paid-call-config-transition-v2",
+        "ledger_file": str(values["ledger"].resolve()),
+        "from_price_config_sha256": sha256_file(active_config),
+        "to_price_config_sha256": sha256_file(active_config),
+        "from_config_transition_sha256": from_config_transition_sha256,
+        "from_policy_file": str(
+            (ROOT / "config" / "streaming-dataset-budget-policy-v1.json").resolve()
+        ),
+        "from_policy_sha256": identity_value["policy_sha256"],
+        "to_policy_sha256": sha256_file(active_policy),
+        "changed_policy_fields": {"live_test_maximum_papers": {"from": 20, "to": 40}},
+        "maximum_authorized_cumulative_tranche_usd": "5.00",
+        "expected_ledger_sha256": sha256_file(values["ledger"]),
+        "expected_identity_sha256": sha256_file(identity),
+        "execution_gate_sha256": sha256_file(values["gate"]),
+        "integrated_code_commit": "fixture-commit",
+        "review_record": str(review),
+        "review_record_sha256": sha256_file(review),
+        "reason": "Increase only the reviewed live-test family limit.",
+        "authorized_at_utc": "2026-09-13T01:20:00Z",
+        **changes,
+    }
+    transition = tmp_path / "private" / "policy-transition.json"
+    write_json(transition, authorization)
+    return transition
+
+
 def execute(
     broker: SharedGeminiBroker,
     *,
@@ -1154,3 +1211,311 @@ def test_transition_does_not_apply_to_an_unsettled_ledger(tmp_path: Path):
         )
 
     assert list((tmp_path / "receipts").glob("config-transition-*.json")) == []
+
+
+def test_reviewed_policy_transition_preserves_spend_and_immutable_custody(
+    tmp_path: Path,
+):
+    values = fixture(tmp_path, transport=Transport())
+    assert execute(values["broker"])["state"] == "completed"
+    identity = tmp_path / ".shared-ledger.json.identity.json"
+    original_ledger = values["ledger"].read_bytes()
+    original_identity = identity.read_bytes()
+    original_receipts = {
+        path.name: path.read_bytes() for path in (tmp_path / "receipts").iterdir()
+    }
+    active_policy = policy_with_paper_limit(tmp_path)
+    transition = reviewed_policy_transition(tmp_path, values, active_policy)
+
+    transitioned = SharedGeminiBroker(
+        policy_file=active_policy,
+        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=Transport(),
+        config_transition_file=transition,
+    )
+
+    status = transitioned.status()
+    assert status["limits"]["live_test_maximum_papers"] == 40
+    assert status["usage"]["live_test_papers"] == 1
+    assert status["remaining"]["live_test_papers"] == 39
+    assert status["initial_policy_sha256"] != status["policy_sha256"]
+    assert status["limits"]["authorized_live_test_ceiling_usd"] == "5.00"
+    assert Decimal(status["remaining"]["live_test_usd"]) < Decimal("5.00")
+    assert status["generation_submissions"] == 1
+    assert values["ledger"].read_bytes() == original_ledger
+    assert identity.read_bytes() == original_identity
+    for name, content in original_receipts.items():
+        assert (tmp_path / "receipts" / name).read_bytes() == content
+
+    transition_event = next((tmp_path / "receipts").glob("config-transition-*.json"))
+    new_receipt = execute(transitioned, paper="p2")
+    assert new_receipt["policy_sha256"] == sha256_file(active_policy)
+    assert new_receipt["config_transition_sha256"] == sha256_file(transition_event)
+
+    restarted = SharedGeminiBroker(
+        policy_file=active_policy,
+        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=Transport(),
+    )
+    assert restarted.status()["config_transition_sha256"] == sha256_file(
+        transition_event
+    )
+
+
+def test_policy_change_without_reviewed_transition_fails_without_state_change(
+    tmp_path: Path,
+):
+    values = fixture(tmp_path, transport=Transport())
+    assert execute(values["broker"])["state"] == "completed"
+    active_policy = policy_with_paper_limit(tmp_path)
+    original_ledger = values["ledger"].read_bytes()
+    original_receipts = {
+        path.name: path.read_bytes() for path in (tmp_path / "receipts").iterdir()
+    }
+
+    with pytest.raises(ValueError, match="requires a reviewed transition"):
+        SharedGeminiBroker(
+            policy_file=active_policy,
+            price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+            execution_gate_file=values["gate"],
+            ledger_file=values["ledger"],
+            receipts_dir=tmp_path / "receipts",
+            credential_file=tmp_path / "private" / "absent.key",
+            prior_construction_spend_usd=Decimal("0"),
+            transport=Transport(),
+        )
+
+    assert values["ledger"].read_bytes() == original_ledger
+    assert {
+        path.name: path.read_bytes() for path in (tmp_path / "receipts").iterdir()
+    } == original_receipts
+
+
+def test_policy_transition_rejects_any_second_policy_change_before_transport(
+    tmp_path: Path,
+):
+    values = fixture(tmp_path, transport=Transport())
+    active_policy = policy_with_paper_limit(tmp_path)
+    policy = json.loads(active_policy.read_text(encoding="utf-8"))
+    policy["maximum_generation_requests_per_minute"] = 11
+    write_json(active_policy, policy)
+    transition = reviewed_policy_transition(tmp_path, values, active_policy)
+    transport = Transport()
+
+    with pytest.raises(ValueError, match="streaming budget value changed"):
+        SharedGeminiBroker(
+            policy_file=active_policy,
+            price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+            execution_gate_file=values["gate"],
+            ledger_file=values["ledger"],
+            receipts_dir=tmp_path / "receipts",
+            credential_file=tmp_path / "private" / "absent.key",
+            prior_construction_spend_usd=Decimal("0"),
+            transport=transport,
+            config_transition_file=transition,
+        )
+
+    assert transport.methods == []
+    assert list((tmp_path / "receipts").glob("config-transition-*.json")) == []
+
+
+def test_policy_transition_rejects_changed_field_declaration_before_transport(
+    tmp_path: Path,
+):
+    values = fixture(tmp_path, transport=Transport())
+    active_policy = policy_with_paper_limit(tmp_path)
+    transition = reviewed_policy_transition(
+        tmp_path,
+        values,
+        active_policy,
+        changed_policy_fields={"live_test_maximum_papers": {"from": 20, "to": 41}},
+    )
+    transport = Transport()
+
+    with pytest.raises(ValueError, match="policy transition change set"):
+        SharedGeminiBroker(
+            policy_file=active_policy,
+            price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+            execution_gate_file=values["gate"],
+            ledger_file=values["ledger"],
+            receipts_dir=tmp_path / "receipts",
+            credential_file=tmp_path / "private" / "absent.key",
+            prior_construction_spend_usd=Decimal("0"),
+            transport=transport,
+            config_transition_file=transition,
+        )
+
+    assert transport.methods == []
+    assert list((tmp_path / "receipts").glob("config-transition-*.json")) == []
+
+
+def test_expanded_policy_cannot_initialize_a_new_ledger(tmp_path: Path):
+    values = fixture(tmp_path, transport=Transport())
+    active_policy = policy_with_paper_limit(tmp_path)
+
+    with pytest.raises(ValueError, match="requires an existing reviewed ledger"):
+        SharedGeminiBroker(
+            policy_file=active_policy,
+            price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+            execution_gate_file=values["gate"],
+            ledger_file=tmp_path / "new-ledger.json",
+            receipts_dir=tmp_path / "new-receipts",
+            credential_file=tmp_path / "private" / "absent.key",
+            prior_construction_spend_usd=Decimal("0"),
+            transport=Transport(),
+        )
+
+
+def test_policy_transition_layers_on_existing_reviewed_price_transition(
+    tmp_path: Path,
+):
+    values = fixture(tmp_path, transport=Transport())
+    assert execute(values["broker"])["state"] == "completed"
+    active_config = tmp_path / "active-price-config.json"
+    active_config.write_bytes(
+        (ROOT / "config" / "gemini-eligibility-v1.json").read_bytes() + b"\n"
+    )
+    price_transition = reviewed_transition(tmp_path, values, active_config)
+    price_broker = SharedGeminiBroker(
+        policy_file=ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
+        price_config_file=active_config,
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=Transport(),
+        config_transition_file=price_transition,
+    )
+    assert execute(price_broker, paper="p2")["state"] == "completed"
+    price_event = next((tmp_path / "receipts").glob("config-transition-*.json"))
+    active_policy = policy_with_paper_limit(tmp_path)
+    policy_transition = reviewed_policy_transition(
+        tmp_path,
+        values,
+        active_policy,
+        active_config=active_config,
+        from_config_transition_sha256=sha256_file(price_event),
+    )
+
+    policy_broker = SharedGeminiBroker(
+        policy_file=active_policy,
+        price_config_file=active_config,
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=Transport(),
+        config_transition_file=policy_transition,
+    )
+    status = policy_broker.status()
+    assert status["limits"]["live_test_maximum_papers"] == 40
+    assert status["usage"]["live_test_papers"] == 2
+    assert status["remaining"]["live_test_papers"] == 38
+    assert execute(policy_broker, paper="p3")["state"] == "completed"
+    assert len(list((tmp_path / "receipts").glob("config-transition-*.json"))) == 2
+
+
+def test_policy_transition_rejects_wrong_predecessor_and_tranche(tmp_path: Path):
+    values = fixture(tmp_path, transport=Transport())
+    active_policy = policy_with_paper_limit(tmp_path)
+    wrong_predecessor = reviewed_policy_transition(
+        tmp_path,
+        values,
+        active_policy,
+        from_config_transition_sha256="0" * 64,
+    )
+
+    with pytest.raises(ValueError, match="policy transition predecessor"):
+        SharedGeminiBroker(
+            policy_file=active_policy,
+            price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+            execution_gate_file=values["gate"],
+            ledger_file=values["ledger"],
+            receipts_dir=tmp_path / "receipts",
+            credential_file=tmp_path / "private" / "absent.key",
+            prior_construction_spend_usd=Decimal("0"),
+            transport=Transport(),
+            config_transition_file=wrong_predecessor,
+        )
+
+    wrong_tranche = reviewed_policy_transition(
+        tmp_path,
+        values,
+        active_policy,
+        maximum_authorized_cumulative_tranche_usd="5.01",
+    )
+    with pytest.raises(ValueError, match="policy transition identity"):
+        SharedGeminiBroker(
+            policy_file=active_policy,
+            price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+            execution_gate_file=values["gate"],
+            ledger_file=values["ledger"],
+            receipts_dir=tmp_path / "receipts",
+            credential_file=tmp_path / "private" / "absent.key",
+            prior_construction_spend_usd=Decimal("0"),
+            transport=Transport(),
+            config_transition_file=wrong_tranche,
+        )
+
+
+def test_expanded_policy_stops_new_forty_first_family_but_allows_downstream(
+    tmp_path: Path,
+):
+    values = fixture(tmp_path, transport=Transport())
+    assert execute(values["broker"])["state"] == "completed"
+    active_policy = policy_with_paper_limit(tmp_path)
+    transition = reviewed_policy_transition(tmp_path, values, active_policy)
+    transport = Transport()
+    broker = SharedGeminiBroker(
+        policy_file=active_policy,
+        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=transport,
+        config_transition_file=transition,
+    )
+    for position in range(2, 41):
+        assert execute(broker, paper=f"p{position}")["state"] == "completed"
+        ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+        ledger["recent_submission_times_utc"] = []
+        write_json(values["ledger"], ledger)
+
+    status = broker.status()
+    assert status["usage"]["live_test_papers"] == 40
+    assert status["remaining"]["live_test_papers"] == 0
+    transport.methods.clear()
+    blocked = execute(broker, paper="p41")
+    assert blocked["state"] == "not_submitted"
+    assert blocked["reason"] == "the live test reached its paper limit"
+    assert blocked["live_call_made"] is False
+    assert transport.methods == ["countTokens"]
+
+    transport.methods.clear()
+    downstream = execute(
+        broker,
+        paper="p40",
+        stage="question_generation",
+        body={
+            **payload(),
+            "contents": [
+                {"role": "user", "parts": [{"text": "Different stage payload."}]}
+            ],
+        },
+    )
+    assert downstream["state"] == "completed"
+    assert transport.methods == ["countTokens", "generateContent"]

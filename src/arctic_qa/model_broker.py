@@ -27,7 +27,7 @@ STAGES = {
     "repair",
 }
 PHASES = {"live_test", "away_production"}
-CONFIG_TRANSITION_FIELDS = {
+CONFIG_TRANSITION_V1_FIELDS = {
     "schema",
     "ledger_file",
     "from_price_config_sha256",
@@ -41,6 +41,15 @@ CONFIG_TRANSITION_FIELDS = {
     "reason",
     "authorized_at_utc",
 }
+CONFIG_TRANSITION_V2_FIELDS = CONFIG_TRANSITION_V1_FIELDS | {
+    "from_config_transition_sha256",
+    "from_policy_file",
+    "from_policy_sha256",
+    "to_policy_sha256",
+    "changed_policy_fields",
+    "maximum_authorized_cumulative_tranche_usd",
+}
+POLICY_TRANSITION_CHANGE = {"live_test_maximum_papers": {"from": 20, "to": 40}}
 USAGE_RECONCILIATION_FIELDS = {
     "schema",
     "request_key",
@@ -127,7 +136,6 @@ def _validate_policy(path: Path) -> dict[str, Any]:
             raise ValueError(f"streaming budget value changed: {field}")
     exact_int = {
         "accepted_question_target": 500,
-        "live_test_maximum_papers": 20,
         "live_test_maximum_generation_submissions": 100,
         "away_maximum_generation_submissions": 5000,
         "maximum_concurrent_generation_requests": 2,
@@ -138,6 +146,8 @@ def _validate_policy(path: Path) -> dict[str, Any]:
     for field, expected in exact_int.items():
         if value.get(field) != expected:
             raise ValueError(f"streaming budget value changed: {field}")
+    if value.get("live_test_maximum_papers") not in {20, 40}:
+        raise ValueError("streaming budget value changed: live_test_maximum_papers")
     for field, expected in {
         "live_test_included_in_away_ceiling": True,
         "automatic_model_fallback": False,
@@ -278,6 +288,7 @@ class SharedGeminiBroker:
         self.transport = transport
         self._config_transition_sha256: str | None = None
         self._config_transition_event_path: Path | None = None
+        self._authorized_live_test_ceiling_usd: Decimal | None = None
         self._status_observer: Callable[[Path], None] | None = None
         self._initialize()
 
@@ -327,7 +338,6 @@ class SharedGeminiBroker:
         if (
             identity["schema"] != "shared-paid-call-ledger-identity-v1"
             or identity["ledger_file"] != str(self.ledger_file)
-            or identity["policy_sha256"] != sha256_file(self.policy_file)
             or _money(identity["prior_construction_spend_usd"], "identity prior")
             != self.prior
         ):
@@ -340,6 +350,43 @@ class SharedGeminiBroker:
         ):
             raise ValueError("the shared paid-call ledger identity changed")
 
+    @staticmethod
+    def _transition_fields(authorization: dict[str, Any]) -> set[str]:
+        if authorization.get("schema") == "shared-paid-call-config-transition-v1":
+            return CONFIG_TRANSITION_V1_FIELDS
+        if authorization.get("schema") == "shared-paid-call-config-transition-v2":
+            return CONFIG_TRANSITION_V2_FIELDS
+        return set()
+
+    @staticmethod
+    def _transition_policy_hashes(
+        authorization: dict[str, Any], identity: dict[str, Any]
+    ) -> tuple[str, str]:
+        if authorization.get("schema") == "shared-paid-call-config-transition-v2":
+            return (
+                str(authorization.get("from_policy_sha256") or ""),
+                str(authorization.get("to_policy_sha256") or ""),
+            )
+        initial = str(identity["policy_sha256"])
+        return initial, initial
+
+    def _transition_pairs(
+        self, authorization: dict[str, Any], identity: dict[str, Any]
+    ) -> tuple[tuple[str, str], tuple[str, str]]:
+        from_policy, to_policy = self._transition_policy_hashes(authorization, identity)
+        return (
+            (str(authorization.get("from_price_config_sha256") or ""), from_policy),
+            (str(authorization.get("to_price_config_sha256") or ""), to_policy),
+        )
+
+    def _apply_transition_controls(self, authorization: dict[str, Any]) -> None:
+        if authorization.get("schema") == "shared-paid-call-config-transition-v2":
+            self._authorized_live_test_ceiling_usd = _money(
+                authorization["maximum_authorized_cumulative_tranche_usd"],
+                "transition tranche",
+                positive=True,
+            )
+
     def _read_transition_event(self, path: Path) -> dict[str, Any]:
         event = _read(path)
         if not isinstance(event, dict) or set(event) != {
@@ -350,11 +397,15 @@ class SharedGeminiBroker:
         }:
             raise ValueError("the applied price configuration transition changed")
         authorization = event["authorization"]
+        expected_fields = (
+            self._transition_fields(authorization)
+            if isinstance(authorization, dict)
+            else set()
+        )
         if (
             event["schema"] != "shared-paid-call-config-transition-event-v1"
             or not isinstance(authorization, dict)
-            or set(authorization) != CONFIG_TRANSITION_FIELDS
-            or authorization.get("schema") != "shared-paid-call-config-transition-v1"
+            or set(authorization) != expected_fields
         ):
             raise ValueError("the applied price configuration transition changed")
         authorization_hash = sha256_bytes(canonical_json(authorization).encode())
@@ -382,38 +433,92 @@ class SharedGeminiBroker:
         identity: dict[str, Any],
         ledger: dict[str, Any],
     ) -> None:
+        expected_fields = (
+            self._transition_fields(authorization)
+            if isinstance(authorization, dict)
+            else set()
+        )
+        if not expected_fields or set(authorization) != expected_fields:
+            raise ValueError("the configuration transition fields changed")
+        initial_pair = (
+            identity["price_config_sha256"],
+            identity["policy_sha256"],
+        )
+        active_pair = (
+            self.active_price_config_sha256,
+            sha256_file(self.policy_file),
+        )
+        from_pair, to_pair = self._transition_pairs(authorization, identity)
         if (
-            not isinstance(authorization, dict)
-            or set(authorization) != CONFIG_TRANSITION_FIELDS
+            authorization["ledger_file"] != str(self.ledger_file)
+            or to_pair != active_pair
         ):
-            raise ValueError("the price configuration transition fields changed")
-        active_hash = self.active_price_config_sha256
-        if (
-            authorization["schema"] != "shared-paid-call-config-transition-v1"
-            or authorization["ledger_file"] != str(self.ledger_file)
-            or authorization["from_price_config_sha256"]
-            != identity["price_config_sha256"]
-            or authorization["to_price_config_sha256"] != active_hash
-        ):
-            raise ValueError("the price configuration transition identity changed")
+            raise ValueError("the configuration transition identity changed")
+        if authorization["schema"] == "shared-paid-call-config-transition-v1":
+            if from_pair != initial_pair:
+                raise ValueError("the configuration transition identity changed")
+        else:
+            if authorization["changed_policy_fields"] != POLICY_TRANSITION_CHANGE:
+                raise ValueError("the policy transition change set changed")
+            if (
+                from_pair[0] != to_pair[0]
+                or from_pair[1] == to_pair[1]
+                or _money(
+                    authorization["maximum_authorized_cumulative_tranche_usd"],
+                    "transition tranche",
+                    positive=True,
+                )
+                != Decimal("5")
+            ):
+                raise ValueError("the policy transition identity changed")
+            source_policy = Path(authorization["from_policy_file"]).resolve()
+            if (
+                not source_policy.is_file()
+                or sha256_file(source_policy) != from_pair[1]
+            ):
+                raise ValueError("the policy transition source changed")
+            source_value = _read(source_policy)
+            active_value = _read(self.policy_file)
+            expected_value = {**source_value, "live_test_maximum_papers": 40}
+            if (
+                source_value.get("live_test_maximum_papers") != 20
+                or active_value != expected_value
+            ):
+                raise ValueError("the policy transition changes more than one field")
+            predecessor = authorization["from_config_transition_sha256"]
+            if from_pair == initial_pair:
+                if predecessor is not None:
+                    raise ValueError("the policy transition predecessor changed")
+            else:
+                matching_predecessors = []
+                for path in self.receipts_dir.glob("config-transition-*.json"):
+                    event = self._read_transition_event(path)
+                    prior = event["authorization"]
+                    if self._transition_pairs(prior, identity) == (
+                        initial_pair,
+                        from_pair,
+                    ):
+                        matching_predecessors.append(path)
+                if len(matching_predecessors) != 1 or predecessor != sha256_file(
+                    matching_predecessors[0]
+                ):
+                    raise ValueError("the policy transition predecessor changed")
         if authorization["expected_ledger_sha256"] != sha256_file(self.ledger_file):
-            raise ValueError("the price configuration transition ledger hash changed")
+            raise ValueError("the configuration transition ledger hash changed")
         if (
             ledger["halted"]
             or ledger["inflight"] != 0
             or _money(ledger["reserved_usd"], "reserved") != 0
             or _money(ledger["ambiguous_reserved_usd"], "ambiguous") != 0
         ):
-            raise ValueError(
-                "a price configuration transition requires a settled ledger"
-            )
+            raise ValueError("a configuration transition requires a settled ledger")
         if authorization["expected_identity_sha256"] != sha256_file(
             self._identity_file
         ):
-            raise ValueError("the price configuration transition identity hash changed")
+            raise ValueError("the configuration transition identity hash changed")
         gate_phase = _read(self.execution_gate_file).get("allowed_phase")
         if gate_phase not in PHASES:
-            raise ValueError("the price configuration transition gate phase is invalid")
+            raise ValueError("the configuration transition gate phase is invalid")
         gate = _validate_gate(self.execution_gate_file, gate_phase)
         if (
             authorization["execution_gate_sha256"]
@@ -422,33 +527,37 @@ class SharedGeminiBroker:
             or authorization["review_record"] != gate["review_record"]
             or authorization["review_record_sha256"] != gate.get("review_record_sha256")
         ):
-            raise ValueError("the price configuration transition review changed")
+            raise ValueError("the configuration transition review changed")
         review_path = Path(authorization["review_record"]).resolve()
         if not review_path.is_file() or authorization[
             "review_record_sha256"
         ] != sha256_file(review_path):
-            raise ValueError("the price configuration transition review is invalid")
+            raise ValueError("the configuration transition review is invalid")
         if not str(authorization["reason"]).strip():
-            raise ValueError("the price configuration transition reason is absent")
+            raise ValueError("the configuration transition reason is absent")
         try:
             authorized = datetime.fromisoformat(
                 str(authorization["authorized_at_utc"]).replace("Z", "+00:00")
             )
         except ValueError as error:
-            raise ValueError(
-                "the price configuration transition time is invalid"
-            ) from error
+            raise ValueError("the configuration transition time is invalid") from error
         if authorized.tzinfo is None:
-            raise ValueError("the price configuration transition time is invalid")
+            raise ValueError("the configuration transition time is invalid")
 
     def _authorize_active_config(
         self, identity: dict[str, Any], ledger: dict[str, Any]
     ) -> None:
-        initial_hash = identity["price_config_sha256"]
-        active_hash = self.active_price_config_sha256
-        if active_hash == initial_hash:
+        initial_pair = (
+            identity["price_config_sha256"],
+            identity["policy_sha256"],
+        )
+        active_pair = (
+            self.active_price_config_sha256,
+            sha256_file(self.policy_file),
+        )
+        if active_pair == initial_pair:
             if self.config_transition_file is not None:
-                raise ValueError("a price configuration transition is not necessary")
+                raise ValueError("a configuration transition is not necessary")
             return
         matching_events: list[tuple[Path, dict[str, Any]]] = []
         for path in self.receipts_dir.glob("config-transition-*.json"):
@@ -456,10 +565,7 @@ class SharedGeminiBroker:
             authorization = event["authorization"]
             if authorization.get("ledger_file") != str(self.ledger_file):
                 raise ValueError("the applied price configuration transition changed")
-            if (
-                authorization.get("from_price_config_sha256") == initial_hash
-                and authorization.get("to_price_config_sha256") == active_hash
-            ):
+            if self._transition_pairs(authorization, identity)[1] == active_pair:
                 matching_events.append((path, event))
         if len(matching_events) > 1:
             raise ValueError("multiple applied price configuration transitions exist")
@@ -478,7 +584,11 @@ class SharedGeminiBroker:
             active_requests = [
                 request
                 for request in ledger["requests"].values()
-                if request.get("price_config_sha256") == active_hash
+                if (
+                    request.get("price_config_sha256", identity["price_config_sha256"]),
+                    request.get("policy_sha256", identity["policy_sha256"]),
+                )
+                == active_pair
             ]
             event_hash = sha256_file(event_path)
             if active_requests and any(
@@ -494,11 +604,10 @@ class SharedGeminiBroker:
                 )
             self._config_transition_sha256 = event_hash
             self._config_transition_event_path = event_path
+            self._apply_transition_controls(authorization)
             return
         if self.config_transition_file is None:
-            raise ValueError(
-                "the active price configuration requires a reviewed transition"
-            )
+            raise ValueError("the active configuration requires a reviewed transition")
         authorization = _read(self.config_transition_file)
         self._validate_transition_authorization(
             authorization, identity=identity, ledger=ledger
@@ -517,6 +626,7 @@ class SharedGeminiBroker:
         )
         self._config_transition_sha256 = sha256_file(event_path)
         self._config_transition_event_path = event_path
+        self._apply_transition_controls(authorization)
 
     def _initialize(self) -> None:
         self.ledger_file.parent.mkdir(parents=True, exist_ok=True)
@@ -542,6 +652,10 @@ class SharedGeminiBroker:
             if self._identity_file.exists():
                 raise ValueError(
                     "the shared paid-call ledger is absent after initialization"
+                )
+            if self.policy["live_test_maximum_papers"] != 20:
+                raise ValueError(
+                    "an expanded policy requires an existing reviewed ledger"
                 )
             if self.prior > _money(
                 self.policy["construction_review_checkpoint_usd"], "checkpoint"
@@ -671,16 +785,22 @@ class SharedGeminiBroker:
         event = self._read_transition_event(path)
         authorization = event["authorization"]
         identity = _read(self._identity_file)
-        initial_hash = identity["price_config_sha256"]
+        initial_pair = (
+            identity["price_config_sha256"],
+            identity["policy_sha256"],
+        )
+        active_pair = (
+            self.active_price_config_sha256,
+            sha256_file(self.policy_file),
+        )
         matching_paths = []
         for candidate_path in self.receipts_dir.glob("config-transition-*.json"):
             candidate = self._read_transition_event(candidate_path)
             candidate_authorization = candidate["authorization"]
             if (
                 candidate_authorization["ledger_file"] == str(self.ledger_file)
-                and candidate_authorization["from_price_config_sha256"] == initial_hash
-                and candidate_authorization["to_price_config_sha256"]
-                == self.active_price_config_sha256
+                and self._transition_pairs(candidate_authorization, identity)[1]
+                == active_pair
             ):
                 matching_paths.append(candidate_path)
         if len(matching_paths) > 1:
@@ -690,7 +810,11 @@ class SharedGeminiBroker:
         active_requests = [
             request
             for request in ledger["requests"].values()
-            if request.get("price_config_sha256") == self.active_price_config_sha256
+            if (
+                request.get("price_config_sha256", initial_pair[0]),
+                request.get("policy_sha256", initial_pair[1]),
+            )
+            == active_pair
         ]
         if not active_requests:
             self._validate_transition_authorization(
@@ -698,32 +822,64 @@ class SharedGeminiBroker:
             )
         if (
             authorization["ledger_file"] != str(self.ledger_file)
-            or authorization["to_price_config_sha256"]
-            != self.active_price_config_sha256
+            or self._transition_pairs(authorization, identity)[1] != active_pair
             or authorization["expected_identity_sha256"]
             != sha256_file(self._identity_file)
         ):
             raise ValueError("the applied price configuration transition changed")
 
     def _validate_immutable_events(self, ledger: dict[str, Any]) -> None:
-        allowed_config_hashes = {ledger["price_config_sha256"]}
-        transition_events_by_config: dict[str, set[str]] = {}
+        identity = _read(self._identity_file)
+        initial_pair = (
+            ledger["price_config_sha256"],
+            ledger["policy_sha256"],
+        )
+        allowed_pairs = {initial_pair}
+        transition_events_by_pair: dict[tuple[str, str], set[str]] = {}
+        pending_events: list[
+            tuple[Path, dict[str, Any], tuple[str, str], tuple[str, str]]
+        ] = []
         for path in self.receipts_dir.glob("config-transition-*.json"):
             event = self._read_transition_event(path)
             authorization = event["authorization"]
-            if (
-                authorization["ledger_file"] != str(self.ledger_file)
-                or authorization["from_price_config_sha256"]
-                != ledger["price_config_sha256"]
-                or authorization["expected_identity_sha256"]
-                != sha256_file(self._identity_file)
-            ):
+            from_pair, target_pair = self._transition_pairs(authorization, identity)
+            if authorization["ledger_file"] != str(self.ledger_file) or authorization[
+                "expected_identity_sha256"
+            ] != sha256_file(self._identity_file):
                 raise ValueError("the applied price configuration transition changed")
-            target_hash = authorization["to_price_config_sha256"]
-            allowed_config_hashes.add(target_hash)
-            transition_events_by_config.setdefault(target_hash, set()).add(
-                sha256_file(path)
-            )
+            pending_events.append((path, authorization, from_pair, target_pair))
+        while pending_events:
+            progressed = False
+            for item in list(pending_events):
+                path, authorization, from_pair, target_pair = item
+                if from_pair not in allowed_pairs:
+                    continue
+                if target_pair in transition_events_by_pair:
+                    raise ValueError(
+                        "multiple applied price configuration transitions exist"
+                    )
+                if authorization["schema"] == "shared-paid-call-config-transition-v1":
+                    if from_pair != initial_pair:
+                        raise ValueError(
+                            "the applied price configuration transition changed"
+                        )
+                else:
+                    prior_hashes = transition_events_by_pair.get(from_pair, set())
+                    expected_predecessor = (
+                        None if from_pair == initial_pair else next(iter(prior_hashes))
+                    )
+                    if (
+                        authorization["from_config_transition_sha256"]
+                        != expected_predecessor
+                    ):
+                        raise ValueError("the policy transition predecessor changed")
+                event_hash = sha256_file(path)
+                allowed_pairs.add(target_pair)
+                transition_events_by_pair[target_pair] = {event_hash}
+                pending_events.remove(item)
+                progressed = True
+            if not progressed:
+                raise ValueError("the applied configuration transition chain changed")
         reconciliation_events: dict[str, tuple[Path, dict[str, Any]]] = {}
         for path in self.receipts_dir.glob("*.usage-reconciliation.json"):
             event = self._read_usage_reconciliation(path)
@@ -750,24 +906,27 @@ class SharedGeminiBroker:
             "model",
             "gate_sha256",
             "price_config_sha256",
+            "policy_sha256",
             "config_transition_sha256",
         )
         for request_key, request in ledger["requests"].items():
             request_config_hash = request.get(
                 "price_config_sha256", ledger["price_config_sha256"]
             )
-            if request_config_hash not in allowed_config_hashes:
+            request_policy_hash = request.get("policy_sha256", ledger["policy_sha256"])
+            request_pair = (request_config_hash, request_policy_hash)
+            if request_pair not in allowed_pairs:
                 raise ValueError(
-                    "a paid-call request uses an unauthorized price config"
+                    "a paid-call request uses an unauthorized configuration"
                 )
             transition_hash = request.get("config_transition_sha256")
-            if request_config_hash == ledger["price_config_sha256"]:
+            if request_pair == initial_pair:
                 if transition_hash is not None:
                     raise ValueError(
                         "an initial-config request has a transition binding"
                     )
-            elif transition_hash not in transition_events_by_config.get(
-                request_config_hash, set()
+            elif transition_hash not in transition_events_by_pair.get(
+                request_pair, set()
             ):
                 raise ValueError(
                     "a paid-call request lacks its authorized config transition"
@@ -998,6 +1157,12 @@ class SharedGeminiBroker:
                 or not re.fullmatch(r"[a-f0-9]{64}", request_config_hash)
             ):
                 raise ValueError("a paid-call request has an invalid price config hash")
+            request_policy_hash = request.get("policy_sha256")
+            if request_policy_hash is not None and (
+                not isinstance(request_policy_hash, str)
+                or not re.fullmatch(r"[a-f0-9]{64}", request_policy_hash)
+            ):
+                raise ValueError("a paid-call request has an invalid policy hash")
             transition_hash = request.get("config_transition_sha256")
             if transition_hash is not None and (
                 not isinstance(transition_hash, str)
@@ -1200,6 +1365,9 @@ class SharedGeminiBroker:
             + _money(row.get("ambiguous_usd", 0), "live ambiguous")
             for row in ledger["live_test_papers"].values()
         )
+        live_test_cap = _money(self.policy["live_test_suballocation_usd"], "live test")
+        if self._authorized_live_test_ceiling_usd is not None:
+            live_test_cap = min(live_test_cap, self._authorized_live_test_ceiling_usd)
         construction_used = self.prior + away_used
         accepted = int(ledger["accepted_question_count"])
         cutoff = datetime.now(UTC) - timedelta(minutes=1)
@@ -1240,6 +1408,11 @@ class SharedGeminiBroker:
                 "automatic_transport_generation_retries",
             )
         }
+        limits["authorized_live_test_ceiling_usd"] = (
+            str(self._authorized_live_test_ceiling_usd)
+            if self._authorized_live_test_ceiling_usd is not None
+            else None
+        )
         usage = {
             "project_lifetime_usd": str(construction_used),
             "benchmark_evaluation_usd": "0",
@@ -1280,10 +1453,7 @@ class SharedGeminiBroker:
                 _money(self.policy["away_session_total_ceiling_usd"], "away")
                 - away_used
             ),
-            "live_test_usd": str(
-                _money(self.policy["live_test_suballocation_usd"], "live test")
-                - live_used
-            ),
+            "live_test_usd": str(live_test_cap - live_used),
             "accepted_questions": int(self.policy["accepted_question_target"])
             - accepted,
             "live_test_papers": int(self.policy["live_test_maximum_papers"])
@@ -1310,6 +1480,7 @@ class SharedGeminiBroker:
             "ledger_file": str(self.ledger_file),
             "ledger_sha256": sha256_file(self.ledger_file),
             "policy_sha256": sha256_file(self.policy_file),
+            "initial_policy_sha256": ledger["policy_sha256"],
             "price_config_sha256": self.active_price_config_sha256,
             "initial_price_config_sha256": ledger["price_config_sha256"],
             "config_transition_sha256": self._config_transition_sha256,
@@ -1791,11 +1962,16 @@ class SharedGeminiBroker:
                     + _money(row.get("ambiguous_usd", 0), "live ambiguous")
                     for row in ledger["live_test_papers"].values()
                 )
-                if live_used + reserved > _money(
+                live_test_cap = _money(
                     self.policy["live_test_suballocation_usd"], "live test"
-                ):
+                )
+                if self._authorized_live_test_ceiling_usd is not None:
+                    live_test_cap = min(
+                        live_test_cap, self._authorized_live_test_ceiling_usd
+                    )
+                if live_used + reserved > live_test_cap:
                     raise ValueError(
-                        "the paid request exceeds the USD 10 live-test cap"
+                        "the paid request exceeds the authorized live-test cap"
                     )
                 if family_id not in ledger["live_test_papers"] and len(
                     ledger["live_test_papers"]
@@ -2100,6 +2276,7 @@ class SharedGeminiBroker:
             "model": self.config["model"],
             "gate_sha256": sha256_file(self.execution_gate_file),
             "price_config_sha256": self.active_price_config_sha256,
+            "policy_sha256": sha256_file(self.policy_file),
             "config_transition_sha256": self._config_transition_sha256,
         }
         operation = self._operation_lock_file.open("a+")
