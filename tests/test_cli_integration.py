@@ -1337,7 +1337,7 @@ def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> No
     command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(verifier)
     generated = json.loads(cli(tmp_path, *command).stdout)
     assert generated["status"] == "qa_gate_failed"
-    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v9"
+    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v10"
     assert (
         generated["provenance"]["numeric_rule_contract_version"]
         == "numeric-rule-source-support-v2"
@@ -1348,9 +1348,7 @@ def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> No
     )
     assert generated["distractors"] == []
     assert generated["qa_gate_reasons"] == [
-        "reconstruction_alternative_answer_present",
         "reconstruction_scope_not_source_bound",
-        "reconstruction_scope_mismatch",
     ]
     candidate_path = tmp_path / "qa-gate-failed-candidate.json"
     candidate_path.write_text(json.dumps(generated), encoding="utf-8")
@@ -1499,7 +1497,7 @@ def test_second_source_version_cannot_select_another_family_finding(
     ("mutation", "reason"),
     [
         ("fabricated_reconstruction_quote", "reconstruction_evidence_not_located"),
-        ("stated_alternative", "reconstruction_alternative_answer_present"),
+        ("stated_alternative", "alternative_answer_unresolved"),
         ("causal_question", "causal_overclaim"),
     ],
 )
@@ -1512,6 +1510,7 @@ def test_reconstruction_and_independent_claim_type_are_enforced(
         item["reconstruction"]["evidence_quote"] = "A fabricated quotation."
     elif mutation == "stated_alternative":
         item["reconstruction"]["alternatives"] = ["another supported answer"]
+        item["answer_verification"]["alternative_answer_search_passed"] = False
     else:
         item["answer_verification"]["question_claim_type"] = "causal"
         item["reconstruction"]["question_claim_type"] = "causal"

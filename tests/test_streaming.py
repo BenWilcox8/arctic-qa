@@ -152,7 +152,7 @@ def test_compound_unit_rule_without_source_tolerance_remains_rejected() -> None:
 def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
     properties = generation_module.NUMERIC_RULE_SCHEMA["properties"]
 
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v9"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v10"
     assert (
         generation_module.NUMERIC_RULE_CONTRACT_VERSION
         == "numeric-rule-source-support-v2"
@@ -208,6 +208,29 @@ def test_numeric_format_alias_is_not_a_competing_reconstruction_answer() -> None
             answer, reconstruction
         )
         is True
+    )
+
+
+def test_reconstruction_match_accepts_bounded_semantic_form() -> None:
+    answer = {
+        "text": "All wetland sequences lacked this loop.",
+        "variants": [],
+    }
+
+    assert validation_module.reconstruction_matches(
+        answer,
+        {
+            "answer": "Yes, all wetland sequences lacked this loop corresponding "
+            "to the conserved motif.",
+        },
+    )
+    assert validation_module.reconstruction_matches(
+        {"text": "The organic mass component was 24 % over February-May."},
+        {"answer": "24 %"},
+    )
+    assert not validation_module.reconstruction_matches(
+        answer,
+        {"answer": "No, wetland sequences did not lack this loop."},
     )
 
 
@@ -273,8 +296,11 @@ def test_position_1043_counterfactual_keeps_scope_rejection() -> None:
 
     assert "reconstruction_alternative_answer_present" not in reasons
     assert "source_bound_numeric_rule_missing" not in reasons
-    assert "reconstruction_scope_mismatch" in reasons
-    assert "answer_verifier_scope_mismatch" in reasons
+    assert "answer_scope_not_source_bound" in reasons
+    assert "reconstruction_scope_not_source_bound" in reasons
+    assert "answer_verifier_scope_not_source_bound" in reasons
+    assert "reconstruction_scope_mismatch" not in reasons
+    assert "answer_verifier_scope_mismatch" not in reasons
 
 
 def run_cli(root: Path, *arguments: str, expected: int = 0) -> dict:

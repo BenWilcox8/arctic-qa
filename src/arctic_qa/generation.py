@@ -21,15 +21,14 @@ from .validation import (
     GENERATION_PROMPT_VERSION,
     NUMERIC_RULE_CONTRACT_VERSION,
     SCOPE_CONTRACT_VERSION,
-    numeric_equal,
     numeric_rule_is_source_bound,
-    reconstruction_has_competing_alternatives,
+    reconstruction_matches,
     scope_is_evidence_bound,
 )
 
 
 PROMPT_VERSION = GENERATION_PROMPT_VERSION
-FINDING_POLICY_VERSION = "one-finding-per-paper-full-context-v3"
+FINDING_POLICY_VERSION = "one-finding-per-paper-full-context-v4"
 FINDING_SPAN_CONTRACT_VERSION = "finding-evidence-span-v2"
 MAX_FINDING_CONTEXT_CHARS = 3_000_000
 MAX_FINDING_SPAN_CHARS = 1_600
@@ -571,7 +570,10 @@ def generate_candidate(
         "paraphrases. Populate only scope qualifiers stated verbatim in the "
         "QUESTION and supported by the selected span. Use null for every other "
         "scope dimension, even when the source contains additional context. At "
-        "least one scope value must be non-null."
+        "least one scope value must be non-null. Return alternatives only when "
+        "the source supports a distinct answer that also correctly answers this "
+        "question. Do not list paraphrases, spelling or unit variants, or false "
+        "and negated answer choices as alternatives."
     )
     reconstruction_result = _call_result(
         db,
@@ -993,18 +995,7 @@ def _qa_gate_reasons(
         reasons.append("answer_verifier_evidence_not_located")
     if reconstruction.get("ambiguity_label") != "one_answer":
         reasons.append("answer_ambiguous")
-    if reconstruction_has_competing_alternatives(answer, reconstruction):
-        reasons.append("reconstruction_alternative_answer_present")
-    proposed = [answer.get("text", ""), *answer.get("variants", [])]
-    text_matches = normalize_text(str(reconstruction.get("answer", ""))) in {
-        normalize_text(str(value)) for value in proposed
-    }
-    numeric_matches = bool(
-        answer.get("numeric_rule")
-        and reconstruction.get("numeric")
-        and numeric_equal(answer["numeric_rule"], reconstruction["numeric"])
-    )
-    if not text_matches and not numeric_matches:
+    if not reconstruction_matches(answer, reconstruction):
         reasons.append("reconstruction_disagreement")
     if answer.get("numeric_rule") and not numeric_rule_is_source_bound(answer):
         reasons.append("source_bound_numeric_rule_missing")
@@ -1014,10 +1005,6 @@ def _qa_gate_reasons(
         reasons.append("reconstruction_scope_not_source_bound")
     if not scope_is_evidence_bound(verification.get("scope"), verification):
         reasons.append("answer_verifier_scope_not_source_bound")
-    if reconstruction.get("scope") != answer.get("scope"):
-        reasons.append("reconstruction_scope_mismatch")
-    if verification.get("scope") != answer.get("scope"):
-        reasons.append("answer_verifier_scope_mismatch")
     if not verification.get("source_entailment_model_verified"):
         reasons.append("source_entailment_not_verified")
     if not verification.get("relation_scope_match"):

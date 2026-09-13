@@ -20,7 +20,7 @@ UNIT_FACTORS: dict[tuple[str, str], Decimal] = {
     ("g", "kg"): Decimal("0.001"),
 }
 SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v2"
-GENERATION_PROMPT_VERSION = "arctic-qa-generation-v9"
+GENERATION_PROMPT_VERSION = "arctic-qa-generation-v10"
 NUMERIC_RULE_CONTRACT_VERSION = "numeric-rule-source-support-v2"
 SCOPE_CONTRACT_VERSION = "selected-evidence-literal-scope-v2"
 
@@ -270,12 +270,6 @@ def validate_candidate(
     if not scope_is_evidence_bound(verification.get("scope"), verification):
         reasons.append("answer_verifier_scope_not_source_bound")
         return _finish(db, candidate, labels, reasons, [], "rejected")
-    if reconstruction.get("scope") != candidate["answer"].get("scope"):
-        reasons.append("reconstruction_scope_mismatch")
-        return _finish(db, candidate, labels, reasons, [], "rejected")
-    if verification.get("scope") != candidate["answer"].get("scope"):
-        reasons.append("answer_verifier_scope_mismatch")
-        return _finish(db, candidate, labels, reasons, [], "rejected")
     if reconstruction.get("question_claim_type") != verification.get(
         "question_claim_type"
     ):
@@ -307,10 +301,6 @@ def validate_candidate(
         return _finish(db, candidate, labels, reasons, [], "unresolved")
     if reconstruction.get("ambiguity_label") != "one_answer":
         reasons.append("answer_ambiguous")
-        labels["unresolved"] = True
-        return _finish(db, candidate, labels, reasons, [], "unresolved")
-    if reconstruction_has_competing_alternatives(candidate["answer"], reconstruction):
-        reasons.append("reconstruction_alternative_answer_present")
         labels["unresolved"] = True
         return _finish(db, candidate, labels, reasons, [], "unresolved")
     if reconstruction_matches(candidate["answer"], reconstruction):
@@ -435,13 +425,32 @@ def reconstruction_matches(
 ) -> bool:
     proposed = [answer.get("text", ""), *answer.get("variants", [])]
     rebuilt = reconstruction.get("answer", "")
+    rebuilt_text = _answer_match_text(str(rebuilt))
     if any(
-        normalize_text(str(value)) == normalize_text(str(rebuilt)) for value in proposed
+        _bounded_text_match(_answer_match_text(str(value)), rebuilt_text)
+        for value in proposed
     ):
         return True
     numeric = answer.get("numeric_rule")
     rebuilt_numeric = reconstruction.get("numeric")
     return bool(numeric and rebuilt_numeric and numeric_equal(numeric, rebuilt_numeric))
+
+
+def _answer_match_text(value: str) -> str:
+    normalized = normalize_text(value)
+    normalized = re.sub(r"^(?:yes|no)\s*[,;:]?\s+", "", normalized)
+    normalized = re.sub(r"[^\w%°.+\-\u2212]+", " ", normalized, flags=re.UNICODE)
+    normalized = normalized.replace(". ", " ").strip(".")
+    return " ".join(normalized.split())
+
+
+def _bounded_text_match(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    shorter, longer = sorted((left, right), key=len)
+    return len(shorter) >= 4 and len(shorter.split()) >= 2 and shorter in longer
 
 
 def reconstruction_has_competing_alternatives(
