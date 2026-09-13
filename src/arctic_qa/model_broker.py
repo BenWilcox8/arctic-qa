@@ -49,7 +49,14 @@ CONFIG_TRANSITION_V2_FIELDS = CONFIG_TRANSITION_V1_FIELDS | {
     "changed_policy_fields",
     "maximum_authorized_cumulative_tranche_usd",
 }
-POLICY_TRANSITION_CHANGE = {"live_test_maximum_papers": {"from": 20, "to": 40}}
+POLICY_TRANSITION_CHANGES = (
+    {"live_test_maximum_papers": {"from": 20, "to": 40}},
+    {
+        "live_test_maximum_papers": {"from": 40, "to": 41},
+        "live_test_maximum_generation_submissions": {"from": 100, "to": 101},
+    },
+)
+ALLOWED_LIVE_TEST_LIMITS = {(20, 100), (40, 100), (41, 101)}
 USAGE_RECONCILIATION_FIELDS = {
     "schema",
     "request_key",
@@ -136,7 +143,6 @@ def _validate_policy(path: Path) -> dict[str, Any]:
             raise ValueError(f"streaming budget value changed: {field}")
     exact_int = {
         "accepted_question_target": 500,
-        "live_test_maximum_generation_submissions": 100,
         "away_maximum_generation_submissions": 5000,
         "maximum_concurrent_generation_requests": 2,
         "maximum_generation_requests_per_minute": 10,
@@ -146,8 +152,12 @@ def _validate_policy(path: Path) -> dict[str, Any]:
     for field, expected in exact_int.items():
         if value.get(field) != expected:
             raise ValueError(f"streaming budget value changed: {field}")
-    if value.get("live_test_maximum_papers") not in {20, 40}:
-        raise ValueError("streaming budget value changed: live_test_maximum_papers")
+    live_test_limits = (
+        value.get("live_test_maximum_papers"),
+        value.get("live_test_maximum_generation_submissions"),
+    )
+    if live_test_limits not in ALLOWED_LIVE_TEST_LIMITS:
+        raise ValueError("streaming budget live-test limits changed")
     for field, expected in {
         "live_test_included_in_away_ceiling": True,
         "automatic_model_fallback": False,
@@ -479,7 +489,8 @@ class SharedGeminiBroker:
             if from_pair != initial_pair:
                 raise ValueError("the configuration transition identity changed")
         else:
-            if authorization["changed_policy_fields"] != POLICY_TRANSITION_CHANGE:
+            changed_policy_fields = authorization["changed_policy_fields"]
+            if changed_policy_fields not in POLICY_TRANSITION_CHANGES:
                 raise ValueError("the policy transition change set changed")
             if (
                 from_pair[0] != to_pair[0]
@@ -500,11 +511,12 @@ class SharedGeminiBroker:
                 raise ValueError("the policy transition source changed")
             source_value = _read(source_policy)
             active_value = _read(self.policy_file)
-            expected_value = {**source_value, "live_test_maximum_papers": 40}
-            if (
-                source_value.get("live_test_maximum_papers") != 20
-                or active_value != expected_value
-            ):
+            expected_value = dict(source_value)
+            for field, limits in changed_policy_fields.items():
+                if source_value.get(field) != limits["from"]:
+                    raise ValueError("the policy transition source limit changed")
+                expected_value[field] = limits["to"]
+            if active_value != expected_value:
                 raise ValueError("the policy transition changes more than one field")
             predecessor = authorization["from_config_transition_sha256"]
             if from_pair == initial_pair:
@@ -515,10 +527,7 @@ class SharedGeminiBroker:
                 for path in self.receipts_dir.glob("config-transition-*.json"):
                     event = self._read_transition_event(path)
                     prior = event["authorization"]
-                    if self._transition_pairs(prior, identity) == (
-                        initial_pair,
-                        from_pair,
-                    ):
+                    if self._transition_pairs(prior, identity)[1] == from_pair:
                         matching_predecessors.append(path)
                 if len(matching_predecessors) != 1 or predecessor != sha256_file(
                     matching_predecessors[0]

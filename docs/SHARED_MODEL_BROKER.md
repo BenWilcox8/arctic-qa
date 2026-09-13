@@ -100,13 +100,20 @@ Each new request receipt records the active price configuration hash and its tra
 
 An absent, altered, or unreviewed transition stops the broker before it reads the credential.
 
-### Exact live-test paper limit transition
+### Exact live-test limit transitions
 
-Schema `shared-paid-call-config-transition-v2` permits one policy change.
+Schema `shared-paid-call-config-transition-v2` permits two exact policy transitions.
 
-It changes `live_test_maximum_papers` from 20 to 40.
+The first transition changes `live_test_maximum_papers` from 20 to 40.
 
-It does not permit a different value or a second policy field change.
+The second transition changes these two fields together:
+
+- `live_test_maximum_papers` from 40 to 41
+- `live_test_maximum_generation_submissions` from 100 to 101
+
+The second transition change set must list each authorized field separately.
+
+The broker rejects a partial change, a different value, or an additional policy change.
 
 Use the same `config_transition_file` constructor argument and CLI option.
 
@@ -119,11 +126,11 @@ The v2 file contains all v1 fields and these fields:
 - `changed_policy_fields`
 - `maximum_authorized_cumulative_tranche_usd`
 
-The change set must contain only the exact 20-to-40 paper limit change.
+The change set must match one of the two exact transitions.
 
 The source policy must remain present and match `from_policy_sha256`.
 
-The target policy must equal that source except for the paper limit.
+The target policy must equal that source except for the authorized limit fields.
 
 The price configuration must not change in this transition.
 
@@ -131,13 +138,15 @@ The cumulative live-test ceiling in this transition must be USD 5.
 
 This ceiling includes all earlier live-test spend in the shared ledger.
 
-If a v1 price transition exists, v2 must name its event hash as the predecessor.
+If a prior transition exists, v2 must name its event hash as the predecessor.
+
+The predecessor must be the unique event that produced the source policy and price pair.
 
 The broker keeps the identity record, spend, requests, receipts, and family counts.
 
 The initial 20-paper policy remains the default for a new ledger.
 
-A 40-paper policy cannot create a new ledger.
+An expanded policy cannot create a new ledger.
 
 The broker records the active policy hash in each new request and receipt.
 

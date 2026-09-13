@@ -114,13 +114,24 @@ The broker applies the transition without resetting prior spend or submission co
 
 Schema v1 authorizes a reviewed price configuration change.
 
-Schema v2 can authorize only the exact live-test paper limit change from 20 to 40.
+Schema v2 can authorize the exact live-test paper limit change from 20 to 40.
+
+It can also authorize one later transition with these two changes:
+
+- `live_test_maximum_papers` from 40 to 41
+- `live_test_maximum_generation_submissions` from 100 to 101
+
+The later transition must authorize both fields separately in its change set.
+
+The broker rejects partial, mismatched, or additional changes.
 
 The v2 transition keeps the cumulative USD 5 live-test ceiling.
 
 The command must still set `--max-papers` to the intended fixed-order input bound.
 
-The active checked-in policy remains at 20 until an accepted transition exists.
+The checked-in default policy remains at 20 papers and 100 submissions.
+
+Each expanded policy requires an accepted transition for an existing ledger.
 
 The first transitioned request binds its ledger record and receipts to the exact transition event.
 
