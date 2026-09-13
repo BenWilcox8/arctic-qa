@@ -450,12 +450,18 @@ def generate_candidate(
             stable_id("finding-selection", source_id, FINDING_POLICY_VERSION),
             "extractor",
             context + "\nExtract one bounded answer record. Select one source_span_id. "
+            "Select a complete prose finding sentence from the results or "
+            "discussion. Do not select a title, heading, figure or table caption, "
+            "legend, axis label, methods-only description, or sentence fragment. "
             "The selected span must contain exact, sufficient evidence for the "
             "answer. Do not combine text from different spans. Set each non-null "
             "scope value to exact SOURCE_DATA text from the selected span, without "
-            "aliases or paraphrases, and keep at least one value non-null. Every "
-            "required_question_phrases entry must be exact selected-span text. "
-            "Add numeric_rule "
+            "aliases or paraphrases, and keep at least one value non-null. Populate "
+            "only the minimum scope qualifiers needed to make the answer unique. "
+            "Each non-null scope value must also appear in "
+            "required_question_phrases. Every required_question_phrases entry must "
+            "be exact selected-span text. Prefer a non-numeric finding unless the "
+            "selected span supports the complete numeric contract. Add numeric_rule "
             "only for one scalar value when the same selected span explicitly "
             "supports its value, unit, tolerance, tolerance basis, precision, "
             "rounding, and conversion. The tolerance_basis must be exact text "
@@ -558,7 +564,10 @@ def generate_candidate(
         + "\nReconstruct the answer. The proposed answer is hidden. "
         "Select one source_span_id for the evidence. Copy each non-null scope "
         "value exactly from its selected SOURCE_DATA span, without aliases or "
-        "paraphrases. At least one scope value must be non-null."
+        "paraphrases. Populate only scope qualifiers stated verbatim in the "
+        "QUESTION and supported by the selected span. Use null for every other "
+        "scope dimension, even when the source contains additional context. At "
+        "least one scope value must be non-null."
     )
     reconstruction_result = _call_result(
         db,
@@ -587,7 +596,13 @@ def generate_candidate(
         + "\nRECONSTRUCTION\n"
         + canonical_json(reconstruction)
         + "\nVerify entailment, relation, scope, ambiguity, alternatives, evidence, and the question claim type. "
-        "Select one source_span_id for the evidence. Copy each non-null scope "
+        "Independently verify every non-null ANSWER_RECORD.scope value against the "
+        "selected SOURCE_DATA span and the QUESTION. Do not assume any proposed "
+        "scope value is true. Select one source_span_id that contains the answer "
+        "and every verified scope value. Return the exact proposed scope only when "
+        "each value occurs verbatim in that span and the QUESTION states it. "
+        "Otherwise set relation_scope_match to false. Do not add scope merely "
+        "because it appears elsewhere in the source. Copy each non-null scope "
         "value exactly from its selected SOURCE_DATA span, without aliases or "
         "paraphrases. At least one scope value must be non-null."
     )

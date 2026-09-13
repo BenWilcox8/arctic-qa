@@ -148,7 +148,7 @@ def test_compound_unit_rule_without_source_tolerance_remains_rejected() -> None:
 def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
     properties = generation_module.NUMERIC_RULE_SCHEMA["properties"]
 
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v7"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v8"
     assert (
         generation_module.NUMERIC_RULE_CONTRACT_VERSION
         == "numeric-rule-source-support-v2"
@@ -476,6 +476,7 @@ class ScriptedBrokerTransport:
             "gemini-3.8-flash", verifier_script or FIXTURES / "fake-verifier.jsonl"
         )
         self.methods: list[str] = []
+        self.role_prompts: list[tuple[str, str]] = []
         self.custody_paths: tuple[Path, Path, Path] | None = None
         self.custody_checks = 0
 
@@ -551,6 +552,7 @@ class ScriptedBrokerTransport:
         role = next(
             name for name, expected in ROLE_SCHEMAS.items() if schema == expected
         )
+        self.role_prompts.append((role, body["contents"][0]["parts"][0]["text"]))
         provider = (
             self.author
             if role
@@ -1429,6 +1431,27 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
         "section_id": "extracted-text",
     }
     assert transport.methods.count("generateContent") == 10
+    prompts = dict(transport.role_prompts)
+    assert "Select a complete prose finding sentence" in prompts["extractor"]
+    assert (
+        "Do not select a title, heading, figure or table caption"
+        in prompts["extractor"]
+    )
+    assert (
+        "Each non-null scope value must also appear in required_question_phrases"
+        in prompts["extractor"]
+    )
+    assert (
+        "Populate only scope qualifiers stated verbatim in the QUESTION"
+        in prompts["reconstructor"]
+    )
+    assert (
+        "Independently verify every non-null ANSWER_RECORD.scope value"
+        in prompts["answer_verifier"]
+    )
+    assert (
+        "Do not assume any proposed scope value is true" in prompts["answer_verifier"]
+    )
 
     resumed = run_stream(
         database,
