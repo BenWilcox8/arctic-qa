@@ -805,8 +805,11 @@
         $('streaming-counts').replaceChildren(...streamingOrder.map((name) => { const box = document.createElement('div'); box.className = 'count'; box.append(text('span', label(name)), text('strong', formatNumber(streaming.counts?.[name]))); return box; }));
         const usage = broker.usage || {};
         const remaining = broker.remaining || {};
-        const capLine = (cap, used, left, kind = 'money') => {
+        const capLine = (cap, used, left, kind = 'money', nullMeansUnrestricted = false) => {
           const display = kind === 'money' ? money : formatNumber;
+          if (nullMeansUnrestricted && cap === null && left === null) {
+            return `Cap Unrestricted | Used ${display(used ?? 0)} | Remaining Unrestricted`;
+          }
           return `Cap ${display(cap)} | Used ${display(used ?? 0)} | Remaining ${display(left ?? cap)}`;
         };
         const budgetRows = [
@@ -817,8 +820,8 @@
           ['away session', capLine(policy.away_session_total_ceiling_usd, usage.away_session_usd, remaining.away_session_usd)],
           ['live test', capLine(policy.live_test_suballocation_usd, usage.live_test_usd, remaining.live_test_usd)],
           ['accepted questions', capLine(policy.accepted_question_target, usage.accepted_questions, remaining.accepted_questions, 'count')],
-          ['live-test papers', capLine(policy.live_test_maximum_papers, usage.live_test_papers, remaining.live_test_papers, 'count')],
-          ['live-test submissions', capLine(policy.live_test_maximum_generation_submissions, usage.live_test_generation_submissions, remaining.live_test_generation_submissions, 'count')],
+          ['live-test papers', capLine(policy.live_test_maximum_papers, usage.live_test_papers, remaining.live_test_papers, 'count', true)],
+          ['live-test submissions', capLine(policy.live_test_maximum_generation_submissions, usage.live_test_generation_submissions, remaining.live_test_generation_submissions, 'count', true)],
           ['away submissions', capLine(policy.away_maximum_generation_submissions, usage.away_generation_submissions, remaining.away_generation_submissions, 'count')],
           ['concurrent requests', capLine(policy.maximum_concurrent_generation_requests, usage.concurrent_generation_requests, remaining.concurrent_generation_requests, 'count')],
           ['requests per minute', capLine(policy.maximum_generation_requests_per_minute, usage.generation_requests_in_current_minute, remaining.generation_requests_in_current_minute, 'count')],

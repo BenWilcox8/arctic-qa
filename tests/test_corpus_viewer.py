@@ -864,6 +864,33 @@ def test_streaming_budget_and_progress_are_bounded_and_read_only(
     }
     assert b"<script>" not in _safe_json_bytes(streaming)
     assert json.loads(artifacts.dataset_metadata())["export_id"] == "export-1"
+
+    unrestricted_policy = json.loads(policy.read_text(encoding="utf-8"))
+    unrestricted_policy["live_test_maximum_papers"] = None
+    unrestricted_policy["live_test_maximum_generation_submissions"] = None
+    write_json(policy, unrestricted_policy)
+    unrestricted_status = json.loads(status.read_text(encoding="utf-8"))
+    unrestricted_status["policy_sha256"] = sha256_file(policy)
+    unrestricted_status["limits"]["live_test_maximum_papers"] = None
+    unrestricted_status["limits"]["live_test_maximum_generation_submissions"] = None
+    unrestricted_status["remaining"]["live_test_papers"] = None
+    unrestricted_status["remaining"]["live_test_generation_submissions"] = None
+    write_json(status, unrestricted_status)
+    unrestricted_progress = json.loads(progress.read_text(encoding="utf-8"))
+    unrestricted_progress["broker_status_sha256"] = sha256_file(status)
+    unrestricted_progress["budget_policy_sha256"] = sha256_file(policy)
+    write_json(progress, unrestricted_progress)
+    unrestricted = artifacts.state()["streaming_pipeline"]
+    assert unrestricted["state"] == "paused"
+    assert unrestricted["budget_policy"]["live_test_maximum_papers"] is None
+    assert (
+        unrestricted["broker"]["remaining"]["live_test_generation_submissions"] is None
+    )
+    viewer_html = (
+        Path(__file__).parents[1] / "src/arctic_qa/corpus_viewer.html"
+    ).read_text(encoding="utf-8")
+    assert "Cap Unrestricted | Used ${display(used ?? 0)}" in viewer_html
+
     changed_ledger = json.loads(ledger.read_text(encoding="utf-8"))
     changed_ledger["spent_usd"] = "0"
     write_json(ledger, changed_ledger)
