@@ -122,7 +122,13 @@ class CapturedZeroThoughtUsageTransport(Transport):
         }
 
 
-def fixture(tmp_path: Path, *, enabled: bool = True, transport=None) -> dict:
+def fixture(
+    tmp_path: Path,
+    *,
+    enabled: bool = True,
+    transport=None,
+    prior_construction_spend_usd: Decimal = Decimal("0"),
+) -> dict:
     gate = tmp_path / "gate.json"
     write_json(
         gate,
@@ -146,7 +152,7 @@ def fixture(tmp_path: Path, *, enabled: bool = True, transport=None) -> dict:
         ledger_file=tmp_path / "shared-ledger.json",
         receipts_dir=tmp_path / "receipts",
         credential_file=credential,
-        prior_construction_spend_usd=Decimal("0"),
+        prior_construction_spend_usd=prior_construction_spend_usd,
         transport=transport,
     )
     return {"broker": broker, "gate": gate, "ledger": tmp_path / "shared-ledger.json"}
@@ -455,6 +461,7 @@ def execute(
     key = broker_request_key(
         model="gemini-3.8-flash",
         run_id=run_id,
+        phase=phase,
         stage=stage,
         paper_id=paper,
         family_id=family,
@@ -1996,6 +2003,185 @@ def test_reviewed_live_test_budget_extension_chains_from_ten_to_twenty(
 
     assert extended.status()["limits"]["authorized_live_test_ceiling_usd"] == "20.00"
     assert extended.status()["limits"]["live_test_suballocation_usd"] == "20.00"
+
+
+def test_reviewed_production_budget_transition_binds_new_run_and_cumulative_cap(
+    tmp_path: Path,
+) -> None:
+    values = prepared_ceiling_extension(tmp_path)
+    ten_dollar = SharedGeminiBroker(
+        policy_file=values["budget_policy"],
+        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=Transport(),
+        config_transition_file=values["ten_dollar_transition"],
+    )
+    predecessor = ten_dollar.status()["config_transition_sha256"]
+    twenty_value = json.loads(values["budget_policy"].read_text(encoding="utf-8"))
+    twenty_value["live_test_suballocation_usd"] = "20.00"
+    twenty_policy = tmp_path / "streaming-dataset-budget-policy-twenty.json"
+    write_json(twenty_policy, twenty_value)
+    twenty_transition = reviewed_policy_transition(
+        tmp_path,
+        values,
+        twenty_policy,
+        from_config_transition_sha256=predecessor,
+        from_policy=values["budget_policy"],
+        changed_policy_fields={
+            "live_test_suballocation_usd": {"from": "10.00", "to": "20.00"}
+        },
+        maximum_authorized_cumulative_tranche_usd="20.00",
+    )
+    high_cost_body = payload()
+    high_cost_body["generationConfig"]["maxOutputTokens"] = 8_192
+    twenty = SharedGeminiBroker(
+        policy_file=twenty_policy,
+        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=HighCostTransport(),
+        config_transition_file=twenty_transition,
+    )
+    twenty.bind_stream_input(**values["stream_binding"])
+    historical = execute(twenty, paper="p2", body=high_cost_body)
+    assert historical["state"] == "completed"
+    predecessor = twenty.status()["config_transition_sha256"]
+
+    stream_binding = {
+        **values["stream_binding"],
+        "phase": "away_production",
+        "run_id": "production-run-1",
+        "campaign_id": "production-campaign-1",
+    }
+    gate = json.loads(values["gate"].read_text(encoding="utf-8"))
+    gate.update(
+        {
+            "allowed_phase": "away_production",
+            "authorized_new_run_id": stream_binding["run_id"],
+            "authorized_campaign_id": stream_binding["campaign_id"],
+        }
+    )
+    write_json(values["gate"], gate)
+    production_value = dict(twenty_value)
+    production_value["away_session_total_ceiling_usd"] = "61.614496"
+    production_policy = tmp_path / "streaming-dataset-budget-policy-production.json"
+    write_json(production_policy, production_value)
+    production_transition = reviewed_policy_transition(
+        tmp_path,
+        values,
+        production_policy,
+        from_config_transition_sha256=predecessor,
+        from_policy=twenty_policy,
+        changed_policy_fields={
+            "away_session_total_ceiling_usd": {
+                "from": "25.00",
+                "to": "61.614496",
+            }
+        },
+        maximum_authorized_cumulative_tranche_usd="61.614496",
+        reason="Authorize only the first production campaign cumulative ceiling.",
+    )
+    transport = HighCostTransport()
+    production = SharedGeminiBroker(
+        policy_file=production_policy,
+        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=transport,
+        config_transition_file=production_transition,
+    )
+    production.bind_stream_input(**stream_binding)
+
+    status = production.status()
+    assert status["limits"]["away_session_total_ceiling_usd"] == "61.614496"
+    assert Decimal(status["remaining"]["away_session_usd"]) == (
+        Decimal("61.614496") - Decimal(status["spent_usd"])
+    )
+    live_test_submissions = status["usage"]["live_test_generation_submissions"]
+    with pytest.raises(ValueError, match="run identity"):
+        execute(
+            production,
+            phase="away_production",
+            run_id="historical-trial-run",
+            paper="p2",
+            body=high_cost_body,
+        )
+    assert transport.methods == []
+
+    receipt = execute(
+        production,
+        phase="away_production",
+        run_id="production-run-1",
+        paper="p2",
+        body=high_cost_body,
+    )
+
+    assert receipt["state"] == "completed"
+    assert receipt["run_id"] == "production-run-1"
+    assert receipt["request_key"] != historical["request_key"]
+    assert production.status()["usage"]["live_test_generation_submissions"] == (
+        live_test_submissions
+    )
+    assert (
+        receipt["config_transition_sha256"]
+        == production.status()["config_transition_sha256"]
+    )
+    assert transport.methods == ["countTokens", "generateContent"]
+
+    blocked = None
+    for position in range(3, 803):
+        result = execute(
+            production,
+            phase="away_production",
+            run_id="production-run-1",
+            paper=f"p{position}",
+            body=high_cost_body,
+        )
+        if result["state"] == "not_submitted":
+            blocked = result
+            break
+        ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+        ledger["recent_submission_times_utc"] = []
+        write_json(values["ledger"], ledger)
+
+    assert blocked is not None
+    assert blocked["reason"] == "the paid request exceeds the authorized away cap"
+    assert blocked["live_call_made"] is False
+    assert Decimal(production.status()["spent_usd"]) < Decimal("61.614496")
+    assert production.status()["limits"]["construction_review_checkpoint_usd"] == (
+        "250.00"
+    )
+
+
+def test_construction_ceiling_refuses_reservation_before_transport(
+    tmp_path: Path,
+) -> None:
+    transport = HighCostTransport()
+    values = fixture(
+        tmp_path,
+        transport=transport,
+        prior_construction_spend_usd=Decimal("249.90"),
+    )
+    body = payload()
+    body["generationConfig"]["maxOutputTokens"] = 8_192
+
+    blocked = execute(values["broker"], body=body)
+
+    assert blocked["state"] == "not_submitted"
+    assert blocked["reason"] == "the paid request exceeds the construction checkpoint"
+    assert blocked["live_call_made"] is False
+    assert transport.methods == ["countTokens"]
+    assert values["broker"].status()["spent_usd"] == "0"
 
 
 @pytest.mark.parametrize(

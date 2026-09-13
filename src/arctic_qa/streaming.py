@@ -1021,6 +1021,7 @@ def _run_eligibility(
     request_key = broker_request_key(
         model=provider.model,
         run_id=provider.invocation_run_id,
+        phase=provider.phase,
         stage="eligibility",
         paper_id=identity["paper_id"],
         family_id=identity["family_id"],
@@ -1119,6 +1120,7 @@ def _validate_brokered_eligibility(
     expected_request_key = broker_request_key(
         model=provider.model,
         run_id=provider.invocation_run_id,
+        phase=provider.phase,
         stage="eligibility",
         paper_id=identity["paper_id"],
         family_id=identity["family_id"],

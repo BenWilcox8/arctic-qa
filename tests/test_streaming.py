@@ -152,7 +152,7 @@ def test_compound_unit_rule_without_source_tolerance_remains_rejected() -> None:
 def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
     properties = generation_module.NUMERIC_RULE_SCHEMA["properties"]
 
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v11"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v12"
     assert (
         generation_module.NUMERIC_RULE_CONTRACT_VERSION
         == "numeric-rule-source-support-v2"
@@ -183,6 +183,50 @@ def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
     assert "selected source span" in properties["tolerance"]["description"]
     assert "Exact source text" in properties["tolerance_basis"]["description"]
     assert "Do not invent" in properties["rounding_rule"]["description"]
+
+
+def test_generation_schemas_require_concise_review_justifications() -> None:
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v12"
+    assert (
+        generation_module.MODEL_JUSTIFICATION_CONTRACT_VERSION
+        == "model-justification-v1"
+    )
+
+    required_by_role = {
+        "question_writer": "question_rationale",
+        "direct_joint": "question_rationale",
+        "reconstructor": "reconstruction_rationale",
+        "answer_verifier": "verification_rationale",
+        "option_verifier": "rationale",
+    }
+    for role, field in required_by_role.items():
+        assert field in generation_module.ROLE_SCHEMAS[role]["required"]
+        assert "concise" in generation_module.ROLE_SCHEMAS[role]["properties"][
+            field
+        ]["description"].lower()
+
+    answer_schema = generation_module.ROLE_SCHEMAS["extractor"]["properties"][
+        "answer"
+    ]
+    assert "selection_rationale" in answer_schema["required"]
+    assert "concise" in answer_schema["properties"]["selection_rationale"][
+        "description"
+    ].lower()
+
+    distractor_schema = generation_module.ROLE_SCHEMAS["distractor_writer"][
+        "properties"
+    ]["distractors"]["items"]
+    assert "generation_rationale" in distractor_schema["required"]
+    assert "concise" in distractor_schema["properties"]["generation_rationale"][
+        "description"
+    ].lower()
+
+
+def test_reconstruction_schema_has_no_frozen_answer_or_selection_rationale() -> None:
+    schema_text = json.dumps(generation_module.ROLE_SCHEMAS["reconstructor"])
+
+    assert "selection_rationale" not in schema_text
+    assert "reference_answer" not in schema_text
 
 
 def test_numeric_format_alias_is_not_a_competing_reconstruction_answer() -> None:
@@ -1537,6 +1581,73 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
     assert (
         sum(job.get("execution_authority") == "shared_gemini_broker" for job in jobs)
         == 1
+    )
+
+
+def test_new_campaign_regenerates_a_paper_with_historical_accepted_output(
+    tmp_path: Path,
+) -> None:
+    access, historical_eligibility = streaming_fixture(tmp_path)
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+
+    historical = run_stream(
+        database,
+        paths.namespace,
+        run_id="historical-trial-invocation",
+        campaign_id="historical-trial-campaign",
+        access_run_dir=access,
+        eligibility_run_dir=historical_eligibility,
+        author=FakeProvider("fake-gemini", FIXTURES / "fake-author.jsonl"),
+        verifier=FakeProvider("fake-gemini", FIXTURES / "fake-verifier.jsonl"),
+        max_papers=1,
+    )
+    historical_item = database.one(
+        "SELECT item_id FROM candidates WHERE run_id='historical-trial-campaign'"
+    )["item_id"]
+    assert historical["counts"]["accepted_base_questions"] == 1
+
+    production_eligibility = tmp_path / "production-eligibility"
+    transport = ScriptedBrokerTransport()
+    broker = shared_broker(tmp_path, transport)
+    provider = BrokerProvider(
+        broker=broker,
+        phase="live_test",
+        invocation_run_id="new-production-invocation",
+    )
+    production = run_stream(
+        database,
+        paths.namespace,
+        run_id="new-production-invocation",
+        campaign_id="new-production-campaign",
+        access_run_dir=access,
+        eligibility_run_dir=production_eligibility,
+        author=provider,
+        verifier=provider,
+        max_papers=1,
+        **broker_eligibility_inputs(tmp_path),
+    )
+
+    production_item = database.one(
+        "SELECT item_id FROM candidates WHERE run_id='new-production-campaign'"
+    )["item_id"]
+    assert production["counts"]["accepted_base_questions"] == 1
+    assert production["resumed_papers"] == 0
+    assert production_item != historical_item
+    assert broker.status()["generation_submissions"] == 10
+    assert transport.methods.count("generateContent") == 10
+    assert (
+        database.one(
+            "SELECT COUNT(*) AS count FROM calls WHERE run_id='new-production-campaign'"
+        )["count"]
+        == 10
+    )
+    jobs = list((production_eligibility / "jobs").glob("*.json"))
+    assert len(jobs) == 1
+    assert (
+        json.loads(jobs[0].read_text(encoding="utf-8"))["execution_authority"]
+        == "shared_gemini_broker"
     )
 
 

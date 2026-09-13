@@ -91,6 +91,7 @@ class BrokerProvider:
         request_key = broker_request_key(
             model=self.model,
             run_id=self.invocation_run_id,
+            phase=self.phase,
             stage=stage,
             paper_id=self.paper_id,
             family_id=self.family_id,
@@ -182,6 +183,7 @@ class BrokerProvider:
         request_key = broker_request_key(
             model=self.model,
             run_id=self.invocation_run_id,
+            phase=self.phase,
             stage=stage,
             paper_id=self.paper_id,
             family_id=self.family_id,

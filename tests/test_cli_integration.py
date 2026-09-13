@@ -1306,8 +1306,20 @@ def test_generation_runs_qa_gates_before_exact_option_verification(
     assert roles[5:] == ["option_verifier"] * 4
     assert item["schema_version"] == "2.0.0"
     assert item["finding_id"]
+    assert item["answer"]["selection_rationale"]
+    assert item["question_rationale"]
+    assert item["reconstruction"]["reconstruction_rationale"]
+    assert item["answer_verification"]["verification_rationale"]
+    assert all(row["generation_rationale"] for row in item["distractors"])
     assert len(item["option_verdicts"]) == 4
-    assert all(verdict["option_text"] for verdict in item["option_verdicts"])
+    assert all(
+        verdict["option_text"] and verdict["rationale"]
+        for verdict in item["option_verdicts"]
+    )
+    assert (
+        item["provenance"]["model_justification_contract_version"]
+        == "model-justification-v1"
+    )
     assert receipt["validation"]["labels"]["mcq_eligible"] is True
 
 
@@ -1337,7 +1349,7 @@ def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> No
     command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(verifier)
     generated = json.loads(cli(tmp_path, *command).stdout)
     assert generated["status"] == "qa_gate_failed"
-    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v11"
+    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v12"
     assert (
         generated["provenance"]["numeric_rule_contract_version"]
         == "numeric-rule-source-support-v2"
@@ -1387,6 +1399,10 @@ def test_generation_arms_share_one_frozen_finding(tmp_path: Path) -> None:
                         "role": "direct_joint",
                         "response": {
                             "question": "What reported water depth was documented?",
+                            "question_rationale": (
+                                "The question preserves the source-bound method "
+                                "qualifier and asks for one measured value."
+                            ),
                             "answer": first["answer"],
                         },
                     }

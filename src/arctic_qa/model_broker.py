@@ -57,6 +57,9 @@ UNBOUNDED_COUNT_CHANGE = {
 LIVE_TEST_BUDGET_EXTENSION_CHANGE = {
     "live_test_suballocation_usd": {"from": "10.00", "to": "20.00"}
 }
+PRODUCTION_BUDGET_EXTENSION_CHANGE = {
+    "away_session_total_ceiling_usd": {"from": "25.00", "to": "61.614496"}
+}
 POLICY_TRANSITION_CHANGES = (
     {"live_test_maximum_papers": {"from": 20, "to": 40}},
     {
@@ -65,6 +68,7 @@ POLICY_TRANSITION_CHANGES = (
     },
     UNBOUNDED_COUNT_CHANGE,
     LIVE_TEST_BUDGET_EXTENSION_CHANGE,
+    PRODUCTION_BUDGET_EXTENSION_CHANGE,
 )
 CEILING_EXTENSION_CHANGE: dict[str, Any] = {}
 AUTHORIZED_CAP_REASON = "the paid request exceeds the authorized live-test cap"
@@ -161,13 +165,21 @@ def _validate_policy(path: Path) -> dict[str, Any]:
         "reserved_for_benchmark_evaluation_usd": Decimal("500"),
         "dataset_construction_allocation_usd": Decimal("500"),
         "construction_review_checkpoint_usd": Decimal("250"),
-        "away_session_total_ceiling_usd": Decimal("25"),
         "maximum_request_reserved_cost_usd": Decimal("0.25"),
         "maximum_paper_cost_usd": Decimal("1"),
     }
     for field, expected in exact_money.items():
         if _money(value.get(field), field, positive=True) != expected:
             raise ValueError(f"streaming budget value changed: {field}")
+    away_ceiling = _money(
+        value.get("away_session_total_ceiling_usd"),
+        "away_session_total_ceiling_usd",
+        positive=True,
+    )
+    if away_ceiling not in {Decimal("25"), Decimal("61.614496")}:
+        raise ValueError(
+            "streaming budget value changed: away_session_total_ceiling_usd"
+        )
     live_test_suballocation = _money(
         value.get("live_test_suballocation_usd"),
         "live_test_suballocation_usd",
@@ -175,9 +187,7 @@ def _validate_policy(path: Path) -> dict[str, Any]:
     )
     if live_test_suballocation not in {Decimal("10"), Decimal("20")}:
         raise ValueError("streaming budget value changed: live_test_suballocation_usd")
-    if live_test_suballocation > _money(
-        value["away_session_total_ceiling_usd"], "away_session_total_ceiling_usd"
-    ):
+    if live_test_suballocation > _money(away_ceiling, "away_session_total_ceiling_usd"):
         raise ValueError("the live-test budget exceeds the away-session budget")
     exact_int = {
         "accepted_question_target": 500,
@@ -283,6 +293,7 @@ def broker_request_key(
     *,
     model: str,
     run_id: str,
+    phase: str = "live_test",
     stage: str,
     paper_id: str,
     family_id: str,
@@ -290,18 +301,17 @@ def broker_request_key(
     payload: dict[str, Any],
 ) -> str:
     """Bind one request key to its model, pipeline identity, and exact payload."""
-    return sha256_bytes(
-        canonical_json(
-            {
-                "model": model,
-                "stage": stage,
-                "paper_id": paper_id,
-                "family_id": family_id,
-                "source_version_id": source_version_id,
-                "payload": payload,
-            }
-        ).encode()
-    )
+    identity = {
+        "model": model,
+        "stage": stage,
+        "paper_id": paper_id,
+        "family_id": family_id,
+        "source_version_id": source_version_id,
+        "payload": payload,
+    }
+    if phase == "away_production":
+        identity.update({"phase": phase, "run_id": run_id})
+    return sha256_bytes(canonical_json(identity).encode())
 
 
 class SharedGeminiBroker:
@@ -435,7 +445,11 @@ class SharedGeminiBroker:
         )
 
     def _apply_transition_controls(self, authorization: dict[str, Any]) -> None:
-        if authorization.get("schema") == "shared-paid-call-config-transition-v2":
+        if (
+            authorization.get("schema") == "shared-paid-call-config-transition-v2"
+            and authorization.get("changed_policy_fields")
+            != PRODUCTION_BUDGET_EXTENSION_CHANGE
+        ):
             self._authorized_live_test_ceiling_usd = _money(
                 authorization["maximum_authorized_cumulative_tranche_usd"],
                 "transition tranche",
@@ -498,6 +512,7 @@ class SharedGeminiBroker:
         if authorization.get("changed_policy_fields") in (
             UNBOUNDED_COUNT_CHANGE,
             LIVE_TEST_BUDGET_EXTENSION_CHANGE,
+            PRODUCTION_BUDGET_EXTENSION_CHANGE,
         ) or self._is_ceiling_extension(authorization):
             self._validate_stream_input_gate(gate)
         if (
@@ -597,11 +612,12 @@ class SharedGeminiBroker:
                 if len(matching_predecessors) != 1:
                     raise ValueError("the policy transition predecessor changed")
             else:
-                expected_tranche = (
-                    Decimal("20")
-                    if changed_policy_fields == LIVE_TEST_BUDGET_EXTENSION_CHANGE
-                    else Decimal("5")
-                )
+                if changed_policy_fields == LIVE_TEST_BUDGET_EXTENSION_CHANGE:
+                    expected_tranche = Decimal("20")
+                elif changed_policy_fields == PRODUCTION_BUDGET_EXTENSION_CHANGE:
+                    expected_tranche = Decimal("61.614496")
+                else:
+                    expected_tranche = Decimal("5")
                 if from_pair[1] == to_pair[1] or tranche != expected_tranche:
                     raise ValueError("the policy transition identity changed")
                 expected_value = dict(source_value)
@@ -2392,7 +2408,7 @@ class SharedGeminiBroker:
             if used + reserved > _money(
                 self.policy["away_session_total_ceiling_usd"], "away"
             ):
-                raise ValueError("the paid request exceeds the USD 25 away cap")
+                raise ValueError("the paid request exceeds the authorized away cap")
             construction_used = self.prior + used
             if construction_used + reserved > _money(
                 self.policy["construction_review_checkpoint_usd"], "checkpoint"
@@ -2735,6 +2751,7 @@ class SharedGeminiBroker:
         expected_key = broker_request_key(
             model=self.config["model"],
             run_id=run_id,
+            phase=phase,
             stage=stage,
             paper_id=paper_id,
             family_id=family_id,
