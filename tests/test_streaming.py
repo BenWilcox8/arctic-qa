@@ -19,7 +19,7 @@ from arctic_qa.broker_provider import BrokerProvider
 from arctic_qa.db import Database
 from arctic_qa.errors import AmbiguousChargeError, BudgetError
 from arctic_qa.exporting import export_run
-from arctic_qa.generation import ROLE_SCHEMAS
+from arctic_qa.generation import ROLE_SCHEMAS, resume_candidate_distractors
 from arctic_qa.model_broker import (
     AUTHORIZED_CAP_REASON,
     PER_REQUEST_CAP_REASON,
@@ -2076,6 +2076,33 @@ def test_short_answer_without_three_distractors_is_not_counted_as_accepted(
         (paths.namespace / "streaming-dataset-r1" / "progress.json").read_text()
     )
     assert progress["counts"]["accepted_qa"] == 0
+
+    base = database.one("SELECT * FROM candidates WHERE status='incomplete_non_mcq'")
+    targeted_author = FakeProvider("gemini-3.8-flash", FIXTURES / "fake-author.jsonl")
+    targeted_verifier = FakeProvider(
+        "gemini-3.8-flash", FIXTURES / "fake-verifier.jsonl"
+    )
+    targeted_author.position = 2
+    targeted_verifier.position = 2
+    resumed = resume_candidate_distractors(
+        database,
+        paths.namespace,
+        item_id=base["item_id"],
+        author=targeted_author,
+        verifier=targeted_verifier,
+    )
+    resumed_validation = validation_module.validate_candidate(
+        database, paths.namespace, resumed
+    ).as_dict()
+    assert resumed["item_id"] != base["item_id"]
+    assert resumed["provenance"]["targeted_regression"] is True
+    assert resumed_validation["labels"]["mcq_eligible"] is True
+    assert (
+        database.one(
+            "SELECT status FROM candidates WHERE item_id=?", (base["item_id"],)
+        )["status"]
+        == "incomplete_non_mcq"
+    )
 
 
 def test_streaming_cli_stops_after_eligibility_rejection(tmp_path: Path) -> None:

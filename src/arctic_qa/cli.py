@@ -13,7 +13,7 @@ from . import __version__
 from .access_readiness import run_access_readiness, supervise_access_readiness
 from .broker_provider import BrokerProvider
 from .corpus_viewer import serve_corpus_viewer
-from .db import Database
+from .db import Database, now
 from .discovery import (
     crossref_exact_doi,
     crossref_reference_expansion,
@@ -27,7 +27,7 @@ from .discovery import (
 from .errors import ArcticQAError
 from .exporting import export_run
 from .extraction import extract_source, load_chunks
-from .generation import generate_candidate
+from .generation import generate_candidate, resume_candidate_distractors
 from .gemini_eligibility import run_gemini_eligibility
 from .manifests import write_source_manifest
 from .metadata_prefilter import run_metadata_prefilter
@@ -331,6 +331,8 @@ def parser() -> argparse.ArgumentParser:
     stream.add_argument("--author-script", type=Path)
     stream.add_argument("--verifier-script", type=Path)
     stream.add_argument("--max-papers", type=int, default=1)
+    stream.add_argument("--resume-distractors-item-id")
+    stream.add_argument("--resume-distractors-paper-id")
     stream.add_argument("--progress-file", type=Path)
     stream.add_argument(
         "--streaming-budget-policy-file",
@@ -831,6 +833,74 @@ def _stream(args, paths: DataPaths, db: Database) -> dict[str, Any]:
             phase=args.phase,
             invocation_run_id=args.run_id,
         )
+    if args.resume_distractors_item_id:
+        if args.phase != "offline":
+            if not args.resume_distractors_paper_id:
+                raise ValueError(
+                    "live targeted distractor resume requires --resume-distractors-paper-id"
+                )
+            broker.bind_stream_input(
+                args.access_run_dir.resolve(),
+                phase=args.phase,
+                run_id=args.run_id,
+                campaign_id=args.campaign_id or args.run_id,
+                eligibility_prompt_file=args.eligibility_prompt_file.resolve(),
+                eligibility_schema_file=args.eligibility_schema_file.resolve(),
+                eligibility_policy_file=args.eligibility_policy_file.resolve(),
+            )
+            row = db.one(
+                "SELECT candidate_json,paper_family_id FROM candidates WHERE item_id=?",
+                (args.resume_distractors_item_id,),
+            )
+            if not row:
+                raise ValueError(
+                    f"unknown candidate: {args.resume_distractors_item_id}"
+                )
+            source_version_id = json.loads(row["candidate_json"])["source"][
+                "content_hash"
+            ]
+            author = verifier = author.bind(
+                paper_id=args.resume_distractors_paper_id,
+                family_id=row["paper_family_id"],
+                source_version_id=source_version_id,
+            )
+        candidate = resume_candidate_distractors(
+            db,
+            paths.namespace,
+            item_id=args.resume_distractors_item_id,
+            author=author,
+            verifier=verifier,
+        )
+        validation = validate_candidate(db, paths.namespace, candidate).as_dict()
+        accepted = (
+            validation["final_label"] == "machine_accepted_unverified"
+            and validation["labels"]["mcq_eligible"]
+        )
+        if accepted and hasattr(author, "record_accepted"):
+            author.record_accepted(
+                family_id=candidate["source"]["paper_family_id"],
+                item_id=candidate["item_id"],
+            )
+        elif validation["final_label"] == "machine_accepted_unverified":
+            with db.transaction():
+                db.connection.execute(
+                    "UPDATE candidates SET status='incomplete_non_mcq',updated_at=? WHERE item_id=?",
+                    (now(), candidate["item_id"]),
+                )
+        exported = export_run(
+            db,
+            paths.namespace,
+            args.campaign_id or args.run_id,
+            seed="streaming-20260912",
+        )
+        return {
+            "state": "completed",
+            "targeted_regression": True,
+            "source_item_id": args.resume_distractors_item_id,
+            "item_id": candidate["item_id"],
+            "validation": validation,
+            "export": exported,
+        }
     return run_stream(
         db,
         paths.namespace,

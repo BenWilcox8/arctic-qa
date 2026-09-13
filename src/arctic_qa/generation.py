@@ -646,98 +646,24 @@ def generate_candidate(
     option_verdicts: list[dict[str, Any]] = []
     qa_hash = stable_id("qa", question, canonical_json(answer))
     if not qa_gate_reasons:
-        distractor_proposals = _call(
-            db,
-            author,
-            run_id,
-            entity_id,
-            "distractor_writer",
-            context
-            + "\nQUESTION\n"
-            + str(question)
-            + "\nANSWER_RECORD\n"
-            + canonical_json(answer)
-            + "\n"
-            + DISTRACTOR_WRITER_INSTRUCTIONS,
-            parameters,
-            reservation,
-            timeout,
-            retries,
-            rate_limit_seconds,
-        )["distractors"]
-        distractors = [
-            _resolve_source_span(
-                proposal,
-                context_spans,
-                reason_code="distractor_evidence_span_not_found",
-            )
-            for proposal in distractor_proposals
-        ]
-        for distractor in distractors:
-            option_hash = stable_id(
-                "option", qa_hash, distractor.get("text"), distractor.get("type")
-            )
-            binding = {
-                "source_hash": source["content_hash"],
-                "qa_hash": qa_hash,
-                "option_hash": option_hash,
-                "option_text": distractor.get("text"),
-            }
-            prompt = (
-                context
-                + "\nQUESTION\n"
-                + str(question)
-                + "\nANSWER_RECORD\n"
-                + canonical_json(answer)
-                + "\nOPTION_RECORD\n"
-                + canonical_json(distractor)
-                + "\nVERIFICATION_BINDING\n"
-                + canonical_json(binding)
-                + "\nEstablish a unique contradiction for this exact displayed option. Absence of mention is not falsity. Set question_admits_option_as_correct only when a reasonable reading of THIS question admits the option. Truth at another location or time alone does not make a scoped substitution correct."
-                + " Select one source_span_id for the evidence."
-            )
-            result = _call_result(
-                db,
-                verifier,
-                run_id,
-                stable_id("option-verdict", entity_id, option_hash),
-                "option_verifier",
-                prompt,
-                parameters,
-                reservation,
-                timeout,
-                retries,
-                rate_limit_seconds,
-            )
-            resolved_option = _resolve_source_span(
-                result.payload,
-                context_spans,
-                reason_code="option_verifier_evidence_span_not_found",
-            )
-            option_verdicts.append(
-                {
-                    **binding,
-                    **resolved_option,
-                    "provenance": {
-                        "role": "option_verifier",
-                        "provider": verifier.name,
-                        "requested_model": verifier.model,
-                        "returned_model": result.returned_model,
-                        "request_id": result.request_id,
-                        "prompt_version": PROMPT_VERSION,
-                        "prompt_hash": provider_prompt_hash(
-                            verifier,
-                            SYSTEM,
-                            prompt,
-                            PROMPT_VERSION,
-                            {
-                                **parameters,
-                                "json_schema": ROLE_SCHEMAS["option_verifier"],
-                            },
-                        ),
-                    },
-                }
-            )
+        distractors, option_verdicts = _generate_distractors(
+            db=db,
+            source=source,
+            context=context,
+            context_spans=context_spans,
+            question=question,
+            answer=answer,
+            qa_hash=qa_hash,
+            entity_id=entity_id,
+            author=author,
+            verifier=verifier,
+            run_id=run_id,
+            parameters=parameters,
+            reservation=reservation,
+            timeout=timeout,
+            retries=retries,
+            rate_limit_seconds=rate_limit_seconds,
+        )
     item_id = stable_id(
         "aqa", run_id, source_id, source["paper_family_id"], arm, question, answer
     )
@@ -828,6 +754,223 @@ def generate_candidate(
                 source_id,
                 source["paper_family_id"],
                 arm,
+                canonical_json(candidate),
+                candidate["status"],
+                now(),
+                now(),
+            ),
+        )
+    return candidate
+
+
+def _generate_distractors(
+    *,
+    db: Database,
+    source: dict[str, Any],
+    context: str,
+    context_spans: dict[str, dict[str, Any]],
+    question: str,
+    answer: dict[str, Any],
+    qa_hash: str,
+    entity_id: str,
+    author: Provider,
+    verifier: Provider,
+    run_id: str,
+    parameters: dict[str, Any],
+    reservation: Decimal,
+    timeout: float,
+    retries: int,
+    rate_limit_seconds: float,
+    attempt_id: str | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    attempt_context = (
+        f"\nTARGETED_REGRESSION_ATTEMPT\n{attempt_id}" if attempt_id else ""
+    )
+    proposals = _call(
+        db,
+        author,
+        run_id,
+        entity_id,
+        "distractor_writer",
+        context
+        + "\nQUESTION\n"
+        + question
+        + "\nANSWER_RECORD\n"
+        + canonical_json(answer)
+        + attempt_context
+        + "\n"
+        + DISTRACTOR_WRITER_INSTRUCTIONS,
+        parameters,
+        reservation,
+        timeout,
+        retries,
+        rate_limit_seconds,
+    )["distractors"]
+    distractors = [
+        _resolve_source_span(
+            proposal,
+            context_spans,
+            reason_code="distractor_evidence_span_not_found",
+        )
+        for proposal in proposals
+    ]
+    verdicts: list[dict[str, Any]] = []
+    for distractor in distractors:
+        option_hash = stable_id(
+            "option", qa_hash, distractor.get("text"), distractor.get("type")
+        )
+        binding = {
+            "source_hash": source["content_hash"],
+            "qa_hash": qa_hash,
+            "option_hash": option_hash,
+            "option_text": distractor.get("text"),
+        }
+        prompt = (
+            context
+            + "\nQUESTION\n"
+            + question
+            + "\nANSWER_RECORD\n"
+            + canonical_json(answer)
+            + "\nOPTION_RECORD\n"
+            + canonical_json(distractor)
+            + "\nVERIFICATION_BINDING\n"
+            + canonical_json(binding)
+            + attempt_context
+            + "\nEstablish a unique contradiction for this exact displayed option. Absence of mention is not falsity. Set question_admits_option_as_correct only when a reasonable reading of THIS question admits the option. Truth at another location or time alone does not make a scoped substitution correct."
+            + " Select one source_span_id for the evidence."
+        )
+        result = _call_result(
+            db,
+            verifier,
+            run_id,
+            stable_id("option-verdict", entity_id, option_hash),
+            "option_verifier",
+            prompt,
+            parameters,
+            reservation,
+            timeout,
+            retries,
+            rate_limit_seconds,
+        )
+        resolved = _resolve_source_span(
+            result.payload,
+            context_spans,
+            reason_code="option_verifier_evidence_span_not_found",
+        )
+        verdicts.append(
+            {
+                **binding,
+                **resolved,
+                "provenance": _call_provenance(
+                    verifier, result, "option_verifier", prompt, parameters
+                ),
+            }
+        )
+    return distractors, verdicts
+
+
+def resume_candidate_distractors(
+    db: Database,
+    namespace: Path,
+    *,
+    item_id: str,
+    author: Provider,
+    verifier: Provider,
+) -> dict[str, Any]:
+    row = db.one("SELECT * FROM candidates WHERE item_id=?", (item_id,))
+    if not row:
+        raise ValueError(f"unknown candidate: {item_id}")
+    if row["status"] != "incomplete_non_mcq":
+        raise ValueError("targeted distractor resume requires an incomplete candidate")
+    base = json.loads(row["candidate_json"])
+    if base.get("qa_gate_reasons"):
+        raise ValueError("targeted distractor resume requires a passed QA gate")
+    source_id = row["source_id"]
+    source = db.one("SELECT * FROM sources WHERE source_id=?", (source_id,))
+    if not source:
+        raise ValueError(f"unknown source: {source_id}")
+    chunks = load_chunks(db, namespace, source_id)
+    chunk_id = (base.get("source") or {}).get("chunk_id")
+    chunk = next((value for value in chunks if value["chunk_id"] == chunk_id), None)
+    if chunk is None:
+        raise ValueError("the targeted candidate source chunk is unavailable")
+    qa_reasons = _qa_gate_reasons(
+        chunk,
+        base["question"],
+        base["answer"],
+        base["reconstruction"],
+        base["answer_verification"],
+    )
+    if qa_reasons:
+        raise ValueError("the targeted candidate no longer passes its QA gate")
+    run_id = row["run_id"]
+    externally_metered = (
+        getattr(author, "externally_metered", False),
+        getattr(verifier, "externally_metered", False),
+    )
+    if externally_metered[0] != externally_metered[1]:
+        raise ValueError("generation providers cannot mix budget authorities")
+    if not all(externally_metered):
+        ensure_budget(db, run_id, "tokens", Decimal("1000000"))
+    parameters = {
+        "temperature": 0,
+        "max_tokens": 2048,
+        "reasoning_token_cap": 2048,
+        "billable_token_overhead": 1024,
+    }
+    attempt_id = stable_id("targeted-distractor-resume", item_id, PROMPT_VERSION)
+    qa_hash = stable_id("qa", base["question"], canonical_json(base["answer"]))
+    distractors, verdicts = _generate_distractors(
+        db=db,
+        source=source,
+        context=_context(chunk),
+        context_spans={span["span_id"]: span for span in _finding_spans(chunk)},
+        question=base["question"],
+        answer=base["answer"],
+        qa_hash=qa_hash,
+        entity_id=stable_id("unit", base["finding_id"], row["generation_arm"]),
+        author=author,
+        verifier=verifier,
+        run_id=run_id,
+        parameters=parameters,
+        reservation=Decimal("100"),
+        timeout=30,
+        retries=0,
+        rate_limit_seconds=0,
+        attempt_id=attempt_id,
+    )
+    candidate = json.loads(canonical_json(base))
+    candidate["item_id"] = stable_id("aqa-targeted", item_id, PROMPT_VERSION)
+    candidate["status"] = "candidate"
+    candidate["distractors"] = distractors
+    candidate["option_verdicts"] = verdicts
+    candidate["correction_history"] = [
+        *candidate.get("correction_history", []),
+        {
+            "kind": "targeted_distractor_regression",
+            "attempt_id": attempt_id,
+            "source_item_id": item_id,
+            "prompt_version": PROMPT_VERSION,
+        },
+    ]
+    candidate["provenance"] = {
+        **candidate["provenance"],
+        "prompt_version": PROMPT_VERSION,
+        "targeted_regression": True,
+        "source_item_id": item_id,
+        "attempt_id": attempt_id,
+    }
+    with db.transaction():
+        db.connection.execute(
+            """INSERT INTO candidates
+            (item_id,run_id,source_id,paper_family_id,generation_arm,candidate_json,status,created_at,updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?)""",
+            (
+                candidate["item_id"],
+                run_id,
+                source_id,
+                row["paper_family_id"],
+                row["generation_arm"],
                 canonical_json(candidate),
                 candidate["status"],
                 now(),
