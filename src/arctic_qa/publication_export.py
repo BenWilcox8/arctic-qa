@@ -35,12 +35,8 @@ def _latest_validation(connection: sqlite3.Connection, item_id: str) -> dict[str
     ).fetchone()
     if not row:
         return {"available": False}
-    return {
-        "available": True,
-        "label": row["label"],
-        "reason_codes": _json(row["reason_codes_json"], []),
-        "details": _json(row["details_json"], {}),
-    }
+    details = _json(row["details_json"], {})
+    return {"available": True, "reason_codes": _json(row["reason_codes_json"], []), "details": {"distractors": details.get("distractors", [])}}
 
 
 def _accepted_options(candidate: dict[str, Any], validation: dict[str, Any]) -> list[dict[str, Any]]:
@@ -121,7 +117,6 @@ def _row(connection: sqlite3.Connection, candidate: dict[str, Any], source: sqli
         "options": review_options,
         "validation": validation,
         "provenance": {key: value for key, value in (candidate.get("provenance") or {}).items() if key != "run_id"},
-        "receipt_trace": _receipt_trace(connection, candidate),
         "rationale_availability": {
             "question": bool(candidate.get("question_rationale")),
             "answer_selection": bool(candidate.get("answer", {}).get("selection_rationale")),
