@@ -153,3 +153,32 @@ The current accepted trial export is `export-61975ae865dbb1f2333e`.
 It has one short-answer item and two MCQ items.
 Use it as trial evidence only.
 Its release label remains `machine_accepted_unverified`.
+
+## Create the quality-first 800-record input
+
+This command writes a ranked subset from the frozen 4,420-record manifest.
+It does not call a provider, alter the freeze, or hash the original source files.
+
+```bash
+PYTHONPATH=src python -m arctic_qa.quality_order \
+  --source-manifest /mnt/crdata/research-abstention/arctic-qa/corpus-freeze-r1/full-text-ready-4420-seed20260912-r1/full-text-ready-manifest.jsonl \
+  --descriptor /mnt/crdata/research-abstention/arctic-qa/corpus-freeze-r1/full-text-ready-4420-seed20260912-r1/manifest-descriptor.json \
+  --output-dir /PRIVATE/QUALITY_ORDER \
+  --seed approved-quality-order-seed-r1 \
+  --limit 800
+```
+
+The tool records every source in `quality-order.json`.
+Each record has its original position, identity hashes, quality band, reason list, and seeded tie-break key.
+The tool reads at most 16,000 characters from each local extraction.
+It uses frozen metadata and this local extraction structure only.
+It excludes QA outcomes, acceptance labels, author prestige, citation counts, and model familiarity.
+
+The selected JSONL file keeps the ranked order and source receipts.
+The matching descriptor and `materialized-top-800` directory work with `full_run_plan` as the access input.
+The materializer writes zero paid calls.
+
+The quality bands prefer readable text with Methods, Results, and evidence markers.
+Within a quality band, the order gives priority to the existing frozen Arctic or marine cue.
+The fixed seed then orders records with equal quality and cue state.
+This ranking does not establish scientific eligibility or correctness.
