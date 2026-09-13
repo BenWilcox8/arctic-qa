@@ -52,6 +52,10 @@ Otherwise, it shows `legacy_rejected_or_unresolved` and does not guess the split
 
 Each row can show its paper ID, title, current stage, final state, and final reason.
 
+Progress counts describe one incremental invocation.
+They can reset when the same run resumes.
+The shared ledger supplies cumulative accepted-QA, paper, submission, and cost totals.
+
 The broker writes an adjacent `shared-gemini-broker-status-v2` record.
 
 The page reads model costs and tokens only from this invariant-checked record.
