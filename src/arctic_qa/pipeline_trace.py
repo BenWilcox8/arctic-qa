@@ -152,19 +152,20 @@ class PipelineTraceStore:
         needle = (query or "").strip().casefold()
         filtered = []
         for record in records.values():
+            if run_id and run_id not in record["run_ids"]:
+                continue
+            visible = self._project_run(record, run_id) if run_id else record
             searchable = " ".join(
-                str(record.get(key) or "")
+                str(visible.get(key) or "")
                 for key in ("paper_id", "source_id", "doi", "title")
             ).casefold()
             if needle and needle not in searchable:
                 continue
-            if run_id and run_id not in record["run_ids"]:
+            if state and state != visible["state"]:
                 continue
-            if state and state != record["state"]:
+            if stage and stage not in visible["stages"]:
                 continue
-            if stage and stage not in record["stages"]:
-                continue
-            filtered.append(record)
+            filtered.append(visible)
         filtered.sort(
             key=lambda item: (str(item.get("latest_at_utc") or ""), item["paper_key"]),
             reverse=True,
@@ -293,7 +294,7 @@ class PipelineTraceStore:
             candidates = [
                 dict(row)
                 for row in connection.execute(
-                    "SELECT source_id,run_id,status,updated_at FROM candidates"
+                    "SELECT item_id,source_id,run_id,status,updated_at FROM candidates"
                 )
             ]
             findings = [
@@ -412,8 +413,69 @@ class PipelineTraceStore:
                 "attempt_count": len(family_receipts),
                 "latest_at_utc": max(latest_values, default=None),
                 "receipts": family_receipts,
+                "candidate_rows": relevant_candidates,
             }
         return groups
+
+    def _project_run(self, record: dict[str, Any], run_id: str) -> dict[str, Any]:
+        receipts = [item for item in record["receipts"] if item.get("run_id") == run_id]
+        candidates = [
+            item for item in record["candidate_rows"] if item.get("run_id") == run_id
+        ]
+        stages = sorted(
+            {str(item.get("stage")) for item in receipts if item.get("stage")}
+        )
+        latest_receipt = max(
+            receipts,
+            key=lambda item: str(
+                item.get("completed_at_utc") or item.get("submitted_at_utc") or ""
+            ),
+            default={},
+        )
+        latest_values = [
+            str(value)
+            for value in (
+                *[
+                    item.get("completed_at_utc") or item.get("submitted_at_utc")
+                    for item in receipts
+                ],
+                *[item.get("updated_at") for item in candidates],
+            )
+            if value
+        ]
+        request_keys = {
+            str(item.get("request_key")) for item in receipts if item.get("request_key")
+        }
+        candidate_ids = {
+            str(value)
+            for value in (
+                record.get("paper_id"),
+                record.get("doi"),
+                *record.get("source_ids", []),
+            )
+            if value
+        }
+        return {
+            **record,
+            "run_ids": [run_id],
+            "state": self._paper_state(
+                candidates,
+                receipts,
+                self._eligibility_state(request_keys, candidate_ids),
+            ),
+            "current_stage": (
+                latest_receipt.get("stage")
+                if latest_receipt
+                else "completed"
+                if candidates
+                else "not_started"
+            ),
+            "stages": stages,
+            "attempt_count": len(receipts),
+            "latest_at_utc": max(latest_values, default=None),
+            "receipts": receipts,
+            "candidate_rows": candidates,
+        }
 
     def _receipt_events(self) -> list[dict[str, Any]]:
         if not self.receipts_dir.is_dir():
@@ -726,8 +788,11 @@ class PipelineTraceStore:
         matching = [
             job
             for _, job in self._all_eligibility_jobs()
-            if job.get("broker_request_key") in request_keys
-            or str(job.get("candidate_key")) in candidate_ids
+            if (
+                job.get("broker_request_key") in request_keys
+                if request_keys
+                else str(job.get("candidate_key")) in candidate_ids
+            )
         ]
         if not matching:
             return None
@@ -791,15 +856,25 @@ class PipelineTraceStore:
     def _runs(
         self, record: dict[str, Any], stages: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        return [
-            {
-                "run_id": run_id,
-                "stages": [
-                    item["stage_key"] for item in stages if item["run_id"] == run_id
-                ],
-            }
-            for run_id in record["run_ids"]
-        ]
+        runs = []
+        for run_id in record["run_ids"]:
+            projected = self._project_run(record, run_id)
+            runs.append(
+                {
+                    "run_id": run_id,
+                    "state": projected["state"],
+                    "current_stage": projected["current_stage"],
+                    "attempt_count": projected["attempt_count"],
+                    "latest_at_utc": projected["latest_at_utc"],
+                    "candidate_item_ids": [
+                        item["item_id"] for item in projected["candidate_rows"]
+                    ],
+                    "stages": [
+                        item["stage_key"] for item in stages if item["run_id"] == run_id
+                    ],
+                }
+            )
+        return runs
 
     def _paper_state(
         self,
@@ -807,6 +882,11 @@ class PipelineTraceStore:
         receipts: list[dict[str, Any]],
         eligibility_state: str | None,
     ) -> str:
+        states = {str(row.get("state")) for row in receipts}
+        if "submitted" in states or "response_received" in states:
+            return "in_progress"
+        if "ambiguous_charge" in states:
+            return "ambiguous_charge"
         candidate_states = {str(row.get("status")) for row in candidates}
         if "machine_accepted_unverified" in candidate_states:
             return "machine_accepted_unverified"
@@ -814,11 +894,6 @@ class PipelineTraceStore:
             return "incomplete_non_mcq"
         if "rejected" in candidate_states:
             return "generation_rejected"
-        states = {str(row.get("state")) for row in receipts}
-        if "submitted" in states or "response_received" in states:
-            return "in_progress"
-        if "ambiguous_charge" in states:
-            return "ambiguous_charge"
         if eligibility_state is not None:
             return eligibility_state
         if receipts:

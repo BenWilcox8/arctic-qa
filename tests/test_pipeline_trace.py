@@ -430,6 +430,62 @@ def test_submitted_only_stage_appears_on_refresh(tmp_path: Path) -> None:
     assert stage["response"]["availability"] == "not_retained"
 
 
+def test_new_submitted_run_does_not_inherit_historical_acceptance(
+    tmp_path: Path,
+) -> None:
+    namespace, _, _ = fixture_namespace(tmp_path)
+    request_key = "b" * 64
+    write_json(
+        namespace
+        / "streaming-dataset-r1"
+        / "model-receipts"
+        / f"{request_key}.submitted.json",
+        {
+            "request_key": request_key,
+            "request_sha256": "c" * 64,
+            "run_id": "future-run",
+            "stage": "finding_answer_extraction",
+            "paper_id": "10.1234/fixture",
+            "family_id": "family-fixture",
+            "source_version_id": "a" * 64,
+            "model": "gemini-fixture",
+            "state": "submitted",
+            "submitted_at_utc": "2026-09-13T00:00:10Z",
+            "reserved_usd": "0.01",
+        },
+    )
+    store = PipelineTraceStore(namespace)
+
+    aggregate = store.list_papers(query="10.1234/fixture")["items"][0]
+    historical = store.list_papers(run_id="campaign-fixture")["items"][0]
+    current = store.list_papers(run_id="future-run")["items"][0]
+
+    assert aggregate["state"] == "in_progress"
+    assert aggregate["current_stage"] == "finding_answer_extraction"
+    assert historical["state"] == "machine_accepted_unverified"
+    assert current["state"] == "in_progress"
+    assert current["run_ids"] == ["future-run"]
+    assert current["current_stage"] == "finding_answer_extraction"
+    assert current["attempt_count"] == 1
+    assert (
+        store.list_papers(run_id="future-run", state="machine_accepted_unverified")[
+            "items"
+        ]
+        == []
+    )
+
+    detail = store.paper_detail(aggregate["paper_key"])
+    runs = {run["run_id"]: run for run in detail["runs"]}
+    assert runs["campaign-fixture"]["state"] == "machine_accepted_unverified"
+    assert runs["campaign-fixture"]["candidate_item_ids"] == ["aqa-fixture"]
+    assert runs["future-run"]["state"] == "in_progress"
+    assert runs["future-run"]["stages"] == [request_key]
+    assert {stage["run_id"] for stage in detail["stages"]} == {
+        "campaign-fixture",
+        "future-run",
+    }
+
+
 @pytest.mark.parametrize(
     ("decision", "expected"),
     (("excluded", "eligibility_rejected"), ("uncertain", "eligibility_unresolved")),
