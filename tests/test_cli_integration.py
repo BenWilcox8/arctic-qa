@@ -587,14 +587,23 @@ def test_scope_alias_not_present_in_source_is_rejected(tmp_path: Path) -> None:
     assert result["reasons"] == ["answer_scope_not_source_bound"]
 
 
+@pytest.mark.parametrize(
+    ("role", "expected_reason"),
+    [
+        ("answer", "answer_scope_not_source_bound"),
+        ("reconstruction", "reconstruction_scope_not_source_bound"),
+        ("answer_verification", "answer_verifier_scope_not_source_bound"),
+    ],
+)
 def test_scope_must_be_bound_to_each_role_selected_evidence_before_export(
     tmp_path: Path,
+    role: str,
+    expected_reason: str,
 ) -> None:
     run_id = "selected-evidence-scope"
     receipt = smoke(tmp_path, run_id)
     item = candidate(tmp_path)
-    for role in ("answer", "reconstruction", "answer_verification"):
-        item[role]["scope"]["geography"] = "71.3 N"
+    item[role]["scope"]["geography"] = "71.3 N"
     bind_qa_verification_receipts(tmp_path, item)
     bind_option_verdicts(
         item,
@@ -614,7 +623,7 @@ def test_scope_must_be_bound_to_each_role_selected_evidence_before_export(
     exported = json.loads(cli(tmp_path, "export", "--run-id", run_id).stdout)
 
     assert result["final_label"] == "rejected"
-    assert result["reasons"] == ["answer_scope_not_source_bound"]
+    assert result["reasons"] == [expected_reason]
     assert exported["short_answer_count"] == 0
     assert exported["mcq_count"] == 0
 
