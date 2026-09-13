@@ -955,7 +955,8 @@ class FakePipelineTraceStore:
         }
 
     def paper_detail(self, paper_key: str) -> dict[str, object]:
-        assert paper_key == "paper-safe-key"
+        if paper_key != "paper-safe-key":
+            raise KeyError("unknown pipeline paper key")
         return {
             "schema": "pipeline-trace-paper-v1",
             "identity": {
@@ -989,7 +990,8 @@ class FakePipelineTraceStore:
         }
 
     def stage_payload(self, paper_key: str, stage_key: str) -> dict[str, object]:
-        assert (paper_key, stage_key) == ("paper-safe-key", "stage-safe-key")
+        if (paper_key, stage_key) != ("paper-safe-key", "stage-safe-key"):
+            raise KeyError("unknown pipeline stage key")
         return {
             "schema": "pipeline-trace-stage-v1",
             "paper_key": paper_key,
@@ -1072,6 +1074,11 @@ def test_pipeline_trace_http_routes_escape_payloads_and_reject_paths(
         with pytest.raises(urllib.error.HTTPError) as arbitrary:
             urllib.request.urlopen(f"{base}/api/pipeline-trace/paper/paper-safe-key")
         assert arbitrary.value.code == 404
+        with pytest.raises(urllib.error.HTTPError) as unknown:
+            urllib.request.urlopen(
+                f"{base}/api/pipeline-trace/paper?paper_key=unknown-key"
+            )
+        assert unknown.value.code == 404
     finally:
         server.shutdown()
         server.server_close()

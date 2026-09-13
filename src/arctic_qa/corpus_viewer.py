@@ -2284,6 +2284,8 @@ class CorpusRequestHandler(BaseHTTPRequestHandler):
                 )
             else:
                 self._json(HTTPStatus.NOT_FOUND, {"error": "route not found"})
+        except KeyError as error:
+            self._json(HTTPStatus.NOT_FOUND, {"error": str(error).strip("'")})
         except ValueError as error:
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
         except RuntimeError as error:

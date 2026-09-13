@@ -66,9 +66,9 @@
       font-weight: 700; letter-spacing: .02em; text-transform: uppercase;
     }
     .ready, .completed, .resolved, .committed, .deployed, .eligible, .fresh, .available, .retained, .success, .machine_accepted_unverified, .priority_seed, .retained_article_type { color: var(--green); background: var(--green-bg); }
-    .partial, .pending, .paused, .stale, .in_progress, .incomplete_non_mcq, .unresolved, .flagged_nonresearch_type, .unresolved_missing_type, .unresolved_mixed_type, .unresolved_other_type { color: var(--amber); background: var(--amber-bg); }
+    .partial, .pending, .paused, .stale, .in_progress, .incomplete_non_mcq, .unresolved, .eligibility_unresolved, .flagged_nonresearch_type, .unresolved_missing_type, .unresolved_mixed_type, .unresolved_other_type { color: var(--amber); background: var(--amber-bg); }
     .running { color: var(--navy); background: var(--cyan); }
-    .not_ready, .not_finished, .blocked, .excluded, .rejected, .generation_rejected, .error, .unavailable, .invalid, .absent { color: var(--red); background: var(--red-bg); }
+    .not_ready, .not_finished, .blocked, .excluded, .rejected, .eligibility_rejected, .generation_rejected, .error, .unavailable, .invalid, .absent { color: var(--red); background: var(--red-bg); }
     .not_started, .unreviewed, .not_running, .not_retained, .unknown, .recorded { color: #4c5e66; background: var(--gray-bg); }
     .counts { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .65rem; margin: 0 0 1rem; }
     .count { background: var(--paper); border: 1px solid var(--line); border-radius: 8px; padding: .8rem; }
@@ -375,8 +375,8 @@
       </div>
       <form class="trace-filters" id="trace-filters">
         <div class="field search"><label for="trace-q">Paper title, DOI, or ID</label><input id="trace-q" name="q" maxlength="200" placeholder="Search retained pipeline papers"></div>
-        <div class="field"><label for="trace-paper-state">Final state</label><select id="trace-paper-state" name="state"><option value="">All states</option><option value="machine_accepted_unverified">Machine accepted, unverified</option><option value="incomplete_non_mcq">Incomplete MCQ</option><option value="rejected">Rejected</option><option value="unresolved">Unresolved</option><option value="eligible">Eligible</option><option value="excluded">Excluded</option></select></div>
-        <div class="field"><label for="trace-stage-filter">Current stage</label><select id="trace-stage-filter" name="stage"><option value="">All stages</option><option value="scientific_eligibility">Scientific eligibility</option><option value="finding_answer_extraction">Finding extraction</option><option value="question_generation">Question generation</option><option value="blinded_reconstruction">Blinded reconstruction</option><option value="answer_verification">Answer verification</option><option value="distractor_generation">Distractor generation</option><option value="option_verification">Option verification</option><option value="validation">Validation</option><option value="export">Export</option></select></div>
+        <div class="field"><label for="trace-paper-state">Final state</label><select id="trace-paper-state" name="state"><option value="">All states</option><option value="machine_accepted_unverified">Machine accepted, unverified</option><option value="incomplete_non_mcq">Incomplete MCQ</option><option value="generation_rejected">Generation rejected</option><option value="eligibility_rejected">Eligibility rejected</option><option value="eligibility_unresolved">Eligibility unresolved</option><option value="eligible">Eligible</option><option value="ambiguous_charge">Ambiguous charge</option><option value="in_progress">In progress</option><option value="not_started">Not started</option></select></div>
+        <div class="field"><label for="trace-stage-filter">Current stage</label><select id="trace-stage-filter" name="stage"><option value="">All stages</option><option value="eligibility">Scientific eligibility</option><option value="finding_answer_extraction">Finding extraction</option><option value="question_generation">Question generation</option><option value="blinded_reconstruction">Blinded reconstruction</option><option value="answer_verification">Answer verification</option><option value="distractor_generation">Distractor generation</option><option value="option_verification">Option verification</option><option value="repair">Repair</option></select></div>
         <div class="field"><label for="trace-run-filter">Run ID</label><input id="trace-run-filter" name="run_id" maxlength="200" placeholder="All runs"></div>
         <div class="field"><label for="trace-limit">Rows</label><select id="trace-limit" name="limit"><option>10</option><option selected>25</option><option>50</option><option>100</option></select></div>
         <button class="filter-action" type="submit">Apply</button>
@@ -902,6 +902,11 @@
     function traceJson(value) {
       return JSON.stringify(safeTraceValue(value), null, 2);
     }
+    function traceRevision(value) {
+      const stable = { ...value };
+      delete stable.generated_at_utc;
+      return traceJson(stable);
+    }
     function traceActionButton(caption, handler) {
       const button = text('button', caption);
       button.type = 'button';
@@ -943,12 +948,17 @@
     function detailSection(caption, value, open = false) {
       const details = document.createElement('details');
       details.className = 'trace-stage';
-      details.open = open;
+      const storageKey = `trace-open:section:${caption}`;
+      details.open = open || sessionStorage.getItem(storageKey) === '1';
       const summary = text('summary', `${caption} (${Array.isArray(value) ? formatNumber(value.length) : 'retained'})`);
       const body = document.createElement('div');
       body.className = 'trace-stage-body';
       body.append(traceField(caption, value));
       details.append(summary, body);
+      details.addEventListener('toggle', () => {
+        if (details.open) sessionStorage.setItem(storageKey, '1');
+        else sessionStorage.removeItem(storageKey);
+      });
       return details;
     }
     function traceIdentityValue(identity, key, fallback = 'Not available') {
@@ -1035,7 +1045,8 @@
       target.append(heading);
       const sections = [
         ['Run and attempt history', payload.runs],
-        ['Retained source context', payload.source],
+        ['Retained source records', payload.sources],
+        ['Eligibility decisions and evidence', payload.eligibility],
         ['Frozen findings', payload.findings],
         ['Generated QA and distractors', payload.candidates],
         ['Validation checks', payload.validation_events],
@@ -1085,7 +1096,7 @@
       $('trace-detail-body').replaceChildren(text('div', 'Loading retained paper detail...', 'loading'));
       try {
         const payload = await fetchJson(`/api/pipeline-trace/paper?paper_key=${encodeURIComponent(paperKey)}`);
-        state.trace.detailRevision = traceJson(payload);
+        state.trace.detailRevision = traceRevision(payload);
         renderTraceDetail(payload);
         renderTraceTable(state.trace.lastList || { items: [] });
         if (!preserveScroll) $('pipeline-inspector').scrollIntoView({ block: 'start' });
@@ -1097,7 +1108,7 @@
       if (!state.trace.selectedPaper) return;
       try {
         const payload = await fetchJson(`/api/pipeline-trace/paper?paper_key=${encodeURIComponent(state.trace.selectedPaper)}`);
-        const revision = traceJson(payload);
+        const revision = traceRevision(payload);
         if (revision !== state.trace.detailRevision) {
           state.trace.detailRevision = revision;
           renderTraceDetail(payload);
@@ -1117,8 +1128,14 @@
         state.trace.lastList = payload;
         state.trace.nextCursor = payload.next_cursor || null;
         renderTraceTable(payload);
-        setBadge($('trace-state'), payload.freshness?.state || payload.freshness || 'available');
-        $('trace-meta').textContent = `Retained trace index generated ${dateText(payload.generated_at_utc)}. No active run is implied by these historical records.`;
+        const freshness = payload.freshness || {};
+        const pipeline = freshness.pipeline || {};
+        const ledger = freshness.ledger || {};
+        const active = pipeline.state === 'running' || Number(ledger.inflight || 0) > 0;
+        const traceState = active ? 'running' : pipeline.availability === 'observed' || ledger.availability === 'observed' ? 'not_running' : 'unavailable';
+        $('trace-state').textContent = active ? 'Active run observed' : traceState === 'not_running' ? 'No active run' : 'State unavailable';
+        $('trace-state').className = `badge ${traceState}`;
+        $('trace-meta').textContent = `Pipeline ${label(pipeline.state)} at ${dateText(pipeline.updated_at_utc)} · Ledger ${label(ledger.state)} with ${formatNumber(ledger.inflight)} in flight · Trace index generated ${dateText(payload.generated_at_utc)}.`;
         $('trace-list-summary').textContent = `Page ${formatNumber(state.trace.page)} · ${formatNumber((payload.items || []).length)} papers shown${state.trace.nextCursor ? ' · more available' : ''}.`;
         $('trace-previous').disabled = state.trace.page <= 1;
         $('trace-next').disabled = !state.trace.nextCursor;
