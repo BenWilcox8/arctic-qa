@@ -760,6 +760,9 @@ def _hydrate_source_span_ids(value: Any, prompt: str) -> Any:
     except (json.JSONDecodeError, KeyError, TypeError):
         return value
     chunks = source_data.get("chunks") if isinstance(source_data, dict) else None
+    if not isinstance(chunks, list) and isinstance(source_data, dict):
+        if isinstance(source_data.get("evidence_spans"), list):
+            chunks = [source_data]
     if not isinstance(chunks, list):
         return value
     spans = [
@@ -771,14 +774,28 @@ def _hydrate_source_span_ids(value: Any, prompt: str) -> Any:
         and isinstance(span.get("span_id"), str)
         and isinstance(span.get("text"), str)
     ]
+    prompt_tail = prompt[match.end() :]
+    bound_span_match = re.search(r'"source_span_id":"([^"]+)"', prompt_tail)
+    bound_span = next(
+        (
+            span
+            for span in spans
+            if bound_span_match and span["span_id"] == bound_span_match.group(1)
+        ),
+        None,
+    )
 
     def walk(item: Any) -> None:
         if isinstance(item, dict):
             if item.get("source_span_id") == "{{span_id}}":
                 answer_text = str(item.get("text") or "")
                 selected = next(
-                    (span for span in spans if answer_text in span["text"]),
-                    spans[0] if spans else None,
+                    (
+                        span
+                        for span in spans
+                        if answer_text and answer_text in span["text"]
+                    ),
+                    bound_span or (spans[0] if spans else None),
                 )
                 if selected is not None:
                     item["source_span_id"] = selected["span_id"]

@@ -8,7 +8,7 @@ from typing import Any
 
 from .db import Database, now
 from .extraction import load_chunks
-from .util import canonical_json, normalize_text, stable_id
+from .util import canonical_json, normalize_text, sha256_bytes, stable_id
 
 
 UNIT_FACTORS: dict[tuple[str, str], Decimal] = {
@@ -48,7 +48,7 @@ REQUIRED_ANSWER_KEYS = {
     "scope",
     "required_question_phrases",
 }
-OPTION_VERDICT_RESPONSE_KEYS = frozenset(
+LEGACY_OPTION_VERDICT_RESPONSE_KEYS = frozenset(
     {
         "contradiction_established",
         "alternative_answer_search_passed",
@@ -57,6 +57,24 @@ OPTION_VERDICT_RESPONSE_KEYS = frozenset(
         "evidence_quote",
         "locator",
         "rationale",
+    }
+)
+SPAN_OPTION_VERDICT_RESPONSE_KEYS = frozenset(
+    {
+        "contradiction_established",
+        "alternative_answer_search_passed",
+        "true_in_different_context",
+        "question_admits_option_as_correct",
+        "source_span_id",
+        "rationale",
+    }
+)
+SPAN_DERIVED_KEYS = frozenset(
+    {
+        "evidence_quote",
+        "locator",
+        "evidence_text_sha256",
+        "span_contract_version",
     }
 )
 
@@ -505,12 +523,18 @@ def _option_verdict_receipt_matches(
         return False
     if not _option_response_schema_valid(response):
         return False
-    recorded_response = {key: verdict.get(key) for key in OPTION_VERDICT_RESPONSE_KEYS}
-    return canonical_json(response) == canonical_json(recorded_response)
+    recorded_keys = set(response)
+    if set(response) == SPAN_OPTION_VERDICT_RESPONSE_KEYS:
+        recorded_keys.update(SPAN_DERIVED_KEYS)
+    recorded_response = {key: verdict.get(key) for key in recorded_keys}
+    return _response_matches_resolved_record(response, recorded_response)
 
 
 def _option_response_schema_valid(response: Any) -> bool:
-    if not isinstance(response, dict) or set(response) != OPTION_VERDICT_RESPONSE_KEYS:
+    if not isinstance(response, dict) or set(response) not in {
+        LEGACY_OPTION_VERDICT_RESPONSE_KEYS,
+        SPAN_OPTION_VERDICT_RESPONSE_KEYS,
+    }:
         return False
     boolean_fields = (
         "contradiction_established",
@@ -520,10 +544,16 @@ def _option_response_schema_valid(response: Any) -> bool:
     )
     if not all(type(response[field]) is bool for field in boolean_fields):
         return False
-    if not all(
-        isinstance(response[field], str) and response[field]
-        for field in ("evidence_quote", "rationale")
-    ):
+    if not isinstance(response["rationale"], str) or not response["rationale"]:
+        return False
+    if set(response) == SPAN_OPTION_VERDICT_RESPONSE_KEYS:
+        return bool(
+            isinstance(response["source_span_id"], str)
+            and response["source_span_id"]
+        )
+    if not isinstance(response["evidence_quote"], str) or not response[
+        "evidence_quote"
+    ]:
         return False
     locator = response["locator"]
     return bool(
@@ -579,9 +609,48 @@ def _qa_verification_receipts_match(db: Database, candidate: dict[str, Any]) -> 
             response = json.loads(receipt["response_json"])
         except (TypeError, json.JSONDecodeError):
             return False
-        if canonical_json(response) != canonical_json(record):
+        if not _response_matches_resolved_record(response, record):
             return False
     return True
+
+
+def _response_matches_resolved_record(response: Any, record: Any) -> bool:
+    if canonical_json(response) == canonical_json(record):
+        return True
+    if not isinstance(response, dict) or not isinstance(record, dict):
+        return False
+    if set(record) != set(response) | SPAN_DERIVED_KEYS:
+        return False
+    if any(record.get(key) != value for key, value in response.items()):
+        return False
+    quote = record.get("evidence_quote")
+    locator = record.get("locator")
+    text_sha256 = record.get("evidence_text_sha256")
+    contract = record.get("span_contract_version")
+    span_id = record.get("source_span_id")
+    if not isinstance(quote, str) or not quote:
+        return False
+    if text_sha256 != sha256_bytes(quote.encode("utf-8")):
+        return False
+    if contract != "finding-evidence-span-v1":
+        return False
+    if not isinstance(locator, dict) or set(locator) != {
+        "chunk_id",
+        "start_offset",
+        "end_offset",
+    }:
+        return False
+    chunk_id = locator["chunk_id"]
+    start = locator["start_offset"]
+    end = locator["end_offset"]
+    if (
+        not isinstance(chunk_id, str)
+        or not chunk_id
+        or type(start) is not int
+        or type(end) is not int
+    ):
+        return False
+    return span_id == stable_id(contract, chunk_id, start, end, text_sha256)
 
 
 def _text_display_issue(text: str) -> str | None:

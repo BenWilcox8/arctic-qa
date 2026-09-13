@@ -20,7 +20,7 @@ from .util import canonical_json, normalize_text, sha256_bytes, stable_id
 from .validation import numeric_equal, numeric_rule_is_source_bound
 
 
-PROMPT_VERSION = "arctic-qa-generation-v4"
+PROMPT_VERSION = "arctic-qa-generation-v5"
 FINDING_POLICY_VERSION = "one-finding-per-paper-full-context-v2"
 FINDING_SPAN_CONTRACT_VERSION = "finding-evidence-span-v1"
 MAX_FINDING_CONTEXT_CHARS = 3_000_000
@@ -41,6 +41,28 @@ LOCATOR_SCHEMA = {
     },
     "additionalProperties": False,
 }
+
+
+def _source_span_selected_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **schema,
+        "required": [
+            field
+            for field in schema["required"]
+            if field not in {"evidence_quote", "locator"}
+        ]
+        + ["source_span_id"],
+        "properties": {
+            **{
+                key: value
+                for key, value in schema["properties"].items()
+                if key not in {"evidence_quote", "locator"}
+            },
+            "source_span_id": {"type": "string", "minLength": 1},
+        },
+    }
+
+
 SCOPE_SCHEMA = {
     "type": "object",
     "required": [
@@ -129,23 +151,7 @@ ANSWER_SCHEMA = {
     },
     "additionalProperties": False,
 }
-EXTRACTOR_ANSWER_SCHEMA = {
-    **ANSWER_SCHEMA,
-    "required": [
-        field
-        for field in ANSWER_SCHEMA["required"]
-        if field not in {"evidence_quote", "locator"}
-    ]
-    + ["source_span_id"],
-    "properties": {
-        **{
-            key: value
-            for key, value in ANSWER_SCHEMA["properties"].items()
-            if key not in {"evidence_quote", "locator"}
-        },
-        "source_span_id": {"type": "string", "minLength": 1},
-    },
-}
+EXTRACTOR_ANSWER_SCHEMA = _source_span_selected_schema(ANSWER_SCHEMA)
 FROZEN_ANSWER_SCHEMA = {
     **ANSWER_SCHEMA,
     "properties": {
@@ -195,6 +201,7 @@ DISTRACTOR_SCHEMA = {
     },
     "additionalProperties": False,
 }
+SPAN_DISTRACTOR_SCHEMA = _source_span_selected_schema(DISTRACTOR_SCHEMA)
 ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
     "extractor": {
         "type": "object",
@@ -217,7 +224,7 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
         },
         "additionalProperties": False,
     },
-    "reconstructor": {
+    "reconstructor": _source_span_selected_schema({
         "type": "object",
         "required": [
             "answer",
@@ -243,14 +250,16 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
             "numeric": NUMERIC_VALUE_SCHEMA,
         },
         "additionalProperties": False,
-    },
+    }),
     "distractor_writer": {
         "type": "object",
         "required": ["distractors"],
-        "properties": {"distractors": {"type": "array", "items": DISTRACTOR_SCHEMA}},
+        "properties": {
+            "distractors": {"type": "array", "items": SPAN_DISTRACTOR_SCHEMA}
+        },
         "additionalProperties": False,
     },
-    "answer_verifier": {
+    "answer_verifier": _source_span_selected_schema({
         "type": "object",
         "required": [
             "source_entailment_model_verified",
@@ -276,8 +285,8 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
             "residual_error": {"type": "string"},
         },
         "additionalProperties": False,
-    },
-    "option_verifier": {
+    }),
+    "option_verifier": _source_span_selected_schema({
         "type": "object",
         "required": [
             "contradiction_established",
@@ -298,7 +307,7 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
             "rationale": {"type": "string", "minLength": 1},
         },
         "additionalProperties": False,
-    },
+    }),
     "correction": {
         "type": "object",
         "required": ["component", "replacement"],
@@ -405,7 +414,11 @@ def generate_candidate(
             retries,
             rate_limit_seconds,
         )["answer"]
-        answer = _resolve_finding_span(answer_proposal, finding_spans)
+        answer = _resolve_source_span(
+            answer_proposal,
+            finding_spans,
+            reason_code="finding_evidence_span_not_found",
+        )
         chunk = next(
             (
                 row
@@ -438,6 +451,9 @@ def generate_candidate(
                     now(),
                 ),
             )
+    context_spans = {
+        span["span_id"]: span for span in _finding_spans(chunk)
+    }
     context = _context(chunk)
     entity_id = stable_id("unit", finding_id, arm)
     arm_answer_proposal = answer
@@ -483,7 +499,8 @@ def generate_candidate(
         context
         + "\nQUESTION\n"
         + str(question)
-        + "\nReconstruct the answer. The proposed answer is hidden."
+        + "\nReconstruct the answer. The proposed answer is hidden. "
+        "Select one source_span_id for the evidence."
     )
     reconstruction_result = _call_result(
         db,
@@ -498,7 +515,11 @@ def generate_candidate(
         retries,
         rate_limit_seconds,
     )
-    reconstruction = reconstruction_result.payload
+    reconstruction = _resolve_source_span(
+        reconstruction_result.payload,
+        context_spans,
+        reason_code="reconstruction_evidence_span_not_found",
+    )
     answer_verification_prompt = (
         context
         + "\nQUESTION\n"
@@ -507,7 +528,8 @@ def generate_candidate(
         + canonical_json(answer)
         + "\nRECONSTRUCTION\n"
         + canonical_json(reconstruction)
-        + "\nVerify entailment, relation, scope, ambiguity, alternatives, evidence, and the question claim type."
+        + "\nVerify entailment, relation, scope, ambiguity, alternatives, evidence, and the question claim type. "
+        "Select one source_span_id for the evidence."
     )
     answer_verification_result = _call_result(
         db,
@@ -522,7 +544,11 @@ def generate_candidate(
         retries,
         rate_limit_seconds,
     )
-    answer_verification = answer_verification_result.payload
+    answer_verification = _resolve_source_span(
+        answer_verification_result.payload,
+        context_spans,
+        reason_code="answer_verifier_evidence_span_not_found",
+    )
     qa_gate_reasons = _qa_gate_reasons(
         chunk, question, answer, reconstruction, answer_verification
     )
@@ -532,7 +558,7 @@ def generate_candidate(
     option_verdicts: list[dict[str, Any]] = []
     qa_hash = stable_id("qa", question, canonical_json(answer))
     if not qa_gate_reasons:
-        distractors = _call(
+        distractor_proposals = _call(
             db,
             author,
             run_id,
@@ -543,13 +569,22 @@ def generate_candidate(
             + str(question)
             + "\nANSWER_RECORD\n"
             + canonical_json(answer)
-            + "\nOvergenerate typed distractor proposals. Do not self-verify them.",
+            + "\nOvergenerate typed distractor proposals. Do not self-verify them. "
+            "Select source_span_id for each evidence record.",
             parameters,
             reservation,
             timeout,
             retries,
             rate_limit_seconds,
         )["distractors"]
+        distractors = [
+            _resolve_source_span(
+                proposal,
+                context_spans,
+                reason_code="distractor_evidence_span_not_found",
+            )
+            for proposal in distractor_proposals
+        ]
         for distractor in distractors:
             option_hash = stable_id(
                 "option", qa_hash, distractor.get("text"), distractor.get("type")
@@ -571,6 +606,7 @@ def generate_candidate(
                 + "\nVERIFICATION_BINDING\n"
                 + canonical_json(binding)
                 + "\nEstablish a unique contradiction for this exact displayed option. Absence of mention is not falsity. Set question_admits_option_as_correct only when a reasonable reading of THIS question admits the option. Truth at another location or time alone does not make a scoped substitution correct."
+                + " Select one source_span_id for the evidence."
             )
             result = _call_result(
                 db,
@@ -585,10 +621,15 @@ def generate_candidate(
                 retries,
                 rate_limit_seconds,
             )
+            resolved_option = _resolve_source_span(
+                result.payload,
+                context_spans,
+                reason_code="option_verifier_evidence_span_not_found",
+            )
             option_verdicts.append(
                 {
                     **binding,
-                    **result.payload,
+                    **resolved_option,
                     "provenance": {
                         "role": "option_verifier",
                         "provider": verifier.name,
@@ -934,6 +975,7 @@ def _record_resolves(record: dict[str, Any], chunk: dict[str, Any]) -> bool:
 
 
 def _context(chunk: dict[str, Any]) -> str:
+    evidence_spans = _finding_spans(chunk)
     return (
         "SOURCE_DATA_BEGIN\n"
         + canonical_json(
@@ -943,6 +985,8 @@ def _context(chunk: dict[str, Any]) -> str:
                 "heading": chunk["heading"],
                 "page": chunk.get("page"),
                 "text": chunk["text"],
+                "span_contract_version": FINDING_SPAN_CONTRACT_VERSION,
+                "evidence_spans": evidence_spans,
             }
         )
         + "\nSOURCE_DATA_END"
@@ -1035,15 +1079,18 @@ def _finding_spans(chunk: dict[str, Any]) -> list[dict[str, Any]]:
     return spans
 
 
-def _resolve_finding_span(
-    proposal: dict[str, Any], spans_by_id: dict[str, dict[str, Any]]
+def _resolve_source_span(
+    proposal: dict[str, Any],
+    spans_by_id: dict[str, dict[str, Any]],
+    *,
+    reason_code: str,
 ) -> dict[str, Any]:
     span_id = proposal.get("source_span_id")
     span = spans_by_id.get(str(span_id))
     if span is None:
         raise CandidateRejectedError(
-            "finding_evidence_span_not_found",
-            "the selected finding evidence span does not exist",
+            reason_code,
+            "the selected evidence span does not exist",
         )
     answer = {key: value for key, value in proposal.items() if key != "source_span_id"}
     answer["evidence_quote"] = span["text"]

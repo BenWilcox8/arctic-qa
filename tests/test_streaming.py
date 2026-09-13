@@ -649,6 +649,81 @@ def test_finding_span_id_resolves_to_exact_source_evidence(tmp_path: Path) -> No
     assert len(record["evidence"]["text_sha256"]) == 64
 
 
+def test_streaming_resolves_every_role_evidence_from_source_spans(
+    tmp_path: Path,
+) -> None:
+    access, eligibility = streaming_fixture(tmp_path)
+    author_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-author.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    for distractor in author_events[2]["response"]["distractors"]:
+        distractor.pop("evidence_quote", None)
+        distractor.pop("locator", None)
+        distractor["source_span_id"] = "{{span_id}}"
+    author_events[2]["require_prompt_contains"] = [
+        '"span_contract_version":"finding-evidence-span-v1"',
+        "Select source_span_id for each evidence record.",
+    ]
+    verifier_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-verifier.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    for event in verifier_events:
+        response = event["response"]
+        response.pop("evidence_quote", None)
+        response.pop("locator", None)
+        response["source_span_id"] = "{{span_id}}"
+        event.setdefault("require_prompt_contains", []).extend(
+            [
+                '"evidence_spans"',
+                "Select one source_span_id for the evidence.",
+            ]
+        )
+    author_script = tmp_path / "all-spans-author.jsonl"
+    author_script.write_text(
+        "\n".join(json.dumps(event) for event in author_events) + "\n",
+        encoding="utf-8",
+    )
+    verifier_script = tmp_path / "all-spans-verifier.jsonl"
+    verifier_script.write_text(
+        "\n".join(json.dumps(event) for event in verifier_events) + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        tmp_path,
+        "stream",
+        "--run-id",
+        "stream-all-evidence-spans",
+        "--access-run-dir",
+        str(access),
+        "--eligibility-run-dir",
+        str(eligibility),
+        "--author-script",
+        str(author_script),
+        "--verifier-script",
+        str(verifier_script),
+    )
+
+    assert result["counts"]["accepted_base_questions"] == 1
+    mcq_path = tmp_path / "arctic-qa" / result["export"]["files"]["mcq"]
+    records = [json.loads(line) for line in mcq_path.read_text().splitlines()]
+    answer_present = next(
+        row for row in records if row["task_type"] == "answer_present_mcq"
+    )
+    for option in answer_present["options"]:
+        if option["is_correct"]:
+            continue
+        assert option["falsity_evidence"]["quote"] == (
+            "The reported water depth was 2.0 m with a source-grounded tolerance of 0.1 m."
+        )
+
+
 def test_streaming_run_manifest_rejects_changed_resume_inputs(tmp_path: Path) -> None:
     access, eligibility = streaming_fixture(tmp_path)
     arguments = (

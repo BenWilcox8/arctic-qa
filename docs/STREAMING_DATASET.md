@@ -217,7 +217,7 @@ This mapping does not change the scientific criteria.
 Span location proves source provenance, but it does not prove scientific entailment.
 The existing evidence and scope gates still decide whether the selected text supports the status.
 
-Generation prompt version 4 uses immutable source spans for finding extraction.
+Generation prompt version 5 uses immutable source spans for all evidence-bearing generation and verification roles.
 The program splits extracted lines at PDF column gaps of at least three spaces.
 It binds each span ID to one chunk, exact character offsets, and the SHA-256 value of the span text.
 The extractor selects one span ID and cannot supply replacement quote text or offsets.
@@ -226,6 +226,9 @@ The candidate retains the span ID, contract version, and text hash.
 An unknown span ID rejects the candidate with `finding_evidence_span_not_found`.
 This change prevents a model from joining visually adjacent text across PDF columns.
 It does not prove that the selected span entails the answer.
+The reconstructor, answer verifier, distractor writer, and option verifier also select source span IDs.
+The program copies stored text and offsets into each downstream record.
+Each role gets a distinct rejection code for an unknown span ID.
 See [the shared model broker guide](SHARED_MODEL_BROKER.md) for the exact command and rules.
 An immutable-event failure republishes broker status with `halted` set to `true` and `integrity_valid` set to `false`.
 The broker observer updates streaming progress to bind that halted status.
