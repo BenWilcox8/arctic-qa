@@ -46,7 +46,11 @@ def test_plan_is_deterministic_and_never_changes_its_inputs(tmp_path: Path) -> N
     ledger = tmp_path / "shared-ledger.json"
     _write_json(
         ledger,
-        {"spent_usd": "1.25", "reserved_usd": "0.25", "prior_construction_spend_usd": "0"},
+        {
+            "spent_usd": "1.25",
+            "reserved_usd": "0.25",
+            "prior_construction_spend_usd": "0",
+        },
     )
     _write_json(ledger.with_name("shared-ledger.json.status.json"), {"state": "ready"})
     config = tmp_path / "config"

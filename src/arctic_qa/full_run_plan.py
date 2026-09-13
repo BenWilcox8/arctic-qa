@@ -32,7 +32,9 @@ def _decimal_text(value: Decimal) -> str:
     return format(value.quantize(Decimal("0.000001")), "f")
 
 
-def _ledger_summary(ledger: dict[str, Any], planning_cap: Decimal) -> dict[str, str | None]:
+def _ledger_summary(
+    ledger: dict[str, Any], planning_cap: Decimal
+) -> dict[str, str | None]:
     spent = Decimal(str(ledger.get("spent_usd", "0")))
     reserved = Decimal(str(ledger.get("reserved_usd", "0")))
     return {
@@ -121,7 +123,9 @@ def build_plan(
     _file_identity(completion_receipt_file)
     access_run_id = access_manifest.get("run_id")
     if run_id == access_run_id or campaign_id == access_run_id:
-        raise ValueError("the future scientific run identity must differ from the access run")
+        raise ValueError(
+            "the future scientific run identity must differ from the access run"
+        )
 
     target_total = access_manifest.get("target_total")
     if not isinstance(target_total, int) or target_total < 1:
@@ -210,7 +214,11 @@ def build_plan(
             "money_spent_by_plan_usd": "0.000000",
             "warning": "This plan does not authorize or start provider requests.",
         },
-        "future_scientific_run": {"run_id": run_id, "campaign_id": campaign_id, "phase": phase},
+        "future_scientific_run": {
+            "run_id": run_id,
+            "campaign_id": campaign_id,
+            "phase": phase,
+        },
         "input": {
             "access_manifest": _file_identity(access_manifest_file),
             "access_completion_receipt": _file_identity(completion_receipt_file),
@@ -225,7 +233,9 @@ def build_plan(
         "selection": {**selection, "planned_source_count": selected_count},
         "generation_configuration": configuration,
         "budget_and_ledger": {
-            "planning_cumulative_cap_usd": _decimal_text(planning_cumulative_budget_usd),
+            "planning_cumulative_cap_usd": _decimal_text(
+                planning_cumulative_budget_usd
+            ),
             "funding_state": "not_authorized_by_plan",
             "ledger": ledger_identity,
             "ledger_status": status_identity,
@@ -235,14 +245,20 @@ def build_plan(
         "stream_command_argv": stream_command,
         "quality_summary_handoff": {
             "interface": "python -m arctic_qa.quality_summary",
-            "required_inputs": ["selected export manifest", "shared ledger", "ledger status"],
+            "required_inputs": [
+                "selected export manifest",
+                "shared ledger",
+                "ledger status",
+            ],
             "warning": "Run the report only after the stream writes an accepted export manifest.",
         },
     }
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description="Write an offline Arctic QA full-run plan.")
+    result = argparse.ArgumentParser(
+        description="Write an offline Arctic QA full-run plan."
+    )
     result.add_argument("--json-out", type=Path, required=True)
     result.add_argument("--data-root", type=Path, required=True)
     result.add_argument("--access-run-dir", type=Path, required=True)
@@ -258,10 +274,14 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--eligibility-prompt-file", type=Path, required=True)
     result.add_argument("--eligibility-schema-file", type=Path, required=True)
     result.add_argument("--eligibility-policy-file", type=Path, required=True)
-    result.add_argument("--planning-cumulative-budget-usd", type=Decimal, default=Decimal("20"))
+    result.add_argument(
+        "--planning-cumulative-budget-usd", type=Decimal, default=Decimal("20")
+    )
     result.add_argument("--max-papers", type=int)
     result.add_argument("--selection-seed")
-    result.add_argument("--phase", choices=("live_test", "away_production"), default="away_production")
+    result.add_argument(
+        "--phase", choices=("live_test", "away_production"), default="away_production"
+    )
     return result
 
 
@@ -287,7 +307,9 @@ def main(argv: list[str] | None = None) -> int:
         selection_seed=args.selection_seed,
         phase=args.phase,
     )
-    args.json_out.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    args.json_out.write_text(
+        json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     return 0
 
 
