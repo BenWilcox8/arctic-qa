@@ -121,11 +121,22 @@ It can also authorize one later transition with these two changes:
 - `live_test_maximum_papers` from 40 to 41
 - `live_test_maximum_generation_submissions` from 100 to 101
 
+It can authorize one final transition from the 41/101 policy:
+
+- `live_test_maximum_papers` from 41 to `null`
+- `live_test_maximum_generation_submissions` from 101 to `null`
+
+This final transition removes the live-test count stops.
+
+It keeps the USD 5 cumulative trial ceiling and all other broker controls.
+
+The broker reports `null` for the two remaining live-test count values.
+
 The later transition must authorize both fields separately in its change set.
 
 The broker rejects partial, mismatched, or additional changes.
 
-The v2 transition keeps the cumulative USD 5 live-test ceiling.
+Every v2 transition keeps the cumulative USD 5 live-test ceiling.
 
 The command must still set `--max-papers` to the intended fixed-order input bound.
 

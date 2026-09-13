@@ -55,8 +55,12 @@ POLICY_TRANSITION_CHANGES = (
         "live_test_maximum_papers": {"from": 40, "to": 41},
         "live_test_maximum_generation_submissions": {"from": 100, "to": 101},
     },
+    {
+        "live_test_maximum_papers": {"from": 41, "to": None},
+        "live_test_maximum_generation_submissions": {"from": 101, "to": None},
+    },
 )
-ALLOWED_LIVE_TEST_LIMITS = {(20, 100), (40, 100), (41, 101)}
+ALLOWED_LIVE_TEST_LIMITS = {(20, 100), (40, 100), (41, 101), (None, None)}
 USAGE_RECONCILIATION_FIELDS = {
     "schema",
     "request_key",
@@ -1474,12 +1478,18 @@ class SharedGeminiBroker:
             "live_test_usd": str(live_test_cap - live_used),
             "accepted_questions": int(self.policy["accepted_question_target"])
             - accepted,
-            "live_test_papers": int(self.policy["live_test_maximum_papers"])
-            - len(ledger["live_test_papers"]),
-            "live_test_generation_submissions": int(
-                self.policy["live_test_maximum_generation_submissions"]
-            )
-            - live_submissions,
+            "live_test_papers": (
+                None
+                if self.policy["live_test_maximum_papers"] is None
+                else int(self.policy["live_test_maximum_papers"])
+                - len(ledger["live_test_papers"])
+            ),
+            "live_test_generation_submissions": (
+                None
+                if self.policy["live_test_maximum_generation_submissions"] is None
+                else int(self.policy["live_test_maximum_generation_submissions"])
+                - live_submissions
+            ),
             "away_generation_submissions": int(
                 self.policy["away_maximum_generation_submissions"]
             )
@@ -1991,16 +2001,22 @@ class SharedGeminiBroker:
                     raise ValueError(
                         "the paid request exceeds the authorized live-test cap"
                     )
-                if family_id not in ledger["live_test_papers"] and len(
-                    ledger["live_test_papers"]
-                ) >= int(self.policy["live_test_maximum_papers"]):
+                paper_limit = self.policy["live_test_maximum_papers"]
+                if (
+                    paper_limit is not None
+                    and family_id not in ledger["live_test_papers"]
+                    and len(ledger["live_test_papers"]) >= int(paper_limit)
+                ):
                     raise ValueError("the live test reached its paper limit")
                 live_submissions = sum(
                     int(row.get("submissions", 0))
                     for row in ledger["live_test_papers"].values()
                 )
-                if live_submissions >= int(
-                    self.policy["live_test_maximum_generation_submissions"]
+                submission_limit = self.policy[
+                    "live_test_maximum_generation_submissions"
+                ]
+                if submission_limit is not None and live_submissions >= int(
+                    submission_limit
                 ):
                     raise ValueError("the live-test submission limit is complete")
             if ledger["inflight"] >= int(

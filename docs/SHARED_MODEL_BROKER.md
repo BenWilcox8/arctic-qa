@@ -102,7 +102,7 @@ An absent, altered, or unreviewed transition stops the broker before it reads th
 
 ### Exact live-test limit transitions
 
-Schema `shared-paid-call-config-transition-v2` permits two exact policy transitions.
+Schema `shared-paid-call-config-transition-v2` permits three exact policy transitions.
 
 The first transition changes `live_test_maximum_papers` from 20 to 40.
 
@@ -110,6 +110,23 @@ The second transition changes these two fields together:
 
 - `live_test_maximum_papers` from 40 to 41
 - `live_test_maximum_generation_submissions` from 100 to 101
+
+The third transition changes these two fields together:
+
+- `live_test_maximum_papers` from 41 to `null`
+- `live_test_maximum_generation_submissions` from 101 to `null`
+
+The two `null` values remove only the live-test count limits.
+
+The third transition does not remove a monetary or operational limit.
+
+The USD 5 cumulative live-test ceiling remains the controlling trial limit.
+
+The USD 1 family limit and USD 0.25 request limit remain active.
+
+The concurrency limit, rate limit, retry ban, and fallback ban also remain active.
+
+The status record shows `null` for both remaining live-test count values in this mode.
 
 The second transition change set must list each authorized field separately.
 
@@ -126,7 +143,7 @@ The v2 file contains all v1 fields and these fields:
 - `changed_policy_fields`
 - `maximum_authorized_cumulative_tranche_usd`
 
-The change set must match one of the two exact transitions.
+The change set must match one of the three exact transitions.
 
 The source policy must remain present and match `from_policy_sha256`.
 
