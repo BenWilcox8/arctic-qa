@@ -924,3 +924,172 @@ def test_http_surface_is_read_only_and_restricted(tmp_path: Path) -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+class FakePipelineTraceStore:
+    def __init__(self) -> None:
+        self.state = "rejected"
+        self.list_arguments: dict[str, object] = {}
+
+    def list_papers(self, **arguments: object) -> dict[str, object]:
+        self.list_arguments = arguments
+        return {
+            "schema": "pipeline-trace-list-v1",
+            "generated_at_utc": "2026-09-13T19:30:00Z",
+            "freshness": {"state": "fresh"},
+            "items": [
+                {
+                    "paper_key": "paper-safe-key",
+                    "paper_id": "10.1234/test",
+                    "source_id": "src-test",
+                    "doi": "10.1234/test",
+                    "title": "<script>retained title</script>",
+                    "run_ids": ["run-test"],
+                    "state": self.state,
+                    "current_stage": "answer_verification",
+                    "attempt_count": 2,
+                    "latest_at_utc": "2026-09-13T19:29:00Z",
+                }
+            ],
+            "next_cursor": "next-safe-cursor",
+        }
+
+    def paper_detail(self, paper_key: str) -> dict[str, object]:
+        assert paper_key == "paper-safe-key"
+        return {
+            "schema": "pipeline-trace-paper-v1",
+            "identity": {
+                "paper_id": "10.1234/test",
+                "source_id": "src-test",
+                "doi": "10.1234/test",
+                "title": "<script>retained title</script>",
+            },
+            "runs": [{"run_id": "run-test", "state": self.state}],
+            "source": {"context": "<b>full retained context</b>"},
+            "findings": [],
+            "candidates": [],
+            "validation_events": [],
+            "rejections": [{"reason_code": "scope_qualifier_missing"}],
+            "exports": [],
+            "stages": [
+                {
+                    "stage_key": "stage-safe-key",
+                    "run_id": "run-test",
+                    "stage": "answer_verification",
+                    "role": "answer_verifier",
+                    "state": "completed",
+                    "attempt": 2,
+                    "timing": {},
+                    "model": {},
+                    "cost": {},
+                    "usage": {},
+                    "payload_availability": "retained",
+                }
+            ],
+        }
+
+    def stage_payload(self, paper_key: str, stage_key: str) -> dict[str, object]:
+        assert (paper_key, stage_key) == ("paper-safe-key", "stage-safe-key")
+        return {
+            "schema": "pipeline-trace-stage-v1",
+            "paper_key": paper_key,
+            "stage_key": stage_key,
+            "request": {"context": "<script>source and prompt</script>"},
+            "raw_response": "<img src=x onerror=alert(1)>",
+            "parsed_response": {"answer": "retained"},
+            "payload_availability": "retained",
+        }
+
+
+def test_pipeline_trace_adapter_is_bounded_and_observes_live_updates(
+    tmp_path: Path,
+) -> None:
+    fixture_corpus(tmp_path)
+    store = FakePipelineTraceStore()
+    artifacts = CorpusArtifacts(
+        tmp_path,
+        "test-run",
+        tmp_path / "runtime",
+        pipeline_trace_store=store,
+    )
+
+    first = artifacts.pipeline_trace_list(
+        {
+            "q": ["Arctic"],
+            "run_id": ["run-test"],
+            "state": ["rejected"],
+            "stage": ["answer_verification"],
+            "limit": ["25"],
+            "cursor": ["cursor-safe"],
+        }
+    )
+    assert first["items"][0]["state"] == "rejected"
+    assert store.list_arguments == {
+        "query": "Arctic",
+        "run_id": "run-test",
+        "state": "rejected",
+        "stage": "answer_verification",
+        "limit": 25,
+        "cursor": "cursor-safe",
+    }
+    store.state = "unresolved"
+    assert (
+        artifacts.pipeline_trace_list({"limit": ["10"]})["items"][0]["state"]
+        == "unresolved"
+    )
+
+    with pytest.raises(ValueError, match="limit must be"):
+        artifacts.pipeline_trace_list({"limit": ["1000"]})
+    with pytest.raises(ValueError, match="unsupported characters"):
+        artifacts.pipeline_trace_paper({"paper_key": ["bad\nkey"]})
+
+
+def test_pipeline_trace_http_routes_escape_payloads_and_reject_paths(
+    tmp_path: Path,
+) -> None:
+    fixture_corpus(tmp_path)
+    artifacts = CorpusArtifacts(
+        tmp_path,
+        "test-run",
+        tmp_path / "runtime",
+        pipeline_trace_store=FakePipelineTraceStore(),
+    )
+    server = CorpusServer(("127.0.0.1", 0), artifacts)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        for route in (
+            "/api/pipeline-trace?limit=10",
+            "/api/pipeline-trace/paper?paper_key=paper-safe-key",
+            "/api/pipeline-trace/stage?paper_key=paper-safe-key&stage_key=stage-safe-key",
+        ):
+            with urllib.request.urlopen(f"{base}{route}") as response:
+                body = response.read()
+                assert response.headers["Cache-Control"] == "no-store"
+                assert b"<script>" not in body
+                assert b"<img" not in body
+        with pytest.raises(urllib.error.HTTPError) as arbitrary:
+            urllib.request.urlopen(f"{base}/api/pipeline-trace/paper/paper-safe-key")
+        assert arbitrary.value.code == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_page_contains_vertical_activity_and_persistent_on_demand_inspector() -> None:
+    page = (Path(__file__).parents[1] / "src/arctic_qa/corpus_viewer.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'id="pipeline-method"' in page
+    assert 'id="activity-eligibility-gate"' in page
+    assert 'id="activity-option-verification"' in page
+    assert 'id="activity-machine-accepted"' in page
+    assert 'id="pipeline-inspector"' in page
+    assert "initialParameters.get('trace_paper')" in page
+    assert "sessionStorage.setItem(`trace-open:" in page
+    assert "/api/pipeline-trace/stage?paper_key=" in page
+    assert "body.append(traceField" in page
+    assert "Machine acceptance is a retained engineering label" in page

@@ -86,6 +86,12 @@ def parser() -> argparse.ArgumentParser:
     viewer.add_argument("--dataset-metadata-file", type=Path)
     viewer.add_argument("--project-overview-file", type=Path)
     viewer.add_argument("--research-timeline-file", type=Path)
+    viewer.add_argument("--pipeline-namespace", type=Path)
+    viewer.add_argument("--pipeline-db-file", type=Path)
+    viewer.add_argument("--pipeline-receipts-dir", type=Path)
+    viewer.add_argument(
+        "--pipeline-eligibility-root", type=Path, action="append", default=[]
+    )
     viewer.add_argument("--host", default="127.0.0.1")
     viewer.add_argument("--port", type=int, default=8787)
     viewer.add_argument("--stale-after-seconds", type=int, default=86400)
@@ -435,6 +441,10 @@ def main(argv: list[str] | None = None) -> int:
                 dataset_metadata_file=args.dataset_metadata_file,
                 project_overview_file=args.project_overview_file,
                 research_timeline_file=args.research_timeline_file,
+                pipeline_namespace=args.pipeline_namespace,
+                pipeline_db_file=args.pipeline_db_file,
+                pipeline_receipts_dir=args.pipeline_receipts_dir,
+                pipeline_eligibility_roots=tuple(args.pipeline_eligibility_root),
                 host=args.host,
                 port=args.port,
                 stale_after_seconds=args.stale_after_seconds,

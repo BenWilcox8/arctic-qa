@@ -275,7 +275,24 @@ def test_main_cli_accepts_explicit_project_overview_path() -> None:
             "/private/runtime",
             "--project-overview-file",
             "/private/status/project-overview.json",
+            "--pipeline-namespace",
+            "/private/arctic-qa",
+            "--pipeline-db-file",
+            "/private/arctic-qa/state.sqlite3",
+            "--pipeline-receipts-dir",
+            "/private/arctic-qa/model-receipts",
+            "--pipeline-eligibility-root",
+            "/private/arctic-qa/eligibility-a",
+            "--pipeline-eligibility-root",
+            "/private/arctic-qa/eligibility-b",
         ]
     )
 
     assert args.project_overview_file == Path("/private/status/project-overview.json")
+    assert args.pipeline_namespace == Path("/private/arctic-qa")
+    assert args.pipeline_db_file == Path("/private/arctic-qa/state.sqlite3")
+    assert args.pipeline_receipts_dir == Path("/private/arctic-qa/model-receipts")
+    assert args.pipeline_eligibility_root == [
+        Path("/private/arctic-qa/eligibility-a"),
+        Path("/private/arctic-qa/eligibility-b"),
+    ]

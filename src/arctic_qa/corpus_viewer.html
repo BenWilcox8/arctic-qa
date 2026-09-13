@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath fill='%23123f54' d='M32 4 4 52h56z'/%3E%3Cpath fill='%23dff3f7' d='m32 20-8 14 8-4 8 4z'/%3E%3C/svg%3E">
-  <title>Arctic corpus stage</title>
+  <title>Arctic QA pipeline inspector</title>
   <style>
     :root {
       color-scheme: light;
@@ -65,11 +65,11 @@
       padding: .22rem .55rem; border-radius: 999px; font-size: .76rem;
       font-weight: 700; letter-spacing: .02em; text-transform: uppercase;
     }
-    .ready, .completed, .resolved, .committed, .deployed, .eligible, .fresh, .priority_seed, .retained_article_type { color: var(--green); background: var(--green-bg); }
-    .partial, .pending, .paused, .stale, .in_progress, .flagged_nonresearch_type, .unresolved_missing_type, .unresolved_mixed_type, .unresolved_other_type { color: var(--amber); background: var(--amber-bg); }
+    .ready, .completed, .resolved, .committed, .deployed, .eligible, .fresh, .available, .retained, .success, .machine_accepted_unverified, .priority_seed, .retained_article_type { color: var(--green); background: var(--green-bg); }
+    .partial, .pending, .paused, .stale, .in_progress, .incomplete_non_mcq, .unresolved, .flagged_nonresearch_type, .unresolved_missing_type, .unresolved_mixed_type, .unresolved_other_type { color: var(--amber); background: var(--amber-bg); }
     .running { color: var(--navy); background: var(--cyan); }
-    .not_ready, .not_finished, .blocked, .excluded, .error, .unavailable, .invalid, .absent { color: var(--red); background: var(--red-bg); }
-    .not_started, .unreviewed, .not_running, .unknown, .recorded { color: #4c5e66; background: var(--gray-bg); }
+    .not_ready, .not_finished, .blocked, .excluded, .rejected, .generation_rejected, .error, .unavailable, .invalid, .absent { color: var(--red); background: var(--red-bg); }
+    .not_started, .unreviewed, .not_running, .not_retained, .unknown, .recorded { color: #4c5e66; background: var(--gray-bg); }
     .counts { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .65rem; margin: 0 0 1rem; }
     .count { background: var(--paper); border: 1px solid var(--line); border-radius: 8px; padding: .8rem; }
     .count span { display: block; color: var(--muted); font-size: .77rem; text-transform: uppercase; letter-spacing: .04em; }
@@ -145,6 +145,48 @@
     .timeline-evidence { color: var(--muted); font-size: .8rem; margin: .45rem 0 0; }
     .timeline-evidence code { color: var(--ink); }
     .timeline-coverage { border-left: 4px solid var(--navy); color: var(--muted); font-size: .85rem; line-height: 1.5; margin-top: .9rem; padding: .65rem .8rem; }
+    .method-panel, .trace-panel { margin-bottom: 1rem; }
+    .method-intro { color: var(--muted); line-height: 1.5; margin: .35rem 0 1rem; max-width: 90ch; }
+    .activity-wrap { background: var(--wash); border: 1px solid var(--line); border-radius: 8px; overflow-x: auto; padding: .75rem; }
+    .activity-svg { display: block; height: auto; margin: 0 auto; min-width: 680px; width: min(100%, 760px); }
+    .activity-flow { fill: none; stroke: #78909a; stroke-width: 3; }
+    .activity-node rect, .activity-node polygon, .activity-node circle { fill: var(--paper); stroke: var(--navy); stroke-width: 3; }
+    .activity-node.exit rect { fill: var(--red-bg); stroke: var(--red); }
+    .activity-node.terminal rect { fill: var(--green-bg); stroke: var(--green); }
+    .activity-node text { fill: var(--ink); font-size: 15px; font-weight: 700; text-anchor: middle; }
+    .activity-node .activity-note { fill: var(--muted); font-size: 12px; font-weight: 500; }
+    .activity-edge-label { fill: var(--muted); font-size: 12px; font-weight: 700; }
+    .method-limits { color: var(--muted); font-size: .84rem; line-height: 1.5; margin: .8rem 0 0; }
+    .trace-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+    .trace-head p { color: var(--muted); line-height: 1.5; margin: .35rem 0 0; max-width: 90ch; }
+    .trace-filters { display: grid; grid-template-columns: minmax(220px, 2fr) repeat(4, minmax(130px, 1fr)) auto; gap: .65rem; margin: 1rem 0; }
+    .trace-workspace { display: grid; grid-template-columns: minmax(360px, .8fr) minmax(0, 1.2fr); gap: 1rem; min-width: 0; }
+    .trace-list, .trace-detail { border: 1px solid var(--line); border-radius: 8px; min-width: 0; overflow: hidden; }
+    .trace-subhead { background: #eef4f6; border-bottom: 1px solid var(--line); padding: .75rem .85rem; }
+    .trace-subhead h3 { margin: 0; }
+    .trace-subhead p { color: var(--muted); font-size: .8rem; margin: .2rem 0 0; }
+    .trace-table-wrap { max-height: 44rem; overflow: auto; }
+    .trace-table button { background: transparent; border: 0; color: #0b6486; min-height: 0; padding: 0; text-align: left; text-decoration: underline; text-underline-offset: 2px; }
+    .trace-table tr.selected { background: var(--cyan); }
+    .trace-table td { overflow-wrap: anywhere; }
+    .trace-list .pager { padding: .7rem .8rem; }
+    .trace-detail-body { max-height: 52rem; overflow: auto; padding: .85rem; }
+    .trace-identity { border-bottom: 1px solid var(--line); margin-bottom: .85rem; padding-bottom: .85rem; }
+    .trace-identity h3 { font-size: 1.15rem; margin-bottom: .3rem; overflow-wrap: anywhere; }
+    .trace-badges { display: flex; flex-wrap: wrap; gap: .35rem; margin: .55rem 0; }
+    .trace-attempts { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .65rem; margin: .75rem 0; }
+    .trace-stage { background: var(--wash); border: 1px solid var(--line); border-radius: 7px; margin: .65rem 0; overflow: hidden; }
+    .trace-stage > summary { align-items: center; display: flex; flex-wrap: wrap; gap: .5rem; padding: .7rem .75rem; }
+    .trace-stage[open] > summary { border-bottom: 1px solid var(--line); }
+    .trace-stage-body { padding: .75rem; }
+    .trace-field { margin-bottom: .75rem; min-width: 0; }
+    .trace-field:last-child { margin-bottom: 0; }
+    .trace-field h4 { font-size: .78rem; letter-spacing: .04em; margin: 0 0 .3rem; text-transform: uppercase; }
+    .trace-field pre { background: #102b38; border-radius: 6px; color: #edf7fa; font: .78rem/1.48 ui-monospace, SFMono-Regular, Consolas, monospace; margin: 0; max-height: 24rem; overflow: auto; padding: .75rem; tab-size: 2; white-space: pre-wrap; word-break: break-word; }
+    .trace-actions { display: flex; flex-wrap: wrap; gap: .45rem; margin: .65rem 0; }
+    .trace-actions button { min-height: 2rem; padding: .35rem .6rem; }
+    .trace-empty { color: var(--muted); line-height: 1.5; padding: 1.2rem; }
+    .trace-error { background: var(--red-bg); color: var(--red); padding: .8rem; }
     .telemetry-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 1rem; }
     .telemetry-grid h3 { margin-bottom: .5rem; }
     .compact-table { border: 1px solid var(--line); border-radius: 6px; overflow: auto; }
@@ -189,6 +231,9 @@
       .progress-live { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .timeline-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .timeline-summary { grid-column: 1 / -1; justify-self: start; padding-bottom: 0; }
+      .trace-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .trace-filters .search { grid-column: 1 / -1; }
+      .trace-workspace { grid-template-columns: 1fr; }
       .filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .filters .search { grid-column: 1 / -1; }
       .filter-action { align-self: end; }
@@ -196,15 +241,17 @@
     @media (max-width: 680px) {
       .shell { width: min(100% - 20px, 1460px); }
       header { padding: 1.3rem 0; }
-      .notice, .section-head, .pager, .metadata-head, .progress-head, .timeline-head { display: block; }
+      .notice, .section-head, .pager, .metadata-head, .progress-head, .timeline-head, .trace-head { display: block; }
       .notice button, .section-head .badge { margin-top: .75rem; }
       .counts, .metadata-counts, .source-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .progress-live { grid-template-columns: 1fr 1fr; }
       .progress-details { grid-template-columns: 1fr; }
       .timeline-filters { grid-template-columns: 1fr; }
       .timeline-summary { grid-column: auto; }
-      .stages, .filters { grid-template-columns: 1fr; }
-      .filters .search { grid-column: auto; }
+      .stages, .filters, .trace-filters { grid-template-columns: 1fr; }
+      .filters .search, .trace-filters .search { grid-column: auto; }
+      .trace-head .badge { margin-top: .75rem; }
+      .trace-attempts { grid-template-columns: 1fr; }
       .table-wrap { overflow: visible; }
       table, thead, tbody, tr, th, td { display: block; }
       thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
@@ -218,8 +265,8 @@
 <body>
   <header>
     <div class="shell">
-      <h1>Arctic corpus stage</h1>
-      <p>Live, read-only visibility for discovery, metadata processing, and scientific eligibility. This page does not start or advance corpus work.</p>
+      <h1>Arctic QA pipeline inspector</h1>
+      <p>Live, read-only visibility from discovery through retained QA attempts and exports. This page does not start or advance corpus or model work.</p>
     </div>
   </header>
   <main class="shell">
@@ -268,6 +315,83 @@
         </article>
       </div>
       <ul class="progress-notes" id="project-progress-notes"></ul>
+    </section>
+
+    <section class="panel method-panel" id="pipeline-method" aria-labelledby="pipeline-method-title">
+      <h2 id="pipeline-method-title">Actual dataset-construction method</h2>
+      <p class="method-intro">This activity diagram follows the implemented order. A paper can leave at an eligibility, QA, or validation gate. Machine acceptance is a retained engineering label; it is not a scientific truth judgment.</p>
+      <div class="activity-wrap" tabindex="0" aria-label="Scrollable vertical pipeline activity diagram">
+        <svg class="activity-svg" viewBox="0 0 720 1940" role="img" aria-labelledby="activity-title activity-description">
+          <title id="activity-title">Vertical activity diagram of the implemented Arctic QA pipeline</title>
+          <desc id="activity-description">Full text passes through eligibility, finding selection, two generation arms, independent answer checks, distractor checks, validation, and immutable export. Failed gates lead to explicit rejected, unresolved, or incomplete records.</desc>
+          <defs>
+            <marker id="activity-arrow" markerHeight="8" markerWidth="8" orient="auto" refX="7" refY="4"><path d="M0,0 L8,4 L0,8 z" fill="#78909a"></path></marker>
+          </defs>
+          <g class="activity-flow" marker-end="url(#activity-arrow)">
+            <path d="M360 55 V105"></path><path d="M360 175 V225"></path><path d="M360 315 V365"></path>
+            <path d="M360 435 V485"></path><path d="M360 575 V625"></path><path d="M360 695 V745"></path>
+            <path d="M360 835 V885"></path><path d="M360 975 V1025"></path><path d="M360 1095 V1145"></path>
+            <path d="M360 1235 V1285"></path><path d="M360 1375 V1425"></path><path d="M360 1515 V1565"></path>
+            <path d="M360 1655 V1705"></path><path d="M360 1795 V1845"></path>
+            <path d="M225 270 H105 V365" marker-end="url(#activity-arrow)"></path>
+            <path d="M495 270 H615 V365" marker-end="url(#activity-arrow)"></path>
+            <path d="M225 930 H105 V1025" marker-end="url(#activity-arrow)"></path>
+            <path d="M495 1470 H615 V1565" marker-end="url(#activity-arrow)"></path>
+          </g>
+          <text class="activity-edge-label" x="112" y="258">excluded</text><text class="activity-edge-label" x="520" y="258">unresolved</text>
+          <text class="activity-edge-label" x="112" y="918">QA gate fails</text><text class="activity-edge-label" x="520" y="1458">fewer than 3 pass</text>
+          <g class="activity-node" id="activity-start"><title>Start with a retained working full-text source</title><circle cx="360" cy="35" r="20"></circle></g>
+          <g class="activity-node" id="activity-eligibility"><title>Model eligibility screening uses retained full text and frozen policy</title><rect x="210" y="105" width="300" height="70" rx="10"></rect><text x="360" y="135">Eligibility screening</text><text class="activity-note" x="360" y="156">full text + frozen scientific policy</text></g>
+          <g class="activity-node" id="activity-eligibility-gate"><title>Eligibility can be eligible, excluded, or unresolved</title><polygon points="360,225 495,270 360,315 225,270"></polygon><text x="360" y="266">Eligible?</text><text class="activity-note" x="360" y="286">three explicit outcomes</text></g>
+          <g class="activity-node exit" id="activity-excluded"><title>Terminal scientific eligibility exclusion</title><rect x="20" y="365" width="170" height="70" rx="10"></rect><text x="105" y="395">Excluded</text><text class="activity-note" x="105" y="416">reason retained</text></g>
+          <g class="activity-node exit" id="activity-unresolved"><title>Terminal unresolved scientific eligibility state</title><rect x="530" y="365" width="170" height="70" rx="10"></rect><text x="615" y="395">Unresolved</text><text class="activity-note" x="615" y="416">reason retained</text></g>
+          <g class="activity-node" id="activity-finding"><title>Select and freeze one finding per paper family and run</title><rect x="210" y="365" width="300" height="70" rx="10"></rect><text x="360" y="395">Select one finding</text><text class="activity-note" x="360" y="416">freeze answer and source locator</text></g>
+          <g class="activity-node" id="activity-generation"><title>Generate the question by answer-first or direct-joint arm</title><rect x="210" y="485" width="300" height="90" rx="10"></rect><text x="360" y="518">Generate question</text><text class="activity-note" x="360" y="540">answer-first or direct-joint arm</text><text class="activity-note" x="360" y="558">same frozen finding</text></g>
+          <g class="activity-node" id="activity-reconstruction"><title>Independently reconstruct the answer while the proposed answer is hidden</title><rect x="210" y="625" width="300" height="70" rx="10"></rect><text x="360" y="655">Blinded reconstruction</text><text class="activity-note" x="360" y="676">answer hidden from verifier</text></g>
+          <g class="activity-node" id="activity-answer-verification"><title>Independently verify entailment, relation, scope, ambiguity, alternatives, evidence, and claim type</title><rect x="210" y="745" width="300" height="90" rx="10"></rect><text x="360" y="776">Answer verification</text><text class="activity-note" x="360" y="798">entailment · scope · ambiguity</text><text class="activity-note" x="360" y="816">alternatives · evidence · claim type</text></g>
+          <g class="activity-node exit" id="activity-qa-rejected"><title>Question and answer gate failure terminal</title><rect x="20" y="1025" width="170" height="70" rx="10"></rect><text x="105" y="1055">QA rejected</text><text class="activity-note" x="105" y="1076">or unresolved</text></g>
+          <g class="activity-node" id="activity-qa-gate"><title>Deterministic and independent question-answer checks must pass</title><polygon points="360,885 495,930 360,975 225,930"></polygon><text x="360" y="926">QA gate passes?</text><text class="activity-note" x="360" y="946">evidence-bound checks</text></g>
+          <g class="activity-node" id="activity-distractors"><title>Overgenerate typed distractor proposals without self-verification</title><rect x="210" y="1025" width="300" height="70" rx="10"></rect><text x="360" y="1055">Generate distractors</text><text class="activity-note" x="360" y="1076">4–6 typed proposals</text></g>
+          <g class="activity-node" id="activity-option-verification"><title>Verify every exact displayed option independently against the question, answer, source, and hashes</title><rect x="210" y="1145" width="300" height="90" rx="10"></rect><text x="360" y="1176">Verify each exact option</text><text class="activity-note" x="360" y="1198">contradiction · alternative answer</text><text class="activity-note" x="360" y="1216">source evidence · hash binding</text></g>
+          <g class="activity-node" id="activity-validation"><title>Apply deterministic source-bound QA and distractor validation</title><rect x="210" y="1285" width="300" height="90" rx="10"></rect><text x="360" y="1316">Deterministic validation</text><text class="activity-note" x="360" y="1338">source spans · scope · numeric rules</text><text class="activity-note" x="360" y="1356">independent receipt bindings</text></g>
+          <g class="activity-node" id="activity-mcq-gate"><title>At least three independently accepted distractors are required for MCQ export</title><polygon points="360,1425 495,1470 360,1515 225,1470"></polygon><text x="360" y="1466">3+ distractors?</text><text class="activity-note" x="360" y="1486">independently accepted</text></g>
+          <g class="activity-node exit" id="activity-incomplete"><title>Short-answer item can remain accepted while MCQ construction is incomplete</title><rect x="530" y="1565" width="170" height="90" rx="10"></rect><text x="615" y="1598">Incomplete MCQ</text><text class="activity-note" x="615" y="1620">short answer retained</text><text class="activity-note" x="615" y="1638">reason retained</text></g>
+          <g class="activity-node terminal" id="activity-machine-accepted"><title>Machine accepted unverified is the maximum automated label</title><rect x="210" y="1565" width="300" height="90" rx="10"></rect><text x="360" y="1598">Machine accepted</text><text class="activity-note" x="360" y="1620">maximum label:</text><text class="activity-note" x="360" y="1638">machine_accepted_unverified</text></g>
+          <g class="activity-node" id="activity-export"><title>Create immutable short-answer, MCQ, rejection, manifest, and provenance outputs</title><rect x="210" y="1705" width="300" height="90" rx="10"></rect><text x="360" y="1736">Immutable export</text><text class="activity-note" x="360" y="1758">short answer · MCQ · rejections</text><text class="activity-note" x="360" y="1776">manifest + provenance</text></g>
+          <g class="activity-node terminal" id="activity-end"><title>End with retained evidence and an explicit terminal state</title><rect x="260" y="1845" width="200" height="65" rx="32"></rect><text x="360" y="1874">Retained result</text><text class="activity-note" x="360" y="1894">no human acceptance implied</text></g>
+        </svg>
+      </div>
+      <p class="method-limits">Roles: the author model proposes findings, questions, and distractors. The verifier model reconstructs answers and checks exact options. Deterministic code enforces source locators, scope, bindings, and export rules. The read-only viewer never starts a run.</p>
+    </section>
+
+    <section class="panel trace-panel" id="pipeline-inspector" aria-labelledby="pipeline-inspector-title">
+      <div class="trace-head">
+        <div>
+          <h2 id="pipeline-inspector-title">Live per-paper pipeline inspector</h2>
+          <p>Inspect retained attempts, prompts, model responses, parsed records, evidence, checks, rejection reasons, costs, and provenance. Large payloads load only after you select a stage.</p>
+          <div class="meta" id="trace-meta">Loading retained pipeline traces...</div>
+        </div>
+        <span class="badge" id="trace-state">Loading</span>
+      </div>
+      <form class="trace-filters" id="trace-filters">
+        <div class="field search"><label for="trace-q">Paper title, DOI, or ID</label><input id="trace-q" name="q" maxlength="200" placeholder="Search retained pipeline papers"></div>
+        <div class="field"><label for="trace-paper-state">Final state</label><select id="trace-paper-state" name="state"><option value="">All states</option><option value="machine_accepted_unverified">Machine accepted, unverified</option><option value="incomplete_non_mcq">Incomplete MCQ</option><option value="rejected">Rejected</option><option value="unresolved">Unresolved</option><option value="eligible">Eligible</option><option value="excluded">Excluded</option></select></div>
+        <div class="field"><label for="trace-stage-filter">Current stage</label><select id="trace-stage-filter" name="stage"><option value="">All stages</option><option value="scientific_eligibility">Scientific eligibility</option><option value="finding_answer_extraction">Finding extraction</option><option value="question_generation">Question generation</option><option value="blinded_reconstruction">Blinded reconstruction</option><option value="answer_verification">Answer verification</option><option value="distractor_generation">Distractor generation</option><option value="option_verification">Option verification</option><option value="validation">Validation</option><option value="export">Export</option></select></div>
+        <div class="field"><label for="trace-run-filter">Run ID</label><input id="trace-run-filter" name="run_id" maxlength="200" placeholder="All runs"></div>
+        <div class="field"><label for="trace-limit">Rows</label><select id="trace-limit" name="limit"><option>10</option><option selected>25</option><option>50</option><option>100</option></select></div>
+        <button class="filter-action" type="submit">Apply</button>
+      </form>
+      <div class="trace-workspace">
+        <div class="trace-list">
+          <div class="trace-subhead"><h3>Retained papers</h3><p id="trace-list-summary">No list loaded.</p></div>
+          <div class="trace-table-wrap" id="trace-table"><div class="loading">Loading papers...</div></div>
+          <div class="pager"><div class="pager-controls"><button type="button" id="trace-previous">Previous</button><button type="button" id="trace-next">Next</button></div></div>
+        </div>
+        <div class="trace-detail">
+          <div class="trace-subhead"><h3>Paper detail</h3><p id="trace-detail-summary">Select a paper to inspect its retained work.</p></div>
+          <div class="trace-detail-body" id="trace-detail-body"><div class="trace-empty">No paper is selected. Filtering and auto-refresh do not start pipeline work.</div></div>
+        </div>
+      </div>
     </section>
 
     <section class="panel timeline-panel" id="research-timeline" aria-labelledby="research-timeline-title">
@@ -404,7 +528,22 @@
     </section>
   </main>
   <script>
-    const state = { page: 1, pages: 1, revision: null, timeline: [] };
+    const initialParameters = new URLSearchParams(window.location.search);
+    const state = {
+      page: 1,
+      pages: 1,
+      revision: null,
+      timeline: [],
+      trace: {
+        cursor: null,
+        cursors: [null],
+        page: 1,
+        nextCursor: null,
+        selectedPaper: initialParameters.get('trace_paper'),
+        selectedStage: initialParameters.get('trace_stage'),
+        detailRevision: null
+      }
+    };
     const $ = (id) => document.getElementById(id);
     const formatNumber = (value) => new Intl.NumberFormat().format(value ?? 0);
     const label = (value) => value ? String(value).replaceAll('_', ' ').replaceAll('-', ' ') : 'Not available';
@@ -744,6 +883,257 @@
       });
       table.append(body); target.append(table);
     }
+    function updateTraceLocation() {
+      const parameters = new URLSearchParams(window.location.search);
+      if (state.trace.selectedPaper) parameters.set('trace_paper', state.trace.selectedPaper);
+      else parameters.delete('trace_paper');
+      if (state.trace.selectedStage) parameters.set('trace_stage', state.trace.selectedStage);
+      else parameters.delete('trace_stage');
+      const query = parameters.toString();
+      history.replaceState(null, '', `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`);
+    }
+    function safeTraceValue(value) {
+      if (Array.isArray(value)) return value.map(safeTraceValue);
+      if (!value || typeof value !== 'object') return value;
+      return Object.fromEntries(Object.entries(value)
+        .filter(([key]) => !/(authorization|credential|api[_-]?key|thoughtsignature|secret)/i.test(key))
+        .map(([key, nested]) => [key, safeTraceValue(nested)]));
+    }
+    function traceJson(value) {
+      return JSON.stringify(safeTraceValue(value), null, 2);
+    }
+    function traceActionButton(caption, handler) {
+      const button = text('button', caption);
+      button.type = 'button';
+      button.addEventListener('click', handler);
+      return button;
+    }
+    async function copyTrace(value, button) {
+      try {
+        await navigator.clipboard.writeText(traceJson(value));
+        const old = button.textContent;
+        button.textContent = 'Copied';
+        setTimeout(() => { button.textContent = old; }, 1200);
+      } catch (_) {
+        button.textContent = 'Copy unavailable';
+      }
+    }
+    function downloadTrace(value, name) {
+      const blob = new Blob([traceJson(value)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${String(name || 'pipeline-trace').replace(/[^A-Za-z0-9._-]+/g, '-')}.json`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    }
+    function traceField(caption, value) {
+      const field = document.createElement('div');
+      field.className = 'trace-field';
+      field.append(text('h4', caption));
+      const pre = text('pre', traceJson(value));
+      field.append(pre);
+      const actions = document.createElement('div');
+      actions.className = 'trace-actions';
+      const copy = traceActionButton('Copy JSON', () => copyTrace(value, copy));
+      actions.append(copy, traceActionButton('Download JSON', () => downloadTrace(value, caption)));
+      field.append(actions);
+      return field;
+    }
+    function detailSection(caption, value, open = false) {
+      const details = document.createElement('details');
+      details.className = 'trace-stage';
+      details.open = open;
+      const summary = text('summary', `${caption} (${Array.isArray(value) ? formatNumber(value.length) : 'retained'})`);
+      const body = document.createElement('div');
+      body.className = 'trace-stage-body';
+      body.append(traceField(caption, value));
+      details.append(summary, body);
+      return details;
+    }
+    function traceIdentityValue(identity, key, fallback = 'Not available') {
+      return identity && identity[key] !== null && identity[key] !== undefined && identity[key] !== '' ? identity[key] : fallback;
+    }
+    function renderTraceTable(payload) {
+      const target = $('trace-table');
+      target.replaceChildren();
+      const items = payload.items || [];
+      if (!items.length) {
+        target.append(text('div', 'No retained paper matches these filters.', 'trace-empty'));
+        return;
+      }
+      const table = document.createElement('table');
+      table.className = 'trace-table';
+      table.innerHTML = '<thead><tr><th>Paper</th><th>State</th><th>Stage</th><th>Attempts</th></tr></thead>';
+      const body = document.createElement('tbody');
+      items.forEach((item) => {
+        const row = document.createElement('tr');
+        if (item.paper_key === state.trace.selectedPaper) row.className = 'selected';
+        const paper = document.createElement('td'); paper.dataset.label = 'Paper';
+        const select = text('button', item.title || item.doi || item.paper_id || item.source_id || 'Untitled paper');
+        select.type = 'button';
+        select.addEventListener('click', () => selectTracePaper(item.paper_key));
+        paper.append(select, text('div', item.doi || item.paper_id || item.source_id || 'No DOI or paper ID', 'subtle'));
+        const finalState = document.createElement('td'); finalState.dataset.label = 'State';
+        finalState.append(text('span', label(item.state), `badge ${item.state || 'unknown'}`));
+        const stage = text('td', label(item.current_stage)); stage.dataset.label = 'Stage';
+        const attempts = text('td', formatNumber(item.attempt_count)); attempts.dataset.label = 'Attempts';
+        row.append(paper, finalState, stage, attempts);
+        body.append(row);
+      });
+      table.append(body);
+      target.append(table);
+    }
+    function stageCaption(stage) {
+      const attempt = stage.attempt === null || stage.attempt === undefined ? '' : ` · attempt ${stage.attempt}`;
+      return `${label(stage.stage || stage.role || 'stage')}${attempt}`;
+    }
+    function stageSummary(stage) {
+      const summary = document.createElement('summary');
+      summary.append(text('span', label(stage.state), `badge ${stage.state || 'unknown'}`), text('span', stageCaption(stage)));
+      return summary;
+    }
+    function renderTraceStage(stage) {
+      const details = document.createElement('details');
+      details.className = 'trace-stage';
+      details.dataset.stageKey = stage.stage_key;
+      details.open = stage.stage_key === state.trace.selectedStage || sessionStorage.getItem(`trace-open:${stage.stage_key}`) === '1';
+      details.append(stageSummary(stage));
+      const body = document.createElement('div');
+      body.className = 'trace-stage-body';
+      const availability = stage.payload_availability || 'Not reported';
+      body.append(text('div', `Payload: ${typeof availability === 'string' ? label(availability) : 'availability details retained'} · Run ${stage.run_id || 'not available'} · Role ${label(stage.role)} · Updated ${dateText(stage.timing?.completed_at_utc || stage.timing?.updated_at_utc || stage.timing?.started_at_utc)}`, 'meta'));
+      const actions = document.createElement('div');
+      actions.className = 'trace-actions';
+      const load = traceActionButton('Load retained payload', () => loadTraceStage(stage.paper_key || state.trace.selectedPaper, stage.stage_key, body, load));
+      actions.append(load);
+      body.append(actions);
+      details.addEventListener('toggle', () => {
+        if (details.open) sessionStorage.setItem(`trace-open:${stage.stage_key}`, '1');
+        else sessionStorage.removeItem(`trace-open:${stage.stage_key}`);
+      });
+      details.append(body);
+      return details;
+    }
+    function renderTraceDetail(payload) {
+      const target = $('trace-detail-body');
+      const scrollTop = target.scrollTop;
+      target.replaceChildren();
+      const identity = payload.identity || {};
+      const heading = text('div', '', 'trace-identity');
+      heading.append(text('h3', traceIdentityValue(identity, 'title', traceIdentityValue(identity, 'doi', traceIdentityValue(identity, 'paper_id', 'Untitled paper')))));
+      heading.append(text('div', `DOI ${traceIdentityValue(identity, 'doi')} · Paper ${traceIdentityValue(identity, 'paper_id')} · Source ${traceIdentityValue(identity, 'source_id')}`, 'meta'));
+      const badges = document.createElement('div'); badges.className = 'trace-badges';
+      const states = [...new Set((payload.runs || []).map((run) => run.state || run.final_state).filter(Boolean))];
+      states.forEach((value) => badges.append(text('span', label(value), `badge ${value}`)));
+      if (!states.length) badges.append(text('span', 'No final state recorded', 'badge unknown'));
+      heading.append(badges);
+      const actions = document.createElement('div'); actions.className = 'trace-actions';
+      const copy = traceActionButton('Copy paper JSON', () => copyTrace(payload, copy));
+      actions.append(copy, traceActionButton('Download paper JSON', () => downloadTrace(payload, identity.paper_id || 'paper-trace')));
+      heading.append(actions);
+      target.append(heading);
+      const sections = [
+        ['Run and attempt history', payload.runs],
+        ['Retained source context', payload.source],
+        ['Frozen findings', payload.findings],
+        ['Generated QA and distractors', payload.candidates],
+        ['Validation checks', payload.validation_events],
+        ['Rejections and unresolved exits', payload.rejections],
+        ['Immutable exports', payload.exports]
+      ];
+      sections.filter(([, value]) => value && (!Array.isArray(value) || value.length)).forEach(([caption, value]) => target.append(detailSection(caption, value)));
+      const stageHeading = text('h3', 'Model and processing stages');
+      stageHeading.style.marginTop = '1rem';
+      target.append(stageHeading);
+      const stages = payload.stages || [];
+      if (stages.length) stages.forEach((stage) => target.append(renderTraceStage(stage)));
+      else target.append(text('div', 'No retained stage trace exists for this paper.', 'trace-empty'));
+      target.scrollTop = scrollTop;
+      $('trace-detail-summary').textContent = `${formatNumber(stages.length)} retained stage records. Select a stage to load its large payload.`;
+      if (state.trace.selectedStage) {
+        const selected = [...target.querySelectorAll('[data-stage-key]')].find((node) => node.dataset.stageKey === state.trace.selectedStage);
+        if (selected) {
+          selected.open = true;
+          selected.querySelector('.trace-actions button')?.click();
+        }
+      }
+    }
+    async function loadTraceStage(paperKey, stageKey, body, button) {
+      if (!paperKey || !stageKey) return;
+      button.disabled = true;
+      button.textContent = 'Loading...';
+      try {
+        const payload = await fetchJson(`/api/pipeline-trace/stage?paper_key=${encodeURIComponent(paperKey)}&stage_key=${encodeURIComponent(stageKey)}`);
+        state.trace.selectedStage = stageKey;
+        updateTraceLocation();
+        body.querySelectorAll('.trace-field').forEach((node) => node.remove());
+        const entries = Object.entries(payload).filter(([key]) => !['schema', 'paper_key', 'stage_key'].includes(key));
+        if (entries.length) entries.forEach(([key, value]) => body.append(traceField(label(key), value)));
+        else body.append(text('div', 'The adapter returned no retained payload fields.', 'trace-empty'));
+        button.textContent = 'Reload retained payload';
+      } catch (error) {
+        body.append(text('div', error.message, 'trace-error'));
+        button.textContent = 'Retry retained payload';
+      } finally { button.disabled = false; }
+    }
+    async function selectTracePaper(paperKey, preserveScroll = false) {
+      if (!paperKey) return;
+      state.trace.selectedPaper = paperKey;
+      state.trace.selectedStage = null;
+      updateTraceLocation();
+      $('trace-detail-body').replaceChildren(text('div', 'Loading retained paper detail...', 'loading'));
+      try {
+        const payload = await fetchJson(`/api/pipeline-trace/paper?paper_key=${encodeURIComponent(paperKey)}`);
+        state.trace.detailRevision = traceJson(payload);
+        renderTraceDetail(payload);
+        renderTraceTable(state.trace.lastList || { items: [] });
+        if (!preserveScroll) $('pipeline-inspector').scrollIntoView({ block: 'start' });
+      } catch (error) {
+        $('trace-detail-body').replaceChildren(text('div', error.message, 'trace-error'));
+      }
+    }
+    async function refreshSelectedTrace() {
+      if (!state.trace.selectedPaper) return;
+      try {
+        const payload = await fetchJson(`/api/pipeline-trace/paper?paper_key=${encodeURIComponent(state.trace.selectedPaper)}`);
+        const revision = traceJson(payload);
+        if (revision !== state.trace.detailRevision) {
+          state.trace.detailRevision = revision;
+          renderTraceDetail(payload);
+        }
+      } catch (_) { /* Keep the selected detail visible during a transient refresh error. */ }
+    }
+    async function loadTraceList(reset = false) {
+      if (reset) {
+        state.trace.cursor = null;
+        state.trace.cursors = [null];
+        state.trace.page = 1;
+      }
+      const parameters = new URLSearchParams(new FormData($('trace-filters')));
+      if (state.trace.cursor) parameters.set('cursor', state.trace.cursor);
+      try {
+        const payload = await fetchJson(`/api/pipeline-trace?${parameters}`);
+        state.trace.lastList = payload;
+        state.trace.nextCursor = payload.next_cursor || null;
+        renderTraceTable(payload);
+        setBadge($('trace-state'), payload.freshness?.state || payload.freshness || 'available');
+        $('trace-meta').textContent = `Retained trace index generated ${dateText(payload.generated_at_utc)}. No active run is implied by these historical records.`;
+        $('trace-list-summary').textContent = `Page ${formatNumber(state.trace.page)} · ${formatNumber((payload.items || []).length)} papers shown${state.trace.nextCursor ? ' · more available' : ''}.`;
+        $('trace-previous').disabled = state.trace.page <= 1;
+        $('trace-next').disabled = !state.trace.nextCursor;
+        const keys = new Set((payload.items || []).map((item) => item.paper_key));
+        if (!state.trace.selectedPaper && payload.items?.length) await selectTracePaper(payload.items[0].paper_key, true);
+        else if (state.trace.selectedPaper) await refreshSelectedTrace();
+      } catch (error) {
+        setBadge($('trace-state'), 'unavailable');
+        $('trace-meta').textContent = error.message;
+        $('trace-table').replaceChildren(text('div', error.message, 'trace-error'));
+        $('trace-list-summary').textContent = 'Trace index unavailable.';
+        $('trace-previous').disabled = true;
+        $('trace-next').disabled = true;
+      }
+    }
     async function fetchJson(url) {
       const response = await fetch(url, { cache: 'no-store' });
       const payload = await response.json();
@@ -887,7 +1277,21 @@
     $('filters').addEventListener('submit', (event) => { event.preventDefault(); state.page = 1; loadCandidates(); });
     $('previous').addEventListener('click', () => { state.page = Math.max(1, state.page - 1); loadCandidates(); });
     $('next').addEventListener('click', () => { state.page = Math.min(state.pages, state.page + 1); loadCandidates(); });
-    $('refresh').addEventListener('click', () => loadState(true));
+    $('refresh').addEventListener('click', () => { loadState(true); loadTraceList(false); });
+    $('trace-filters').addEventListener('submit', (event) => { event.preventDefault(); loadTraceList(true); });
+    $('trace-previous').addEventListener('click', () => {
+      if (state.trace.page <= 1) return;
+      state.trace.page -= 1;
+      state.trace.cursor = state.trace.cursors[state.trace.page - 1] || null;
+      loadTraceList(false);
+    });
+    $('trace-next').addEventListener('click', () => {
+      if (!state.trace.nextCursor) return;
+      state.trace.cursors[state.trace.page] = state.trace.nextCursor;
+      state.trace.cursor = state.trace.nextCursor;
+      state.trace.page += 1;
+      loadTraceList(false);
+    });
     $('timeline-agent').addEventListener('change', renderTimelineEntries);
     $('timeline-stage').addEventListener('change', renderTimelineEntries);
     let progressResizeTimer;
@@ -896,7 +1300,8 @@
       progressResizeTimer = setTimeout(() => loadState(false), 150);
     });
     loadState(true);
-    setInterval(() => loadState(false), 15000);
+    loadTraceList(true);
+    setInterval(() => { loadState(false); loadTraceList(false); }, 15000);
   </script>
 </body>
 </html>

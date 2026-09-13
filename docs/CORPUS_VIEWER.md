@@ -21,6 +21,10 @@ PYTHONPATH=src python -m arctic_qa corpus-view \
   --zotero-receipts-dir /private/zotero/receipts \
   --metadata-run-dir /private/metadata-prefilter/run-RUN_ID \
   --source-run-dir /private/source-screening/run-RUN_ID \
+  --pipeline-namespace /private/arctic-qa-data \
+  --pipeline-db-file /private/arctic-qa-data/state.sqlite3 \
+  --pipeline-receipts-dir /private/arctic-qa-data/streaming-dataset-r1/model-receipts \
+  --pipeline-eligibility-root /private/arctic-qa-data/gemini-eligibility-r1/run-RUN_ID \
   --project-overview-file /private/status/project-progress-overview-v1.json \
   --research-timeline-file /private/status/research-fleet-timeline-v1.json \
   --host 127.0.0.1 \
@@ -30,8 +34,42 @@ PYTHONPATH=src python -m arctic_qa corpus-view \
 
 Stop the foreground process with `Ctrl-C`.
 
-The server exposes only `/`, `/api/state`, `/api/candidates`, `/healthz`, and one fixed metadata download route.
+The server exposes only `/`, `/api/state`, `/api/candidates`, `/api/pipeline-trace`, `/api/pipeline-trace/paper`, `/api/pipeline-trace/stage`, `/healthz`, and one fixed metadata download route.
 It does not expose source files, PDFs, credentials, directories, or arbitrary paths.
+
+## Per-paper pipeline inspector
+
+The optional pipeline trace adapter reads retained artifacts from explicit roots.
+It does not make model requests or change pipeline state.
+
+Use `--pipeline-namespace` to enable the inspector.
+Use `--pipeline-db-file` and `--pipeline-receipts-dir` to select the database and retained model receipts.
+Repeat `--pipeline-eligibility-root` for each selected eligibility receipt root.
+The configured shared ledger supplies the accounting records.
+
+The paper list is bounded to 100 rows per request.
+Filters can select a title, DOI, paper ID, run, final state, or current stage.
+The server uses opaque paper and stage keys.
+It does not accept file paths in these API requests.
+
+Select a paper to load its run history and small structured records.
+Select one stage to load its retained request context, model response, parsed result, checks, timing, cost, and provenance.
+The adapter labels unavailable and unretained payloads explicitly.
+It does not present reconstructed context as a verbatim submitted request.
+
+The private inspector can show retained source context that was supplied to a model.
+It removes credentials, authorization headers, provider thought signatures, and private paths.
+The page inserts all source and model text through text-only DOM operations.
+It never interprets retained text as HTML.
+
+The selected paper and stage stay in the page URL.
+Open stage panels stay in browser session storage.
+The 15-second refresh checks a bounded list and preserves the current selection.
+The refresh does not start work and does not imply an active run.
+
+For a live deployment, configure the producer's canonical database, progress record, ledger, and receipt directories directly.
+Do not use a manually copied progress snapshot as the continuing data source.
+Keep curated historical timeline records separate from these live producer inputs.
 
 For the integrated streaming view, also pass these optional files:
 

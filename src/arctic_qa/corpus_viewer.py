@@ -228,6 +228,7 @@ class CorpusArtifacts:
         dataset_metadata_file: Path | None = None,
         project_overview_file: Path | None = None,
         research_timeline_file: Path | None = None,
+        pipeline_trace_store: Any | None = None,
         stale_after_seconds: int = 86400,
         process_stale_after_seconds: int = 300,
     ) -> None:
@@ -272,6 +273,7 @@ class CorpusArtifacts:
         self.research_timeline_file = (
             research_timeline_file.resolve() if research_timeline_file else None
         )
+        self.pipeline_trace_store = pipeline_trace_store
         self.stale_after_seconds = stale_after_seconds
         self.process_stale_after_seconds = process_stale_after_seconds
         self.run_dir = self.corpus_root / "ledgers" / f"run-{run_id}"
@@ -861,6 +863,74 @@ class CorpusArtifacts:
         } <= set(value):
             raise RuntimeError("validated dataset metadata has an unsupported shape")
         return _safe_json_bytes(value)
+
+    @staticmethod
+    def _trace_parameter(
+        parameters: dict[str, list[str]], name: str, *, required: bool = False
+    ) -> str | None:
+        value = (parameters.get(name) or [""])[0].strip()
+        if not value:
+            if required:
+                raise ValueError(f"{name} is required")
+            return None
+        if len(value) > 500 or any(ord(character) < 32 for character in value):
+            raise ValueError(f"{name} contains unsupported characters")
+        return value
+
+    def pipeline_trace_list(self, parameters: dict[str, list[str]]) -> dict[str, Any]:
+        if self.pipeline_trace_store is None:
+            return {
+                "schema": "pipeline-trace-list-v1",
+                "generated_at_utc": None,
+                "freshness": {"state": "absent"},
+                "items": [],
+                "next_cursor": None,
+            }
+        try:
+            limit = int((parameters.get("limit") or ["25"])[0])
+        except ValueError as error:
+            raise ValueError("limit must be an integer") from error
+        if limit not in PAGE_SIZES:
+            raise ValueError("limit must be 10, 25, 50, or 100")
+        result = self.pipeline_trace_store.list_papers(
+            query=self._trace_parameter(parameters, "q"),
+            run_id=self._trace_parameter(parameters, "run_id"),
+            state=self._trace_parameter(parameters, "state"),
+            stage=self._trace_parameter(parameters, "stage"),
+            limit=limit,
+            cursor=self._trace_parameter(parameters, "cursor"),
+        )
+        if (
+            not isinstance(result, dict)
+            or result.get("schema") != "pipeline-trace-list-v1"
+        ):
+            raise RuntimeError("the pipeline trace adapter returned an invalid list")
+        return result
+
+    def pipeline_trace_paper(self, parameters: dict[str, list[str]]) -> dict[str, Any]:
+        if self.pipeline_trace_store is None:
+            raise RuntimeError("pipeline trace data is not configured")
+        paper_key = self._trace_parameter(parameters, "paper_key", required=True)
+        result = self.pipeline_trace_store.paper_detail(paper_key)
+        if (
+            not isinstance(result, dict)
+            or result.get("schema") != "pipeline-trace-paper-v1"
+        ):
+            raise RuntimeError("the pipeline trace adapter returned an invalid paper")
+        return result
+
+    def pipeline_trace_stage(self, parameters: dict[str, list[str]]) -> dict[str, Any]:
+        if self.pipeline_trace_store is None:
+            raise RuntimeError("pipeline trace data is not configured")
+        paper_key = self._trace_parameter(parameters, "paper_key", required=True)
+        stage_key = self._trace_parameter(parameters, "stage_key", required=True)
+        result = self.pipeline_trace_store.stage_payload(paper_key, stage_key)
+        if (
+            not isinstance(result, dict)
+            or result.get("schema") != "pipeline-trace-stage-v1"
+        ):
+            raise RuntimeError("the pipeline trace adapter returned an invalid stage")
+        return result
 
     def _project_overview(self, streaming: dict[str, Any]) -> dict[str, Any]:
         unavailable: dict[str, Any] = {
@@ -2174,6 +2244,27 @@ class CorpusRequestHandler(BaseHTTPRequestHandler):
                         parse_qs(parsed.query, keep_blank_values=True)
                     ),
                 )
+            elif parsed.path == "/api/pipeline-trace":
+                self._json(
+                    HTTPStatus.OK,
+                    self.artifacts.pipeline_trace_list(
+                        parse_qs(parsed.query, keep_blank_values=True)
+                    ),
+                )
+            elif parsed.path == "/api/pipeline-trace/paper":
+                self._json(
+                    HTTPStatus.OK,
+                    self.artifacts.pipeline_trace_paper(
+                        parse_qs(parsed.query, keep_blank_values=True)
+                    ),
+                )
+            elif parsed.path == "/api/pipeline-trace/stage":
+                self._json(
+                    HTTPStatus.OK,
+                    self.artifacts.pipeline_trace_stage(
+                        parse_qs(parsed.query, keep_blank_values=True)
+                    ),
+                )
             elif parsed.path == "/downloads/dataset-metadata.json":
                 self._send(
                     HTTPStatus.OK,
@@ -2235,9 +2326,24 @@ def serve_corpus_viewer(
     port: int,
     stale_after_seconds: int,
     process_stale_after_seconds: int,
+    pipeline_namespace: Path | None = None,
+    pipeline_db_file: Path | None = None,
+    pipeline_receipts_dir: Path | None = None,
+    pipeline_eligibility_roots: tuple[Path, ...] = (),
 ) -> None:
     if not 0 <= port <= 65535:
         raise ValueError("port must be between 0 and 65535")
+    pipeline_trace_store = None
+    if pipeline_namespace is not None:
+        from .pipeline_trace import PipelineTraceStore
+
+        pipeline_trace_store = PipelineTraceStore(
+            pipeline_namespace,
+            db_file=pipeline_db_file,
+            receipts_dir=pipeline_receipts_dir,
+            ledger_file=shared_ledger_file,
+            eligibility_roots=pipeline_eligibility_roots,
+        )
     artifacts = CorpusArtifacts(
         corpus_root,
         run_id,
@@ -2255,6 +2361,7 @@ def serve_corpus_viewer(
         dataset_metadata_file=dataset_metadata_file,
         project_overview_file=project_overview_file,
         research_timeline_file=research_timeline_file,
+        pipeline_trace_store=pipeline_trace_store,
         stale_after_seconds=stale_after_seconds,
         process_stale_after_seconds=process_stale_after_seconds,
     )
@@ -2289,6 +2396,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dataset-metadata-file", type=Path)
     parser.add_argument("--project-overview-file", type=Path)
     parser.add_argument("--research-timeline-file", type=Path)
+    parser.add_argument("--pipeline-namespace", type=Path)
+    parser.add_argument("--pipeline-db-file", type=Path)
+    parser.add_argument("--pipeline-receipts-dir", type=Path)
+    parser.add_argument(
+        "--pipeline-eligibility-root", type=Path, action="append", default=[]
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--stale-after-seconds", type=int, default=86400)
@@ -2311,6 +2424,10 @@ def main(argv: list[str] | None = None) -> int:
         dataset_metadata_file=args.dataset_metadata_file,
         project_overview_file=args.project_overview_file,
         research_timeline_file=args.research_timeline_file,
+        pipeline_namespace=args.pipeline_namespace,
+        pipeline_db_file=args.pipeline_db_file,
+        pipeline_receipts_dir=args.pipeline_receipts_dir,
+        pipeline_eligibility_roots=tuple(args.pipeline_eligibility_root),
         host=args.host,
         port=args.port,
         stale_after_seconds=args.stale_after_seconds,
