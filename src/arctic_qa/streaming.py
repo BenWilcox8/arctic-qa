@@ -409,11 +409,79 @@ def run_stream(
         except Exception as error:
             progress.error(candidate_key, access.get("title"), "source_import", error)
             raise
-        if db.one(
-            "SELECT item_id FROM candidates WHERE run_id=? AND source_id=? LIMIT 1",
+        existing_candidate = db.one(
+            """SELECT item_id,status FROM candidates
+            WHERE run_id=? AND source_id=?
+            ORDER BY updated_at DESC,item_id DESC LIMIT 1""",
             (campaign_id, source_id),
-        ):
+        )
+        terminal_candidate = db.one(
+            """SELECT item_id,status FROM candidates
+            WHERE run_id=? AND source_id=?
+            AND status IN ('rejected','machine_accepted_unverified','incomplete_non_mcq')
+            ORDER BY updated_at DESC,item_id DESC LIMIT 1""",
+            (campaign_id, source_id),
+        )
+        if existing_candidate:
             resumed_papers += 1
+        if terminal_candidate:
+            event = db.one(
+                """SELECT label,reason_codes_json FROM validation_events
+                WHERE item_id=? ORDER BY created_at DESC,event_id DESC LIMIT 1""",
+                (terminal_candidate["item_id"],),
+            )
+            expected_label = (
+                "rejected"
+                if terminal_candidate["status"] == "rejected"
+                else "machine_accepted_unverified"
+            )
+            if event is None or event["label"] != expected_label:
+                raise ValueError(
+                    "a terminal streaming candidate lacks its validation event"
+                )
+            reason_codes = json.loads(event["reason_codes_json"])
+            if not isinstance(reason_codes, list) or any(
+                not isinstance(reason, str) for reason in reason_codes
+            ):
+                raise ValueError("a terminal streaming validation event changed")
+            dispositions = {
+                "rejected": "generation_rejected",
+                "machine_accepted_unverified": "accepted",
+                "incomplete_non_mcq": "incomplete_non_mcq",
+            }
+            disposition = dispositions[terminal_candidate["status"]]
+            counts[
+                {
+                    "generation_rejected": "generation_rejected",
+                    "accepted": "accepted_base_questions",
+                    "incomplete_non_mcq": "incomplete_non_mcq",
+                }[disposition]
+            ] += 1
+            counts["processed"] += 1
+            if disposition == "generation_rejected":
+                progress.increment("generation_rejected")
+            elif disposition == "accepted":
+                progress.set_count("accepted_qa", _accepted_count(db, campaign_id))
+            paper_results.append(
+                {
+                    "candidate_key": candidate_key,
+                    "disposition": disposition,
+                    "reason_codes": reason_codes,
+                    "source_id": source_id,
+                }
+            )
+            progress.paper(
+                paper_id=source_id,
+                title=access.get("title"),
+                current_stage="completed",
+                final_state=disposition,
+                final_reason=(
+                    expected_label
+                    if disposition == "accepted"
+                    else (reason_codes or [expected_label])[0]
+                ),
+            )
+            continue
         progress.paper(
             paper_id=source_id,
             title=access.get("title"),

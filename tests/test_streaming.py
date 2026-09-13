@@ -1336,7 +1336,7 @@ def test_streaming_maximum_comes_from_immutable_input_count(tmp_path: Path) -> N
 
 
 def test_streaming_uses_one_shared_broker_for_all_ten_stages(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     access, eligibility = streaming_fixture(tmp_path)
     eligibility_inputs = broker_eligibility_inputs(tmp_path)
@@ -1453,6 +1453,9 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
         "Do not assume any proposed scope value is true" in prompts["answer_verifier"]
     )
 
+    monkeypatch.setattr(
+        generation_module, "PROMPT_VERSION", "arctic-qa-generation-test-next"
+    )
     resumed = run_stream(
         database,
         paths.namespace,
