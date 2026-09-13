@@ -156,7 +156,6 @@ def test_v2_rejects_unknown_and_duplicate_selected_span_ids() -> None:
     assert "evidence_span_duplicate:study_geography" in repeated_result["errors"]
 
 
-
 def test_v2_allows_one_verified_span_to_support_separate_criteria() -> None:
     text, blocks, selected = _case()
     manifest = eligibility._span_manifest_v2(blocks)

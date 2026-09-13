@@ -1187,8 +1187,7 @@ def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> No
         == "numeric-rule-source-support-v2"
     )
     assert (
-        generated["provenance"]["scope_contract_version"]
-        == "source-literal-scope-v1"
+        generated["provenance"]["scope_contract_version"] == "source-literal-scope-v1"
     )
     assert generated["distractors"] == []
     assert generated["qa_gate_reasons"] == [

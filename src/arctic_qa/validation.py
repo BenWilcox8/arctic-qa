@@ -205,7 +205,9 @@ def validate_candidate(
             [],
             "rejected",
         )
-    if not scope_is_source_bound(candidate["answer"].get("scope"), list(chunks.values())):
+    if not scope_is_source_bound(
+        candidate["answer"].get("scope"), list(chunks.values())
+    ):
         reasons.append("answer_scope_not_source_bound")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     if candidate["answer"].get("numeric_rule") and not numeric_rule_is_source_bound(
@@ -670,12 +672,12 @@ def _option_response_schema_valid(response: Any) -> bool:
         return False
     if set(response) == SPAN_OPTION_VERDICT_RESPONSE_KEYS:
         return bool(
-            isinstance(response["source_span_id"], str)
-            and response["source_span_id"]
+            isinstance(response["source_span_id"], str) and response["source_span_id"]
         )
-    if not isinstance(response["evidence_quote"], str) or not response[
-        "evidence_quote"
-    ]:
+    if (
+        not isinstance(response["evidence_quote"], str)
+        or not response["evidence_quote"]
+    ):
         return False
     locator = response["locator"]
     return bool(
@@ -929,7 +931,9 @@ def scope_is_source_bound(
     source_text = normalize_text(
         " ".join(str(chunk.get("text", "")) for chunk in chunks)
     )
-    return bool(source_text and all(value in source_text for value in normalized_values))
+    return bool(
+        source_text and all(value in source_text for value in normalized_values)
+    )
 
 
 def _is_exact_integer_count_rule(rule: dict[str, Any]) -> bool:
@@ -943,8 +947,7 @@ def _is_exact_integer_count_rule(rule: dict[str, Any]) -> bool:
         and value == value.to_integral_value()
         and tolerance == 0
         and normalize_text(str(rule.get("tolerance_basis", ""))) == "count"
-        and normalize_text(str(rule.get("reported_precision", "")))
-        == "exact integer"
+        and normalize_text(str(rule.get("reported_precision", ""))) == "exact integer"
         and normalize_text(str(rule.get("rounding_rule", ""))) == "none"
         and normalize_text(str(rule.get("conversion_rule", ""))).startswith(
             "direct count"
@@ -1003,9 +1006,7 @@ def _bare_count_alias_matches(
 def _contains_quantity(text: str, expected: Decimal, expected_unit: str) -> bool:
     for match in NUMERIC_LITERAL_PATTERN.finditer(text):
         try:
-            value = Decimal(
-                match.group("value").replace(",", "").replace("−", "-")
-            )
+            value = Decimal(match.group("value").replace(",", "").replace("−", "-"))
         except (InvalidOperation, ValueError):
             continue
         suffix = text[match.end() :]

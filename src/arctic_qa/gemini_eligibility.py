@@ -1379,10 +1379,9 @@ def _validate_response_v2(
             ):
                 errors.append(f"evidence_invalid:{criterion}")
                 continue
-            if (
-                len(span_ids) != len(set(span_ids))
-                or selected_for_criterion.intersection(span_ids)
-            ):
+            if len(span_ids) != len(
+                set(span_ids)
+            ) or selected_for_criterion.intersection(span_ids):
                 errors.append(f"evidence_span_duplicate:{criterion}")
             selected_for_criterion.update(span_ids)
             unknown = [span_id for span_id in span_ids if span_id not in catalog]

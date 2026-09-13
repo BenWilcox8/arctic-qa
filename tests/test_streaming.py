@@ -158,9 +158,10 @@ def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
         ]
         == 1
     )
-    assert "Exact source text" in generation_module.SCOPE_SCHEMA["properties"][
-        "method"
-    ]["description"]
+    assert (
+        "Exact source text"
+        in generation_module.SCOPE_SCHEMA["properties"]["method"]["description"]
+    )
     assert "selected source span" in properties["canonical_value"]["description"]
     assert "selected source span" in properties["tolerance"]["description"]
     assert "Exact source text" in properties["tolerance_basis"]["description"]
@@ -869,16 +870,17 @@ def test_finding_span_id_resolves_to_exact_source_evidence(tmp_path: Path) -> No
     )
 
     assert result["counts"]["accepted_base_questions"] == 1
-    short_answer_path = tmp_path / "arctic-qa" / result["export"]["files"][
-        "short_answer"
-    ]
+    short_answer_path = (
+        tmp_path / "arctic-qa" / result["export"]["files"]["short_answer"]
+    )
     record = json.loads(short_answer_path.read_text(encoding="utf-8"))
     assert record["evidence"]["quote"] == (
         "The reported water depth was 2.0 m with a source-grounded tolerance of 0.1 m."
     )
-    assert record["evidence"]["locator"]["end_offset"] > record["evidence"]["locator"][
-        "start_offset"
-    ]
+    assert (
+        record["evidence"]["locator"]["end_offset"]
+        > record["evidence"]["locator"]["start_offset"]
+    )
     assert record["evidence"]["span_contract_version"] == "finding-evidence-span-v1"
     assert record["evidence"]["source_span_id"].startswith("finding-evidence-span-v1-")
     assert len(record["evidence"]["text_sha256"]) == 64
@@ -1937,9 +1939,7 @@ def test_streaming_records_invalid_finding_and_advances_to_next_paper(
     )
     author_script = tmp_path / "invalid-finding-then-valid-author.jsonl"
     author_script.write_text(
-        "\n".join(
-            json.dumps(event) for event in [invalid_extractor, *author_events]
-        )
+        "\n".join(json.dumps(event) for event in [invalid_extractor, *author_events])
         + "\n",
         encoding="utf-8",
     )
@@ -1970,9 +1970,7 @@ def test_streaming_records_invalid_finding_and_advances_to_next_paper(
         "reason_codes": ["finding_evidence_span_not_found"],
         "source_id": stable_id("src", "test-only:invalid-finding"),
     }
-    rejection_path = tmp_path / "arctic-qa" / result["export"]["files"][
-        "rejections"
-    ]
+    rejection_path = tmp_path / "arctic-qa" / result["export"]["files"]["rejections"]
     rejections = [json.loads(line) for line in rejection_path.read_text().splitlines()]
     assert [row["reason_code"] for row in rejections] == [
         "finding_evidence_span_not_found"
@@ -2046,9 +2044,7 @@ def test_streaming_rejects_invalid_downstream_source_span_selection(
             "source_id": stable_id("src", "test-only:streaming-paper"),
         }
     ]
-    rejection_path = tmp_path / "arctic-qa" / result["export"]["files"][
-        "rejections"
-    ]
+    rejection_path = tmp_path / "arctic-qa" / result["export"]["files"]["rejections"]
     rejections = [json.loads(line) for line in rejection_path.read_text().splitlines()]
     assert [row["reason_code"] for row in rejections] == [reason_code]
 

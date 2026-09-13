@@ -262,33 +262,35 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
         },
         "additionalProperties": False,
     },
-    "reconstructor": _source_span_selected_schema({
-        "type": "object",
-        "required": [
-            "answer",
-            "evidence_quote",
-            "locator",
-            "scope",
-            "question_claim_type",
-            "ambiguity_label",
-            "alternatives",
-        ],
-        "properties": {
-            "answer": {"type": "string", "minLength": 1},
-            "evidence_quote": {"type": "string", "minLength": 1},
-            "locator": LOCATOR_SCHEMA,
-            "scope": SCOPE_SCHEMA,
-            "question_claim_type": {
-                "enum": ["observation", "association", "causal", "definition"]
+    "reconstructor": _source_span_selected_schema(
+        {
+            "type": "object",
+            "required": [
+                "answer",
+                "evidence_quote",
+                "locator",
+                "scope",
+                "question_claim_type",
+                "ambiguity_label",
+                "alternatives",
+            ],
+            "properties": {
+                "answer": {"type": "string", "minLength": 1},
+                "evidence_quote": {"type": "string", "minLength": 1},
+                "locator": LOCATOR_SCHEMA,
+                "scope": SCOPE_SCHEMA,
+                "question_claim_type": {
+                    "enum": ["observation", "association", "causal", "definition"]
+                },
+                "ambiguity_label": {
+                    "enum": ["one_answer", "multiple_answers", "unresolved"]
+                },
+                "alternatives": {"type": "array", "items": {"type": "string"}},
+                "numeric": NUMERIC_VALUE_SCHEMA,
             },
-            "ambiguity_label": {
-                "enum": ["one_answer", "multiple_answers", "unresolved"]
-            },
-            "alternatives": {"type": "array", "items": {"type": "string"}},
-            "numeric": NUMERIC_VALUE_SCHEMA,
-        },
-        "additionalProperties": False,
-    }),
+            "additionalProperties": False,
+        }
+    ),
     "distractor_writer": {
         "type": "object",
         "required": ["distractors"],
@@ -297,55 +299,59 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
         },
         "additionalProperties": False,
     },
-    "answer_verifier": _source_span_selected_schema({
-        "type": "object",
-        "required": [
-            "source_entailment_model_verified",
-            "relation_scope_match",
-            "ambiguity_resolved",
-            "alternative_answer_search_passed",
-            "question_claim_type",
-            "evidence_quote",
-            "locator",
-            "scope",
-        ],
-        "properties": {
-            "source_entailment_model_verified": {"type": "boolean"},
-            "relation_scope_match": {"type": "boolean"},
-            "ambiguity_resolved": {"type": "boolean"},
-            "alternative_answer_search_passed": {"type": "boolean"},
-            "question_claim_type": {
-                "enum": ["observation", "association", "causal", "definition"]
+    "answer_verifier": _source_span_selected_schema(
+        {
+            "type": "object",
+            "required": [
+                "source_entailment_model_verified",
+                "relation_scope_match",
+                "ambiguity_resolved",
+                "alternative_answer_search_passed",
+                "question_claim_type",
+                "evidence_quote",
+                "locator",
+                "scope",
+            ],
+            "properties": {
+                "source_entailment_model_verified": {"type": "boolean"},
+                "relation_scope_match": {"type": "boolean"},
+                "ambiguity_resolved": {"type": "boolean"},
+                "alternative_answer_search_passed": {"type": "boolean"},
+                "question_claim_type": {
+                    "enum": ["observation", "association", "causal", "definition"]
+                },
+                "evidence_quote": {"type": "string", "minLength": 1},
+                "locator": LOCATOR_SCHEMA,
+                "scope": SCOPE_SCHEMA,
+                "residual_error": {"type": "string"},
             },
-            "evidence_quote": {"type": "string", "minLength": 1},
-            "locator": LOCATOR_SCHEMA,
-            "scope": SCOPE_SCHEMA,
-            "residual_error": {"type": "string"},
-        },
-        "additionalProperties": False,
-    }),
-    "option_verifier": _source_span_selected_schema({
-        "type": "object",
-        "required": [
-            "contradiction_established",
-            "alternative_answer_search_passed",
-            "true_in_different_context",
-            "question_admits_option_as_correct",
-            "evidence_quote",
-            "locator",
-            "rationale",
-        ],
-        "properties": {
-            "contradiction_established": {"type": "boolean"},
-            "alternative_answer_search_passed": {"type": "boolean"},
-            "true_in_different_context": {"type": "boolean"},
-            "question_admits_option_as_correct": {"type": "boolean"},
-            "evidence_quote": {"type": "string", "minLength": 1},
-            "locator": LOCATOR_SCHEMA,
-            "rationale": {"type": "string", "minLength": 1},
-        },
-        "additionalProperties": False,
-    }),
+            "additionalProperties": False,
+        }
+    ),
+    "option_verifier": _source_span_selected_schema(
+        {
+            "type": "object",
+            "required": [
+                "contradiction_established",
+                "alternative_answer_search_passed",
+                "true_in_different_context",
+                "question_admits_option_as_correct",
+                "evidence_quote",
+                "locator",
+                "rationale",
+            ],
+            "properties": {
+                "contradiction_established": {"type": "boolean"},
+                "alternative_answer_search_passed": {"type": "boolean"},
+                "true_in_different_context": {"type": "boolean"},
+                "question_admits_option_as_correct": {"type": "boolean"},
+                "evidence_quote": {"type": "string", "minLength": 1},
+                "locator": LOCATOR_SCHEMA,
+                "rationale": {"type": "string", "minLength": 1},
+            },
+            "additionalProperties": False,
+        }
+    ),
     "correction": {
         "type": "object",
         "required": ["component", "replacement"],
@@ -442,8 +448,7 @@ def generate_candidate(
             run_id,
             stable_id("finding-selection", source_id, FINDING_POLICY_VERSION),
             "extractor",
-            context
-            + "\nExtract one bounded answer record. Select one source_span_id. "
+            context + "\nExtract one bounded answer record. Select one source_span_id. "
             "The selected span must contain exact, sufficient evidence for the "
             "answer. Do not combine text from different spans. Set each non-null "
             "scope value to exact SOURCE_DATA text, without aliases or "
@@ -501,9 +506,7 @@ def generate_candidate(
                     now(),
                 ),
             )
-    context_spans = {
-        span["span_id"]: span for span in _finding_spans(chunk)
-    }
+    context_spans = {span["span_id"]: span for span in _finding_spans(chunk)}
     context = _context(chunk)
     entity_id = stable_id("unit", finding_id, arm)
     arm_answer_proposal = answer
@@ -1118,9 +1121,7 @@ def _finding_spans(chunk: dict[str, Any]) -> list[dict[str, Any]]:
     text = chunk["text"]
     for line_match in re.finditer(r"[^\n]+", text):
         line = line_match.group(0)
-        segments = list(
-            re.finditer(r"\S(?:.*?\S)?(?=(?:[ \t]{3,}|$))", line)
-        )
+        segments = list(re.finditer(r"\S(?:.*?\S)?(?=(?:[ \t]{3,}|$))", line))
         for segment in segments:
             start = line_match.start() + segment.start()
             end = line_match.start() + segment.end()
