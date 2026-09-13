@@ -1100,3 +1100,8 @@ def test_page_contains_vertical_activity_and_persistent_on_demand_inspector() ->
     assert "/api/pipeline-trace/stage?paper_key=" in page
     assert "body.append(traceField" in page
     assert "Machine acceptance is a retained engineering label" in page
+    assert (
+        ".telemetry-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));"
+        in page
+    )
+    assert ".telemetry-grid > div { min-width: 0; }" in page

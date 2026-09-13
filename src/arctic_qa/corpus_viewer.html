@@ -187,7 +187,8 @@
     .trace-actions button { min-height: 2rem; padding: .35rem .6rem; }
     .trace-empty { color: var(--muted); line-height: 1.5; padding: 1.2rem; }
     .trace-error { background: var(--red-bg); color: var(--red); padding: .8rem; }
-    .telemetry-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 1rem; }
+    .telemetry-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin-top: 1rem; }
+    .telemetry-grid > div { min-width: 0; }
     .telemetry-grid h3 { margin-bottom: .5rem; }
     .compact-table { border: 1px solid var(--line); border-radius: 6px; overflow: auto; }
     .compact-table table { font-size: .8rem; }
