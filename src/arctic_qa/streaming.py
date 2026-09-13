@@ -122,6 +122,18 @@ def run_stream(
         eligibility_schema_file=eligibility_schema_file,
         eligibility_policy_file=eligibility_policy_file,
     )
+    trusted_eligibility_decisions: dict[str, str] = {}
+    if verifier_broker is not None:
+        trusted_eligibility_decisions = _trusted_brokered_eligibility_decisions(
+            selection=selection,
+            access_items=access_items,
+            eligibility_jobs=eligibility_jobs,
+            verifier=verifier,
+            max_papers=max_papers,
+            prompt_file=eligibility_prompt_file,
+            schema_file=eligibility_schema_file,
+            policy_file=eligibility_policy_file,
+        )
     progress = _Progress(
         progress_file or namespace / "streaming-dataset-r1" / "progress.json",
         run_id=campaign_id,
@@ -132,26 +144,32 @@ def run_stream(
                 item.get("access_state") == "full_text_ready"
                 for item in access_items.values()
             ),
-            "eligibility_completed": 0
+            "eligibility_completed": len(trusted_eligibility_decisions)
             if verifier_broker is not None
             else sum(
                 (item.get("validation") or {}).get("decision")
                 in {"eligible", "excluded", "uncertain"}
                 for item in eligibility_jobs.values()
             ),
-            "eligible": 0
+            "eligible": sum(
+                value == "eligible" for value in trusted_eligibility_decisions.values()
+            )
             if verifier_broker is not None
             else sum(
                 (item.get("validation") or {}).get("decision") == "eligible"
                 for item in eligibility_jobs.values()
             ),
-            "excluded": 0
+            "excluded": sum(
+                value == "excluded" for value in trusted_eligibility_decisions.values()
+            )
             if verifier_broker is not None
             else sum(
                 (item.get("validation") or {}).get("decision") == "excluded"
                 for item in eligibility_jobs.values()
             ),
-            "unresolved": 0
+            "unresolved": sum(
+                value == "uncertain" for value in trusted_eligibility_decisions.values()
+            )
             if verifier_broker is not None
             else sum(
                 (item.get("validation") or {}).get("decision") == "uncertain"
@@ -174,7 +192,6 @@ def run_stream(
     }
     paper_results: list[dict[str, Any]] = []
     resumed_papers = 0
-    trusted_eligibility_decisions: dict[str, str] = {}
     for selected in selection:
         if counts["processed"] >= max_papers:
             break
@@ -563,6 +580,58 @@ def _bind_provider(
         family_id=family_id,
         source_version_id=source_version_id,
     )
+
+
+def _trusted_brokered_eligibility_decisions(
+    *,
+    selection: list[dict[str, Any]],
+    access_items: dict[str, dict[str, Any]],
+    eligibility_jobs: dict[str, dict[str, Any]],
+    verifier: Provider,
+    max_papers: int,
+    prompt_file: Path,
+    schema_file: Path,
+    policy_file: Path,
+) -> dict[str, str]:
+    decisions: dict[str, str] = {}
+    processed = 0
+    for selected in selection:
+        if processed >= max_papers:
+            break
+        candidate_key = selected.get("candidate_key")
+        access = access_items.get(candidate_key)
+        if access is None or access.get("access_state") != "full_text_ready":
+            continue
+        processed += 1
+        eligibility = eligibility_jobs.get(candidate_key)
+        if eligibility is None or eligibility.get("execution_authority") != (
+            "shared_gemini_broker"
+        ):
+            continue
+        family_id = str(
+            access.get("paper_family_id")
+            or stable_id("family", access.get("doi") or candidate_key)
+        )
+        paper_verifier = _bind_provider(
+            verifier,
+            paper_id=str(candidate_key),
+            family_id=family_id,
+            source_version_id=str(access["source_content_hash"]),
+        )
+        _validate_access_integrity(access, eligibility)
+        validation = _validate_brokered_eligibility(
+            eligibility,
+            paper_verifier,
+            access=access,
+            prompt_file=prompt_file,
+            schema_file=schema_file,
+            policy_file=policy_file,
+        )
+        decision = validation["decision"]
+        if validation["valid"] is not True and decision != "uncertain":
+            raise ValueError("invalid deterministic eligibility must remain uncertain")
+        decisions[str(candidate_key)] = decision
+    return decisions
 
 
 def _accepted_count(db: Database, run_id: str) -> int:

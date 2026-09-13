@@ -8,11 +8,13 @@ import sys
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from arctic_qa import cli as cli_module
 from arctic_qa import generation as generation_module
+from arctic_qa import streaming as streaming_module
 from arctic_qa.broker_provider import BrokerProvider
 from arctic_qa.db import Database
 from arctic_qa.errors import AmbiguousChargeError
@@ -1089,7 +1091,7 @@ def test_unresolved_eligibility_resume_rejects_changed_source(tmp_path: Path) ->
 
 
 def test_streaming_advances_after_uncertain_brokered_eligibility(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     access, eligibility = streaming_fixture(tmp_path)
     first_item_path = access / "items" / "item-000001.json"
@@ -1165,6 +1167,16 @@ def test_streaming_advances_after_uncertain_brokered_eligibility(
         for path in (tmp_path / "model-receipts").glob("*.json")
     }
 
+    progress_path = paths.namespace / "streaming-dataset-r1" / "progress.json"
+    observed_progress_counts: list[dict[str, int]] = []
+    original_atomic_json = streaming_module.atomic_json
+
+    def observe_atomic_json(path: Path, value: Any, **kwargs: Any) -> None:
+        if path.resolve() == progress_path.resolve():
+            observed_progress_counts.append(dict(value["counts"]))
+        original_atomic_json(path, value, **kwargs)
+
+    monkeypatch.setattr(streaming_module, "atomic_json", observe_atomic_json)
     arguments["max_papers"] = 2
     result = run_stream(**arguments)
 
@@ -1197,6 +1209,10 @@ def test_streaming_advances_after_uncertain_brokered_eligibility(
         "generation_rejected": 0,
         "accepted_qa": 0,
     }
+    assert observed_progress_counts
+    assert all(
+        counts["eligibility_completed"] >= 1 for counts in observed_progress_counts
+    )
     assert progress["recent_papers"][0]["final_state"] == "unresolved"
     assert progress["recent_papers"][0]["final_reason"] == (
         "evidence_unmatched_or_ambiguous:study_geography"
