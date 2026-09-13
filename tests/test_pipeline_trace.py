@@ -428,3 +428,65 @@ def test_submitted_only_stage_appears_on_refresh(tmp_path: Path) -> None:
     stage = store.stage_payload(item["paper_key"], request_key)
     assert stage["stage"]["state"] == "submitted"
     assert stage["response"]["availability"] == "not_retained"
+
+
+@pytest.mark.parametrize(
+    ("decision", "expected"),
+    (("excluded", "eligibility_rejected"), ("uncertain", "eligibility_unresolved")),
+)
+def test_eligibility_only_state_uses_retained_decision(
+    tmp_path: Path, decision: str, expected: str
+) -> None:
+    namespace, _, _ = fixture_namespace(tmp_path)
+    request_key = "7" * 64
+    response = {
+        "responseId": "eligibility-only-response",
+        "modelVersion": "gemini-fixture-v1",
+        "candidates": [
+            {
+                "finishReason": "STOP",
+                "content": {"parts": [{"text": canonical_json({"criteria": []})}]},
+            }
+        ],
+    }
+    write_json(
+        namespace / "streaming-dataset-r1" / "model-receipts" / f"{request_key}.json",
+        {
+            "request_key": request_key,
+            "request_sha256": "8" * 64,
+            "run_id": "eligibility-only-run",
+            "stage": "eligibility",
+            "paper_id": "10.1234/second",
+            "family_id": "family-second",
+            "source_version_id": "9" * 64,
+            "model": "gemini-fixture",
+            "state": "completed",
+            "submitted_at_utc": "2026-09-13T00:00:06Z",
+            "completed_at_utc": "2026-09-13T00:00:07Z",
+            "response": response,
+        },
+    )
+    job_key = "a" * 64
+    write_json(
+        namespace
+        / "gemini-eligibility-r1"
+        / "run-eligibility-only"
+        / "jobs"
+        / f"{job_key}.json",
+        {
+            "schema": "gemini-eligibility-job-v1",
+            "job_key": job_key,
+            "candidate_key": "10.1234/second",
+            "broker_request_key": request_key,
+            "completed_at_utc": "2026-09-13T00:00:07Z",
+            "validation": {
+                "valid": True,
+                "decision": decision,
+                "overall_reason_codes": [f"fixture_{decision}"],
+            },
+        },
+    )
+
+    item = PipelineTraceStore(namespace).list_papers(query="10.1234/second")["items"][0]
+
+    assert item["state"] == expected

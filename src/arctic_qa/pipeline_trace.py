@@ -134,6 +134,8 @@ class PipelineTraceStore:
             raise ValueError("pipeline trace inputs must stay inside the namespace")
         self._receipt_cache_fingerprint: tuple[tuple[str, int, int], ...] = ()
         self._receipt_cache: list[dict[str, Any]] = []
+        self._job_cache_fingerprint: tuple[tuple[str, int, int], ...] = ()
+        self._job_cache: list[tuple[Path, dict[str, Any]]] = []
 
     def list_papers(
         self,
@@ -365,7 +367,18 @@ class PipelineTraceStore:
                     if item.get("stage")
                 }
             )
-            state = self._paper_state(relevant_candidates, family_receipts)
+            state = self._paper_state(
+                relevant_candidates,
+                family_receipts,
+                self._eligibility_state(
+                    {
+                        str(item.get("request_key"))
+                        for item in family_receipts
+                        if item.get("request_key")
+                    },
+                    {str(value) for value in (*receipt_ids, *source_ids) if value},
+                ),
+            )
             title = source.get("title")
             if not title:
                 title = next(
@@ -646,10 +659,7 @@ class PipelineTraceStore:
             if value
         }
         jobs = []
-        for path in self._job_paths():
-            job = self._read_json(path)
-            if not isinstance(job, dict):
-                continue
+        for path, job in self._all_eligibility_jobs():
             if (
                 job.get("broker_request_key") not in request_keys
                 and str(job.get("candidate_key")) not in candidate_ids
@@ -672,9 +682,8 @@ class PipelineTraceStore:
     ) -> dict[str, Any] | None:
         if not request_key:
             return None
-        for path in self._job_paths():
-            job = self._read_json(path)
-            if isinstance(job, dict) and job.get("broker_request_key") == request_key:
+        for path, job in self._all_eligibility_jobs():
+            if job.get("broker_request_key") == request_key:
                 safe = self._safe_value(job)
                 manifest = (
                     path.parent.parent / "span-manifests" / f"{job.get('job_key')}.json"
@@ -694,6 +703,46 @@ class PipelineTraceStore:
             if root.is_dir()
             for path in root.glob("*/jobs/*.json")
         )
+
+    def _all_eligibility_jobs(self) -> list[tuple[Path, dict[str, Any]]]:
+        paths = self._job_paths()
+        fingerprint = tuple(
+            (str(path), path.stat().st_size, path.stat().st_mtime_ns) for path in paths
+        )
+        if fingerprint == self._job_cache_fingerprint:
+            return self._job_cache
+        jobs = []
+        for path in paths:
+            value = self._read_json(path)
+            if isinstance(value, dict):
+                jobs.append((path, value))
+        self._job_cache_fingerprint = fingerprint
+        self._job_cache = jobs
+        return self._job_cache
+
+    def _eligibility_state(
+        self, request_keys: set[str], candidate_ids: set[str]
+    ) -> str | None:
+        matching = [
+            job
+            for _, job in self._all_eligibility_jobs()
+            if job.get("broker_request_key") in request_keys
+            or str(job.get("candidate_key")) in candidate_ids
+        ]
+        if not matching:
+            return None
+        latest = max(matching, key=lambda job: str(job.get("completed_at_utc") or ""))
+        validation = latest.get("validation") or {}
+        decision = validation.get("decision")
+        if validation.get("valid") is not True and decision != "excluded":
+            return "eligibility_unresolved"
+        if decision == "uncertain":
+            return "eligibility_unresolved"
+        if decision == "excluded":
+            return "eligibility_rejected"
+        if decision == "eligible":
+            return "eligible"
+        return "eligibility_completed"
 
     def _export_rows(
         self, record: dict[str, Any], source_ids: list[str]
@@ -753,7 +802,10 @@ class PipelineTraceStore:
         ]
 
     def _paper_state(
-        self, candidates: list[dict[str, Any]], receipts: list[dict[str, Any]]
+        self,
+        candidates: list[dict[str, Any]],
+        receipts: list[dict[str, Any]],
+        eligibility_state: str | None,
     ) -> str:
         candidate_states = {str(row.get("status")) for row in candidates}
         if "machine_accepted_unverified" in candidate_states:
@@ -767,6 +819,8 @@ class PipelineTraceStore:
             return "in_progress"
         if "ambiguous_charge" in states:
             return "ambiguous_charge"
+        if eligibility_state is not None:
+            return eligibility_state
         if receipts:
             latest = max(
                 receipts,
