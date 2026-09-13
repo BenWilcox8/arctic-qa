@@ -160,15 +160,21 @@
     .trace-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
     .trace-head p { color: var(--muted); line-height: 1.5; margin: .35rem 0 0; max-width: 90ch; }
     .trace-filters { display: grid; grid-template-columns: minmax(220px, 2fr) repeat(4, minmax(130px, 1fr)) auto; gap: .65rem; margin: 1rem 0; }
-    .trace-workspace { display: grid; grid-template-columns: minmax(360px, .8fr) minmax(0, 1.2fr); gap: 1rem; min-width: 0; }
+    .trace-workspace { display: grid; grid-template-columns: minmax(460px, .95fr) minmax(0, 1.35fr); gap: 1rem; min-width: 0; }
     .trace-list, .trace-detail { border: 1px solid var(--line); border-radius: 8px; min-width: 0; overflow: hidden; }
     .trace-subhead { background: #eef4f6; border-bottom: 1px solid var(--line); padding: .75rem .85rem; }
     .trace-subhead h3 { margin: 0; }
     .trace-subhead p { color: var(--muted); font-size: .8rem; margin: .2rem 0 0; }
     .trace-table-wrap { max-height: 44rem; overflow: auto; }
+    .trace-table { table-layout: fixed; }
+    .trace-table .trace-paper-column { width: 46%; }
+    .trace-table .trace-state-column { width: 25%; }
+    .trace-table .trace-stage-column { width: 19%; }
+    .trace-table .trace-attempt-column { width: 10%; }
     .trace-table button { background: transparent; border: 0; color: #0b6486; min-height: 0; padding: 0; text-align: left; text-decoration: underline; text-underline-offset: 2px; }
+    .trace-table .badge { justify-content: flex-start; white-space: normal; width: auto; }
     .trace-table tr.selected { background: var(--cyan); }
-    .trace-table td { overflow-wrap: anywhere; }
+    .trace-table th, .trace-table td { overflow-wrap: anywhere; padding: .65rem .5rem; }
     .trace-list .pager { padding: .7rem .8rem; }
     .trace-detail-body { max-height: 52rem; overflow: auto; padding: .85rem; }
     .trace-identity { border-bottom: 1px solid var(--line); margin-bottom: .85rem; padding-bottom: .85rem; }
@@ -185,6 +191,32 @@
     .trace-field pre { background: #102b38; border-radius: 6px; color: #edf7fa; font: .78rem/1.48 ui-monospace, SFMono-Regular, Consolas, monospace; margin: 0; max-height: 24rem; overflow: auto; padding: .75rem; tab-size: 2; white-space: pre-wrap; word-break: break-word; }
     .trace-actions { display: flex; flex-wrap: wrap; gap: .45rem; margin: .65rem 0; }
     .trace-actions button { min-height: 2rem; padding: .35rem .6rem; }
+    .trace-readable { display: grid; gap: .75rem; min-width: 0; }
+    .trace-readable-card { background: var(--paper); border: 1px solid var(--line); border-radius: 7px; min-width: 0; padding: .8rem; }
+    .trace-readable-card > :first-child { margin-top: 0; }
+    .trace-readable-card > :last-child { margin-bottom: 0; }
+    .trace-readable-title { align-items: flex-start; display: flex; flex-wrap: wrap; gap: .45rem .6rem; justify-content: space-between; margin-bottom: .65rem; }
+    .trace-readable-title h4 { font-size: .95rem; margin: 0; overflow-wrap: anywhere; }
+    .trace-kv { display: grid; gap: .55rem; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: .55rem 0; }
+    .trace-kv-item { background: var(--wash); border-radius: 5px; min-width: 0; padding: .55rem .6rem; }
+    .trace-kv-item.wide { grid-column: 1 / -1; }
+    .trace-kv-label { color: var(--muted); display: block; font-size: .7rem; font-weight: 700; letter-spacing: .04em; margin-bottom: .2rem; text-transform: uppercase; }
+    .trace-kv-value { display: block; line-height: 1.45; overflow-wrap: anywhere; white-space: pre-wrap; }
+    .trace-question { border-left: 4px solid var(--navy); font-size: 1.02rem; font-weight: 700; line-height: 1.5; margin: .65rem 0; padding: .65rem .75rem; }
+    .trace-answer { background: var(--green-bg); border-left: 4px solid var(--green); line-height: 1.5; margin: .65rem 0; padding: .65rem .75rem; }
+    .trace-answer strong, .trace-question strong { display: block; font-size: .72rem; letter-spacing: .04em; margin-bottom: .25rem; text-transform: uppercase; }
+    .trace-option-list { display: grid; gap: .4rem; list-style: none; margin: .55rem 0; padding: 0; }
+    .trace-option { background: var(--wash); border: 1px solid var(--line); border-radius: 6px; display: grid; gap: .25rem; grid-template-columns: auto minmax(0, 1fr); line-height: 1.45; padding: .55rem .65rem; }
+    .trace-option.correct { background: var(--green-bg); border-color: var(--green); }
+    .trace-option-marker { font-weight: 800; min-width: 1.6rem; }
+    .trace-evidence { background: #eef4f6; border-left: 4px solid #78909a; line-height: 1.5; margin: .55rem 0; overflow-wrap: anywhere; padding: .65rem .75rem; white-space: pre-wrap; }
+    .trace-evidence strong { display: block; font-size: .72rem; letter-spacing: .04em; margin-bottom: .25rem; text-transform: uppercase; }
+    .trace-readable-list { margin: .4rem 0; padding-left: 1.25rem; }
+    .trace-readable-list li { margin: .25rem 0; overflow-wrap: anywhere; }
+    .trace-raw { border-top: 1px solid var(--line); margin-top: .8rem; padding-top: .65rem; }
+    .trace-raw > summary { font-size: .82rem; font-weight: 700; }
+    .trace-raw .trace-field { margin-top: .65rem; }
+    .trace-section-note { color: var(--muted); line-height: 1.5; margin: 0 0 .7rem; }
     .trace-empty { color: var(--muted); line-height: 1.5; padding: 1.2rem; }
     .trace-error { background: var(--red-bg); color: var(--red); padding: .8rem; }
     .telemetry-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin-top: 1rem; }
@@ -253,6 +285,8 @@
       .filters .search, .trace-filters .search { grid-column: auto; }
       .trace-head .badge { margin-top: .75rem; }
       .trace-attempts { grid-template-columns: 1fr; }
+      .trace-kv { grid-template-columns: 1fr; }
+      .trace-kv-item.wide { grid-column: auto; }
       .table-wrap { overflow: visible; }
       table, thead, tbody, tr, th, td { display: block; }
       thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
@@ -946,7 +980,328 @@
       field.append(actions);
       return field;
     }
-    function detailSection(caption, value, open = false) {
+    function hasTraceValue(value) {
+      return value !== null && value !== undefined && value !== '';
+    }
+    function traceValueText(value) {
+      if (!hasTraceValue(value)) return 'Not recorded';
+      if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+      if (Array.isArray(value)) return value.length ? value.map(traceValueText).join(', ') : 'None recorded';
+      return String(value);
+    }
+    function readableCard(titleValue, stateValue = null) {
+      const card = document.createElement('article');
+      card.className = 'trace-readable-card';
+      const heading = document.createElement('div');
+      heading.className = 'trace-readable-title';
+      heading.append(text('h4', titleValue));
+      if (stateValue) heading.append(text('span', label(stateValue), `badge ${stateValue}`));
+      card.append(heading);
+      return card;
+    }
+    function readableKeyValues(entries) {
+      const grid = document.createElement('div');
+      grid.className = 'trace-kv';
+      entries.filter(([, value]) => hasTraceValue(value)).forEach(([caption, value, wide = false]) => {
+        const item = document.createElement('div');
+        item.className = `trace-kv-item${wide ? ' wide' : ''}`;
+        item.append(text('span', caption, 'trace-kv-label'), text('span', traceValueText(value), 'trace-kv-value'));
+        grid.append(item);
+      });
+      return grid;
+    }
+    function readableList(caption, values) {
+      const wrap = document.createElement('div');
+      if (caption) wrap.append(text('strong', caption));
+      const list = document.createElement('ul');
+      list.className = 'trace-readable-list';
+      const records = Array.isArray(values) ? values : [];
+      if (records.length) records.forEach((value) => list.append(text('li', traceValueText(value))));
+      else list.append(text('li', 'None recorded', 'subtle'));
+      wrap.append(list);
+      return wrap;
+    }
+    function locatorText(locator) {
+      if (!locator || typeof locator !== 'object') return hasTraceValue(locator) ? traceValueText(locator) : 'Not recorded';
+      const parts = Object.entries(locator)
+        .filter(([, value]) => hasTraceValue(value) && typeof value !== 'object')
+        .map(([key, value]) => `${label(key)}: ${traceValueText(value)}`);
+      return parts.length ? parts.join(' · ') : 'Not recorded';
+    }
+    function appendEvidence(target, value, caption = 'Source evidence') {
+      if (!value || typeof value !== 'object') return;
+      const quote = value.quote || value.evidence_quote || value.text_quote;
+      const locator = value.locator;
+      if (!hasTraceValue(quote) && !hasTraceValue(locator)) return;
+      const evidence = document.createElement('div');
+      evidence.className = 'trace-evidence';
+      evidence.append(text('strong', caption));
+      if (hasTraceValue(quote)) evidence.append(document.createTextNode(traceValueText(quote)));
+      if (hasTraceValue(locator)) evidence.append(text('div', `Locator: ${locatorText(locator)}`, 'subtle'));
+      target.append(evidence);
+    }
+    function appendOptions(target, options, caption = 'Answer choices') {
+      if (!Array.isArray(options) || !options.length) return;
+      target.append(text('strong', caption));
+      const list = document.createElement('ol');
+      list.className = 'trace-option-list';
+      options.forEach((option, index) => {
+        const value = option && typeof option === 'object' ? option : { text: option };
+        const item = document.createElement('li');
+        item.className = `trace-option${value.is_correct ? ' correct' : ''}`;
+        const marker = value.is_correct ? 'Correct' : String.fromCharCode(65 + index);
+        item.append(text('span', marker, 'trace-option-marker'), text('span', traceValueText(value.text ?? value.answer ?? value.value), 'trace-kv-value'));
+        const notes = [value.type ? label(value.type) : null, value.verification_label ? label(value.verification_label) : null, value.label ? label(value.label) : null].filter(Boolean);
+        if (notes.length) item.append(text('span', '', 'trace-option-marker'), text('span', notes.join(' · '), 'subtle'));
+        list.append(item);
+      });
+      target.append(list);
+    }
+    function readableObject(titleValue, value) {
+      const card = readableCard(titleValue);
+      if (!value || typeof value !== 'object') {
+        card.append(readableKeyValues([['Value', value, true]]));
+        return card;
+      }
+      const primitive = [];
+      const nested = [];
+      Object.entries(value).forEach(([key, item]) => {
+        if (item === null || item === undefined) return;
+        if (typeof item !== 'object' || (Array.isArray(item) && item.every((entry) => typeof entry !== 'object'))) primitive.push([label(key), item, typeof item === 'string' && item.length > 100]);
+        else nested.push([key, item]);
+      });
+      if (primitive.length) card.append(readableKeyValues(primitive));
+      nested.forEach(([key, item]) => {
+        if (Array.isArray(item)) {
+          card.append(text('strong', `${label(key)} (${formatNumber(item.length)})`));
+          const list = document.createElement('ul');
+          list.className = 'trace-readable-list';
+          item.forEach((entry) => {
+            if (entry && typeof entry === 'object') {
+              const important = entry.text || entry.question || entry.answer || entry.reason_code || entry.label || entry.stage || entry.id || entry.item_id;
+              list.append(text('li', important ? traceValueText(important) : `${Object.keys(entry).map(label).join(', ')}`));
+            } else list.append(text('li', traceValueText(entry)));
+          });
+          card.append(list);
+        } else {
+          const values = Object.entries(item)
+            .filter(([, entry]) => entry === null || typeof entry !== 'object')
+            .map(([nestedKey, entry]) => [label(nestedKey), entry]);
+          if (values.length) {
+            card.append(text('strong', label(key)));
+            card.append(readableKeyValues(values));
+          }
+        }
+      });
+      return card;
+    }
+    function answerText(record) {
+      const answer = record?.answer;
+      if (answer && typeof answer === 'object') return answer.text || answer.answer || answer.value;
+      if (hasTraceValue(answer)) return answer;
+      const references = record?.reference_answers;
+      if (Array.isArray(references) && references.length) {
+        const first = references[0];
+        return first && typeof first === 'object' ? first.text || first.answer || first.value : first;
+      }
+      return record?.correct_answer;
+    }
+    function renderQaReadableRecord(wrapper, index = 0) {
+      const record = wrapper?.candidate || wrapper?.record || wrapper || {};
+      const itemId = wrapper?.item_id || record.item_id;
+      const recordState = wrapper?.status || record.status || record.release_label;
+      const card = readableCard(itemId ? `QA item ${itemId}` : `QA record ${index + 1}`, recordState);
+      if (hasTraceValue(record.question)) {
+        const question = text('div', '', 'trace-question');
+        question.append(text('strong', 'Question'), document.createTextNode(traceValueText(record.question)));
+        card.append(question);
+      } else card.append(text('p', 'No question is recorded for this item.', 'trace-section-note'));
+      const answer = answerText(record);
+      if (hasTraceValue(answer)) {
+        const answerNode = text('div', '', 'trace-answer');
+        answerNode.append(text('strong', 'Reference answer'), document.createTextNode(traceValueText(answer)));
+        card.append(answerNode);
+      }
+      const metadata = [
+        ['Generation arm', wrapper?.generation_arm || record.generation_arm],
+        ['Task type', record.task_type],
+        ['Claim type', record.question_claim_type || record.answer?.claim_type],
+        ['Release label', record.release_label],
+        ['Run', wrapper?.run_id || record.run_id]
+      ];
+      card.append(readableKeyValues(metadata));
+      appendOptions(card, record.options);
+      appendOptions(card, record.distractors, 'Distractors');
+      const reconstruction = record.reconstruction || record.blinded_reconstruction;
+      if (reconstruction) card.append(readableObject('Blinded reconstruction', reconstruction));
+      if (record.answer_verification) card.append(readableObject('Answer checks', record.answer_verification));
+      if (Array.isArray(record.option_verdicts) && record.option_verdicts.length) {
+        card.append(text('strong', 'Option verdicts'));
+        record.option_verdicts.forEach((verdict, verdictIndex) => card.append(readableObject(`Option ${verdictIndex + 1}`, verdict)));
+      }
+      appendEvidence(card, record.answer);
+      appendEvidence(card, record.evidence || record.answer_evidence);
+      if (record.answer?.required_question_phrases) card.append(readableList('Required question phrases', record.answer.required_question_phrases));
+      return card;
+    }
+    function renderRunsReadable(records) {
+      const wrap = document.createElement('div'); wrap.className = 'trace-readable';
+      records.forEach((run) => {
+        const card = readableCard(run.run_id || 'Run ID not recorded', run.state);
+        card.append(readableKeyValues([
+          ['Current stage', label(run.current_stage)],
+          ['Attempts', run.attempt_count],
+          ['Latest update', dateText(run.latest_at_utc)],
+          ['Candidate items', run.candidate_item_ids?.length || 0]
+        ]));
+        if (run.candidate_item_ids?.length) card.append(readableList('Candidate item IDs', run.candidate_item_ids));
+        card.append(text('p', `${formatNumber(run.stages?.length || 0)} retained model or processing stages.`, 'trace-section-note'));
+        wrap.append(card);
+      });
+      return wrap;
+    }
+    function renderSourcesReadable(records) {
+      const wrap = document.createElement('div'); wrap.className = 'trace-readable';
+      records.forEach((source) => {
+        const card = readableCard(source.title || source.doi || source.source_id || 'Source record', source.access_state);
+        card.append(readableKeyValues([
+          ['Source', source.source_id], ['Availability', label(source.availability)],
+          ['DOI', source.doi], ['Authors', source.authors], ['Year', source.year],
+          ['Media type', source.media_type], ['License', source.license],
+          ['Eligibility', label(source.eligibility_state)], ['Geography', label(source.geography_state)],
+          ['Geography confidence', label(source.geography_confidence)], ['Retrieved', dateText(source.retrieved_at)],
+          ['Inclusion reason', label(source.inclusion_reason), true]
+        ]));
+        const doi = source.doi ? safeLink(`https://doi.org/${encodeURIComponent(source.doi)}`, 'Open DOI record') : null;
+        if (doi) card.append(doi);
+        const resolved = source.scope_evidence?.resolved_evidence || [];
+        resolved.forEach((group) => {
+          card.append(text('strong', `Evidence for ${label(group.criterion)}`));
+          (group.spans || []).forEach((span) => appendEvidence(card, span));
+        });
+        if (Array.isArray(source.chunks) && source.chunks.length) {
+          card.append(text('strong', `Retained source chunks (${formatNumber(source.chunks.length)})`));
+          source.chunks.forEach((chunk, index) => {
+            const details = document.createElement('details');
+            details.className = 'trace-raw';
+            details.append(text('summary', chunk.heading || chunk.chunk_id || `Source chunk ${index + 1}`));
+            details.append(readableKeyValues([
+              ['Chunk', chunk.chunk_id], ['Section', chunk.section_id], ['Page', chunk.page],
+              ['Offsets', hasTraceValue(chunk.start_offset) || hasTraceValue(chunk.end_offset) ? `${chunk.start_offset ?? '?'} to ${chunk.end_offset ?? '?'}` : null]
+            ]));
+            if (hasTraceValue(chunk.text)) details.append(text('div', chunk.text, 'trace-evidence'));
+            card.append(details);
+          });
+        }
+        wrap.append(card);
+      });
+      return wrap;
+    }
+    function renderEligibilityReadable(records) {
+      const wrap = document.createElement('div'); wrap.className = 'trace-readable';
+      records.forEach((record) => {
+        const decision = record.validation?.decision || record.decision || record.state;
+        const card = readableCard(`Eligibility decision ${record.candidate_key || record.job_key || ''}`.trim(), decision);
+        card.append(readableKeyValues([
+          ['Decision', label(decision)], ['Model', record.model_version || record.model],
+          ['Completed', dateText(record.completed_at_utc)], ['Cost', money(record.actual_cost_usd)],
+          ['Input tokens', record.input_tokens], ['Output tokens', record.output_tokens]
+        ]));
+        card.append(readableList('Overall reasons', record.validation?.overall_reason_codes || record.overall_reason_codes));
+        const criteria = record.parsed_response?.criteria || [];
+        criteria.forEach((criterion) => {
+          const criterionCard = readableCard(label(criterion.criterion_id), criterion.status);
+          criterionCard.append(readableList('Reasons', criterion.reason_codes));
+          criterionCard.append(readableList('Missing context', criterion.missing_context));
+          const spanIds = (criterion.evidence || []).flatMap((entry) => entry.span_ids || []);
+          if (spanIds.length) criterionCard.append(readableList('Evidence span IDs', spanIds));
+          card.append(criterionCard);
+        });
+        (record.validation?.resolved_evidence || []).forEach((group) => {
+          card.append(text('strong', `Located evidence for ${label(group.criterion)}`));
+          (group.spans || []).forEach((span) => appendEvidence(card, span));
+        });
+        wrap.append(card);
+      });
+      return wrap;
+    }
+    function renderFindingsReadable(records) {
+      const wrap = document.createElement('div'); wrap.className = 'trace-readable';
+      records.forEach((record, index) => {
+        const answer = record.answer || {};
+        const card = readableCard(record.finding_id ? `Finding ${record.finding_id}` : `Frozen finding ${index + 1}`, record.status);
+        if (hasTraceValue(answer.text)) {
+          const answerNode = text('div', '', 'trace-answer');
+          answerNode.append(text('strong', 'Frozen answer'), document.createTextNode(answer.text));
+          card.append(answerNode);
+        }
+        card.append(readableKeyValues([
+          ['Claim type', answer.claim_type], ['Run', record.run_id], ['Source', record.source_id],
+          ['Chunk', record.chunk_id], ['Scope period', answer.scope?.period], ['Scope population', answer.scope?.population]
+        ]));
+        appendEvidence(card, answer);
+        if (answer.required_question_phrases) card.append(readableList('Required question phrases', answer.required_question_phrases));
+        wrap.append(card);
+      });
+      return wrap;
+    }
+    function renderCandidatesReadable(records) {
+      const wrap = document.createElement('div'); wrap.className = 'trace-readable';
+      records.forEach((record, index) => wrap.append(renderQaReadableRecord(record, index)));
+      return wrap;
+    }
+    function renderValidationReadable(records) {
+      const wrap = document.createElement('div'); wrap.className = 'trace-readable';
+      records.forEach((record, index) => {
+        const card = readableCard(`${label(record.stage || 'Validation')} · ${record.item_id || `event ${index + 1}`}`, record.label);
+        card.append(readableKeyValues([['Recorded', dateText(record.created_at)], ['Event ID', record.event_id]]));
+        card.append(readableList('Reasons', record.reason_codes));
+        if (record.details?.labels) card.append(readableObject('Recorded checks', record.details.labels));
+        appendOptions(card, record.details?.distractors, 'Checked distractors');
+        wrap.append(card);
+      });
+      return wrap;
+    }
+    function renderRejectionsReadable(records) {
+      const wrap = document.createElement('div'); wrap.className = 'trace-readable';
+      records.forEach((record, index) => {
+        const card = readableCard(record.reason_code ? label(record.reason_code) : `Exit ${index + 1}`, 'rejected');
+        card.append(readableKeyValues([
+          ['Stage', label(record.stage)], ['Item', record.item_id], ['Source', record.source_id],
+          ['Recorded', dateText(record.created_at)], ['Rejection ID', record.rejection_id]
+        ]));
+        if (record.detail && Object.keys(record.detail).length) card.append(readableObject('Exit details', record.detail));
+        wrap.append(card);
+      });
+      return wrap;
+    }
+    function renderExportsReadable(records) {
+      const wrap = document.createElement('div'); wrap.className = 'trace-readable';
+      records.forEach((entry, index) => {
+        const record = entry.record || {};
+        if (record.question || record.options || record.reference_answers) {
+          const card = renderQaReadableRecord({ ...entry, ...record, candidate: record }, index);
+          card.prepend(readableKeyValues([['Export', entry.export_id], ['Form', label(entry.kind)]]));
+          wrap.append(card);
+        } else {
+          const card = readableCard(`${label(entry.kind || 'Export record')} · ${entry.export_id || index + 1}`, record.release_label || record.state);
+          card.append(readableKeyValues([
+            ['Item', record.item_id], ['Stage', label(record.stage)], ['Reason', label(record.reason_code)],
+            ['Source', record.source_id], ['Task type', label(record.task_type)]
+          ]));
+          wrap.append(card);
+        }
+      });
+      return wrap;
+    }
+    function rawJsonDetails(caption, value) {
+      const details = document.createElement('details');
+      details.className = 'trace-raw';
+      details.append(text('summary', `Complete raw JSON for ${caption}`));
+      details.append(traceField(caption, value));
+      return details;
+    }
+    function detailSection(caption, value, renderer, open = false) {
       const details = document.createElement('details');
       details.className = 'trace-stage';
       const storageKey = `trace-open:section:${caption}`;
@@ -954,7 +1309,7 @@
       const summary = text('summary', `${caption} (${Array.isArray(value) ? formatNumber(value.length) : 'retained'})`);
       const body = document.createElement('div');
       body.className = 'trace-stage-body';
-      body.append(traceField(caption, value));
+      body.append(renderer(value), rawJsonDetails(caption, value));
       details.append(summary, body);
       details.addEventListener('toggle', () => {
         if (details.open) sessionStorage.setItem(storageKey, '1');
@@ -975,7 +1330,7 @@
       }
       const table = document.createElement('table');
       table.className = 'trace-table';
-      table.innerHTML = '<thead><tr><th>Paper</th><th>State</th><th>Stage</th><th>Attempts</th></tr></thead>';
+      table.innerHTML = '<colgroup><col class="trace-paper-column"><col class="trace-state-column"><col class="trace-stage-column"><col class="trace-attempt-column"></colgroup><thead><tr><th>Paper</th><th>State</th><th>Stage</th><th>Attempts</th></tr></thead>';
       const body = document.createElement('tbody');
       items.forEach((item) => {
         const row = document.createElement('tr');
@@ -1044,17 +1399,18 @@
       actions.append(copy, traceActionButton('Download paper JSON', () => downloadTrace(payload, identity.paper_id || 'paper-trace')));
       heading.append(actions);
       target.append(heading);
+      target.append(text('p', 'Machine labels report retained pipeline state. They do not establish scientific acceptance or truth.', 'trace-section-note'));
       const sections = [
-        ['Run and attempt history', payload.runs],
-        ['Retained source records', payload.sources],
-        ['Eligibility decisions and evidence', payload.eligibility],
-        ['Frozen findings', payload.findings],
-        ['Generated QA and distractors', payload.candidates],
-        ['Validation checks', payload.validation_events],
-        ['Rejections and unresolved exits', payload.rejections],
-        ['Immutable exports', payload.exports]
+        ['Generated QA and distractors', payload.candidates, renderCandidatesReadable, true],
+        ['Frozen findings', payload.findings, renderFindingsReadable],
+        ['Eligibility decisions and evidence', payload.eligibility, renderEligibilityReadable],
+        ['Validation checks', payload.validation_events, renderValidationReadable],
+        ['Run and attempt history', payload.runs, renderRunsReadable],
+        ['Retained source records', payload.sources, renderSourcesReadable],
+        ['Rejections and unresolved exits', payload.rejections, renderRejectionsReadable],
+        ['Immutable exports', payload.exports, renderExportsReadable]
       ];
-      sections.filter(([, value]) => value && (!Array.isArray(value) || value.length)).forEach(([caption, value]) => target.append(detailSection(caption, value)));
+      sections.filter(([, value]) => value && (!Array.isArray(value) || value.length)).forEach(([caption, value, renderer, open]) => target.append(detailSection(caption, value, renderer, open)));
       const stageHeading = text('h3', 'Model and processing stages');
       stageHeading.style.marginTop = '1rem';
       target.append(stageHeading);
@@ -1071,6 +1427,67 @@
         }
       }
     }
+    function renderStagePayloadReadable(payload) {
+      const wrap = document.createElement('div');
+      wrap.className = 'trace-readable';
+      const stage = payload.stage || {};
+      const overview = readableCard(`${label(stage.stage || 'Pipeline stage')} · attempt ${stage.attempt ?? 'not recorded'}`, stage.state);
+      overview.append(readableKeyValues([
+        ['Role', label(stage.role)], ['Run', stage.run_id], ['Requested model', stage.model?.requested],
+        ['Returned model', stage.model?.returned], ['Prompt version', stage.model?.prompt_version],
+        ['Actual cost', money(stage.cost?.actual_usd)], ['Reserved cost', money(stage.cost?.reserved_usd)],
+        ['Started', dateText(stage.timing?.started_at_utc)], ['Completed', dateText(stage.timing?.completed_at_utc)],
+        ['Duration', hasTraceValue(stage.timing?.duration_ms) ? `${formatNumber(stage.timing.duration_ms)} ms` : null]
+      ]));
+      wrap.append(overview);
+      const response = payload.response || {};
+      const parsed = response.parsed_response;
+      if (parsed && typeof parsed === 'object') {
+        const hasQaShape = hasTraceValue(parsed.question) || hasTraceValue(parsed.answer) || Array.isArray(parsed.options) || Array.isArray(parsed.distractors);
+        const parsedWrap = readableCard('Parsed model result', response.availability);
+        parsedWrap.append(hasQaShape ? renderQaReadableRecord({ candidate: parsed }) : readableObject('Structured result', parsed));
+        wrap.append(parsedWrap);
+      }
+      if (hasTraceValue(response.model_text)) {
+        const modelText = readableCard('Model response text', response.availability);
+        modelText.append(text('div', response.model_text, 'trace-evidence'));
+        wrap.append(modelText);
+      } else {
+        wrap.append(readableObject('Model response', {
+          availability: response.availability || 'not recorded',
+          note: response.availability === 'not_retained' ? 'The original model response was not retained.' : 'No model response text is recorded.'
+        }));
+      }
+      const request = payload.request || {};
+      const requestCard = readableCard('Submitted request', request.availability);
+      requestCard.append(readableKeyValues([
+        ['Availability', label(request.availability)],
+        ['Reason', request.reason, true]
+      ]));
+      if (request.payload && typeof request.payload === 'object') requestCard.append(readableObject('Retained request content', request.payload));
+      else requestCard.append(text('p', request.availability === 'not_retained' ? 'The exact submitted request was not retained.' : 'No request content is recorded.', 'trace-section-note'));
+      wrap.append(requestCard);
+      if (Array.isArray(payload.candidates) && payload.candidates.length) {
+        const candidates = readableCard(`Related QA records (${formatNumber(payload.candidates.length)})`);
+        candidates.append(renderCandidatesReadable(payload.candidates));
+        wrap.append(candidates);
+      }
+      if (Array.isArray(payload.source_context) && payload.source_context.length) {
+        const sources = readableCard(`Retained source context (${formatNumber(payload.source_context.length)})`);
+        sources.append(renderSourcesReadable(payload.source_context));
+        wrap.append(sources);
+      }
+      if (payload.eligibility) {
+        const records = Array.isArray(payload.eligibility) ? payload.eligibility : [payload.eligibility];
+        const eligibility = readableCard('Eligibility context');
+        eligibility.append(renderEligibilityReadable(records));
+        wrap.append(eligibility);
+      }
+      if (payload.journal) wrap.append(readableObject('Processing journal', payload.journal));
+      if (payload.receipt) wrap.append(readableObject('Paid-call receipt', payload.receipt));
+      wrap.append(rawJsonDetails('selected stage', payload));
+      return wrap;
+    }
     async function loadTraceStage(paperKey, stageKey, body, button) {
       if (!paperKey || !stageKey) return;
       button.disabled = true;
@@ -1079,10 +1496,8 @@
         const payload = await fetchJson(`/api/pipeline-trace/stage?paper_key=${encodeURIComponent(paperKey)}&stage_key=${encodeURIComponent(stageKey)}`);
         state.trace.selectedStage = stageKey;
         updateTraceLocation();
-        body.querySelectorAll('.trace-field').forEach((node) => node.remove());
-        const entries = Object.entries(payload).filter(([key]) => !['schema', 'paper_key', 'stage_key'].includes(key));
-        if (entries.length) entries.forEach(([key, value]) => body.append(traceField(label(key), value)));
-        else body.append(text('div', 'The adapter returned no retained payload fields.', 'trace-empty'));
+        body.querySelectorAll('.trace-readable, .trace-raw, .trace-error').forEach((node) => node.remove());
+        body.append(renderStagePayloadReadable(payload));
         button.textContent = 'Reload retained payload';
       } catch (error) {
         body.append(text('div', error.message, 'trace-error'));

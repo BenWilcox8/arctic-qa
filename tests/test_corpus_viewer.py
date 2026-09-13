@@ -968,7 +968,27 @@ class FakePipelineTraceStore:
             "runs": [{"run_id": "run-test", "state": self.state}],
             "source": {"context": "<b>full retained context</b>"},
             "findings": [],
-            "candidates": [],
+            "candidates": [
+                {
+                    "item_id": "qa-readable",
+                    "status": "machine_accepted_unverified",
+                    "candidate": {
+                        "question": "What changed?",
+                        "answer": {
+                            "text": "The measured value increased.",
+                            "evidence_quote": "The value increased during the period.",
+                            "locator": {"chunk_id": "chunk-readable"},
+                        },
+                        "distractors": [
+                            {"text": "It decreased.", "type": "contradiction"}
+                        ],
+                        "options": [
+                            {"text": "It increased.", "is_correct": True},
+                            {"text": "It decreased.", "is_correct": False},
+                        ],
+                    },
+                }
+            ],
             "validation_events": [],
             "rejections": [{"reason_code": "scope_qualifier_missing"}],
             "exports": [],
@@ -1098,10 +1118,35 @@ def test_page_contains_vertical_activity_and_persistent_on_demand_inspector() ->
     assert "initialParameters.get('trace_paper')" in page
     assert "sessionStorage.setItem(`trace-open:" in page
     assert "/api/pipeline-trace/stage?paper_key=" in page
-    assert "body.append(traceField" in page
+    assert "rawJsonDetails('selected stage', payload)" in page
     assert "Machine acceptance is a retained engineering label" in page
     assert (
         ".telemetry-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));"
         in page
     )
     assert ".telemetry-grid > div { min-width: 0; }" in page
+
+
+def test_page_contains_readable_trace_views_and_bounded_table_widths() -> None:
+    page = (Path(__file__).parents[1] / "src/arctic_qa/corpus_viewer.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert "renderCandidatesReadable" in page
+    assert "renderEligibilityReadable" in page
+    assert "renderStagePayloadReadable" in page
+    assert "Complete raw JSON for ${caption}" in page
+    assert "traceValueText(record.question)" in page
+    assert "Reference answer" in page
+    assert "Answer choices" in page
+    assert "Distractors" in page
+    assert ".trace-table { table-layout: fixed; }" in page
+    assert ".trace-table .trace-paper-column { width: 46%; }" in page
+    assert "grid-template-columns: minmax(460px, .95fr) minmax(0, 1.35fr)" in page
+
+    detail = FakePipelineTraceStore().paper_detail("paper-safe-key")
+    candidate = detail["candidates"][0]["candidate"]
+    assert candidate["question"] == "What changed?"
+    assert candidate["answer"]["text"] == "The measured value increased."
+    assert candidate["options"][0]["is_correct"] is True
+    assert candidate["answer"]["locator"]["chunk_id"] == "chunk-readable"
