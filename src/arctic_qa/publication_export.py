@@ -40,7 +40,6 @@ def _latest_validation(connection: sqlite3.Connection, item_id: str) -> dict[str
         "label": row["label"],
         "reason_codes": _json(row["reason_codes_json"], []),
         "details": _json(row["details_json"], {}),
-        "created_at": row["created_at"],
     }
 
 
@@ -105,9 +104,6 @@ def _row(connection: sqlite3.Connection, candidate: dict[str, Any], source: sqli
         "item_id": stable_id("publication-item", candidate["item_id"], seed),
         "question_id": candidate["item_id"],
         "variant_id": "answer_present_mcq",
-        "campaign_run_id": candidate.get("provenance", {}).get("run_id"),
-        "release_status": "machine_accepted_unverified",
-        "split_group": source["paper_family_id"],
         "paper": {
             "source_id": source["source_id"], "paper_id": source["stable_id"], "doi": source["doi"],
             "title": source["title"], "year": source["year"], "content_hash": source["content_hash"],
@@ -124,9 +120,8 @@ def _row(connection: sqlite3.Connection, candidate: dict[str, Any], source: sqli
         },
         "options": review_options,
         "validation": validation,
-        "provenance": candidate.get("provenance"),
+        "provenance": {key: value for key, value in (candidate.get("provenance") or {}).items() if key != "run_id"},
         "receipt_trace": _receipt_trace(connection, candidate),
-        "correction_history": candidate.get("correction_history", []),
         "rationale_availability": {
             "question": bool(candidate.get("question_rationale")),
             "answer_selection": bool(candidate.get("answer", {}).get("selection_rationale")),
@@ -191,17 +186,17 @@ def export_publication_package(state_db: Path, output_dir: Path, *, run_id: str,
                 "provenance_json": canonical_json(row["provenance"]), "rationale_availability_json": canonical_json(row["rationale_availability"]),
             })
     benchmark = [{"item_id": row["item_id"], "question_id": row["question_id"], "variant_id": row["variant_id"], "question": row["question"], "options": [{"option_id": option["option_id"], "position": option["position"], "text": option["text"]} for option in row["options"]]} for row in records]
-    scoring = [{"item_id": row["item_id"], "correct_option_id": next(option["option_id"] for option in row["options"] if option["is_correct"]), "release_status": row["release_status"]} for row in records]
+    scoring = [{"item_id": row["item_id"], "correct_option_id": next(option["option_id"] for option in row["options"] if option["is_correct"])} for row in records]
     benchmark_jsonl.write_text("".join(canonical_json(row) + "\n" for row in benchmark), encoding="utf-8")
     scoring_jsonl.write_text("".join(canonical_json(row) + "\n" for row in scoring), encoding="utf-8")
-    for path, values, fields in ((benchmark_csv, benchmark, ["item_id", "question_id", "variant_id", "question", "options_json"]), (scoring_csv, scoring, ["item_id", "correct_option_id", "release_status"])):
+    for path, values, fields in ((benchmark_csv, benchmark, ["item_id", "question_id", "variant_id", "question", "options_json"]), (scoring_csv, scoring, ["item_id", "correct_option_id"])):
         with path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=fields)
             writer.writeheader()
             for value in values:
                 writer.writerow({name: (canonical_json(value["options"]) if name == "options_json" and "options" in value else value.get(name)) for name in fields})
     files = {"reviewer_jsonl": jsonl_path, "reviewer_csv": csv_path, "benchmark_jsonl": benchmark_jsonl, "benchmark_csv": benchmark_csv, "scoring_jsonl": scoring_jsonl, "scoring_csv": scoring_csv}
-    manifest = {"schema_version": SCHEMA_VERSION, "run_id": run_id, "shuffle_seed": seed, "reviewer_item_count": len(records), "benchmark_item_count": len(benchmark), "files": {name: {"path": path.name, "sha256": _sha256(path)} for name, path in files.items()}, "limitations": ["Benchmark inputs contain no labels, rationales, evidence, or provenance.", "Reviewer files are not model-facing benchmark inputs.", "The package excludes full papers, extracted source blobs, and submitted prompts.", "Missing rationale fields remain explicit missing values."]}
+    manifest = {"schema_version": SCHEMA_VERSION, "shuffle_seed": seed, "reviewer_item_count": len(records), "benchmark_item_count": len(benchmark), "files": {name: {"path": path.name, "sha256": _sha256(path)} for name, path in files.items()}, "limitations": ["Benchmark inputs contain no labels, rationales, evidence, or provenance.", "Reviewer files are not model-facing benchmark inputs.", "The package excludes full papers, extracted source blobs, and submitted prompts.", "Missing rationale fields remain explicit missing values."]}
     (output_dir / "manifest.json").write_text(canonical_json(manifest) + "\n", encoding="utf-8")
     return manifest
 
