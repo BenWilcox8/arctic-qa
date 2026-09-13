@@ -85,6 +85,7 @@ def parser() -> argparse.ArgumentParser:
     viewer.add_argument("--streaming-progress-file", type=Path)
     viewer.add_argument("--dataset-metadata-file", type=Path)
     viewer.add_argument("--project-overview-file", type=Path)
+    viewer.add_argument("--research-timeline-file", type=Path)
     viewer.add_argument("--host", default="127.0.0.1")
     viewer.add_argument("--port", type=int, default=8787)
     viewer.add_argument("--stale-after-seconds", type=int, default=86400)
@@ -433,6 +434,7 @@ def main(argv: list[str] | None = None) -> int:
                 streaming_progress_file=args.streaming_progress_file,
                 dataset_metadata_file=args.dataset_metadata_file,
                 project_overview_file=args.project_overview_file,
+                research_timeline_file=args.research_timeline_file,
                 host=args.host,
                 port=args.port,
                 stale_after_seconds=args.stale_after_seconds,

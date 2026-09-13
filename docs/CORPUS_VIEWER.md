@@ -22,6 +22,7 @@ PYTHONPATH=src python -m arctic_qa corpus-view \
   --metadata-run-dir /private/metadata-prefilter/run-RUN_ID \
   --source-run-dir /private/source-screening/run-RUN_ID \
   --project-overview-file /private/status/project-progress-overview-v1.json \
+  --research-timeline-file /private/status/research-fleet-timeline-v1.json \
   --host 127.0.0.1 \
   --port 8787 \
   --process-stale-after-seconds 300
@@ -95,6 +96,25 @@ It marks an old valid record stale with the normal artifact freshness threshold.
 The editorial stage record does not contain live counters.
 The viewer derives those counters from the existing discovery, access, streaming, and broker records.
 This separation prevents an editorial update from overriding accounting or pipeline evidence.
+
+## Research fleet timeline
+
+The optional timeline file uses `research-fleet-timeline-v1`.
+It contains a curated chronological history from timestamped operational evidence.
+The page can filter entries by agent or crew and pipeline stage.
+
+Each entry identifies its event kind, status, artifact state, version, and evidence reference.
+The event kinds separate code changes, reviews, tests, live execution, outcomes, blockers, restarts, and monitoring.
+The artifact state keeps committed or deployed work separate from work in progress.
+
+The timeline owner must keep entries in chronological order.
+The owner must label date precision and attribution limits in the entry text.
+The coverage note must identify gaps in the bounded evidence search.
+The viewer does not infer missing events or completion from the timeline.
+
+The viewer accepts only HTTP or HTTPS evidence links.
+It does not serve private reports, gate files, credentials, receipts, or arbitrary paths.
+It rejects malformed files and files larger than 256 KiB.
 
 ## Progress record
 

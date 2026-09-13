@@ -57,6 +57,32 @@ GEMINI_FILTERS = {
 PROJECT_PROGRESS_STATUSES = {"completed", "in_progress", "not_finished"}
 PROJECT_PROGRESS_SCHEMA = "project-progress-overview-v1"
 PROJECT_PROGRESS_MAX_BYTES = 131_072
+RESEARCH_TIMELINE_SCHEMA = "research-fleet-timeline-v1"
+RESEARCH_TIMELINE_MAX_BYTES = 262_144
+RESEARCH_TIMELINE_KINDS = {
+    "code_change",
+    "review",
+    "test",
+    "live_execution",
+    "outcome",
+    "blocker",
+    "restart",
+    "monitoring",
+}
+RESEARCH_TIMELINE_STATUSES = {
+    "completed",
+    "in_progress",
+    "blocked",
+    "resolved",
+}
+RESEARCH_TIMELINE_ARTIFACT_STATES = {
+    "committed",
+    "deployed",
+    "recorded",
+    "in_progress",
+    "blocked",
+    "resolved",
+}
 PROJECT_PROGRESS_STAGE_IDS = {
     "scientific": (
         "research-design",
@@ -201,6 +227,7 @@ class CorpusArtifacts:
         streaming_progress_file: Path | None = None,
         dataset_metadata_file: Path | None = None,
         project_overview_file: Path | None = None,
+        research_timeline_file: Path | None = None,
         stale_after_seconds: int = 86400,
         process_stale_after_seconds: int = 300,
     ) -> None:
@@ -241,6 +268,9 @@ class CorpusArtifacts:
         )
         self.project_overview_file = (
             project_overview_file.resolve() if project_overview_file else None
+        )
+        self.research_timeline_file = (
+            research_timeline_file.resolve() if research_timeline_file else None
         )
         self.stale_after_seconds = stale_after_seconds
         self.process_stale_after_seconds = process_stale_after_seconds
@@ -334,6 +364,7 @@ class CorpusArtifacts:
             _file_fingerprint(self.streaming_progress_file),
             _file_fingerprint(self.dataset_metadata_file),
             _file_fingerprint(self.project_overview_file),
+            _file_fingerprint(self.research_timeline_file),
         ]
         return hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
@@ -951,6 +982,152 @@ class CorpusArtifacts:
             raise ValueError(f"the {diagram} project stage sequence is invalid")
         return stages
 
+    def _research_timeline(self) -> dict[str, Any]:
+        unavailable: dict[str, Any] = {
+            "schema": RESEARCH_TIMELINE_SCHEMA,
+            "telemetry": "absent",
+            "state": "unavailable",
+            "updated_at_utc": None,
+            "window_start_utc": None,
+            "window_end_utc": None,
+            "summary": "Research fleet timeline is unavailable.",
+            "coverage_note": "No curated timeline record is configured.",
+            "source_types": [],
+            "entries": [],
+        }
+        path = self.research_timeline_file
+        if path is None or not path.is_file():
+            return unavailable
+        try:
+            if path.stat().st_size > RESEARCH_TIMELINE_MAX_BYTES:
+                raise ValueError("the research timeline is too large")
+            value = _read_json(path)
+            if (
+                not isinstance(value, dict)
+                or value.get("schema") != RESEARCH_TIMELINE_SCHEMA
+            ):
+                raise ValueError("the research timeline schema is invalid")
+            updated_at = self._project_overview_timestamp(value.get("updated_at_utc"))
+            window_start = self._project_overview_timestamp(
+                value.get("window_start_utc")
+            )
+            window_end = self._project_overview_timestamp(value.get("window_end_utc"))
+            if window_end < window_start:
+                raise ValueError("the research timeline window is invalid")
+            sources_value = value.get("source_types", [])
+            if not isinstance(sources_value, list) or len(sources_value) > 20:
+                raise ValueError("the research timeline source types are invalid")
+            source_types = [
+                self._project_overview_text(source, "source type", 120)
+                for source in sources_value
+            ]
+            entries_value = value.get("entries")
+            if (
+                not isinstance(entries_value, list)
+                or not entries_value
+                or len(entries_value) > 200
+            ):
+                raise ValueError("the research timeline entries are invalid")
+            entries: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            previous_at: datetime | None = None
+            for entry in entries_value:
+                if not isinstance(entry, dict):
+                    raise ValueError("a research timeline entry is invalid")
+                entry_id = entry.get("id")
+                agent = entry.get("agent")
+                stage = entry.get("stage")
+                kind = entry.get("kind")
+                status = entry.get("status")
+                artifact_state = entry.get("artifact_state")
+                if (
+                    not isinstance(entry_id, str)
+                    or not re.fullmatch(r"[a-z0-9][a-z0-9-]{2,79}", entry_id)
+                    or entry_id in seen
+                    or not isinstance(agent, str)
+                    or not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,47}", agent)
+                    or not isinstance(stage, str)
+                    or not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,47}", stage)
+                    or kind not in RESEARCH_TIMELINE_KINDS
+                    or status not in RESEARCH_TIMELINE_STATUSES
+                    or artifact_state not in RESEARCH_TIMELINE_ARTIFACT_STATES
+                ):
+                    raise ValueError("a research timeline entry identity is invalid")
+                at = self._project_overview_timestamp(entry.get("at_utc"))
+                if (
+                    at < window_start
+                    or at > window_end
+                    or (previous_at is not None and at < previous_at)
+                ):
+                    raise ValueError("the research timeline entry order is invalid")
+                evidence_url_value = entry.get("evidence_url")
+                evidence_url = _safe_external_url(evidence_url_value)
+                if evidence_url_value is not None and evidence_url is None:
+                    raise ValueError("a research timeline evidence URL is invalid")
+                seen.add(entry_id)
+                previous_at = at
+                entries.append(
+                    {
+                        "id": entry_id,
+                        "at_utc": at.replace(microsecond=0)
+                        .isoformat()
+                        .replace("+00:00", "Z"),
+                        "agent": agent,
+                        "agent_label": self._project_overview_text(
+                            entry.get("agent_label"), "agent label", 80
+                        ),
+                        "stage": stage,
+                        "stage_label": self._project_overview_text(
+                            entry.get("stage_label"), "stage label", 80
+                        ),
+                        "kind": kind,
+                        "status": status,
+                        "artifact_state": artifact_state,
+                        "title": self._project_overview_text(
+                            entry.get("title"), "entry title", 160
+                        ),
+                        "detail": self._project_overview_text(
+                            entry.get("detail"), "entry detail", 1_500
+                        ),
+                        "version": self._project_overview_text(
+                            entry.get("version"), "entry version", 160
+                        ),
+                        "evidence_ref": self._project_overview_text(
+                            entry.get("evidence_ref"), "evidence reference", 300
+                        ),
+                        "evidence_url": evidence_url,
+                    }
+                )
+            age = (datetime.now(UTC) - updated_at).total_seconds()
+            telemetry = "stale" if age > self.stale_after_seconds else "observed"
+
+            def timestamp(item: datetime) -> str:
+                return item.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+            return {
+                "schema": RESEARCH_TIMELINE_SCHEMA,
+                "telemetry": telemetry,
+                "state": "available" if telemetry == "observed" else "stale",
+                "updated_at_utc": timestamp(updated_at),
+                "window_start_utc": timestamp(window_start),
+                "window_end_utc": timestamp(window_end),
+                "summary": self._project_overview_text(
+                    value.get("summary"), "timeline summary", 800
+                ),
+                "coverage_note": self._project_overview_text(
+                    value.get("coverage_note"), "coverage note", 1_200
+                ),
+                "source_types": source_types,
+                "entries": entries,
+            }
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return {
+                **unavailable,
+                "telemetry": "invalid",
+                "summary": "Research fleet timeline is unavailable because its record is invalid.",
+                "coverage_note": "No timeline event is inferred from an invalid record.",
+            }
+
     @staticmethod
     def _project_live_metrics(streaming: dict[str, Any]) -> dict[str, Any]:
         observed = streaming.get("telemetry") == "observed"
@@ -1387,6 +1564,7 @@ class CorpusArtifacts:
             ("Streaming progress", self.streaming_progress_file),
             ("Validated dataset metadata", self.dataset_metadata_file),
             ("Project progress overview", self.project_overview_file),
+            ("Research fleet timeline", self.research_timeline_file),
         ]
         rows = []
         for label, path in paths:
@@ -1500,6 +1678,7 @@ class CorpusArtifacts:
         gemini["connection"] = connection
         streaming = self._streaming_state()
         project_overview = self._project_overview(streaming)
+        research_timeline = self._research_timeline()
         historical_gemini = {
             "state": gemini.get("state"),
             "updated_at_utc": gemini.get("updated_at_utc"),
@@ -1688,6 +1867,7 @@ class CorpusArtifacts:
             "gemini_screening": gemini,
             "streaming_pipeline": streaming,
             "project_overview": project_overview,
+            "research_timeline": research_timeline,
             "artifacts": artifacts,
             "data_revision": self._small_fingerprint or self._base_fingerprint(),
             "readiness": {
@@ -2048,6 +2228,7 @@ def serve_corpus_viewer(
     streaming_progress_file: Path | None,
     dataset_metadata_file: Path | None,
     project_overview_file: Path | None,
+    research_timeline_file: Path | None,
     host: str,
     port: int,
     stale_after_seconds: int,
@@ -2071,6 +2252,7 @@ def serve_corpus_viewer(
         streaming_progress_file=streaming_progress_file,
         dataset_metadata_file=dataset_metadata_file,
         project_overview_file=project_overview_file,
+        research_timeline_file=research_timeline_file,
         stale_after_seconds=stale_after_seconds,
         process_stale_after_seconds=process_stale_after_seconds,
     )
@@ -2104,6 +2286,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--streaming-progress-file", type=Path)
     parser.add_argument("--dataset-metadata-file", type=Path)
     parser.add_argument("--project-overview-file", type=Path)
+    parser.add_argument("--research-timeline-file", type=Path)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--stale-after-seconds", type=int, default=86400)
@@ -2125,6 +2308,7 @@ def main(argv: list[str] | None = None) -> int:
         streaming_progress_file=args.streaming_progress_file,
         dataset_metadata_file=args.dataset_metadata_file,
         project_overview_file=args.project_overview_file,
+        research_timeline_file=args.research_timeline_file,
         host=args.host,
         port=args.port,
         stale_after_seconds=args.stale_after_seconds,
