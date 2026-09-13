@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any
 
 from .errors import AmbiguousChargeError, BudgetError, ProviderError
-from .model_broker import SharedGeminiBroker, broker_request_key
+from .model_broker import AUTHORIZED_CAP_REASON, SharedGeminiBroker, broker_request_key
 from .providers import ProviderResult
 from .util import canonical_json, sha256_bytes
 
@@ -99,23 +99,27 @@ class BrokerProvider:
         )
         receipt_path = self.broker.receipts_dir / f"{request_key}.json"
         if receipt_path.is_file():
-            receipt, result = self.read_receipt(
-                request_key=request_key,
-                role=role,
-                request_sha256=sha256_bytes(canonical_json(payload).encode()),
-            )
-            return result
-        else:
-            receipt = self.broker.execute(
-                phase=self.phase,
-                run_id=self.invocation_run_id,
-                stage=stage,
-                paper_id=self.paper_id,
-                family_id=self.family_id,
-                source_version_id=self.source_version_id,
-                request_key=request_key,
-                payload=payload,
-            )
+            receipt = self.broker.effective_receipt(request_key)
+            if not (
+                receipt.get("state") == "not_submitted"
+                and receipt.get("reason") == AUTHORIZED_CAP_REASON
+            ):
+                _, result = self.read_receipt(
+                    request_key=request_key,
+                    role=role,
+                    request_sha256=sha256_bytes(canonical_json(payload).encode()),
+                )
+                return result
+        receipt = self.broker.execute(
+            phase=self.phase,
+            run_id=self.invocation_run_id,
+            stage=stage,
+            paper_id=self.paper_id,
+            family_id=self.family_id,
+            source_version_id=self.source_version_id,
+            request_key=request_key,
+            payload=payload,
+        )
         return _provider_result(receipt, self.model)
 
     def read_receipt(

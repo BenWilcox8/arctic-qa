@@ -910,9 +910,7 @@ def _run_eligibility(
         source_version_id=identity["source_version_id"],
         payload=request,
     )
-    receipt_path = broker.receipts_dir / f"{request_key}.json"
-    if not receipt_path.is_file():
-        raise ValueError("the brokered eligibility receipt is missing")
+    receipt_path = broker.effective_receipt_path(request_key)
     job = {
         "schema": "gemini-eligibility-job-v1",
         "job_key": job_key,
@@ -1027,7 +1025,7 @@ def _validate_brokered_eligibility(
         role="eligibility",
         request_sha256=sha256_bytes(canonical_json(request).encode()),
     )
-    receipt_path = broker.receipts_dir / f"{request_key}.json"
+    receipt_path = broker.effective_receipt_path(request_key)
     if (
         eligibility.get("broker_receipt_sha256") != sha256_file(receipt_path)
         or receipt.get("state") != "completed"

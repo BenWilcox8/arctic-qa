@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from arctic_qa.broker_provider import BrokerProvider, _request_payload
 from arctic_qa.cli import main as cli_main
 from arctic_qa.model_broker import SharedGeminiBroker, broker_request_key
 from arctic_qa.providers import GeminiProvider, ProviderError, make_provider
@@ -82,7 +83,14 @@ class HighCostTransport(Transport):
         if method == "countTokens":
             return {"totalTokens": 290_000}
         return {
-            "candidates": [{"content": {"parts": [{"text": "{}"}]}}],
+            "responseId": "high-cost-response",
+            "modelVersion": "gemini-3.8-flash",
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "content": {"parts": [{"text": "{}"}]},
+                }
+            ],
             "usageMetadata": {
                 "promptTokenCount": 290_000,
                 "candidatesTokenCount": 8_192,
@@ -396,6 +404,37 @@ def prepared_budget_bounded_transition(tmp_path: Path) -> dict:
         "budget_predecessor": predecessor,
         "budget_transition": budget_transition,
         "stream_binding": stream_binding,
+    }
+
+
+def prepared_ceiling_extension(tmp_path: Path) -> dict:
+    values = prepared_budget_bounded_transition(tmp_path)
+    broker = SharedGeminiBroker(
+        policy_file=values["budget_policy"],
+        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=Transport(),
+        config_transition_file=values["budget_transition"],
+    )
+    prior_event = broker.status()["config_transition_sha256"]
+    transition = reviewed_policy_transition(
+        tmp_path,
+        values,
+        values["budget_policy"],
+        from_config_transition_sha256=prior_event,
+        from_policy=values["budget_policy"],
+        changed_policy_fields={},
+        maximum_authorized_cumulative_tranche_usd="10.00",
+        reason="Increase only the reviewed cumulative live-test ceiling.",
+    )
+    return {
+        **values,
+        "five_dollar_event": prior_event,
+        "ten_dollar_transition": transition,
     }
 
 
@@ -1729,6 +1768,255 @@ def test_budget_bounded_transition_stops_at_cumulative_trial_amount(
     assert blocked["live_call_made"] is False
     assert transport.methods == ["countTokens"]
     assert Decimal(broker.status()["spent_usd"]) < Decimal("5.00")
+
+
+def test_reviewed_ceiling_extension_resumes_one_not_submitted_request_and_restarts(
+    tmp_path: Path,
+) -> None:
+    values = prepared_budget_bounded_transition(tmp_path)
+    transport = HighCostTransport()
+    broker = SharedGeminiBroker(
+        policy_file=values["budget_policy"],
+        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=transport,
+        config_transition_file=values["budget_transition"],
+    )
+    bind_budget_stream_input(broker, values)
+    parameters = {
+        "temperature": 0,
+        "max_tokens": 8_192,
+        "json_schema": {"type": "object"},
+    }
+    body = _request_payload("Return JSON.", "Paper text.", parameters, broker.config)
+    for position in range(2, 22):
+        assert execute(broker, paper=f"p{position}", body=body)["state"] == (
+            "completed"
+        )
+        ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+        ledger["recent_submission_times_utc"] = []
+        write_json(values["ledger"], ledger)
+
+    transport.methods.clear()
+    blocked = execute(broker, paper="p22", body=body)
+    assert blocked["state"] == "not_submitted"
+    assert blocked["reason"] == "the paid request exceeds the authorized live-test cap"
+    assert transport.methods == ["countTokens"]
+    prior_event = broker.status()["config_transition_sha256"]
+    prior_receipts = {
+        path.name: path.read_bytes()
+        for path in (tmp_path / "receipts").glob("*.json")
+        if path.name != f"request-{blocked['request_key']}.json"
+    }
+
+    ten_dollar_transition = reviewed_policy_transition(
+        tmp_path,
+        values,
+        values["budget_policy"],
+        from_config_transition_sha256=prior_event,
+        from_policy=values["budget_policy"],
+        changed_policy_fields={},
+        maximum_authorized_cumulative_tranche_usd="10.00",
+        reason="Increase only the reviewed cumulative live-test ceiling.",
+    )
+    transport.methods.clear()
+    extended = SharedGeminiBroker(
+        policy_file=values["budget_policy"],
+        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=transport,
+        config_transition_file=ten_dollar_transition,
+    )
+    bind_budget_stream_input(extended, values)
+
+    status = extended.status()
+    assert status["limits"]["authorized_live_test_ceiling_usd"] == "10.00"
+    assert status["limits"]["live_test_maximum_papers"] is None
+    assert status["limits"]["live_test_maximum_generation_submissions"] is None
+    assert status["limits"]["maximum_request_reserved_cost_usd"] == "0.25"
+    assert status["limits"]["maximum_paper_cost_usd"] == "1.00"
+    assert status["limits"]["maximum_concurrent_generation_requests"] == 2
+    assert status["limits"]["maximum_generation_requests_per_minute"] == 10
+    assert status["limits"]["automatic_transport_generation_retries"] == 0
+    provider = BrokerProvider(
+        broker=extended,
+        phase="live_test",
+        invocation_run_id="run-1",
+    ).bind(
+        paper_id="p22",
+        family_id="family-p22",
+        source_version_id="source-p22",
+    )
+    provider.invoke(
+        "eligibility", "Return JSON.", "Paper text.", parameters, timeout=30
+    )
+    resumed = extended.effective_receipt(blocked["request_key"])
+    assert resumed["state"] == "completed"
+    assert resumed["request_key"] == blocked["request_key"]
+    assert ".resume-" in extended.effective_receipt_path(blocked["request_key"]).name
+    assert transport.methods == ["generateContent"]
+    for name, content in prior_receipts.items():
+        assert (tmp_path / "receipts" / name).read_bytes() == content
+
+    transport.methods.clear()
+    restarted = SharedGeminiBroker(
+        policy_file=values["budget_policy"],
+        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=transport,
+        config_transition_file=ten_dollar_transition,
+    )
+    bind_budget_stream_input(restarted, values)
+    assert restarted.status()["config_transition_sha256"] != prior_event
+    restarted_provider = BrokerProvider(
+        broker=restarted,
+        phase="live_test",
+        invocation_run_id="run-1",
+    ).bind(
+        paper_id="p22",
+        family_id="family-p22",
+        source_version_id="source-p22",
+    )
+    repeated = restarted_provider.invoke(
+        "eligibility", "Return JSON.", "Paper text.", parameters, timeout=30
+    )
+    assert repeated.payload == {}
+    assert transport.methods == []
+
+    for position in range(23, 42):
+        assert execute(restarted, paper=f"p{position}", body=body)["state"] == (
+            "completed"
+        )
+        ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+        ledger["recent_submission_times_utc"] = []
+        write_json(values["ledger"], ledger)
+    assert Decimal(restarted.status()["spent_usd"]) < Decimal("10.00")
+    assert Decimal(restarted.status()["live_test_remaining_usd"]) < Decimal("0.25")
+    transport.methods.clear()
+    stopped = execute(restarted, paper="p42", body=body)
+    assert stopped["state"] == "not_submitted"
+    assert stopped["reason"] == "the paid request exceeds the authorized live-test cap"
+    assert stopped["live_call_made"] is False
+    assert transport.methods == ["countTokens"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        (
+            "from_config_transition_sha256",
+            "0" * 64,
+            "policy transition predecessor",
+        ),
+        (
+            "maximum_authorized_cumulative_tranche_usd",
+            "10.01",
+            "policy transition identity",
+        ),
+        ("expected_ledger_sha256", "0" * 64, "transition ledger hash"),
+        (
+            "changed_policy_fields",
+            {
+                "live_test_maximum_papers": {"from": 41, "to": None},
+                "live_test_maximum_generation_submissions": {
+                    "from": 101,
+                    "to": None,
+                },
+            },
+            "price configuration transition file changed",
+        ),
+    ],
+)
+def test_ceiling_extension_rejects_changed_authorization_before_transport(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    values = prepared_ceiling_extension(tmp_path)
+    authorization = json.loads(
+        values["ten_dollar_transition"].read_text(encoding="utf-8")
+    )
+    authorization[field] = value
+    write_json(values["ten_dollar_transition"], authorization)
+    transport = Transport()
+
+    with pytest.raises(ValueError, match=message):
+        SharedGeminiBroker(
+            policy_file=values["budget_policy"],
+            price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+            execution_gate_file=values["gate"],
+            ledger_file=values["ledger"],
+            receipts_dir=tmp_path / "receipts",
+            credential_file=tmp_path / "private" / "gemini.key",
+            prior_construction_spend_usd=Decimal("0"),
+            transport=transport,
+            config_transition_file=values["ten_dollar_transition"],
+        )
+
+    assert transport.methods == []
+    assert len(list((tmp_path / "receipts").glob("config-transition-*.json"))) == 3
+
+
+def test_ceiling_extension_rejects_changed_gate_before_transport(
+    tmp_path: Path,
+) -> None:
+    values = prepared_ceiling_extension(tmp_path)
+    gate = json.loads(values["gate"].read_text(encoding="utf-8"))
+    gate["authorized_new_run_id"] = "different-run"
+    write_json(values["gate"], gate)
+    transport = Transport()
+
+    with pytest.raises(ValueError, match="configuration transition review changed"):
+        SharedGeminiBroker(
+            policy_file=values["budget_policy"],
+            price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+            execution_gate_file=values["gate"],
+            ledger_file=values["ledger"],
+            receipts_dir=tmp_path / "receipts",
+            credential_file=tmp_path / "private" / "gemini.key",
+            prior_construction_spend_usd=Decimal("0"),
+            transport=transport,
+            config_transition_file=values["ten_dollar_transition"],
+        )
+
+    assert transport.methods == []
+
+
+def test_ceiling_extension_cannot_apply_to_a_fresh_ledger(tmp_path: Path) -> None:
+    values = prepared_ceiling_extension(tmp_path / "authorized")
+    fresh = fixture(tmp_path / "fresh", transport=Transport())
+    transport = Transport()
+
+    with pytest.raises(ValueError, match="configuration transition identity"):
+        SharedGeminiBroker(
+            policy_file=values["budget_policy"],
+            price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+            execution_gate_file=values["gate"],
+            ledger_file=fresh["ledger"],
+            receipts_dir=tmp_path / "fresh" / "receipts",
+            credential_file=tmp_path / "fresh" / "private" / "gemini.key",
+            prior_construction_spend_usd=Decimal("0"),
+            transport=transport,
+            config_transition_file=values["ten_dollar_transition"],
+        )
+
+    assert transport.methods == []
+    assert (
+        list((tmp_path / "fresh" / "receipts").glob("config-transition-*.json")) == []
+    )
 
 
 def test_budget_bounded_transition_rechecks_gate_after_request(
