@@ -1,5 +1,27 @@
 # Geography correction implementation report
 
+## Current runtime status
+
+This section supersedes the earlier pending-release and partial-suite text below.
+The active segment is `first-production-6fbdf41-r1-geo-v3-scope-r2` in the
+existing campaign `arctic-qa-production-campaign-001`, using the original
+ranked-800 input, shared ledger, USD11.614496 historical baseline, USD50 new
+cap, USD61.614496 cumulative cap, USD0.25 request cap, USD1 family cap, and no
+fallback or automatic retries. It uses immutable v6 prompt SHA-256
+`65b861845e1335656153357309478391289e9f92ea6485c3e205587f8006f96f` and
+released gate SHA-256
+`792b0d9467250d02d979d5b95ea7a4762bd23b583e9ba6332ad21ec35c127c0e`.
+
+The previous v3 segment and every v2/v5 artifact remain immutable. Its first
+v3 manifest refused before provider transport because it retained v2 inputs.
+The v5 segment stopped after ten decisions on a whitespace-only chunk boundary;
+the final code accepts only token-bounded whitespace equivalence and turns any
+remaining source-scope mismatch into a paper-local rejection. The v6 sample
+eliminated the prior repeated activity-ID binding defect. Remaining source-scope
+phrase failures stay uncertain, and finding/reconstruction failures stay
+paper-local generation rejections. No new accepted family is claimed from the
+retained campaign acceptance counter.
+
 ## Current checkpoint
 
 The correction and question-context integration are committed locally. No focused
