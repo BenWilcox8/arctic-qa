@@ -7,11 +7,13 @@ the reviewed successor gate.
 
 ## Reviewed zero-cost recovery
 
-Run from the released primary checkout after verifying the listed old ledger hash
-and the absence of the four sidecars:
+Run from this reviewed worktree with code at commit
+`d56f115f7a287745addf2e54ac14b3bdd24ecf80`, or from an immutable runtime
+snapshot of that exact commit. Verify the listed old ledger hash and the absence
+of the four sidecars:
 
 ```sh
-cd /home/ben/.treehouse/firstmate-c40011/6/firstmate/projects/arctic-qa
+cd /home/ben/.treehouse/arctic-qa-e52b57/6/arctic-qa
 nix develop -c env PYTHONPATH=src python -m arctic_qa --json settle-pretransport-reservation \
   --request-key 445c8935c5dc9d1c5d03fe7d4d15308fd57d0e68f8d2d21bf310875b85b5512b \
   --expected-ledger-sha256 1ef465bf0f539709f8293f193e956b7b275d83e259d3ab5be760a4448b6d7a13 \
@@ -33,7 +35,7 @@ After the recovery receipt is present and the released successor gate and v3
 canonical policy are installed, run:
 
 ```sh
-cd /home/ben/.treehouse/firstmate-c40011/6/firstmate/projects/arctic-qa
+cd /home/ben/.treehouse/arctic-qa-e52b57/6/arctic-qa
 nix develop -c env PYTHONPATH=src python -m arctic_qa --json --data-root /mnt/crdata/research-abstention stream \
   --phase away_production \
   --run-id first-production-6fbdf41-r1 \

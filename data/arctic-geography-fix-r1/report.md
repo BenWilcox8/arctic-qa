@@ -104,3 +104,6 @@ The reviewable successor gate draft is
 It is deliberately disabled and has a pending review hash. The exact recovery
 and restart commands are in
 `data/arctic-geography-fix-r1/release-draft/recovery-and-restart.md`.
+They run from this reviewed worktree with code at
+`d56f115f7a287745addf2e54ac14b3bdd24ecf80`, or an immutable runtime snapshot
+of that exact commit. They do not depend on the stale primary clone.
