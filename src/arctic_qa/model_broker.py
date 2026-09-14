@@ -122,6 +122,8 @@ USAGE_RECONCILIATION_FIELDS = {
     "reconciled_at_utc",
 }
 EXCLUSIVE_BATCH_SCHEMA = "shared-gemini-exclusive-batch-v1"
+ACCEPTED_ITEM_V1_SCHEMA = "shared-paid-call-accepted-item-v1"
+ACCEPTED_ITEM_V2_SCHEMA = "shared-paid-call-accepted-item-v2"
 
 
 def _now() -> str:
@@ -1385,23 +1387,92 @@ class SharedGeminiBroker:
         if reconciliation_events:
             raise ValueError("a usage reconciliation event lacks a ledger request")
 
-        accepted_events: dict[str, str] = {}
+        accepted_roots: dict[str, tuple[str, Path]] = {}
+        accepted_successors: dict[
+            tuple[str, str], tuple[str, Path, dict[str, Any]]
+        ] = {}
         for path in self.receipts_dir.glob("accepted-*.json"):
             value = _read(path)
-            if value.get("schema") != "shared-paid-call-accepted-item-v1":
-                raise ValueError("an accepted-item event has an invalid schema")
             family_id = value.get("family_id")
             item_id = value.get("item_id")
-            expected_name = f"accepted-{sha256_bytes(str(family_id).encode())}.json"
+            if value.get("schema") == ACCEPTED_ITEM_V1_SCHEMA:
+                expected_name = (
+                    f"accepted-{sha256_bytes(str(family_id).encode())}.json"
+                )
+                if (
+                    set(value)
+                    != {"schema", "family_id", "item_id", "recorded_at_utc"}
+                    or not isinstance(family_id, str)
+                    or not family_id
+                    or not isinstance(item_id, str)
+                    or not item_id
+                    or path.name != expected_name
+                    or family_id in accepted_roots
+                ):
+                    raise ValueError("an accepted-item event has an invalid identity")
+                accepted_roots[family_id] = (item_id, path)
+                continue
+            if value.get("schema") != ACCEPTED_ITEM_V2_SCHEMA:
+                raise ValueError("an accepted-item event has an invalid schema")
+            predecessor_item_id = value.get("predecessor_item_id")
+            expected_name = (
+                f"accepted-{sha256_bytes(str(family_id).encode())}-"
+                f"{sha256_bytes(str(item_id).encode())}.json"
+            )
+            successor_key = (str(family_id), str(predecessor_item_id))
             if (
-                not isinstance(family_id, str)
+                set(value)
+                != {
+                    "schema",
+                    "family_id",
+                    "item_id",
+                    "predecessor_item_id",
+                    "predecessor_event_sha256",
+                    "invocation_run_id",
+                    "gate_sha256",
+                    "recorded_at_utc",
+                }
+                or not isinstance(family_id, str)
                 or not family_id
                 or not isinstance(item_id, str)
                 or not item_id
+                or not isinstance(predecessor_item_id, str)
+                or not predecessor_item_id
+                or predecessor_item_id == item_id
+                or not re.fullmatch(
+                    r"[a-f0-9]{64}", str(value.get("predecessor_event_sha256") or "")
+                )
+                or not re.fullmatch(
+                    r"[a-f0-9]{64}", str(value.get("gate_sha256") or "")
+                )
+                or not str(value.get("invocation_run_id") or "").strip()
                 or path.name != expected_name
+                or successor_key in accepted_successors
             ):
                 raise ValueError("an accepted-item event has an invalid identity")
+            accepted_successors[successor_key] = (item_id, path, value)
+
+        accepted_events: dict[str, str] = {}
+        visited_successors: set[tuple[str, str]] = set()
+        for family_id, (root_item_id, root_path) in accepted_roots.items():
+            item_id = root_item_id
+            event_path = root_path
+            chain_items = {item_id}
+            while (family_id, item_id) in accepted_successors:
+                key = (family_id, item_id)
+                next_item_id, next_path, event = accepted_successors[key]
+                if (
+                    event["predecessor_event_sha256"] != sha256_file(event_path)
+                    or next_item_id in chain_items
+                ):
+                    raise ValueError("an accepted-item supersession chain changed")
+                visited_successors.add(key)
+                chain_items.add(next_item_id)
+                item_id = next_item_id
+                event_path = next_path
             accepted_events[family_id] = item_id
+        if len(visited_successors) != len(accepted_successors):
+            raise ValueError("an accepted-item supersession lacks its predecessor")
         if accepted_events != ledger["accepted_families"]:
             raise ValueError("the accepted-item ledger differs from immutable events")
 
@@ -2173,7 +2244,13 @@ class SharedGeminiBroker:
                 "ambiguous_receipt_sha256": reconciliation["ambiguous_receipt_sha256"],
             }
 
-    def record_accepted(self, *, family_id: str, item_id: str) -> dict[str, Any]:
+    def record_accepted(
+        self,
+        *,
+        family_id: str,
+        item_id: str,
+        invocation_run_id: str | None = None,
+    ) -> dict[str, Any]:
         if not family_id or not item_id:
             raise ValueError("accepted item identity is missing")
         with self._lock_file.open("a+") as lock:
@@ -2181,7 +2258,19 @@ class SharedGeminiBroker:
             ledger = self._validated_ledger()
             old = ledger["accepted_families"].get(family_id)
             if old and old != item_id:
-                raise ValueError("a paper family already has an accepted item")
+                gate_phase = _read(self.execution_gate_file).get("allowed_phase")
+                if gate_phase not in PHASES:
+                    raise ValueError("the accepted-item supersession phase is invalid")
+                gate = _validate_gate(self.execution_gate_file, gate_phase)
+                binding = self._stream_input_binding
+                if (
+                    gate.get("accepted_item_supersession_enabled") is not True
+                    or not invocation_run_id
+                    or gate.get("authorized_new_run_id") != invocation_run_id
+                    or binding is None
+                    or binding.get("run_id") != invocation_run_id
+                ):
+                    raise ValueError("a paper family already has an accepted item")
             duplicate_family = next(
                 (
                     other_family
@@ -2205,9 +2294,40 @@ class SharedGeminiBroker:
                     self.receipts_dir
                     / f"accepted-{sha256_bytes(family_id.encode())}.json",
                     {
-                        "schema": "shared-paid-call-accepted-item-v1",
+                        "schema": ACCEPTED_ITEM_V1_SCHEMA,
                         "family_id": family_id,
                         "item_id": item_id,
+                        "recorded_at_utc": _now(),
+                    },
+                    immutable=True,
+                )
+            elif old != item_id:
+                old_path = self.receipts_dir / (
+                    f"accepted-{sha256_bytes(family_id.encode())}.json"
+                )
+                for path in self.receipts_dir.glob(
+                    f"accepted-{sha256_bytes(family_id.encode())}-*.json"
+                ):
+                    event = _read(path)
+                    if event.get("item_id") == old:
+                        old_path = path
+                        break
+                if not old_path.is_file():
+                    raise ValueError("the accepted-item predecessor is absent")
+                atomic_json(
+                    self.receipts_dir
+                    / (
+                        f"accepted-{sha256_bytes(family_id.encode())}-"
+                        f"{sha256_bytes(item_id.encode())}.json"
+                    ),
+                    {
+                        "schema": ACCEPTED_ITEM_V2_SCHEMA,
+                        "family_id": family_id,
+                        "item_id": item_id,
+                        "predecessor_item_id": old,
+                        "predecessor_event_sha256": sha256_file(old_path),
+                        "invocation_run_id": invocation_run_id,
+                        "gate_sha256": sha256_file(self.execution_gate_file),
                         "recorded_at_utc": _now(),
                     },
                     immutable=True,

@@ -68,7 +68,11 @@ class BrokerProvider:
         }
 
     def record_accepted(self, *, family_id: str, item_id: str) -> dict[str, Any]:
-        return self.broker.record_accepted(family_id=family_id, item_id=item_id)
+        return self.broker.record_accepted(
+            family_id=family_id,
+            item_id=item_id,
+            invocation_run_id=self.invocation_run_id,
+        )
 
     def invoke(
         self,

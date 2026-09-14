@@ -878,6 +878,41 @@ def test_one_accepted_item_per_family_survives_restart(tmp_path: Path):
         resumed.record_accepted(family_id="family-2", item_id="item-1")
 
 
+def test_reviewed_run_supersedes_accepted_item_and_preserves_event_chain(
+    tmp_path: Path,
+) -> None:
+    values = fixture(tmp_path, transport=Transport())
+    broker = values["broker"]
+    broker.record_accepted(family_id="family-1", item_id="item-1")
+    gate = json.loads(values["gate"].read_text(encoding="utf-8"))
+    gate.update(
+        {
+            "accepted_item_supersession_enabled": True,
+            "authorized_new_run_id": "rerun-r1",
+        }
+    )
+    write_json(values["gate"], gate)
+    broker._stream_input_binding = {"run_id": "rerun-r1"}
+
+    status = broker.record_accepted(
+        family_id="family-1",
+        item_id="item-2",
+        invocation_run_id="rerun-r1",
+    )
+
+    assert status["accepted_question_count"] == 1
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    assert ledger["accepted_families"] == {"family-1": "item-2"}
+    events = sorted((tmp_path / "receipts").glob("accepted-*.json"))
+    assert len(events) == 2
+    assert {json.loads(path.read_text())["item_id"] for path in events} == {
+        "item-1",
+        "item-2",
+    }
+    resumed = fixture(tmp_path, transport=Transport())["broker"]
+    assert resumed.status()["accepted_question_count"] == 1
+
+
 def test_new_run_id_cannot_replay_the_same_request(tmp_path: Path):
     transport = Transport()
     broker = fixture(tmp_path, transport=transport)["broker"]
