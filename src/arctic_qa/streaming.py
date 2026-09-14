@@ -260,6 +260,43 @@ def run_stream(
             or stable_id("family", access.get("doi") or candidate_key)
         )
         source_version_id = str(access["source_content_hash"])
+        operational_unresolved = (
+            verifier_broker.operational_unresolved_family_ids()
+            if verifier_broker is not None
+            else {}
+        )
+        if family_id in operational_unresolved:
+            request_key = operational_unresolved[family_id]
+            reason_code = "operational_ambiguous_charge_http_500"
+            _record_operational_unresolved(
+                db,
+                campaign_id=campaign_id,
+                candidate_key=str(candidate_key),
+                selected=selected,
+                family_id=family_id,
+                request_key=request_key,
+            )
+            counts.setdefault("operational_unresolved", 0)
+            counts["operational_unresolved"] += 1
+            counts["processed"] += 1
+            progress.increment("unresolved")
+            paper_results.append(
+                {
+                    "candidate_key": candidate_key,
+                    "disposition": "operational_unresolved",
+                    "reason_codes": [reason_code],
+                    "source_id": None,
+                    "broker_request_key": request_key,
+                }
+            )
+            progress.paper(
+                paper_id=candidate_key,
+                title=access.get("title"),
+                current_stage="completed",
+                final_state="unresolved",
+                final_reason=reason_code,
+            )
+            continue
         paper_author = _bind_provider(
             author,
             paper_id=paper_id,
@@ -1427,6 +1464,46 @@ def _record_generation_rejection(
                     reason_code,
                 ),
                 source_id,
+                reason_code,
+                canonical_json(detail),
+                now(),
+            ),
+        )
+
+
+def _record_operational_unresolved(
+    db: Database,
+    *,
+    campaign_id: str,
+    candidate_key: str,
+    selected: dict[str, Any],
+    family_id: str,
+    request_key: str,
+) -> None:
+    reason_code = "operational_ambiguous_charge_http_500"
+    detail = {
+        "campaign_id": campaign_id,
+        "candidate_key": candidate_key,
+        "family_id": family_id,
+        "broker_request_key": request_key,
+        "selection": selected,
+        "replay_prohibited": True,
+        "operational_unresolved": True,
+    }
+    with db.transaction():
+        db.connection.execute(
+            """INSERT OR IGNORE INTO rejection_ledger
+            (rejection_id,item_id,source_id,stage,reason_code,detail_json,created_at)
+            VALUES (?,NULL,NULL,'generation',?,?,?)""",
+            (
+                stable_id(
+                    "rejection",
+                    campaign_id,
+                    candidate_key,
+                    family_id,
+                    request_key,
+                    reason_code,
+                ),
                 reason_code,
                 canonical_json(detail),
                 now(),

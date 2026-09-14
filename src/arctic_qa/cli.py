@@ -402,6 +402,27 @@ def parser() -> argparse.ArgumentParser:
         "--prior-construction-spend-usd", type=Decimal, required=True
     )
 
+    continuation = commands.add_parser(
+        "authorize-ambiguous-continuation",
+        help="Authorize unrelated papers after a reviewed HTTP 500 unknown charge.",
+    )
+    continuation.add_argument("--request-key", required=True)
+    continuation.add_argument("--expected-ledger-sha256", required=True)
+    continuation.add_argument("--review-file", type=Path, required=True)
+    continuation.add_argument("--evidence-file", type=Path, required=True)
+    continuation.add_argument("--authorized-run-id", required=True)
+    continuation.add_argument("--operator-id", required=True)
+    continuation.add_argument("--streaming-budget-policy-file", type=Path, required=True)
+    continuation.add_argument("--price-config-file", type=Path, required=True)
+    continuation.add_argument("--execution-gate-file", type=Path, required=True)
+    continuation.add_argument("--shared-ledger-file", type=Path, required=True)
+    continuation.add_argument("--model-receipts-dir", type=Path, required=True)
+    continuation.add_argument("--ledger-config-transition-file", type=Path)
+    continuation.add_argument("--credential-file", type=Path, required=True)
+    continuation.add_argument(
+        "--prior-construction-spend-usd", type=Decimal, required=True
+    )
+
     settle = commands.add_parser(
         "settle-pretransport-reservation",
         help="Settle the reviewed reservation that stopped before generation transport.",
@@ -558,6 +579,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.command == "reconcile-usage":
             return _emit(args, _reconcile_usage(args))
+        if args.command == "authorize-ambiguous-continuation":
+            return _emit(args, _authorize_ambiguous_continuation(args))
         if args.command == "settle-pretransport-reservation":
             return _emit(args, _settle_pretransport_reservation(args))
         paths, db = _open(args)
@@ -631,6 +654,31 @@ def _reconcile_usage(args) -> dict[str, Any]:
         ),
     )
     return broker.reconcile_omitted_thought_usage(args.request_key)
+
+
+def _authorize_ambiguous_continuation(args) -> dict[str, Any]:
+    broker = SharedGeminiBroker(
+        policy_file=args.streaming_budget_policy_file.resolve(),
+        price_config_file=args.price_config_file.resolve(),
+        execution_gate_file=args.execution_gate_file.resolve(),
+        ledger_file=args.shared_ledger_file.resolve(),
+        receipts_dir=args.model_receipts_dir.resolve(),
+        credential_file=args.credential_file.resolve(),
+        prior_construction_spend_usd=args.prior_construction_spend_usd,
+        config_transition_file=(
+            args.ledger_config_transition_file.resolve()
+            if args.ledger_config_transition_file
+            else None
+        ),
+    )
+    return broker.authorize_ambiguous_continuation(
+        request_key=args.request_key,
+        expected_ledger_sha256=args.expected_ledger_sha256,
+        review_file=args.review_file.resolve(),
+        evidence_file=args.evidence_file.resolve(),
+        authorized_run_id=args.authorized_run_id,
+        operator_id=args.operator_id,
+    )
 
 
 def _settle_pretransport_reservation(args) -> dict[str, Any]:
