@@ -17,7 +17,8 @@ The state database is optional.
 When present, it adds paper identity, validation records, retained rationales, and model trace metadata.
 It never selects rows or changes options.
 
-The reviewer files contain labels, validation records, short evidence excerpts, locators, and retained rationales.
+The reviewer files contain labels, reference answers, validation records, short evidence excerpts, locators, and retained rationales.
+An answer-absent reviewer row retains the paired question reference answer and evidence when state data retains them.
 The benchmark files contain questions and option text only.
 The scoring files contain the correct option ID or a null value for an answer-absent variant.
 

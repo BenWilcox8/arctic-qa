@@ -80,8 +80,20 @@ def test_manifest_selected_variants_keep_their_exact_options(tmp_path: Path) -> 
     manifest_path.write_text(json.dumps({"export_id": "trial", "files": {"mcq": "exports/trial/mcq.jsonl"}, "file_sha256": {"mcq": "fixture-hash"}}), encoding="utf-8")
     renderer = tmp_path / "generation-v10.py"
     renderer.write_text("PROMPT_VERSION = 'arctic-qa-generation-v10'\n", encoding="utf-8")
+    db_path = tmp_path / "state.sqlite3"
+    connection = sqlite3.connect(db_path)
+    connection.executescript("""
+        CREATE TABLE sources (source_id TEXT,stable_id TEXT,doi TEXT,title TEXT,year INTEGER,content_hash TEXT,metadata_json TEXT,inclusion_reason TEXT);
+        CREATE TABLE candidates (item_id TEXT,source_id TEXT,candidate_json TEXT);
+        CREATE TABLE validation_events (item_id TEXT,stage TEXT,label TEXT,reason_codes_json TEXT,details_json TEXT);
+    """)
+    connection.execute("INSERT INTO sources VALUES (?,?,?,?,?,?,?,?)", ("source-1", "paper-1", "10.1/example", "Example paper", 2026, "source-hash", "{}", "selected"))
+    candidate = {"question": "What changed?", "answer": {"text": "It increased", "claim_type": "observation", "evidence_quote": "The measured value increased.", "locator": {"page": 2}}}
+    connection.execute("INSERT INTO candidates VALUES (?,?,?)", ("question-1", "source-1", json.dumps(candidate)))
+    connection.commit()
+    connection.close()
 
-    manifest = export_publication_package(None, tmp_path / "package", seed="fixed", export_manifest=manifest_path, historical_renderers=[renderer])
+    manifest = export_publication_package(db_path, tmp_path / "package", seed="fixed", export_manifest=manifest_path, historical_renderers=[renderer])
 
     assert manifest["reviewer_item_count"] == 2
     reviewer = [json.loads(line) for line in (tmp_path / "package" / "reviewer-items.jsonl").read_text().splitlines()]
@@ -91,6 +103,8 @@ def test_manifest_selected_variants_keep_their_exact_options(tmp_path: Path) -> 
     assert [option["text"] for option in reviewer[0]["options"]] == ["It increased", "It decreased"]
     assert reviewer[0]["options"][0]["is_correct"] is True
     assert "release_label" not in json.dumps(reviewer[0])
+    assert reviewer[1]["reference_answer"]["text"] == "It increased"
+    assert reviewer[1]["answer_evidence"]["excerpt"] == "The measured value increased."
     assert "is_correct" not in json.dumps(benchmark[0])
     assert scoring[0]["correct_option_id"] is not None
     assert scoring[1]["correct_option_id"] is None

@@ -254,6 +254,7 @@ def _manifest_row(connection: sqlite3.Connection | None, item: dict[str, Any]) -
         candidate = _matching_candidate(connection, item) or {}
         validations = _public_validation(connection, candidate.get("_database_item_id"))
     verdicts = {row.get("option_text"): row for row in candidate.get("option_verdicts", []) if isinstance(row, dict)}
+    candidate_answer = candidate.get("answer") if isinstance(candidate.get("answer"), dict) else {}
     options = []
     for position, option in enumerate(item.get("options", []), start=1):
         if not isinstance(option, dict):
@@ -280,7 +281,12 @@ def _manifest_row(connection: sqlite3.Connection | None, item: dict[str, Any]) -
         "variant_id": item.get("task_type"),
         "paper": source,
         "question": item.get("question"),
-        "answer_evidence": _short_evidence(item.get("answer_evidence")),
+        "reference_answer": {
+            name: candidate_answer[name]
+            for name in ("text", "claim_type")
+            if candidate_answer.get(name) is not None
+        } or None,
+        "answer_evidence": _short_evidence(item.get("answer_evidence")) or _short_evidence(candidate_answer),
         "options": options,
         "validation": validations,
         "rationales": {
@@ -331,7 +337,7 @@ def _write_manifest_package(
     benchmark_csv = output_dir / "benchmark-inputs.csv"
     scoring_csv = output_dir / "scoring-labels.csv"
     for path, rows, fields in (
-        (reviewer_csv, records, ["item_id", "question_id", "variant_id", "question", "paper_json", "answer_evidence_json", "options_json", "validation_json", "rationales_json", "model_trace_json", "interpretation_limit", "evidence_state"]),
+        (reviewer_csv, records, ["item_id", "question_id", "variant_id", "question", "paper_json", "reference_answer_json", "answer_evidence_json", "options_json", "validation_json", "rationales_json", "model_trace_json", "interpretation_limit", "evidence_state"]),
         (benchmark_csv, benchmark_rows, ["item_id", "question_id", "variant_id", "question", "options_json"]),
         (scoring_csv, scoring_rows, ["item_id", "correct_option_id", "answer_present"]),
     ):
