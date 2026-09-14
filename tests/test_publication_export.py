@@ -28,7 +28,7 @@ def _live_candidate(item_id: str, question: str, *, prompt: str) -> dict:
         for index, letter in enumerate("ABC", start=2)
     ]
     return {
-        "schema_version": "2.2.0",
+        "schema_version": "2.3.0",
         "item_id": item_id,
         "question": question,
         "question_context": "Annual mean.",
@@ -167,7 +167,7 @@ def test_live_snapshot_updates_atomically_and_excludes_stale_rows(
     _insert_live_candidate(
         connection,
         _live_candidate(
-            "rejected", "Rejected question?", prompt="arctic-qa-generation-v16"
+            "rejected", "Rejected question?", prompt="arctic-qa-generation-v17"
         ),
         family="rejected-family",
         status="rejected",
@@ -175,7 +175,7 @@ def test_live_snapshot_updates_atomically_and_excludes_stale_rows(
     _insert_live_candidate(
         connection,
         _live_candidate(
-            "unbound", "Unbound question?", prompt="arctic-qa-generation-v16"
+            "unbound", "Unbound question?", prompt="arctic-qa-generation-v17"
         ),
         family="unbound-family",
         bind_validation=False,
@@ -185,7 +185,7 @@ def test_live_snapshot_updates_atomically_and_excludes_stale_rows(
         _live_candidate(
             "current-old",
             "Earlier current question?",
-            prompt="arctic-qa-generation-v16",
+            prompt="arctic-qa-generation-v17",
         ),
         family="current-family",
         updated_at="2026-09-14T00:00:00Z",
@@ -193,7 +193,7 @@ def test_live_snapshot_updates_atomically_and_excludes_stale_rows(
     _insert_live_candidate(
         connection,
         _live_candidate(
-            "current-new", "Newest current question?", prompt="arctic-qa-generation-v16"
+            "current-new", "Newest current question?", prompt="arctic-qa-generation-v17"
         ),
         family="current-family",
         updated_at="2026-09-14T00:01:00Z",
@@ -256,7 +256,7 @@ def test_live_snapshot_updates_atomically_and_excludes_stale_rows(
     _insert_live_candidate(
         connection,
         _live_candidate(
-            "second-family", "Second question?", prompt="arctic-qa-generation-v16"
+            "second-family", "Second question?", prompt="arctic-qa-generation-v17"
         ),
         family="second-family",
         updated_at="2026-09-14T00:02:00Z",
@@ -299,7 +299,7 @@ def test_live_preview_includes_retained_model_verified_distractors_only(
         ("source-1", "10.1/current", "Current paper"),
     )
     preview = _live_candidate(
-        "preview", "Preview question?", prompt="arctic-qa-generation-v16"
+        "preview", "Preview question?", prompt="arctic-qa-generation-v17"
     )
     preview_distractors = [
         {
@@ -319,7 +319,7 @@ def test_live_preview_includes_retained_model_verified_distractors_only(
         validation_distractors=preview_distractors,
     )
     rejected = _live_candidate(
-        "rejected", "Rejected question?", prompt="arctic-qa-generation-v16"
+        "rejected", "Rejected question?", prompt="arctic-qa-generation-v17"
     )
     _insert_live_candidate(
         connection,
@@ -333,7 +333,7 @@ def test_live_preview_includes_retained_model_verified_distractors_only(
     missing_model_verification = _live_candidate(
         "missing-model-verification",
         "Incomplete question?",
-        prompt="arctic-qa-generation-v16",
+        prompt="arctic-qa-generation-v17",
     )
     _insert_live_candidate(
         connection,

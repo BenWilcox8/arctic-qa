@@ -79,12 +79,50 @@ def test_standalone_wording_instructions_cover_scope_and_otu_context() -> None:
     assert "Do not invent a missing detail" in instructions
     assert "paper-specific observation" in instructions
     assert "source-dependent shorthand" in instructions
+    assert "according to the study" in instructions
+    assert "at this time" in instructions
     assert "determine or verify the answer" in instructions
     assert "identify a referent or interpret scope" in instructions
     assert "exact evidence quotes, source locators, or rationale fields" in instructions
     assert "operational taxonomic units (OTUs)" in context_instructions
     assert "source-supported sample and location context" in context_instructions
     assert "taxonomic counts" in context_instructions
+    assert "only when its expansion occurs in SOURCE_DATA" in context_instructions
+
+
+def test_reconstructor_omits_inapplicable_numeric_metadata() -> None:
+    instructions = generation.RECONSTRUCTION_NUMERIC_INSTRUCTIONS
+
+    assert "one scalar value" in instructions
+    assert "ranges" in instructions
+    assert "directional answers" in instructions
+    assert "string 'null'" in instructions
+
+
+def test_generation_attempt_contract_rejects_unbounded_paths() -> None:
+    primary = {
+        "contract_version": "bounded-paper-progression-v1",
+        "attempt_id": "attempt-1",
+        "attempt_kind": "primary",
+        "finding_attempt_index": 1,
+        "question_revision_index": 0,
+        "parent_attempt_id": None,
+        "parent_item_id": None,
+        "trigger_reason_code": None,
+        "finding_policy_version": (
+            generation.SCOPE_ROLE_FINDING_POLICY_VERSION + ":finding-1"
+        ),
+        "excluded_finding_span_ids": [],
+    }
+
+    assert generation._validated_generation_attempt(primary) == primary
+    primary["finding_attempt_index"] = 3
+    try:
+        generation._validated_generation_attempt(primary)
+    except ValueError as error:
+        assert "bounded contract" in str(error)
+    else:
+        raise AssertionError("an unbounded finding path was accepted")
 
 
 def test_exports_default_legacy_context_and_serialize_new_context() -> None:

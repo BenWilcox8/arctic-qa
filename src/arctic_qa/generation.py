@@ -30,9 +30,10 @@ from .validation import (
 
 
 PROMPT_VERSION = GENERATION_PROMPT_VERSION
-CANDIDATE_SCHEMA_VERSION = "2.2.0"
+CANDIDATE_SCHEMA_VERSION = "2.3.0"
 FINDING_POLICY_VERSION = "one-finding-per-paper-full-context-v6"
 SCOPE_ROLE_FINDING_POLICY_VERSION = "one-finding-per-paper-full-context-v7"
+GENERATION_ATTEMPT_CONTRACT_VERSION = "bounded-paper-progression-v1"
 FINDING_SPAN_CONTRACT_VERSION = "finding-evidence-span-v3"
 MODEL_JUSTIFICATION_CONTRACT_VERSION = "model-justification-v1"
 ARCTIC_SCOPE_CONTRACT_VERSION = "eligible-arctic-finding-scope-v1"
@@ -95,8 +96,9 @@ BENCHMARK_STANDALONE_INSTRUCTIONS = (
     "system, location, samples, period, and conditions needed for one interpretation. "
     "State each detail only when SOURCE_DATA supports it. Do not invent a missing detail "
     "or broaden a paper-specific observation into a general fact. Do not use source-dependent "
-    "shorthand. This includes 'this study', 'the authors', figure or table citations, and "
-    "'as described above'. Do not use unresolved phrases such as 'the samples' or 'the "
+    "shorthand. This includes 'this study', 'according to the study', 'the authors', "
+    "'at this time', figure or table citations, and 'as described above'. Do not use "
+    "unresolved phrases such as 'the samples' or 'the "
     "identified OTUs'. Make each answer and displayed distractor understandable with the "
     "question and question_context alone. A reader can need SOURCE_DATA to determine or "
     "verify the answer. A reader must not need it to identify a referent or interpret scope. "
@@ -113,7 +115,13 @@ QUESTION_CONTEXT_INSTRUCTIONS = (
     "context when they are needed to interpret OTUs. Do not include answer-bearing numbers, "
     "taxonomic counts, relationships, results, conclusions, answer-choice eliminators, "
     "or a paper summary. If an acronym expansion answers the question, do not supply that "
-    "expansion. Do not invent a definition."
+    "expansion. Expand an unfamiliar acronym only when its expansion occurs in "
+    "SOURCE_DATA. Do not infer or invent a definition."
+)
+RECONSTRUCTION_NUMERIC_INSTRUCTIONS = (
+    "Populate numeric only for one scalar value with one applicable unit. Omit "
+    "numeric for ranges, tuples, counts written as words, nonnumeric answers, or "
+    "directional answers. Never put the string 'null' in a numeric field."
 )
 DISTRACTOR_WRITER_INSTRUCTIONS = """Treat QUESTION and QUESTION_CONTEXT as the complete benchmark task. Do not use SOURCE_DATA to resolve a missing system, location, sample, period, condition, or referent. If the displayed task needs SOURCE_DATA to identify a referent or interpret scope, do not propose distractors. SOURCE_DATA can still determine the answer. Propose 4 to 6 typed distractors so that at least three can survive independent verification. Do not self-verify them. Each option must be a concise positive assertion with one interpretation. Avoid explicit negation and compound assertions. Each option must be understandable with QUESTION and QUESTION_CONTEXT alone. For a numeric option, display exactly one displayed number and unit, and provide numeric canonical_value and unit metadata that match that display. Prefer nonnumeric categorical or directional contradictions when the answer lacks a source-bound numeric tolerance rule. Select source_span_id for each evidence record. For each option, provide a concise generation_rationale that explains why the option is plausible and how it differs from the source-supported answer. This is a model-generated justification, not proof and not hidden reasoning."""
 
@@ -553,6 +561,73 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
 }
 
 
+def _validated_generation_attempt(
+    value: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    required = {
+        "contract_version",
+        "attempt_id",
+        "attempt_kind",
+        "finding_attempt_index",
+        "question_revision_index",
+        "parent_attempt_id",
+        "parent_item_id",
+        "trigger_reason_code",
+        "finding_policy_version",
+        "excluded_finding_span_ids",
+    }
+    if set(value) != required:
+        raise ValueError("generation attempt fields do not match the contract")
+    if value["contract_version"] != GENERATION_ATTEMPT_CONTRACT_VERSION:
+        raise ValueError("generation attempt contract version is not current")
+    if value["attempt_kind"] not in {
+        "primary",
+        "question_revision",
+        "alternative_finding",
+    }:
+        raise ValueError("generation attempt kind is invalid")
+    finding_index = value["finding_attempt_index"]
+    revision_index = value["question_revision_index"]
+    if finding_index not in {1, 2} or revision_index not in {0, 1}:
+        raise ValueError("generation attempt indexes exceed the bounded contract")
+    if not isinstance(value["attempt_id"], str) or not value["attempt_id"]:
+        raise ValueError("generation attempt ID is invalid")
+    policy = value["finding_policy_version"]
+    if policy != f"{SCOPE_ROLE_FINDING_POLICY_VERSION}:finding-{finding_index}":
+        raise ValueError("generation attempt finding policy is invalid")
+    exclusions = value["excluded_finding_span_ids"]
+    if not isinstance(exclusions, list) or any(
+        not isinstance(span_id, str) or not span_id for span_id in exclusions
+    ):
+        raise ValueError("generation attempt exclusions are invalid")
+    if len(exclusions) != len(set(exclusions)):
+        raise ValueError("generation attempt exclusions contain duplicates")
+    if value["attempt_kind"] == "primary":
+        if finding_index != 1 or revision_index != 0:
+            raise ValueError("primary generation attempt indexes are invalid")
+        if any(
+            value[field] is not None
+            for field in ("parent_attempt_id", "parent_item_id", "trigger_reason_code")
+        ) or exclusions:
+            raise ValueError("primary generation attempt has parent state")
+    else:
+        if not isinstance(value["parent_attempt_id"], str) or not value["parent_attempt_id"]:
+            raise ValueError("fallback generation attempt lacks a parent")
+        if not isinstance(value["trigger_reason_code"], str) or not value["trigger_reason_code"]:
+            raise ValueError("fallback generation attempt lacks a trigger reason")
+    if value["attempt_kind"] == "question_revision":
+        if revision_index != 1 or not isinstance(value["parent_item_id"], str):
+            raise ValueError("question revision parent state is invalid")
+        if exclusions:
+            raise ValueError("question revision cannot exclude a finding")
+    if value["attempt_kind"] == "alternative_finding":
+        if finding_index != 2 or revision_index != 0 or not exclusions:
+            raise ValueError("alternative finding state is invalid")
+    return json.loads(canonical_json(value))
+
+
 def generate_candidate(
     db: Database,
     namespace: Path,
@@ -573,6 +648,7 @@ def generate_candidate(
     reasoning_token_cap: int = 2048,
     billable_token_overhead: int = 1024,
     pricing_usd_per_million_tokens: dict[str, Decimal] | None = None,
+    generation_attempt: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source = db.one("SELECT * FROM sources WHERE source_id=?", (source_id,))
     if not source:
@@ -587,6 +663,29 @@ def generate_candidate(
         raise ValueError(
             "source must have year and discipline strata before generation"
         )
+    attempt = _validated_generation_attempt(generation_attempt)
+    if attempt is not None:
+        expected_attempt_id = stable_id(
+            "generation-attempt",
+            run_id,
+            source["paper_family_id"],
+            attempt["finding_attempt_index"],
+            attempt["question_revision_index"],
+            GENERATION_ATTEMPT_CONTRACT_VERSION,
+        )
+        if attempt["attempt_id"] != expected_attempt_id:
+            raise ValueError("generation attempt ID does not match its family path")
+    finding_policy_version = (
+        attempt["finding_policy_version"]
+        if attempt is not None
+        else SCOPE_ROLE_FINDING_POLICY_VERSION
+    )
+    if (
+        attempt is not None
+        and attempt["attempt_kind"] == "question_revision"
+        and arm != "answer_first"
+    ):
+        raise ValueError("question revision requires the answer-first arm")
     chunks = load_chunks(db, namespace, source_id)
     if not chunks:
         raise ValueError(f"source has no usable chunks: {source_id}")
@@ -611,11 +710,36 @@ def generate_candidate(
         parameters["pricing_usd_per_million_tokens"] = {
             key: str(value) for key, value in pricing_usd_per_million_tokens.items()
         }
-    existing_finding = db.one(
-        """SELECT * FROM findings
-        WHERE run_id=? AND paper_family_id=? AND selection_policy_version=?""",
-        (run_id, source["paper_family_id"], SCOPE_ROLE_FINDING_POLICY_VERSION),
-    )
+    revision_parent: dict[str, Any] | None = None
+    if attempt is not None and attempt["attempt_kind"] == "question_revision":
+        parent_row = db.one(
+            "SELECT candidate_json FROM candidates WHERE item_id=? AND run_id=?",
+            (attempt["parent_item_id"], run_id),
+        )
+        if parent_row is None:
+            raise ValueError("question revision parent candidate is unavailable")
+        revision_parent = json.loads(parent_row["candidate_json"])
+        if (
+            revision_parent.get("source", {}).get("paper_family_id")
+            != source["paper_family_id"]
+        ):
+            raise ValueError("question revision parent belongs to another family")
+        existing_finding = db.one(
+            "SELECT * FROM findings WHERE finding_id=? AND run_id=?",
+            (revision_parent.get("finding_id"), run_id),
+        )
+        if (
+            existing_finding is None
+            or existing_finding["selection_policy_version"]
+            != finding_policy_version
+        ):
+            raise ValueError("question revision frozen finding is unavailable")
+    else:
+        existing_finding = db.one(
+            """SELECT * FROM findings
+            WHERE run_id=? AND paper_family_id=? AND selection_policy_version=?""",
+            (run_id, source["paper_family_id"], finding_policy_version),
+        )
     if existing_finding:
         if existing_finding["source_id"] != source_id:
             raise ValueError(
@@ -641,16 +765,29 @@ def generate_candidate(
             if arctic_scope is not None
             else ""
         )
+        exclusion_instruction = (
+            "\nEXCLUDED_FINDING_SPAN_IDS\n"
+            + canonical_json(attempt["excluded_finding_span_ids"])
+            + "\nSelect a different scientific finding. Do not select an excluded "
+            "span or any combined span that contains an excluded component."
+            if attempt is not None and attempt["excluded_finding_span_ids"]
+            else ""
+        )
+        finding_entity_id = stable_id(
+            "finding-selection",
+            source_id,
+            finding_policy_version,
+            attempt["attempt_id"] if attempt is not None else "",
+        )
         answer_proposal = _call(
             db,
             author,
             run_id,
-            stable_id(
-                "finding-selection", source_id, SCOPE_ROLE_FINDING_POLICY_VERSION
-            ),
+            finding_entity_id,
             "extractor",
             context
             + scope_instruction
+            + exclusion_instruction
             + "\nExtract one bounded answer record. Select one source_span_id. "
             + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS
             + " "
@@ -697,6 +834,16 @@ def generate_candidate(
             finding_spans,
             reason_code="finding_evidence_span_not_found",
         )
+        if attempt is not None and attempt["excluded_finding_span_ids"]:
+            selected_ids = {
+                answer.get("source_span_id"),
+                *answer.get("source_span_ids", []),
+            }
+            if selected_ids.intersection(attempt["excluded_finding_span_ids"]):
+                raise CandidateRejectedError(
+                    "alternative_finding_not_distinct",
+                    "the alternative selected an excluded finding span",
+                )
         _require_arctic_scope_custody(answer, arctic_scope)
         chunk = next(
             (
@@ -715,7 +862,7 @@ def generate_candidate(
             "finding",
             run_id,
             source_id,
-            SCOPE_ROLE_FINDING_POLICY_VERSION,
+            finding_policy_version,
             chunk["chunk_id"],
             canonical_json(answer),
         )
@@ -730,7 +877,7 @@ def generate_candidate(
                     source_id,
                     source["paper_family_id"],
                     chunk["chunk_id"],
-                    SCOPE_ROLE_FINDING_POLICY_VERSION,
+                    finding_policy_version,
                     canonical_json(answer),
                     now(),
                 ),
@@ -749,10 +896,30 @@ def generate_candidate(
         span["span_id"]: span for span in (scoped_chunk_spans or _finding_spans(chunk))
     }
     context = _context(chunk, scoped_chunk_spans)
-    entity_id = stable_id("unit", finding_id, arm)
+    entity_id = (
+        stable_id("unit", finding_id, arm, attempt["attempt_id"])
+        if attempt is not None
+        else stable_id("unit", finding_id, arm)
+    )
     arm_answer_proposal = answer
     question_rationale: str
     question_context: str
+    revision_instruction = (
+        "\nQUESTION_REVISION\n"
+        + canonical_json(
+            {
+                "parent_question": revision_parent["question"],
+                "parent_question_context": revision_parent.get(
+                    "question_context", ""
+                ),
+                "trigger_reason_code": attempt["trigger_reason_code"],
+            }
+        )
+        + "\nRevise only the question and question_context. Fix the recorded "
+        "stand-alone wording or context defect. Do not change the frozen finding. "
+        if revision_parent is not None and attempt is not None
+        else ""
+    )
     if arm == "answer_first":
         question_record = _call(
             db,
@@ -763,6 +930,7 @@ def generate_candidate(
             context
             + "\nANSWER_RECORD\n"
             + canonical_json(answer)
+            + revision_instruction
             + "\nWrite one self-contained question. Include every "
             "required_question_phrases entry verbatim. Set question_rationale "
             "to a concise evidence-grounded justification for the question's "
@@ -845,7 +1013,9 @@ def generate_candidate(
         "least one scope value must be non-null. Return alternatives only when "
         "the source supports a distinct answer that also correctly answers this "
         "question. Do not list paraphrases, spelling or unit variants, or false "
-        "and negated answer choices as alternatives. Set reconstruction_rationale "
+        "and negated answer choices as alternatives. "
+        + RECONSTRUCTION_NUMERIC_INSTRUCTIONS
+        + " Set reconstruction_rationale "
         "to a concise evidence-grounded justification for the reconstructed "
         "answer and ambiguity label. Do not provide hidden reasoning."
     )
@@ -1002,6 +1172,7 @@ def generate_candidate(
         SCOPE_CONTRACT_VERSION,
         SCOPE_ROLE_SEMANTICS_VERSION,
         SCOPE_ROLE_BINDING_CONTRACT_VERSION,
+        attempt["attempt_id"] if attempt is not None else "",
         question,
         question_context,
         answer,
@@ -1013,7 +1184,7 @@ def generate_candidate(
         "schema_version": CANDIDATE_SCHEMA_VERSION,
         "item_id": item_id,
         "finding_id": finding_id,
-        "finding_policy_version": SCOPE_ROLE_FINDING_POLICY_VERSION,
+        "finding_policy_version": finding_policy_version,
         "status": "candidate" if not qa_gate_reasons else "qa_gate_failed",
         "task_type": "short_answer",
         "question_claim_type": answer_verification.get("question_claim_type"),
@@ -1039,6 +1210,10 @@ def generate_candidate(
         "provenance": {
             "run_id": run_id,
             "generation_arm": arm,
+            "generation_attempt_contract_version": (
+                GENERATION_ATTEMPT_CONTRACT_VERSION
+            ),
+            "generation_attempt": attempt,
             "prompt_version": PROMPT_VERSION,
             "numeric_rule_contract_version": NUMERIC_RULE_CONTRACT_VERSION,
             "direct_value_contract_version": DIRECT_SOURCE_VALUE_CONTRACT_VERSION,

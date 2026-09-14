@@ -1307,7 +1307,7 @@ def test_generation_runs_qa_gates_before_exact_option_verification(
         "distractor_writer",
     ]
     assert roles[5:] == ["option_verifier"] * 4
-    assert item["schema_version"] == "2.2.0"
+    assert item["schema_version"] == "2.3.0"
     assert item["finding_id"]
     assert item["answer"]["selection_rationale"]
     assert item["answer"]["source_span_ids"]
@@ -1538,7 +1538,7 @@ def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> No
     command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(verifier)
     generated = json.loads(cli(tmp_path, *command).stdout)
     assert generated["status"] == "qa_gate_failed"
-    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v16"
+    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v17"
     assert (
         generated["provenance"]["numeric_rule_contract_version"]
         == "numeric-rule-source-support-v2"

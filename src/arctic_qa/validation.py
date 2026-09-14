@@ -21,7 +21,7 @@ UNIT_FACTORS: dict[tuple[str, str], Decimal] = {
 }
 SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v3"
 LEGACY_SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v2"
-GENERATION_PROMPT_VERSION = "arctic-qa-generation-v16"
+GENERATION_PROMPT_VERSION = "arctic-qa-generation-v17"
 NUMERIC_RULE_CONTRACT_VERSION = "numeric-rule-source-support-v2"
 DIRECT_SOURCE_VALUE_CONTRACT_VERSION = "direct-source-value-v1"
 MULTI_VALUE_NUMERIC_CONTRACT_VERSION = "numeric-rule-multiple-values-v1"
@@ -49,7 +49,21 @@ CANDIDATE_CONTRACTS = {
         ),
     },
     "2.2.0": {
+        "prompt_version": "arctic-qa-generation-v16",
+        "numeric_rule_contract_version": NUMERIC_RULE_CONTRACT_VERSION,
+        "direct_value_contract_version": DIRECT_SOURCE_VALUE_CONTRACT_VERSION,
+        "scope_contract_version": SCOPE_CONTRACT_VERSION,
+        "scope_role_semantics_version": "scope-role-semantics-v2",
+        "scope_role_binding_contract_version": (
+            "scope-role-question-context-binding-v1"
+        ),
+        "evidence_combination_contract_version": (
+            EVIDENCE_COMBINATION_CONTRACT_VERSION
+        ),
+    },
+    "2.3.0": {
         "prompt_version": GENERATION_PROMPT_VERSION,
+        "generation_attempt_contract_version": "bounded-paper-progression-v1",
         "numeric_rule_contract_version": NUMERIC_RULE_CONTRACT_VERSION,
         "direct_value_contract_version": DIRECT_SOURCE_VALUE_CONTRACT_VERSION,
         "scope_contract_version": SCOPE_CONTRACT_VERSION,
@@ -242,7 +256,7 @@ def _eligible_arctic_scope_error(
         components = (candidate.get("answer") or {}).get("evidence_components")
         eligibility_ids = (candidate.get("answer") or {}).get("eligibility_span_ids")
         if (
-            candidate.get("schema_version") not in {"2.1.0", "2.2.0"}
+            candidate.get("schema_version") not in {"2.1.0", "2.2.0", "2.3.0"}
             or not isinstance(components, list)
             or not isinstance(eligibility_ids, list)
             or not eligibility_ids
@@ -1348,7 +1362,12 @@ def _qa_verification_receipts_match(db: Database, candidate: dict[str, Any]) -> 
     calls = provenance.get("verification_calls") or {}
     if not all(isinstance(value, str) and value for value in (run_id, arm, finding_id)):
         return False
-    entity_id = stable_id("unit", finding_id, arm)
+    generation_attempt = provenance.get("generation_attempt")
+    entity_id = (
+        stable_id("unit", finding_id, arm, generation_attempt.get("attempt_id"))
+        if isinstance(generation_attempt, dict)
+        else stable_id("unit", finding_id, arm)
+    )
     records = {
         "reconstructor": candidate.get("reconstruction"),
         "answer_verifier": candidate.get("answer_verification"),
