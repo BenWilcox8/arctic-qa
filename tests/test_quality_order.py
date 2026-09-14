@@ -41,7 +41,9 @@ def _frozen_row(
     }
 
 
-def test_quality_order_is_deterministic_and_materializes_without_provider_calls(tmp_path: Path) -> None:
+def test_quality_order_is_deterministic_and_materializes_without_provider_calls(
+    tmp_path: Path,
+) -> None:
     originals = tmp_path / "originals"
     originals.mkdir()
     sources = [originals / f"source-{position}.pdf" for position in range(1, 4)]
@@ -77,7 +79,10 @@ def test_quality_order_is_deterministic_and_materializes_without_provider_calls(
     ]
     frozen = tmp_path / "freeze" / "manifest.jsonl"
     frozen.parent.mkdir()
-    frozen.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
+    frozen.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
     descriptor = frozen.with_name("descriptor.json")
     descriptor.write_text(
         json.dumps(
@@ -90,7 +95,9 @@ def test_quality_order_is_deterministic_and_materializes_without_provider_calls(
         ),
         encoding="utf-8",
     )
-    before = {path: path.read_bytes() for path in [*sources, *extractions, frozen, descriptor]}
+    before = {
+        path: path.read_bytes() for path in [*sources, *extractions, frozen, descriptor]
+    }
     first = produce_quality_order(
         source_manifest_file=frozen,
         descriptor_file=descriptor,
@@ -114,6 +121,11 @@ def test_quality_order_is_deterministic_and_materializes_without_provider_calls(
         "10.1234/source-2",
         "10.1234/source-3",
     ]
-    selected = [json.loads(line) for line in Path(first["selected_manifest"]).read_text(encoding="utf-8").splitlines()]
+    selected = [
+        json.loads(line)
+        for line in Path(first["selected_manifest"])
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
     assert [row["original_manifest_position"] for row in selected] == [1, 2]
     assert (Path(first["access_run"]["access_run_dir"]) / "run-manifest.json").is_file()

@@ -201,25 +201,30 @@ def test_generation_schemas_require_concise_review_justifications() -> None:
     }
     for role, field in required_by_role.items():
         assert field in generation_module.ROLE_SCHEMAS[role]["required"]
-        assert "concise" in generation_module.ROLE_SCHEMAS[role]["properties"][
-            field
-        ]["description"].lower()
+        assert (
+            "concise"
+            in generation_module.ROLE_SCHEMAS[role]["properties"][field][
+                "description"
+            ].lower()
+        )
 
-    answer_schema = generation_module.ROLE_SCHEMAS["extractor"]["properties"][
-        "answer"
-    ]
+    answer_schema = generation_module.ROLE_SCHEMAS["extractor"]["properties"]["answer"]
     assert "selection_rationale" in answer_schema["required"]
-    assert "concise" in answer_schema["properties"]["selection_rationale"][
-        "description"
-    ].lower()
+    assert (
+        "concise"
+        in answer_schema["properties"]["selection_rationale"]["description"].lower()
+    )
 
     distractor_schema = generation_module.ROLE_SCHEMAS["distractor_writer"][
         "properties"
     ]["distractors"]["items"]
     assert "generation_rationale" in distractor_schema["required"]
-    assert "concise" in distractor_schema["properties"]["generation_rationale"][
-        "description"
-    ].lower()
+    assert (
+        "concise"
+        in distractor_schema["properties"]["generation_rationale"][
+            "description"
+        ].lower()
+    )
 
 
 def test_reconstruction_schema_has_no_frozen_answer_or_selection_rationale() -> None:
