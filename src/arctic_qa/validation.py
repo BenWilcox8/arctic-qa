@@ -377,14 +377,14 @@ def validate_candidate(
         return _finish(db, candidate, labels, reasons, [], "rejected")
     labels["scope_complete"] = True
     reconstruction = candidate.get("reconstruction") or {}
-    if not evidence_resolves(reconstruction, chunks):
+    if not role_evidence_resolves(reconstruction, chunks):
         reasons.append("reconstruction_evidence_not_located")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     if not scope_is_evidence_bound(reconstruction.get("scope"), reconstruction):
         reasons.append("reconstruction_scope_not_source_bound")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     verification = candidate.get("answer_verification") or {}
-    if not evidence_resolves(verification, chunks):
+    if not role_evidence_resolves(verification, chunks):
         reasons.append("answer_verifier_evidence_not_located")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     if not scope_is_evidence_bound(verification.get("scope"), verification):
@@ -612,6 +612,14 @@ def source_span_evidence_resolves(
     if recorded_eligibility_ids is not None and not eligibility_ids:
         return False
     return True
+
+
+def role_evidence_resolves(
+    record: dict[str, Any], chunks: dict[str, dict[str, Any]]
+) -> bool:
+    if record.get("span_contract_version") == SOURCE_SPAN_CONTRACT_VERSION:
+        return source_span_evidence_resolves(record, chunks)
+    return evidence_resolves(record, chunks)
 
 
 def reconstruction_matches(
