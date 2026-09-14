@@ -57,6 +57,7 @@ def _config(path: Path) -> dict[str, Any]:
     if value.get("config_id") not in {
         "arctic-gemini-eligibility-r1-config-v2",
         "arctic-gemini-eligibility-r1-config-v3",
+        "arctic-gemini-eligibility-r1-config-v4",
     }:
         raise ValueError("the Gemini eligibility config revision is not approved")
     if value.get("model") != "gemini-3.8-flash":
@@ -92,12 +93,18 @@ def _config(path: Path) -> dict[str, Any]:
     if value["maximum_output_tokens"] != 8192:
         raise ValueError("the configured Gemini output limit must be 8192")
     stage_models = value.get("stage_models")
-    if value["config_id"] == "arctic-gemini-eligibility-r1-config-v3":
+    if value["config_id"] in {
+        "arctic-gemini-eligibility-r1-config-v3",
+        "arctic-gemini-eligibility-r1-config-v4",
+    }:
         if not isinstance(stage_models, dict) or set(stage_models) != {
             "answer_agreement"
         }:
             raise ValueError("the Gemini stage model registry changed")
-        _validate_answer_agreement_config(stage_models["answer_agreement"])
+        if value["config_id"] == "arctic-gemini-eligibility-r1-config-v3":
+            _validate_legacy_answer_agreement_config(stage_models["answer_agreement"])
+        else:
+            _validate_answer_agreement_config(stage_models["answer_agreement"])
     elif stage_models is not None:
         raise ValueError("the legacy Gemini configuration has stage models")
     start = date.fromisoformat(value["price_valid_from"])
@@ -113,36 +120,33 @@ def _validate_answer_agreement_config(value: Any) -> None:
     if not isinstance(value, dict):
         raise ValueError("the answer agreement price configuration is invalid")
     exact = {
-        "model": "gemini-2.5-flash-lite",
+        "model": "gemini-3.1-flash-lite",
         "maximum_input_tokens": 1_048_576,
         "model_output_token_limit": 65_536,
         "maximum_output_tokens": 4,
-        "thinking_budget": 0,
-        "input_usd_per_million_tokens": "0.10",
-        "output_usd_per_million_tokens_including_thinking": "0.40",
+        "thinking_level": "minimal",
+        "input_usd_per_million_tokens": "0.25",
+        "output_usd_per_million_tokens_including_thinking": "1.50",
         "price_source": "https://ai.google.dev/gemini-api/docs/pricing",
         "model_source": (
-            "https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-lite"
+            "https://ai.google.dev/gemini-api/docs/models/"
+            "gemini-3.1-flash-lite"
         ),
         "thinking_source": (
             "https://ai.google.dev/gemini-api/docs/generate-content/thinking"
         ),
         "structured_output_source": "https://ai.google.dev/api/generate-content",
-        "authenticated_availability_endpoint": (
-            "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000"
-        ),
     }
     if any(value.get(name) != expected for name, expected in exact.items()):
         raise ValueError("the verified answer agreement model configuration changed")
-    if value.get("authenticated_supported_methods") != [
+    if value.get("documented_supported_methods") != [
         "generateContent",
         "countTokens",
-        "createCachedContent",
         "batchGenerateContent",
     ]:
-        raise ValueError("the authenticated answer agreement methods changed")
+        raise ValueError("the documented answer agreement methods changed")
     checked = datetime.fromisoformat(
-        str(value.get("authenticated_availability_checked_at_utc") or "").replace(
+        str(value.get("documented_availability_checked_at_utc") or "").replace(
             "Z", "+00:00"
         )
     )
@@ -152,6 +156,23 @@ def _validate_answer_agreement_config(value: Any) -> None:
     end = date.fromisoformat(str(value.get("price_valid_through")))
     if not start <= date.today() <= end:
         raise ValueError("answer agreement pricing is not active")
+
+
+def _validate_legacy_answer_agreement_config(value: Any) -> None:
+    """Keep the immutable v3 route readable for reviewed ledger recovery."""
+    if not isinstance(value, dict):
+        raise ValueError("the legacy answer agreement configuration is invalid")
+    exact = {
+        "model": "gemini-2.5-flash-lite",
+        "maximum_input_tokens": 1_048_576,
+        "model_output_token_limit": 65_536,
+        "maximum_output_tokens": 4,
+        "thinking_budget": 0,
+        "input_usd_per_million_tokens": "0.10",
+        "output_usd_per_million_tokens_including_thinking": "0.40",
+    }
+    if any(value.get(name) != expected for name, expected in exact.items()):
+        raise ValueError("the legacy answer agreement configuration changed")
 
 
 def model_config_for_stage(config: dict[str, Any], stage: str) -> dict[str, Any]:

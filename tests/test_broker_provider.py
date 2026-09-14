@@ -73,7 +73,7 @@ class JudgeTransport(Transport):
             return {"totalTokens": 100}
         return {
             "responseId": "judge-response-1",
-            "modelVersion": "gemini-2.5-flash-lite",
+            "modelVersion": "gemini-3.1-flash-lite",
             "candidates": [
                 {
                     "finishReason": "STOP",
@@ -204,16 +204,16 @@ def test_answer_judge_uses_flash_lite_and_reuses_immutable_receipt(
     assert first.payload == "yes"
     assert second == first
     assert transport.methods == ["countTokens", "generateContent"]
-    assert transport.models == ["gemini-2.5-flash-lite"] * 2
+    assert transport.models == ["gemini-3.1-flash-lite"] * 2
     generation = transport.bodies[1]["generationConfig"]
     assert generation["responseMimeType"] == "text/x.enum"
     assert generation["responseJsonSchema"] == schema
     assert generation["maxOutputTokens"] == 4
-    assert generation["thinkingConfig"] == {"thinkingBudget": 0}
+    assert generation["thinkingConfig"] == {"thinkingLevel": "minimal"}
     receipt = json.loads(Path(reference["receipt_file"]).read_text(encoding="utf-8"))
-    assert receipt["model"] == "gemini-2.5-flash-lite"
+    assert receipt["model"] == "gemini-3.1-flash-lite"
     assert receipt["stage"] == "answer_agreement"
-    assert receipt["actual_cost_usd"] == "0.000011"
+    assert receipt["actual_cost_usd"] == "0.000027"
     assert broker.status()["stages"]["answer_agreement"]["submissions"] == 1
 
 

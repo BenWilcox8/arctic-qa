@@ -22,7 +22,8 @@ UNIT_FACTORS: dict[tuple[str, str], Decimal] = {
 }
 SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v3"
 LEGACY_SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v2"
-GENERATION_PROMPT_VERSION = "arctic-qa-generation-v19"
+GENERATION_PROMPT_VERSION = "arctic-qa-generation-v20"
+STANDALONE_VERIFICATION_CONTRACT_VERSION = "source-blind-standalone-gate-v1"
 ANSWER_AGREEMENT_CONTRACT_VERSION = "deterministic-first-answer-agreement-v1"
 ANSWER_AGREEMENT_PROMPT_VERSION = "answer-agreement-judge-v1"
 ANSWER_AGREEMENT_SYSTEM = """Decide whether two texts give the same answer to one question.
@@ -156,6 +157,27 @@ CANDIDATE_CONTRACTS = {
         "prompt_version": GENERATION_PROMPT_VERSION,
         "generation_attempt_contract_version": "bounded-paper-progression-v2",
         "answer_agreement_contract_version": ANSWER_AGREEMENT_CONTRACT_VERSION,
+        "question_verification_contract_version": (
+            QUESTION_VERIFICATION_CONTRACT_VERSION
+        ),
+        "numeric_rule_contract_version": NUMERIC_RULE_CONTRACT_VERSION,
+        "direct_value_contract_version": DIRECT_SOURCE_VALUE_CONTRACT_VERSION,
+        "scope_contract_version": SCOPE_CONTRACT_VERSION,
+        "scope_role_semantics_version": "scope-role-semantics-v2",
+        "scope_role_binding_contract_version": (
+            "scope-role-question-context-binding-v1"
+        ),
+        "evidence_combination_contract_version": (
+            EVIDENCE_COMBINATION_CONTRACT_VERSION
+        ),
+    },
+    "2.5.0": {
+        "prompt_version": GENERATION_PROMPT_VERSION,
+        "generation_attempt_contract_version": "bounded-paper-progression-v2",
+        "answer_agreement_contract_version": ANSWER_AGREEMENT_CONTRACT_VERSION,
+        "standalone_verification_contract_version": (
+            STANDALONE_VERIFICATION_CONTRACT_VERSION
+        ),
         "question_verification_contract_version": (
             QUESTION_VERIFICATION_CONTRACT_VERSION
         ),
@@ -363,7 +385,7 @@ def _eligible_arctic_scope_error(
         eligibility_ids = (candidate.get("answer") or {}).get("eligibility_span_ids")
         if (
             candidate.get("schema_version")
-            not in {"2.1.0", "2.2.0", "2.3.0", "2.4.0"}
+            not in {"2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0"}
             or not isinstance(components, list)
             or not isinstance(eligibility_ids, list)
             or not eligibility_ids
@@ -411,6 +433,7 @@ def validate_candidate(
         "schema_valid": False,
         "evidence_located": False,
         "scope_complete": False,
+        "standalone_interpretable": False,
         "source_entailment_model_verified": False,
         "reconstruction_agreement": False,
         "deterministic_contradiction": False,
@@ -426,7 +449,10 @@ def validate_candidate(
     if schema_version not in CANDIDATE_CONTRACTS:
         reasons.append("unsafe_legacy_candidate_schema")
         return _finish(db, candidate, labels, reasons, [], "rejected")
-    if REQUIRED_ITEM_KEYS - candidate.keys() or not isinstance(
+    required_item_keys = REQUIRED_ITEM_KEYS | (
+        {"standalone_verification"} if schema_version == "2.5.0" else set()
+    )
+    if required_item_keys - candidate.keys() or not isinstance(
         candidate.get("answer"), dict
     ):
         reasons.append("schema_invalid")
@@ -495,6 +521,16 @@ def validate_candidate(
     ):
         reasons.append("generation_contract_version_mismatch")
         return _finish(db, candidate, labels, reasons, [], "rejected")
+    if schema_version == "2.5.0":
+        standalone = candidate.get("standalone_verification")
+        if not standalone_verification_resolves(candidate, standalone):
+            reasons.append("standalone_verification_unresolved")
+            labels["unresolved"] = True
+            return _finish(db, candidate, labels, reasons, [], "unresolved")
+        if standalone["pass"] is not True:
+            reasons.extend(_standalone_reason_codes(standalone))
+            return _finish(db, candidate, labels, reasons, [], "rejected")
+        labels["standalone_interpretable"] = True
     if not scope_is_evidence_bound(
         candidate["answer"].get("scope"), candidate["answer"]
     ):
@@ -593,7 +629,7 @@ def validate_candidate(
         labels["unresolved"] = True
         return _finish(db, candidate, labels, reasons, [], "unresolved")
     agreement = candidate.get("answer_agreement")
-    if schema_version == "2.4.0":
+    if schema_version in {"2.4.0", "2.5.0"}:
         if not answer_agreement_resolves(db, candidate, agreement):
             reasons.append("answer_agreement_unresolved")
             labels["unresolved"] = True
@@ -1729,7 +1765,7 @@ def answer_agreement_resolves(
     db: Database, candidate: dict[str, Any], agreement: Any
 ) -> bool:
     """Validate the deterministic result and an optional LLM fallback receipt."""
-    if candidate.get("schema_version") != "2.4.0" or not isinstance(
+    if candidate.get("schema_version") not in {"2.4.0", "2.5.0"} or not isinstance(
         agreement, dict
     ):
         return False
@@ -1870,6 +1906,11 @@ def _qa_verification_receipts_match(db: Database, candidate: dict[str, Any]) -> 
         else stable_id("unit", finding_id, arm)
     )
     records = {
+        **(
+            {"standalone_verifier": candidate.get("standalone_verification")}
+            if candidate.get("schema_version") == "2.5.0"
+            else {}
+        ),
         "reconstructor": candidate.get("reconstruction"),
         "answer_verifier": candidate.get("answer_verification"),
     }
@@ -1905,6 +1946,62 @@ def _qa_verification_receipts_match(db: Database, candidate: dict[str, Any]) -> 
             return False
         if not _response_matches_resolved_record(response, record):
             return False
+    return True
+
+
+def _standalone_reason_codes(verification: dict[str, Any]) -> list[str]:
+    reasons = [
+        f"standalone_{reason}" for reason in verification.get("reasons", [])
+    ]
+    if verification.get("answer_leakage_absent") is not True:
+        reasons.append("standalone_answer_leakage")
+    return list(dict.fromkeys(reasons or ["standalone_gate_failed"]))
+
+
+def standalone_verification_resolves(
+    candidate: dict[str, Any], verification: Any
+) -> bool:
+    """Validate one source-blind decision and its retained model receipt."""
+    if not isinstance(verification, dict) or set(verification) != {
+        "contract_version",
+        "pass",
+        "answer_leakage_absent",
+        "unresolved_phrases",
+        "missing_detail_types",
+        "reasons",
+        "review_rationale",
+    }:
+        return False
+    if verification.get("contract_version") != STANDALONE_VERIFICATION_CONTRACT_VERSION:
+        return False
+    if type(verification.get("pass")) is not bool or type(
+        verification.get("answer_leakage_absent")
+    ) is not bool:
+        return False
+    for field in ("unresolved_phrases", "missing_detail_types", "reasons"):
+        values = verification.get(field)
+        if not isinstance(values, list) or any(
+            not isinstance(value, str) or not value for value in values
+        ):
+            return False
+    if not isinstance(verification.get("review_rationale"), str) or not verification[
+        "review_rationale"
+    ]:
+        return False
+    if verification["pass"] is True and (
+        verification["answer_leakage_absent"] is not True
+        or verification["unresolved_phrases"]
+        or verification["missing_detail_types"]
+        or verification["reasons"]
+    ):
+        return False
+    if verification["pass"] is False and not (
+        verification["reasons"]
+        or verification["unresolved_phrases"]
+        or verification["missing_detail_types"]
+        or verification["answer_leakage_absent"] is False
+    ):
+        return False
     return True
 
 

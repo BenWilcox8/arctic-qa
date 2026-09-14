@@ -209,7 +209,7 @@ def test_compound_unit_rule_without_source_tolerance_remains_rejected() -> None:
 def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
     properties = generation_module.NUMERIC_RULE_SCHEMA["properties"]
 
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v19"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v20"
     assert (
         generation_module.NUMERIC_RULE_CONTRACT_VERSION
         == "numeric-rule-source-support-v2"
@@ -264,7 +264,7 @@ def test_generation_prompt_requires_atomic_answers_and_aligned_questions() -> No
 
 
 def test_generation_schemas_require_concise_review_justifications() -> None:
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v19"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v20"
     assert (
         generation_module.MODEL_JUSTIFICATION_CONTRACT_VERSION
         == "model-justification-v1"
@@ -1540,8 +1540,8 @@ def test_streaming_maximum_comes_from_immutable_input_count(tmp_path: Path) -> N
         run_stream(**{**arguments, "max_papers": 502})
 
 
-def test_streaming_uses_one_shared_broker_for_all_ten_stages(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_streaming_uses_one_shared_broker_for_all_eleven_calls(
+    tmp_path: Path,
 ) -> None:
     access, eligibility = streaming_fixture(tmp_path)
     eligibility_inputs = broker_eligibility_inputs(tmp_path)
@@ -1581,9 +1581,9 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
         "live_provider": True,
     }
     status = broker.status()
-    assert status["generation_submissions"] == 10
+    assert status["generation_submissions"] == 11
     assert status["accepted_question_count"] == 1
-    assert transport.custody_checks == 20
+    assert transport.custody_checks == 22
     access_item = json.loads(next((access / "items").glob("*.json")).read_text())
     family_id = stable_id("family", access_item["candidate_key"])
     assert set(status["papers"]) == {family_id}
@@ -1598,6 +1598,7 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
         "eligibility": 1,
         "finding_answer_extraction": 1,
         "question_generation": 1,
+        "standalone_verification": 1,
         "blinded_reconstruction": 1,
         "answer_verification": 1,
         "distractor_generation": 1,
@@ -1635,16 +1636,19 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
         "page_id": None,
         "section_id": "extracted-text",
     }
-    assert transport.methods.count("generateContent") == 10
+    assert transport.methods.count("generateContent") == 11
     prompts = dict(transport.role_prompts)
     assert (
         "Select one atomic claim from a complete prose finding sentence"
         in prompts["extractor"]
     )
     assert (
-        "Do not select a title, heading, figure or table caption"
+        "Do not select a title, heading, caption"
         in prompts["extractor"]
     )
+    assert "SOURCE_DATA" not in prompts["standalone_verifier"]
+    assert "ANSWER_RECORD" not in prompts["standalone_verifier"]
+    assert "RECONSTRUCTION" not in prompts["standalone_verifier"]
     assert (
         "Each non-null scope value must also appear in required_question_phrases"
         in prompts["extractor"]
@@ -1676,8 +1680,8 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
 
     assert resumed["resumed_papers"] == 1
     assert resumed["counts"]["accepted_base_questions"] == 1
-    assert broker.status()["generation_submissions"] == 10
-    assert transport.methods.count("generateContent") == 10
+    assert broker.status()["generation_submissions"] == 11
+    assert transport.methods.count("generateContent") == 11
     jobs = [
         json.loads(path.read_text()) for path in (eligibility / "jobs").glob("*.json")
     ]
@@ -1746,7 +1750,7 @@ def test_same_campaign_regenerates_a_stale_terminal_candidate(
     assert second["counts"]["generation_rejected"] == 1
     assert len(candidates) == 2
     assert {json.loads(row["candidate_json"])["provenance"]["prompt_version"] for row in candidates} == {
-        "arctic-qa-generation-v19",
+        "arctic-qa-generation-v20",
         "arctic-qa-generation-test-next",
     }
 
@@ -1802,13 +1806,13 @@ def test_new_campaign_regenerates_a_paper_with_historical_accepted_output(
     assert production["counts"]["accepted_base_questions"] == 1
     assert production["resumed_papers"] == 0
     assert production_item != historical_item
-    assert broker.status()["generation_submissions"] == 10
-    assert transport.methods.count("generateContent") == 10
+    assert broker.status()["generation_submissions"] == 11
+    assert transport.methods.count("generateContent") == 11
     assert (
         database.one(
             "SELECT COUNT(*) AS count FROM calls WHERE run_id='new-production-campaign'"
         )["count"]
-        == 10
+        == 11
     )
     jobs = list((production_eligibility / "jobs").glob("*.json"))
     assert len(jobs) == 1
@@ -1934,7 +1938,7 @@ def test_streaming_live_gate_binds_reviewed_access_input_before_transport(
     result = run_stream(**arguments, access_run_dir=reviewed_access)
 
     assert result["counts"]["accepted_base_questions"] == 1
-    assert transport.methods.count("generateContent") == 10
+    assert transport.methods.count("generateContent") == 11
 
 
 def test_streaming_resumes_reconciled_eligibility_after_process_restart(
@@ -2024,9 +2028,9 @@ def test_streaming_resumes_reconciled_eligibility_after_process_restart(
     )
 
     assert result["counts"]["accepted_base_questions"] == 1
-    assert transport.methods.count("generateContent") == 10
+    assert transport.methods.count("generateContent") == 11
     status = restarted_broker.status()
-    assert status["generation_submissions"] == 10
+    assert status["generation_submissions"] == 11
     assert status["stages"]["eligibility"]["submissions"] == 1
     assert database.one(
         "SELECT status,error_code,error_text FROM calls WHERE role='eligibility'"
@@ -2115,8 +2119,8 @@ def test_live_stream_cli_runs_inline_eligibility_and_qa(
     assert exit_code == 0
     result = json.loads(capsys.readouterr().out)
     assert result["counts"]["accepted_base_questions"] == 1
-    assert broker.status()["generation_submissions"] == 10
-    assert transport.methods.count("generateContent") == 10
+    assert broker.status()["generation_submissions"] == 11
+    assert transport.methods.count("generateContent") == 11
 
 
 def test_streaming_live_cli_obeys_disabled_broker_gate_before_credentials(
@@ -2232,12 +2236,17 @@ def test_failed_reconstruction_never_reaches_distractor_generation(
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    verifier_events[0]["response"]["ambiguity_label"] = "multiple_answers"
-    verifier_events[0]["response"]["alternatives"] = ["1.9 m"]
+    verifier_events[1]["response"]["ambiguity_label"] = "multiple_answers"
+    verifier_events[1]["response"]["alternatives"] = ["1.9 m"]
     verifier_script = tmp_path / "ambiguous-verifier.jsonl"
     verifier_script.write_text(
         "\n".join(
-            json.dumps(event) for event in [verifier_events[0], verifier_events[1]]
+            json.dumps(event)
+            for event in [
+                verifier_events[0],
+                verifier_events[1],
+                verifier_events[2],
+            ]
         )
         + "\n",
         encoding="utf-8",
@@ -2272,7 +2281,7 @@ def test_failed_reconstruction_never_reaches_distractor_generation(
     assert result["counts"]["accepted_base_questions"] == 0
     assert result["counts"]["generation_rejected"] == 1
     status = broker.status()
-    assert status["generation_submissions"] == 7
+    assert status["generation_submissions"] == 8
     assert "distractor_generation" not in status["stages"]
     assert "option_verification" not in status["stages"]
 
@@ -2285,8 +2294,8 @@ def test_true_distractor_is_removed_before_streaming_export(tmp_path: Path) -> N
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    verifier_events[2]["response"]["contradiction_established"] = False
-    verifier_events[2]["response"]["question_admits_option_as_correct"] = True
+    verifier_events[3]["response"]["contradiction_established"] = False
+    verifier_events[3]["response"]["question_admits_option_as_correct"] = True
     verifier_script = tmp_path / "true-option-verifier.jsonl"
     verifier_script.write_text(
         "\n".join(json.dumps(event) for event in verifier_events) + "\n",
@@ -2327,8 +2336,14 @@ def test_true_distractor_is_removed_before_streaming_export(tmp_path: Path) -> N
 
 
 def test_short_answer_without_three_distractors_is_not_counted_as_accepted(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    def clear_test_rate_window(broker: SharedGeminiBroker) -> None:
+        ledger = json.loads(broker.ledger_file.read_text(encoding="utf-8"))
+        ledger["recent_submission_times_utc"] = []
+        write_json(broker.ledger_file, ledger)
+
+    monkeypatch.setattr(SharedGeminiBroker, "_pace", clear_test_rate_window)
     access, eligibility = streaming_fixture(tmp_path)
     author_events = [
         json.loads(line)
@@ -2336,10 +2351,6 @@ def test_short_answer_without_three_distractors_is_not_counted_as_accepted(
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    revised_question_writer = json.loads(json.dumps(author_events[1]))
-    revised_question_writer["response"]["question"] = (
-        "What reported water depth was documented in the study?"
-    )
     alternative_author_script = tmp_path / "incomplete-alternative-author.jsonl"
     alternative_author_script.write_text(
         "\n".join(
@@ -2348,10 +2359,12 @@ def test_short_answer_without_three_distractors_is_not_counted_as_accepted(
                 author_events[0],
                 author_events[1],
                 author_events[2],
-                author_events[1],
-                revised_question_writer,
+                author_events[2],
                 author_events[2],
                 author_events[0],
+                author_events[2],
+                author_events[2],
+                author_events[2],
             ]
         )
         + "\n",
@@ -2363,13 +2376,20 @@ def test_short_answer_without_three_distractors_is_not_counted_as_accepted(
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    verifier_events[2]["response"]["question_admits_option_as_correct"] = True
     verifier_events[3]["response"]["question_admits_option_as_correct"] = True
+    verifier_events[4]["response"]["question_admits_option_as_correct"] = True
     verifier_script = tmp_path / "two-accepted-distractor-verifier.jsonl"
     verifier_script.write_text(
         "\n".join(
             json.dumps(event)
-            for event in [*verifier_events, *json.loads(json.dumps(verifier_events))]
+            for event in [
+                *verifier_events,
+                *json.loads(json.dumps(verifier_events[3:])),
+                *json.loads(json.dumps(verifier_events[3:])),
+                *json.loads(json.dumps(verifier_events[3:])),
+                *json.loads(json.dumps(verifier_events[3:])),
+                *json.loads(json.dumps(verifier_events[3:])),
+            ]
         )
         + "\n",
         encoding="utf-8",
@@ -2416,13 +2436,27 @@ def test_short_answer_without_three_distractors_is_not_counted_as_accepted(
     )
     assert progress["counts"]["accepted_qa"] == 0
 
+    attempts = [
+        json.loads(row["candidate_json"])
+        for row in database.rows("SELECT candidate_json FROM candidates")
+    ]
+    assert {attempt["question"] for attempt in attempts} == {
+        "What reported water depth was documented?"
+    }
+    assert broker.status()["stages"]["question_generation"]["submissions"] == 1
+    assert broker.status()["stages"]["distractor_generation"]["submissions"] == 3
+    assert sum(
+        bool(attempt["provenance"].get("distractor_only_retry"))
+        for attempt in attempts
+    ) == 2
+
     base = database.one("SELECT * FROM candidates WHERE status='incomplete_non_mcq'")
     targeted_author = FakeProvider("gemini-3.8-flash", FIXTURES / "fake-author.jsonl")
     targeted_verifier = FakeProvider(
         "gemini-3.8-flash", FIXTURES / "fake-verifier.jsonl"
     )
     targeted_author.position = 2
-    targeted_verifier.position = 2
+    targeted_verifier.position = 3
     resumed = resume_candidate_distractors(
         database,
         paths.namespace,
@@ -2709,7 +2743,7 @@ def test_live_stream_records_schema_invalid_reconstruction_and_advances(
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    invalid_reconstruction = json.loads(json.dumps(verifier_events[0]))
+    invalid_reconstruction = json.loads(json.dumps(verifier_events[1]))
     invalid_reconstruction["response"]["numeric"] = {
         "canonical_value": "",
         "unit": "",
@@ -2723,7 +2757,12 @@ def test_live_stream_records_schema_invalid_reconstruction_and_advances(
     )
     verifier_script.write_text(
         "\n".join(
-            json.dumps(event) for event in [invalid_reconstruction, *verifier_events]
+            json.dumps(event)
+            for event in [
+                verifier_events[0],
+                invalid_reconstruction,
+                *verifier_events,
+            ]
         )
         + "\n",
         encoding="utf-8",

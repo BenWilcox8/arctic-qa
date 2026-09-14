@@ -236,7 +236,7 @@ Most stages use JSON objects.
 The answer-agreement fallback uses the `yes` or `no` enum.
 
 The base Gemini model uses low thinking.
-The `gemini-2.5-flash-lite` answer judge uses a thinking budget of zero.
+The `gemini-3.1-flash-lite` answer judge uses minimal thinking.
 
 The broker selects the registered model and price by stage.
 The answer-agreement stage keeps the same request identity, receipt, resume, and budget controls.

@@ -22,6 +22,7 @@ ROLE_STAGES = {
     "eligibility": "eligibility",
     "extractor": "finding_answer_extraction",
     "question_writer": "question_generation",
+    "standalone_verifier": "standalone_verification",
     "direct_joint": "question_generation",
     "reconstructor": "blinded_reconstruction",
     "answer_judge": "answer_agreement",

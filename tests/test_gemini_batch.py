@@ -148,16 +148,16 @@ def test_batch_answer_judge_uses_flash_lite_price_and_payload(
     key = next(iter(state["requests"]))
     request = store.prepared_record(key)
     assert request["stage"] == "answer_agreement"
-    assert request["model"] == "gemini-2.5-flash-lite"
+    assert request["model"] == "gemini-3.1-flash-lite"
     assert request["batch_pricing"] == {
-        "input_usd_per_million_tokens": "0.05",
-        "output_usd_per_million_tokens_including_thinking": "0.20",
+        "input_usd_per_million_tokens": "0.125",
+        "output_usd_per_million_tokens_including_thinking": "0.75",
         "valid_through": "2026-12-31",
         "source": "https://ai.google.dev/gemini-api/docs/pricing",
     }
     generation = request["request"]["generationConfig"]
     assert generation["responseMimeType"] == "text/x.enum"
-    assert generation["thinkingConfig"] == {"thinkingBudget": 0}
+    assert generation["thinkingConfig"] == {"thinkingLevel": "minimal"}
     manifest = store.make_round(
         run_identity={"run_id": "judge-batch-run"},
         ordered_inputs=[
@@ -170,7 +170,7 @@ def test_batch_answer_judge_uses_flash_lite_price_and_payload(
         ],
     )
     assert manifest is not None
-    assert manifest["model"] == "gemini-2.5-flash-lite"
+    assert manifest["model"] == "gemini-3.1-flash-lite"
     assert manifest["pricing"] == request["batch_pricing"]
 
 
@@ -926,6 +926,7 @@ def test_staged_batch_pipeline_uses_real_prompts_and_exports_accepted_output(
         "eligibility": 1,
         "finding_answer_extraction": 1,
         "question_generation": 1,
+        "standalone_verification": 1,
         "blinded_reconstruction": 1,
         "answer_verification": 1,
         "distractor_generation": 1,
@@ -960,8 +961,19 @@ def test_batch_pipeline_reuses_bounded_question_revision_contract(
     seen_stage_counts: dict[str, int] = {}
 
     def revised_response(record: dict[str, Any]) -> dict[str, Any]:
-        payload = scripted_payload(record)
         prompt = record["request"]["contents"][0]["parts"][0]["text"]
+        if record["role"] == "standalone_verifier" and "as 2.0 m?" in prompt:
+            payload = {
+                "contract_version": "source-blind-standalone-gate-v1",
+                "pass": False,
+                "answer_leakage_absent": False,
+                "unresolved_phrases": [],
+                "missing_detail_types": [],
+                "reasons": ["answer_leakage"],
+                "review_rationale": "The displayed question contains its answer.",
+            }
+        else:
+            payload = scripted_payload(record)
         if record["role"] == "question_writer" and "QUESTION_REVISION" not in prompt:
             payload["question"] = (
                 "What reported water depth was documented as 2.0 m?"
@@ -1030,6 +1042,7 @@ def test_batch_pipeline_reuses_bounded_question_revision_contract(
         "eligibility": 1,
         "question_generation": 2,
         "finding_answer_extraction": 1,
+        "standalone_verification": 2,
         "blinded_reconstruction": 2,
         "answer_verification": 2,
         "distractor_generation": 1,

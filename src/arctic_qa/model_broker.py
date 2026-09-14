@@ -26,6 +26,7 @@ STAGES = {
     "eligibility",
     "finding_answer_extraction",
     "question_generation",
+    "standalone_verification",
     "blinded_reconstruction",
     "answer_agreement",
     "answer_verification",
@@ -94,6 +95,7 @@ TRANSITION_GATE_SUCCESSOR_FIELDS = {
     "review_record_sha256",
 }
 PRETRANSPORT_SETTLEMENT_SCHEMA = "shared-paid-call-pretransport-settlement-v1"
+COUNT_ERROR_CONTINUATION_SCHEMA = "shared-paid-call-count-error-continuation-v1"
 AMBIGUOUS_CONTINUATION_SCHEMA = "shared-paid-call-ambiguous-continuation-v1"
 AMBIGUOUS_CONTINUATION_EVIDENCE_SCHEMA = (
     "shared-paid-call-ambiguous-continuation-evidence-v1"
@@ -455,6 +457,10 @@ def _validate_payload(payload: dict[str, Any], config: dict[str, Any]) -> None:
     thinking = generation.get("thinkingConfig")
     if "thinking_budget" in config and thinking != {
         "thinkingBudget": config["thinking_budget"]
+    }:
+        raise ValueError("the broker thinking control changed")
+    if config.get("model") == "gemini-3.1-flash-lite" and thinking != {
+        "thinkingLevel": config["thinking_level"]
     }:
         raise ValueError("the broker thinking control changed")
     for instruction in (payload.get("systemInstruction"), *payload.get("contents", [])):
@@ -1515,6 +1521,34 @@ class SharedGeminiBroker:
             final = _read(final_path)
             if any(final.get(name) != request.get(name) for name in base_fields):
                 raise ValueError("an immutable final event changed request identity")
+            count_error_path = (
+                self.receipts_dir / f"{request_key}.count-error-continuation.json"
+            )
+            count_error_sha256 = request.get("count_error_continuation_sha256")
+            if count_error_sha256 is not None:
+                event = _read(count_error_path) if count_error_path.is_file() else {}
+                review_path = Path(str(event.get("review_file") or ""))
+                evidence_path = Path(str(event.get("evidence_file") or ""))
+                if (
+                    state != "count_error"
+                    or not re.fullmatch(r"[a-f0-9]{64}", str(count_error_sha256))
+                    or not count_error_path.is_file()
+                    or sha256_file(count_error_path) != count_error_sha256
+                    or event.get("schema") != COUNT_ERROR_CONTINUATION_SCHEMA
+                    or event.get("request_key") != request_key
+                    or event.get("count_error_receipt_sha256")
+                    != sha256_file(final_path)
+                    or event.get("gate_sha256") != request.get("gate_sha256")
+                    or event.get("live_call_made") is not False
+                    or event.get("replay_prohibited") is not True
+                    or not review_path.is_file()
+                    or event.get("review_file_sha256") != sha256_file(review_path)
+                    or not evidence_path.is_file()
+                    or event.get("evidence_file_sha256") != sha256_file(evidence_path)
+                ):
+                    raise ValueError("a count-error continuation event changed")
+            elif count_error_path.is_file():
+                raise ValueError("an unapplied count-error continuation event exists")
             settlement_path = (
                 self.receipts_dir / f"{request_key}.pretransport-settlement.json"
             )
@@ -3401,6 +3435,120 @@ class SharedGeminiBroker:
                     "applied": True,
                     "settlement_receipt": str(settlement_path),
                     "settlement_receipt_sha256": settlement_sha256,
+                }
+        finally:
+            operation.close()
+
+    def authorize_count_error_continuation(
+        self,
+        *,
+        request_key: str,
+        expected_ledger_sha256: str,
+        review_file: Path,
+        evidence_file: Path,
+    ) -> dict[str, Any]:
+        """Clear one reviewed pretransport count error without replaying it."""
+        operation = self._operation_lock_file.open("a+")
+        try:
+            fcntl.flock(operation, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            operation.close()
+            raise ValueError("another paid broker operation is active") from error
+        try:
+            with self._lock_file.open("a+") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                ledger = self._validated_ledger()
+                if sha256_file(self.ledger_file) != expected_ledger_sha256:
+                    raise ValueError("the reviewed count-error ledger changed")
+                request = ledger["requests"].get(request_key)
+                final_path = self.receipts_dir / f"{request_key}.json"
+                continuation_path = (
+                    self.receipts_dir
+                    / f"{request_key}.count-error-continuation.json"
+                )
+                if request is None or not final_path.is_file():
+                    raise ValueError("the reviewed count-error request is absent")
+                applied_hash = request.get("count_error_continuation_sha256")
+                if applied_hash is not None:
+                    if (
+                        not continuation_path.is_file()
+                        or sha256_file(continuation_path) != applied_hash
+                    ):
+                        raise ValueError("the count-error continuation record changed")
+                    return {
+                        "schema": "shared-paid-call-count-error-continuation-result-v1",
+                        "request_key": request_key,
+                        "applied": False,
+                        "continuation_receipt": str(continuation_path),
+                        "continuation_receipt_sha256": applied_hash,
+                    }
+                final = _read(final_path)
+                if (
+                    request.get("state") != "count_error"
+                    or final.get("state") != "count_error"
+                    or final.get("live_call_made") is not False
+                    or request.get("reason") != "HTTPError: HTTP Error 404: Not Found"
+                    or final.get("error") != request.get("reason")
+                    or request.get("stage") != "answer_agreement"
+                    or request.get("model") != "gemini-2.5-flash-lite"
+                ):
+                    raise ValueError("the request is not the reviewed countTokens 404")
+                if not review_file.is_file() or not evidence_file.is_file():
+                    raise ValueError("the reviewed count-error evidence is absent")
+                gate_record = _read(self.execution_gate_file)
+                gate = _validate_gate(
+                    self.execution_gate_file, str(gate_record.get("allowed_phase"))
+                )
+                if request.get("gate_sha256") != sha256_file(self.execution_gate_file):
+                    raise ValueError("the reviewed count-error gate changed")
+                evidence = _read(evidence_file)
+                if evidence != {
+                    "schema": "arctic-answer-judge-count-error-evidence-v1",
+                    "request_key": request_key,
+                    "count_tokens_http_status": 404,
+                    "live_call_made": False,
+                    "replay_prohibited": True,
+                    "replacement_model": "gemini-3.1-flash-lite",
+                }:
+                    raise ValueError("the count-error evidence is not exact")
+                event = {
+                    "schema": COUNT_ERROR_CONTINUATION_SCHEMA,
+                    "request_key": request_key,
+                    "count_error_receipt_sha256": sha256_file(final_path),
+                    "ledger_sha256_before": expected_ledger_sha256,
+                    "gate_sha256": request["gate_sha256"],
+                    "integrated_code_commit": gate["integrated_code_commit"],
+                    "review_file": str(review_file.resolve()),
+                    "review_file_sha256": sha256_file(review_file),
+                    "evidence_file": str(evidence_file.resolve()),
+                    "evidence_file_sha256": sha256_file(evidence_file),
+                    "live_call_made": False,
+                    "replay_prohibited": True,
+                    "authorized_at_utc": _now(),
+                }
+                atomic_json(continuation_path, event, immutable=True)
+                continuation_sha256 = sha256_file(continuation_path)
+                request["count_error_continuation_sha256"] = continuation_sha256
+                unresolved = [
+                    value
+                    for value in ledger["requests"].values()
+                    if value.get("state") == "count_error"
+                    and not value.get("count_error_continuation_sha256")
+                ]
+                if unresolved or int(ledger["inflight"]) != 0:
+                    raise ValueError("another count error or inflight request remains")
+                ledger["halted"] = False
+                ledger["halt_reason"] = None
+                ledger["updated_at_utc"] = _now()
+                self._validate_ledger(ledger)
+                self._validate_immutable_events(ledger)
+                self._commit_ledger(ledger)
+                return {
+                    "schema": "shared-paid-call-count-error-continuation-result-v1",
+                    "request_key": request_key,
+                    "applied": True,
+                    "continuation_receipt": str(continuation_path),
+                    "continuation_receipt_sha256": continuation_sha256,
                 }
         finally:
             operation.close()

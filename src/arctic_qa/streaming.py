@@ -59,6 +59,23 @@ REPAIRABLE_QUESTION_REASONS = frozenset(
         "scope_qualifier_not_source_bound",
         "source_entailment_not_verified",
         "insufficient_verified_distractors",
+        "standalone_gate_failed",
+        "standalone_verification_unresolved",
+        "standalone_undefined_subject_or_system",
+        "standalone_undefined_measured_variable",
+        "standalone_undefined_unit_meaning",
+        "standalone_undefined_percentage_basis",
+        "standalone_undefined_acronym",
+        "standalone_undefined_location",
+        "standalone_undefined_period_or_event",
+        "standalone_undefined_population_or_sample",
+        "standalone_undefined_treatment_or_condition",
+        "standalone_undefined_comparison_basis",
+        "standalone_unresolved_study_local_referent",
+        "standalone_source_dependent_locator",
+        "standalone_answer_leakage",
+        "standalone_multiple_interpretations",
+        "standalone_malformed_text",
     }
 )
 ALTERNATIVE_FINDING_REASONS = frozenset(
@@ -1327,9 +1344,8 @@ def _next_generation_attempt(
                 trigger_reason_code=reason_codes[0],
                 excluded_finding_span_ids=excluded,
             )
-    reason_is_repairable = (
-        len(reason_codes) == 1
-        and reason_codes[0] in REPAIRABLE_QUESTION_REASONS
+    reason_is_repairable = bool(reason_codes) and all(
+        reason in REPAIRABLE_QUESTION_REASONS for reason in reason_codes
     )
     next_revision = int(failed_attempt["question_revision_index"]) + 1
     if reason_is_repairable and next_revision <= MAX_QUESTION_REVISIONS:

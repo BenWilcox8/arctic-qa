@@ -253,16 +253,16 @@ class BatchStore:
                 "the standard output price does not match the batch price record"
             )
         agreement_config = model_config_for_stage(self.config, "answer_agreement")
-        if agreement_config["model"] != "gemini-2.5-flash-lite" or (
+        if agreement_config["model"] != "gemini-3.1-flash-lite" or (
             "batchGenerateContent"
-            not in agreement_config.get("authenticated_supported_methods", [])
+            not in agreement_config.get("documented_supported_methods", [])
         ):
             raise ValueError(
                 "the configured answer agreement model lacks batch support evidence"
             )
         if _batch_pricing(agreement_config) != {
-            "input_usd_per_million_tokens": "0.05",
-            "output_usd_per_million_tokens_including_thinking": "0.20",
+            "input_usd_per_million_tokens": "0.125",
+            "output_usd_per_million_tokens_including_thinking": "0.75",
             "valid_through": agreement_config["price_valid_through"],
             "source": PRICING_SOURCE,
         }:

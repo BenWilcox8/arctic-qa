@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import urllib.error
 from decimal import Decimal
 from pathlib import Path
 
@@ -128,6 +129,7 @@ def fixture(
     enabled: bool = True,
     transport=None,
     prior_construction_spend_usd: Decimal = Decimal("0"),
+    price_config_file: Path | None = None,
 ) -> dict:
     gate = tmp_path / "gate.json"
     write_json(
@@ -147,7 +149,9 @@ def fixture(
     credential.chmod(0o600)
     broker = SharedGeminiBroker(
         policy_file=ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
-        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        price_config_file=(
+            price_config_file or ROOT / "config" / "gemini-eligibility-v1.json"
+        ),
         execution_gate_file=gate,
         ledger_file=tmp_path / "shared-ledger.json",
         receipts_dir=tmp_path / "receipts",
@@ -835,6 +839,113 @@ def test_count_error_is_durable_and_never_generates(tmp_path: Path):
     assert ledger["requests"][receipt["request_key"]]["state"] == "count_error"
     assert values["broker"].status()["halted"] is True
     assert transport.methods == ["countTokens"]
+
+
+def test_reviewed_count_error_continuation_clears_halt_without_replay(
+    tmp_path: Path,
+) -> None:
+    legacy = json.loads(
+        (ROOT / "config" / "gemini-eligibility-v1.json").read_text()
+    )
+    legacy["config_id"] = "arctic-gemini-eligibility-r1-config-v3"
+    legacy["stage_models"]["answer_agreement"] = {
+        "model": "gemini-2.5-flash-lite",
+        "maximum_input_tokens": 1_048_576,
+        "model_output_token_limit": 65_536,
+        "maximum_output_tokens": 4,
+        "thinking_budget": 0,
+        "input_usd_per_million_tokens": "0.10",
+        "output_usd_per_million_tokens_including_thinking": "0.40",
+        "price_valid_from": "2026-09-14",
+        "price_valid_through": "2026-12-31",
+        "price_source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "model_source": (
+            "https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-lite"
+        ),
+        "thinking_source": (
+            "https://ai.google.dev/gemini-api/docs/generate-content/thinking"
+        ),
+        "structured_output_source": "https://ai.google.dev/api/generate-content",
+        "authenticated_availability_endpoint": (
+            "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000"
+        ),
+        "authenticated_availability_checked_at_utc": "2026-09-14T20:25:00Z",
+        "authenticated_supported_methods": [
+            "generateContent",
+            "countTokens",
+            "createCachedContent",
+            "batchGenerateContent",
+        ],
+    }
+    legacy_path = tmp_path / "legacy-price.json"
+    write_json(legacy_path, legacy)
+    class Count404Transport(Transport):
+        def post(self, model: str, method: str, body: dict) -> dict:
+            self.methods.append(method)
+            raise urllib.error.HTTPError(
+                "https://example.invalid", 404, "Not Found", {}, None
+            )
+
+    transport = Count404Transport()
+    values = fixture(tmp_path, transport=transport, price_config_file=legacy_path)
+    body = payload()
+    body["generationConfig"].update(
+        {
+            "maxOutputTokens": 4,
+            "responseMimeType": "text/x.enum",
+            "responseJsonSchema": {"type": "string", "enum": ["yes", "no"]},
+            "thinkingConfig": {"thinkingBudget": 0},
+        }
+    )
+    key = broker_request_key(
+        model="gemini-2.5-flash-lite",
+        run_id="run-1",
+        phase="live_test",
+        stage="answer_agreement",
+        paper_id="p1",
+        family_id="family-p1",
+        source_version_id="source-p1",
+        payload=body,
+    )
+    receipt = values["broker"].execute(
+        phase="live_test",
+        run_id="run-1",
+        stage="answer_agreement",
+        paper_id="p1",
+        family_id="family-p1",
+        source_version_id="source-p1",
+        request_key=key,
+        payload=body,
+    )
+    review = tmp_path / "review.md"
+    review.write_text("The countTokens 404 recovery passed review.\n", encoding="utf-8")
+    evidence = tmp_path / "evidence.json"
+    write_json(
+        evidence,
+        {
+            "schema": "arctic-answer-judge-count-error-evidence-v1",
+            "request_key": key,
+            "count_tokens_http_status": 404,
+            "live_call_made": False,
+            "replay_prohibited": True,
+            "replacement_model": "gemini-3.1-flash-lite",
+        },
+    )
+
+    result = values["broker"].authorize_count_error_continuation(
+        request_key=key,
+        expected_ledger_sha256=sha256_file(values["ledger"]),
+        review_file=review,
+        evidence_file=evidence,
+    )
+
+    assert receipt["state"] == "count_error"
+    assert result["applied"] is True
+    assert values["broker"].status()["halted"] is False
+    assert transport.methods == ["countTokens"]
+    assert json.loads(values["ledger"].read_text())["requests"][key][
+        "count_error_continuation_sha256"
+    ] == result["continuation_receipt_sha256"]
 
 
 def test_request_key_and_payload_features_fail_closed(tmp_path: Path):

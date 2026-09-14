@@ -44,6 +44,7 @@ _ROLE_BY_STAGE = {
     "eligibility": "eligibility",
     "finding_answer_extraction": "extractor",
     "question_generation": "question_writer",
+    "standalone_verification": "standalone_verifier",
     "blinded_reconstruction": "reconstructor",
     "answer_agreement": "answer_judge",
     "answer_verification": "answer_verifier",
@@ -1454,7 +1455,25 @@ class PipelineTraceStore:
             answer = candidate.get("answer") or {}
             reconstruction = candidate.get("reconstruction") or {}
             verification = candidate.get("answer_verification") or {}
+            standalone = candidate.get("standalone_verification") or {}
             agreement = candidate.get("answer_agreement") or {}
+            if standalone.get("review_rationale"):
+                model_statements.append(
+                    {
+                        "label": "Source-blind standalone verifier statement",
+                        "text": str(standalone["review_rationale"]),
+                    }
+                )
+            if standalone.get("unresolved_phrases"):
+                model_statements.append(
+                    {
+                        "label": "Unresolved displayed phrases",
+                        "text": ", ".join(
+                            str(value)
+                            for value in standalone["unresolved_phrases"]
+                        ),
+                    }
+                )
             if verification.get("verification_rationale"):
                 model_statements.append(
                     {

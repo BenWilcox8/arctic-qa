@@ -312,8 +312,8 @@ def agreement_fallback_script(
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    events[0]["response"]["answer"] = reconstructed_answer
-    events[0]["response"].pop("numeric")
+    events[1]["response"]["answer"] = reconstructed_answer
+    events[1]["response"].pop("numeric")
     judge = {
         "role": "answer_judge",
         "require_prompt_contains": [
@@ -328,7 +328,7 @@ def agreement_fallback_script(
             else {"kind": "malformed"}
         ),
     }
-    events.insert(2, judge)
+    events.insert(3, judge)
     path = tmp_path / f"agreement-{verdict or 'malformed'}.jsonl"
     path.write_text(
         "\n".join(json.dumps(event) for event in events) + "\n",
@@ -1336,15 +1336,28 @@ def test_generation_runs_qa_gates_before_exact_option_verification(
             ("ordered-verification-run",),
         ).fetchall()
     roles = [row["role"] for row in calls]
-    assert roles[:5] == [
+    assert roles[:6] == [
         "extractor",
         "question_writer",
+        "standalone_verifier",
         "reconstructor",
         "answer_verifier",
         "distractor_writer",
     ]
-    assert roles[5:] == ["option_verifier"] * 4
-    assert item["schema_version"] == "2.4.0"
+    assert roles[6:] == ["option_verifier"] * 4
+    assert item["schema_version"] == "2.5.0"
+    assert item["standalone_verification"] == {
+        "contract_version": "source-blind-standalone-gate-v1",
+        "pass": True,
+        "answer_leakage_absent": True,
+        "unresolved_phrases": [],
+        "missing_detail_types": [],
+        "reasons": [],
+        "review_rationale": (
+            "The displayed task defines the measured variable and needs no "
+            "source-only referent."
+        ),
+    }
     assert item["answer_agreement"] == {
         "contract_version": "deterministic-first-answer-agreement-v1",
         "method": "deterministic",
@@ -1382,6 +1395,88 @@ def test_generation_runs_qa_gates_before_exact_option_verification(
         == "model-justification-v1"
     )
     assert receipt["validation"]["labels"]["mcq_eligible"] is True
+
+
+def test_source_blind_gate_rejects_undefined_metric_acronym_and_event(
+    tmp_path: Path,
+) -> None:
+    receipt = smoke(tmp_path, "standalone-gate-setup")
+    author_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-author.jsonl").read_text().splitlines()
+    ]
+    author_events[1]["response"]["question"] = (
+        "According to the table, what Chl a anomaly was reported at this time?"
+    )
+    author_path = tmp_path / "undefined-standalone-author.jsonl"
+    author_path.write_text(
+        "\n".join(json.dumps(event) for event in author_events) + "\n",
+        encoding="utf-8",
+    )
+    verifier_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-verifier.jsonl").read_text().splitlines()
+    ]
+    verifier_events[0] = {
+        "role": "standalone_verifier",
+        "require_prompt_contains": [
+            "According to the table",
+            "Chl a",
+            "at this time",
+        ],
+        "forbid_prompt_contains": [
+            "SOURCE_DATA",
+            "ANSWER_RECORD",
+            "RECONSTRUCTION",
+            "2.0 m",
+        ],
+        "response": {
+            "contract_version": "source-blind-standalone-gate-v1",
+            "pass": False,
+            "answer_leakage_absent": True,
+            "unresolved_phrases": ["Chl a", "at this time"],
+            "missing_detail_types": [
+                "measured_variable",
+                "acronym",
+                "period_or_event",
+            ],
+            "reasons": [
+                "undefined_measured_variable",
+                "undefined_acronym",
+                "undefined_period_or_event",
+                "source_dependent_locator",
+            ],
+            "review_rationale": (
+                "The displayed task omits the measurement definition and event."
+            ),
+        },
+    }
+    verifier_path = tmp_path / "undefined-standalone-verifier.jsonl"
+    verifier_path.write_text(
+        "\n".join(json.dumps(event) for event in verifier_events) + "\n",
+        encoding="utf-8",
+    )
+    command = list(
+        generate_command(receipt["screen"]["source_id"], "standalone-gate", author_path)
+    )
+    command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(
+        verifier_path
+    )
+
+    generated = json.loads(cli(tmp_path, *command).stdout)
+
+    assert generated["status"] == "qa_gate_failed"
+    assert generated["distractors"] == []
+    assert {
+        "standalone_undefined_measured_variable",
+        "standalone_undefined_acronym",
+        "standalone_undefined_period_or_event",
+        "standalone_source_dependent_locator",
+    } <= set(generated["qa_gate_reasons"])
+    assert generated["standalone_verification"]["unresolved_phrases"] == [
+        "Chl a",
+        "at this time",
+    ]
 
 
 def test_answer_agreement_fallback_accepts_historical_false_disagreement(
@@ -1682,11 +1777,11 @@ def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> No
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    events[0]["response"]["alternatives"] = ["another source-supported answer"]
-    events[0]["response"]["scope"]["method"] = "a conflicting method"
+    events[1]["response"]["alternatives"] = ["another source-supported answer"]
+    events[1]["response"]["scope"]["method"] = "a conflicting method"
     verifier = tmp_path / "ambiguous-verifier.jsonl"
     verifier.write_text(
-        "\n".join(json.dumps(event) for event in events[:2]) + "\n",
+        "\n".join(json.dumps(event) for event in events[:3]) + "\n",
         encoding="utf-8",
     )
     command = list(
@@ -1699,7 +1794,7 @@ def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> No
     command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(verifier)
     generated = json.loads(cli(tmp_path, *command).stdout)
     assert generated["status"] == "qa_gate_failed"
-    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v19"
+    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v20"
     assert (
         generated["provenance"]["numeric_rule_contract_version"]
         == "numeric-rule-source-support-v2"
@@ -1729,6 +1824,7 @@ def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> No
     assert roles == [
         "extractor",
         "question_writer",
+        "standalone_verifier",
         "reconstructor",
         "answer_verifier",
     ]

@@ -214,13 +214,13 @@ An accepted judge fallback adds one call.
 
 The broker reserves each request from its exact counted input and configured output cap.
 The base model uses low thinking.
-The answer-agreement judge uses a thinking budget of zero.
+The answer-agreement judge uses minimal thinking.
 The fixed output limits still include both candidate and thinking tokens.
 See [the Gemini structured-output budget correction](GEMINI_STRUCTURED_OUTPUT_BUDGET.md).
 The verified price record uses USD 0.75 per million input tokens.
 It uses USD 3.75 per million output and thinking tokens.
-The judge uses `gemini-2.5-flash-lite` at USD 0.10 per million input tokens.
-Its output costs USD 0.40 per million tokens.
+The judge uses `gemini-3.1-flash-lite` at USD 0.25 per million input tokens.
+Its output costs USD 1.50 per million tokens.
 Each request must reserve no more than USD 0.25.
 Each paper must use no more than USD 1.00.
 

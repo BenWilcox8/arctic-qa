@@ -41,8 +41,10 @@ A context change creates a different generated item and invalidates old option b
 ## Scope roles
 
 Generation roles use `scope-role-semantics-v2`.
-New candidates use generation prompt `arctic-qa-generation-v19`.
-They use scope contract `selected-evidence-literal-scope-v4` and candidate schema `2.4.0`.
+New candidates use generation prompt `arctic-qa-generation-v20`.
+They use scope contract `selected-evidence-literal-scope-v4` and candidate schema `2.5.0`.
+Before source-aware checks, a source-blind gate reads only the question and question context.
+It rejects missing definitions or answer leakage that make the displayed task ambiguous.
 Schema 2.4 records the answer-agreement method and confidence category.
 Deterministic agreement is authoritative and does not call a model.
 Only a deterministic mismatch can use the Gemini answer judge.

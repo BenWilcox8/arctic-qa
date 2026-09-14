@@ -12,6 +12,7 @@ from arctic_qa.validation import (
     question_context_leaks_answer,
     question_context_verification_reason,
     required_question_phrases_contain_answer,
+    standalone_verification_resolves,
 )
 
 
@@ -34,6 +35,29 @@ def test_required_acronym_context_passes_context_gates() -> None:
     assert question_context_verification_reason(
         context, answer, _verification(required=True)
     ) is None
+
+
+def test_source_blind_gate_accepts_supported_non_leaking_definition_context() -> None:
+    candidate = {
+        "question": "What Chl a anomaly occurred during the 2025 spring bloom?",
+        "question_context": (
+            "Chl a means chlorophyll a concentration. The anomaly is the change "
+            "from the 2010 to 2020 spring mean at the Beaufort Sea station."
+        ),
+    }
+    verification = {
+        "contract_version": "source-blind-standalone-gate-v1",
+        "pass": True,
+        "answer_leakage_absent": True,
+        "unresolved_phrases": [],
+        "missing_detail_types": [],
+        "reasons": [],
+        "review_rationale": (
+            "The displayed context defines the metric, baseline, period, and location."
+        ),
+    }
+
+    assert standalone_verification_resolves(candidate, verification)
 
 
 def test_self_contained_question_uses_empty_context() -> None:
