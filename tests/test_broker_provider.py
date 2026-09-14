@@ -59,14 +59,16 @@ class MalformedTransport(Transport):
         return response
 
 
-def broker_fixture(tmp_path: Path, transport: Transport) -> SharedGeminiBroker:
+def broker_fixture(
+    tmp_path: Path, transport: Transport, *, phase: str = "live_test"
+) -> SharedGeminiBroker:
     gate = tmp_path / "gate.json"
     write_json(
         gate,
         {
             "schema": "streaming-live-execution-gate-v1",
             "live_generation_enabled": True,
-            "allowed_phase": "live_test",
+            "allowed_phase": phase,
             "integrated_code_commit": "test-only-commit",
             "independent_review_verdict": "pass",
             "review_record": "test-only-review",
@@ -139,6 +141,63 @@ def test_broker_provider_binds_role_and_reuses_completed_receipt(
     status = broker.status()
     assert status["generation_submissions"] == 1
     assert status["stages"]["question_generation"]["submissions"] == 1
+
+
+def test_new_away_invocation_does_not_reuse_same_campaign_call_journal(
+    tmp_path: Path,
+) -> None:
+    transport = Transport()
+    broker = broker_fixture(tmp_path, transport, phase="away_production")
+    database = Database(tmp_path / "state.sqlite3")
+    database.migrate(tmp_path / "backups")
+    schema = {
+        "type": "object",
+        "required": ["question"],
+        "properties": {"question": {"type": "string"}},
+        "additionalProperties": False,
+    }
+    parameters = {
+        "temperature": 0,
+        "max_tokens": 1000,
+        "json_schema": schema,
+    }
+
+    for invocation_run_id in ("historical-segment", "successor-segment"):
+        provider = BrokerProvider(
+            broker=broker,
+            phase="away_production",
+            invocation_run_id=invocation_run_id,
+        ).bind(
+            paper_id="paper-1",
+            family_id="family-1",
+            source_version_id=SOURCE_VERSION,
+        )
+        for _ in range(2):
+            call_provider(
+                database,
+                provider,
+                run_id="same-campaign",
+                entity_id="same-unit",
+                role="question_writer",
+                system="System",
+                prompt="Prompt",
+                prompt_version="test-v1",
+                parameters=parameters,
+                response_schema=schema,
+                reservation=Decimal("999999"),
+                timeout=30,
+                retries=0,
+                rate_limit_seconds=0,
+            )
+
+    assert transport.methods == [
+        "countTokens",
+        "generateContent",
+        "countTokens",
+        "generateContent",
+    ]
+    assert database.one("SELECT COUNT(*) AS count FROM calls")["count"] == 2
+    assert broker.status()["generation_submissions"] == 2
 
 
 def test_call_journal_does_not_create_a_second_broker_budget(tmp_path: Path) -> None:

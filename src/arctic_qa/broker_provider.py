@@ -62,6 +62,8 @@ class BrokerProvider:
 
     def request_identity(self) -> dict[str, str | None]:
         return {
+            "phase": self.phase,
+            "invocation_run_id": self.invocation_run_id,
             "paper_id": self.paper_id,
             "family_id": self.family_id,
             "source_version_id": self.source_version_id,
