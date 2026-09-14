@@ -5,6 +5,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from . import generation as generation_contract
 from .db import Database, now
 from .discovery import manual_record
 from .errors import BudgetError, CandidateRejectedError, ProviderResponseError
@@ -407,18 +408,20 @@ def run_stream(
         except Exception as error:
             progress.error(candidate_key, access.get("title"), "source_import", error)
             raise
-        existing_candidate = db.one(
-            """SELECT item_id,status FROM candidates
-            WHERE run_id=? AND source_id=?
-            ORDER BY updated_at DESC,item_id DESC LIMIT 1""",
-            (campaign_id, source_id),
+        existing_candidate = _candidate_for_current_contract(
+            db,
+            run_id=campaign_id,
+            source_id=source_id,
         )
-        terminal_candidate = db.one(
-            """SELECT item_id,status,candidate_json FROM candidates
-            WHERE run_id=? AND source_id=?
-            AND status IN ('rejected','machine_accepted_unverified','incomplete_non_mcq')
-            ORDER BY updated_at DESC,item_id DESC LIMIT 1""",
-            (campaign_id, source_id),
+        terminal_candidate = _candidate_for_current_contract(
+            db,
+            run_id=campaign_id,
+            source_id=source_id,
+            statuses={
+                "rejected",
+                "machine_accepted_unverified",
+                "incomplete_non_mcq",
+            },
         )
         if existing_candidate:
             resumed_papers += 1
@@ -687,6 +690,47 @@ def _validation_event_for_stored_candidate(
         ORDER BY created_at DESC,event_id DESC LIMIT 1""",
         (candidate["item_id"], candidate_hash),
     )
+
+
+def _candidate_for_current_contract(
+    db: Database,
+    *,
+    run_id: str,
+    source_id: str,
+    statuses: set[str] | None = None,
+) -> dict[str, Any] | None:
+    """Return only a candidate made with every current generation contract."""
+    rows = db.rows(
+        """SELECT item_id,status,candidate_json FROM candidates
+        WHERE run_id=? AND source_id=?
+        ORDER BY updated_at DESC,item_id DESC""",
+        (run_id, source_id),
+    )
+    for row in rows:
+        if statuses is not None and row["status"] not in statuses:
+            continue
+        candidate = json.loads(row["candidate_json"])
+        provenance = candidate.get("provenance") or {}
+        if (
+            candidate.get("schema_version")
+            == generation_contract.CANDIDATE_SCHEMA_VERSION
+            and candidate.get("finding_policy_version")
+            == generation_contract.SCOPE_ROLE_FINDING_POLICY_VERSION
+            and provenance.get("prompt_version")
+            == generation_contract.PROMPT_VERSION
+            and provenance.get("numeric_rule_contract_version")
+            == generation_contract.NUMERIC_RULE_CONTRACT_VERSION
+            and provenance.get("direct_value_contract_version")
+            == generation_contract.DIRECT_SOURCE_VALUE_CONTRACT_VERSION
+            and provenance.get("scope_contract_version")
+            == generation_contract.SCOPE_CONTRACT_VERSION
+            and provenance.get("scope_role_semantics_version")
+            == generation_contract.SCOPE_ROLE_SEMANTICS_VERSION
+            and provenance.get("scope_role_binding_contract_version")
+            == generation_contract.SCOPE_ROLE_BINDING_CONTRACT_VERSION
+        ):
+            return row
+    return None
 
 
 def _bind_provider(

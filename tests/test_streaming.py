@@ -1593,9 +1593,6 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
         "Do not assume any proposed scope value is true" in prompts["answer_verifier"]
     )
 
-    monkeypatch.setattr(
-        generation_module, "PROMPT_VERSION", "arctic-qa-generation-test-next"
-    )
     resumed = run_stream(
         database,
         paths.namespace,
@@ -1621,6 +1618,69 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
         sum(job.get("execution_authority") == "shared_gemini_broker" for job in jobs)
         == 1
     )
+
+
+def test_same_campaign_regenerates_a_stale_terminal_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    access, eligibility = streaming_fixture(tmp_path)
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+    first = run_stream(
+        database,
+        paths.namespace,
+        run_id="historical-invocation",
+        campaign_id="same-campaign",
+        access_run_dir=access,
+        eligibility_run_dir=eligibility,
+        author=FakeProvider("fake-gemini", FIXTURES / "fake-author.jsonl"),
+        verifier=FakeProvider("fake-gemini", FIXTURES / "fake-verifier.jsonl"),
+        max_papers=1,
+    )
+    old_item = first["paper_results"][0]
+    assert old_item["disposition"] == "accepted"
+    monkeypatch.setattr(
+        generation_module, "PROMPT_VERSION", "arctic-qa-generation-test-next"
+    )
+    rerun_author = tmp_path / "rerun-author.jsonl"
+    author_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-author.jsonl").read_text().splitlines()
+    ]
+    rerun_author.write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in author_events
+            if event.get("role") != "extractor"
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    second = run_stream(
+        database,
+        paths.namespace,
+        run_id="rerun-invocation",
+        campaign_id="same-campaign",
+        access_run_dir=access,
+        eligibility_run_dir=eligibility,
+        author=FakeProvider("fake-gemini", rerun_author),
+        verifier=FakeProvider("fake-gemini", FIXTURES / "fake-verifier.jsonl"),
+        max_papers=1,
+    )
+
+    candidates = database.rows(
+        "SELECT item_id,candidate_json FROM candidates "
+        "WHERE run_id='same-campaign' ORDER BY created_at,item_id"
+    )
+    assert second["resumed_papers"] == 0
+    assert second["counts"]["generation_rejected"] == 1
+    assert len(candidates) == 2
+    assert {json.loads(row["candidate_json"])["provenance"]["prompt_version"] for row in candidates} == {
+        "arctic-qa-generation-v16",
+        "arctic-qa-generation-test-next",
+    }
 
 
 def test_new_campaign_regenerates_a_paper_with_historical_accepted_output(

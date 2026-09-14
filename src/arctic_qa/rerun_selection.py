@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from .full_run_plan import materialize_frozen_access_run
-from .generation import FINDING_POLICY_VERSION, PROMPT_VERSION
+from .generation import (
+    CANDIDATE_SCHEMA_VERSION,
+    FINDING_POLICY_VERSION,
+    PROMPT_VERSION,
+    SCOPE_ROLE_FINDING_POLICY_VERSION,
+)
 from .util import (
     atomic_json,
     atomic_write,
@@ -240,7 +245,9 @@ def build_rerun_selection(
             "eligibility_schema_sha256": schema_sha256,
             "eligibility_policy_sha256": policy_sha256,
             "generation_prompt_version": PROMPT_VERSION,
-            "finding_policy_version": FINDING_POLICY_VERSION,
+            "candidate_schema_version": CANDIDATE_SCHEMA_VERSION,
+            "finding_policy_version": SCOPE_ROLE_FINDING_POLICY_VERSION,
+            "base_finding_policy_version": FINDING_POLICY_VERSION,
             "numeric_rule_contract_version": NUMERIC_RULE_CONTRACT_VERSION,
             "scope_contract_version": SCOPE_CONTRACT_VERSION,
         }
