@@ -1,24 +1,30 @@
 # Publication export
 
-The publication exporter creates linked reviewer, benchmark, and scoring files.
-It reads the selected state database in read-only mode.
+The publication exporter writes reviewer, benchmark, and scoring companion files.
+The selected export manifest is the source of the final MCQ rows.
+The exporter copies each selected option text and label without reconstruction.
+
+Run the exporter with a selected export manifest.
 
 ```sh
-PYTHONPATH=src python -m arctic_qa.publication_export \
-  --state-db /path/to/arctic-qa/state.sqlite3 \
-  --run-id trial-r1 \
+PYTHONPATH=src:$PYTHONPATH python3.13 -m arctic_qa.publication_export \
+  --export-manifest /path/to/exports/export-id/manifest.json \
+  --state-db /path/to/state.sqlite3 \
   --output-dir /path/to/publication-package
 ```
 
-The package contains JSONL and CSV files for each projection.
-The reviewer files contain the question, options, evidence excerpts, validation records, selection data, and attributable receipt responses.
-The benchmark files contain only the question and option text.
-The scoring files contain the correct option ID and release status.
+The state database is optional.
+When present, it adds paper identity, validation records, retained rationales, and model trace metadata.
+It never selects rows or changes options.
 
-Each package has a manifest with counts and SHA-256 hashes.
-The exporter writes one reviewer row for each accepted QA record with three accepted deterministic distractors.
+The reviewer files contain labels, validation records, short evidence excerpts, locators, and retained rationales.
+The benchmark files contain questions and option text only.
+The scoring files contain the correct option ID or a null value for an answer-absent variant.
 
-The files contain no full papers, extraction blobs, or submitted prompts.
-The reviewer files are not model-facing benchmark inputs.
-The exporter retains missing rationale fields as null or false availability values.
-It does not create historical model explanations.
+The package excludes full papers, rendered requests, costs, run IDs, timestamps, and release status values.
+It does not treat automated validation or model rationales as independent scientific review.
+
+Use `--prompt-template` only for a known historical template.
+The exporter copies that template into `historical-prompt-bundle` and records its SHA-256 hash.
+Use `--historical-renderer` for an exact historical renderer source file.
+It does not label an unspecified or future template as historical.

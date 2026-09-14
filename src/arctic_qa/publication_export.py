@@ -16,6 +16,17 @@ from .util import canonical_json, stable_id
 SCHEMA_VERSION = "arctic-qa-publication-review-v1"
 
 
+def load_authoritative_mcqs(export_manifest: Path, source_root: Path) -> list[dict[str, Any]]:
+    """Load the immutable accepted MCQ variants selected by an export manifest."""
+    manifest = _json(export_manifest.read_text(encoding="utf-8"), {})
+    relative = manifest.get("files", {}).get("mcq")
+    if not isinstance(relative, str):
+        raise ValueError("the export manifest has no MCQ file")
+    path = Path(relative)
+    path = path if path.is_absolute() else source_root / path
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
 def _json(value: str | None, default: Any) -> Any:
     try:
         return json.loads(value) if value else default
@@ -132,8 +143,231 @@ def _row(connection: sqlite3.Connection, candidate: dict[str, Any], source: sqli
     }
 
 
-def export_publication_package(state_db: Path, output_dir: Path, *, run_id: str, seed: str, prompt_templates: list[Path] | None = None) -> dict[str, Any]:
+def _short_evidence(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    quote = value.get("quote") or value.get("evidence_quote")
+    locator = value.get("locator")
+    if not isinstance(quote, str) and not isinstance(locator, dict):
+        return None
+    result: dict[str, Any] = {}
+    if isinstance(quote, str):
+        result["excerpt"] = quote[:800]
+        result["excerpt_truncated"] = len(quote) > 800
+    if isinstance(locator, dict):
+        result["locator"] = locator
+    for name in ("source_span_id", "span_contract_version", "text_sha256", "evidence_text_sha256"):
+        if isinstance(value.get(name), str):
+            result[name] = value[name]
+    return result or None
+
+
+def _public_validation(connection: sqlite3.Connection, candidate_id: str | None) -> list[dict[str, Any]]:
+    if not candidate_id:
+        return []
+    rows = connection.execute(
+        "SELECT stage,label,reason_codes_json,details_json FROM validation_events "
+        "WHERE item_id=? ORDER BY rowid", (candidate_id,)
+    ).fetchall()
+    result = []
+    for row in rows:
+        details = _json(row["details_json"], {})
+        labels = details.get("labels", {}) if isinstance(details, dict) else {}
+        if not isinstance(labels, dict):
+            labels = {}
+        result.append(
+            {
+                "stage": row["stage"],
+                "verdict": row["label"],
+                "reason_codes": _json(row["reason_codes_json"], []),
+                "checks": {
+                    name: value
+                    for name, value in labels.items()
+                    if name not in {"machine_accepted_unverified", "rejected", "mcq_eligible", "unresolved"}
+                },
+            }
+        )
+    return result
+
+
+def _manifest_root(manifest_path: Path, manifest: dict[str, Any]) -> Path:
+    relative = manifest.get("files", {}).get("mcq")
+    if not isinstance(relative, str):
+        raise ValueError("the export manifest has no MCQ file")
+    if Path(relative).is_absolute():
+        return Path("/")
+    for parent in (manifest_path.parent, *manifest_path.parents):
+        if (parent / relative).is_file():
+            return parent
+    raise ValueError("the export manifest MCQ file is not available from its parent directories")
+
+
+def _model_trace(candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    provenance = candidate.get("provenance") if isinstance(candidate.get("provenance"), dict) else {}
+    calls = provenance.get("verification_calls") if isinstance(provenance, dict) else {}
+    result = []
+    if isinstance(calls, dict):
+        for value in calls.values():
+            if isinstance(value, dict):
+                result.append({name: value.get(name) for name in ("role", "provider", "requested_model", "returned_model", "prompt_version", "prompt_hash") if value.get(name) is not None})
+    for role, model in (("author", provenance.get("author_model")), ("verifier", provenance.get("verifier_model"))):
+        if isinstance(model, str) and not any(entry.get("returned_model") == model for entry in result):
+            result.append({"role": role, "returned_model": model})
+    return result
+
+
+def _matching_candidate(connection: sqlite3.Connection, item: dict[str, Any]) -> dict[str, Any] | None:
+    source = item.get("source") if isinstance(item.get("source"), dict) else {}
+    source_id = source.get("source_id")
+    question = item.get("question")
+    if not isinstance(source_id, str) or not isinstance(question, str):
+        return None
+    for row in connection.execute(
+        "SELECT item_id,candidate_json FROM candidates WHERE source_id=? ORDER BY item_id DESC", (source_id,)
+    ):
+        candidate = _json(row["candidate_json"], {})
+        if candidate.get("question") == question:
+            candidate["_database_item_id"] = row["item_id"]
+            return candidate
+    return None
+
+
+def _manifest_row(connection: sqlite3.Connection | None, item: dict[str, Any]) -> dict[str, Any]:
+    source_identity = item.get("source") if isinstance(item.get("source"), dict) else {}
+    source: dict[str, Any] = {
+        name: source_identity.get(name)
+        for name in ("source_id", "content_hash", "chunk_id", "section_id")
+        if source_identity.get(name) is not None
+    }
+    candidate: dict[str, Any] = {}
+    validations: list[dict[str, Any]] = []
+    if connection is not None and isinstance(source_identity.get("source_id"), str):
+        database_source = connection.execute(
+            "SELECT stable_id,doi,title,year,content_hash,metadata_json,inclusion_reason FROM sources WHERE source_id=?",
+            (source_identity["source_id"],),
+        ).fetchone()
+        if database_source:
+            source.update({name: database_source[name] for name in ("stable_id", "doi", "title", "year", "content_hash", "inclusion_reason") if database_source[name] is not None})
+            metadata = _json(database_source["metadata_json"], {})
+            if isinstance(metadata, dict) and isinstance(metadata.get("selection"), dict):
+                source["selection"] = metadata["selection"]
+        candidate = _matching_candidate(connection, item) or {}
+        validations = _public_validation(connection, candidate.get("_database_item_id"))
+    verdicts = {row.get("option_text"): row for row in candidate.get("option_verdicts", []) if isinstance(row, dict)}
+    options = []
+    for position, option in enumerate(item.get("options", []), start=1):
+        if not isinstance(option, dict):
+            continue
+        verdict = verdicts.get(option.get("text"), {})
+        options.append(
+            {
+                "position": position,
+                "option_id": stable_id("publication-option-id", item.get("item_id"), str(position), option.get("text")),
+                "text": option.get("text"),
+                "is_correct": option.get("is_correct"),
+                "verification": {
+                    "label": option.get("verification_label"),
+                    "evidence": _short_evidence(option.get("falsity_evidence")),
+                    "rationale": verdict.get("rationale"),
+                    "automated_checks": {name: verdict.get(name) for name in ("contradiction_established", "alternative_answer_search_passed", "source_entailment_model_verified") if name in verdict},
+                },
+            }
+        )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "item_id": item.get("item_id"),
+        "question_id": item.get("paired_item_id") or item.get("item_id"),
+        "variant_id": item.get("task_type"),
+        "paper": source,
+        "question": item.get("question"),
+        "answer_evidence": _short_evidence(item.get("answer_evidence")),
+        "options": options,
+        "validation": validations,
+        "rationales": {
+            name: candidate.get(name)
+            for name in ("question_rationale", "reconstruction", "answer_verification")
+            if candidate.get(name) is not None
+        },
+        "model_trace": _model_trace(candidate),
+        "interpretation_limit": item.get("interpretation_limit"),
+        "evidence_state": item.get("evidence_state"),
+        "limitations": [
+            "Automated validation and model-generated rationales are not independent scientific review.",
+            "The source export selects the rows. State data only enriches them.",
+        ],
+    }
+
+
+def _write_manifest_package(
+    export_manifest: Path,
+    state_db: Path | None,
+    output_dir: Path,
+    seed: str,
+    prompt_templates: list[Path] | None,
+    historical_renderers: list[Path] | None,
+) -> dict[str, Any]:
+    source_manifest = _json(export_manifest.read_text(encoding="utf-8"), {})
+    source_root = _manifest_root(export_manifest, source_manifest)
+    items = load_authoritative_mcqs(export_manifest, source_root)
+    connection = None
+    if state_db:
+        connection = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+    try:
+        records = [_manifest_row(connection, item) for item in items]
+    finally:
+        if connection is not None:
+            connection.close()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    reviewer = output_dir / "reviewer-items.jsonl"
+    benchmark = output_dir / "benchmark-inputs.jsonl"
+    scoring = output_dir / "scoring-labels.jsonl"
+    reviewer.write_text("".join(canonical_json(row) + "\n" for row in records), encoding="utf-8")
+    benchmark_rows = [{"item_id": row["item_id"], "question_id": row["question_id"], "variant_id": row["variant_id"], "question": row["question"], "options": [{name: option[name] for name in ("option_id", "position", "text")} for option in row["options"]]} for row in records]
+    scoring_rows = [{"item_id": row["item_id"], "correct_option_id": next((option["option_id"] for option in row["options"] if option["is_correct"] is True), None), "answer_present": any(option["is_correct"] is True for option in row["options"])} for row in records]
+    benchmark.write_text("".join(canonical_json(row) + "\n" for row in benchmark_rows), encoding="utf-8")
+    scoring.write_text("".join(canonical_json(row) + "\n" for row in scoring_rows), encoding="utf-8")
+    reviewer_csv = output_dir / "reviewer-items.csv"
+    benchmark_csv = output_dir / "benchmark-inputs.csv"
+    scoring_csv = output_dir / "scoring-labels.csv"
+    for path, rows, fields in (
+        (reviewer_csv, records, ["item_id", "question_id", "variant_id", "question", "paper_json", "answer_evidence_json", "options_json", "validation_json", "rationales_json", "model_trace_json", "interpretation_limit", "evidence_state"]),
+        (benchmark_csv, benchmark_rows, ["item_id", "question_id", "variant_id", "question", "options_json"]),
+        (scoring_csv, scoring_rows, ["item_id", "correct_option_id", "answer_present"]),
+    ):
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({name: canonical_json(row[name.removesuffix("_json")]) if name.endswith("_json") else row.get(name) for name in fields})
+    bundle = output_dir / "historical-prompt-bundle"
+    templates = []
+    for path, kind in [*( (path, "template") for path in prompt_templates or []), *( (path, "renderer") for path in historical_renderers or [])]:
+        destination = bundle / path.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(path.read_bytes())
+        templates.append({"path": str(destination.relative_to(output_dir)), "sha256": _sha256(destination), "historical": True, "kind": kind})
+    files = {"reviewer_jsonl": reviewer, "reviewer_csv": reviewer_csv, "benchmark_jsonl": benchmark, "benchmark_csv": benchmark_csv, "scoring_jsonl": scoring, "scoring_csv": scoring_csv}
+    manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "source_export": {"export_id": source_manifest.get("export_id"), "manifest_sha256": _sha256(export_manifest), "mcq_sha256": source_manifest.get("file_sha256", {}).get("mcq")},
+        "shuffle_seed": seed,
+        "reviewer_item_count": len(records),
+        "benchmark_item_count": len(benchmark_rows),
+        "files": {name: {"path": path.name, "sha256": _sha256(path)} for name, path in files.items()},
+        "historical_prompt_templates": templates,
+        "limitations": ["Rows are copied from the selected immutable MCQ export.", "No historical prompt template was asserted unless the caller supplied it explicitly.", "The package has no full papers, request bodies, costs, run IDs, timestamps, or release statuses."],
+    }
+    (output_dir / "manifest.json").write_text(canonical_json(manifest) + "\n", encoding="utf-8")
+    return manifest
+
+
+def export_publication_package(state_db: Path | None, output_dir: Path, *, run_id: str | None = None, seed: str, prompt_templates: list[Path] | None = None, historical_renderers: list[Path] | None = None, export_manifest: Path | None = None) -> dict[str, Any]:
     """Read a state database and write reviewer JSONL, CSV, and a hashed manifest."""
+    if export_manifest is not None:
+        return _write_manifest_package(export_manifest, state_db, output_dir, seed, prompt_templates, historical_renderers)
+    if state_db is None or run_id is None:
+        raise ValueError("--state-db and --run-id are required without --export-manifest")
     connection = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     rows = connection.execute(
@@ -206,14 +440,18 @@ def export_publication_package(state_db: Path, output_dir: Path, *, run_id: str,
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Write a reviewer publication package from a read-only Arctic QA state DB.")
-    parser.add_argument("--state-db", type=Path, required=True)
+    parser = argparse.ArgumentParser(description="Write a reviewer publication package from immutable Arctic QA exports.")
+    parser.add_argument("--export-manifest", type=Path)
+    parser.add_argument("--state-db", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--run-id")
     parser.add_argument("--shuffle-seed", default="publication-review-v1")
     parser.add_argument("--prompt-template", type=Path, action="append", default=[])
+    parser.add_argument("--historical-renderer", type=Path, action="append", default=[])
     args = parser.parse_args(argv)
-    export_publication_package(args.state_db, args.output_dir, run_id=args.run_id, seed=args.shuffle_seed, prompt_templates=args.prompt_template)
+    if args.export_manifest is None and (args.state_db is None or args.run_id is None):
+        parser.error("--export-manifest or both --state-db and --run-id are required")
+    export_publication_package(args.state_db, args.output_dir, run_id=args.run_id, seed=args.shuffle_seed, prompt_templates=args.prompt_template, historical_renderers=args.historical_renderer, export_manifest=args.export_manifest)
     return 0
 
 
