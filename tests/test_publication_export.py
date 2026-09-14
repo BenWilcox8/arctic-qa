@@ -77,6 +77,9 @@ def _insert_live_candidate(
     status: str = "machine_accepted_unverified",
     updated_at: str = "2026-09-14T00:00:00Z",
     bind_validation: bool = True,
+    validation_label: str = "machine_accepted_unverified",
+    validation_distractors: list[dict] | None = None,
+    validation_labels: dict | None = None,
 ) -> None:
     stored = canonical_json(candidate)
     connection.execute(
@@ -95,13 +98,25 @@ def _insert_live_candidate(
         "candidate_hash": (
             stable_id("candidate-payload", stored) if bind_validation else "wrong"
         ),
-        "labels": {
+        "labels": validation_labels or {
             "mcq_eligible": True,
             "machine_accepted_unverified": True,
             "schema_valid": True,
+            "scope_complete": True,
+            "reconstruction_agreement": True,
+            "source_entailment_model_verified": True,
+            "alternative_answer_search_passed": True,
+            "model_verified": True,
         },
-        "distractors": [
-            {"text": item["text"], "accepted": True, "deterministic": True}
+        "distractors": validation_distractors
+        if validation_distractors is not None
+        else [
+            {
+                "text": item["text"],
+                "accepted": True,
+                "deterministic": True,
+                "model_verified": True,
+            }
             for item in candidate["distractors"]
         ],
         "run_id": "private-run",
@@ -112,7 +127,7 @@ def _insert_live_candidate(
         (
             candidate["item_id"],
             "automated_acceptance",
-            "machine_accepted_unverified",
+            validation_label,
             "[]",
             canonical_json(details),
             updated_at,
@@ -259,6 +274,117 @@ def test_live_snapshot_updates_atomically_and_excludes_stale_rows(
     assert second["item_count"] == 2
     assert second["snapshot_id"] != first["snapshot_id"]
     assert len(list((output / "snapshots").iterdir())) == 2
+
+
+def test_live_preview_includes_retained_model_verified_distractors_only(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "state.sqlite3"
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        """
+        CREATE TABLE sources (source_id TEXT,doi TEXT,title TEXT);
+        CREATE TABLE candidates (
+            item_id TEXT,paper_family_id TEXT,source_id TEXT,status TEXT,
+            candidate_json TEXT,updated_at TEXT,run_id TEXT
+        );
+        CREATE TABLE validation_events (
+            item_id TEXT,stage TEXT,label TEXT,reason_codes_json TEXT,
+            details_json TEXT,created_at TEXT
+        );
+        """
+    )
+    connection.execute(
+        "INSERT INTO sources VALUES (?,?,?)",
+        ("source-1", "10.1/current", "Current paper"),
+    )
+    preview = _live_candidate(
+        "preview", "Preview question?", prompt="arctic-qa-generation-v16"
+    )
+    preview_distractors = [
+        {
+            "text": item["text"],
+            "accepted": True,
+            "deterministic": False,
+            "model_verified": True,
+            "label": "model-verified",
+            "reasons": ["residual_model_error_possible"],
+        }
+        for item in preview["distractors"]
+    ]
+    _insert_live_candidate(
+        connection,
+        preview,
+        family="preview-family",
+        validation_distractors=preview_distractors,
+    )
+    rejected = _live_candidate(
+        "rejected", "Rejected question?", prompt="arctic-qa-generation-v16"
+    )
+    _insert_live_candidate(
+        connection,
+        rejected,
+        family="rejected-family",
+        status="rejected",
+        validation_label="rejected",
+        validation_distractors=[],
+        validation_labels={"mcq_eligible": False, "rejected": True},
+    )
+    missing_model_verification = _live_candidate(
+        "missing-model-verification",
+        "Incomplete question?",
+        prompt="arctic-qa-generation-v16",
+    )
+    _insert_live_candidate(
+        connection,
+        missing_model_verification,
+        family="incomplete-family",
+        validation_distractors=[
+            {
+                "text": item["text"],
+                "accepted": True,
+                "deterministic": False,
+                "model_verified": False,
+            }
+            for item in missing_model_verification["distractors"]
+        ],
+    )
+    connection.commit()
+
+    manifest = refresh_live_publication_snapshot(
+        database,
+        tmp_path / "live",
+        selection_file=REPO / "config/live-dataset-current-contract-v1.json",
+        seed="fixed",
+    )
+    connection.close()
+
+    assert manifest["item_count"] == 1
+    assert manifest["excluded_counts"] == {
+        "incomplete_or_rejected": 1,
+        "superseded_contract": 0,
+        "invalid_or_unbound_validation": 1,
+        "duplicate_current_family": 0,
+    }
+    assert manifest["preview"] == {
+        "label": "Machine-validated preview",
+        "notice": (
+            "Some accepted distractors are model-verified but non-deterministic. "
+            "The reviewer rows retain their validation and uncertainty details."
+        ),
+    }
+    snapshot = tmp_path / "live" / "snapshots" / manifest["snapshot_id"]
+    benchmark = json.loads((snapshot / "accepted-benchmark.jsonl").read_text())
+    reviewer = json.loads((snapshot / "accepted-reviewer.jsonl").read_text())
+    assert benchmark["item_id"] == reviewer["item_id"]
+    assert "is_correct" not in canonical_json(benchmark)
+    validation = reviewer["validation"][0]
+    assert validation["details"]["checks"]["model_verified"] is True
+    assert all(
+        item["deterministic"] is False
+        and item["reasons"] == ["residual_model_error_possible"]
+        for item in validation["details"]["distractors"]
+    )
 
 
 def test_reviewer_preserves_verdict_rationale_while_benchmark_hides_labels(

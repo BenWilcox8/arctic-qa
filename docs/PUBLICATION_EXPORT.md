@@ -38,7 +38,11 @@ The live exporter reads the state database without changing it.
 It selects accepted families with the exact contracts in `config/live-dataset-current-contract-v1.json`.
 Thus, accepted rows from older contracts remain historical and do not enter the current dataset.
 
-The exporter requires a payload-bound final validation event and three deterministic accepted distractors.
+The live exporter is a machine-validated preview for captain review.
+It requires a payload-bound final validation event and three accepted model-verified distractors.
+It preserves each distractor uncertainty and determinism result in the reviewer rows.
+It does not label a row as deterministic or human-reviewed.
+The final publication and CSV exports still require three deterministic accepted distractors.
 It writes one answer-present row for each paper family.
 If one family has multiple current candidates, the exporter selects the newest candidate state.
 

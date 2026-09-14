@@ -1237,6 +1237,14 @@ class CorpusArtifacts:
             or manifest.get("updated_at_utc") != pointer.get("updated_at_utc")
         ):
             raise RuntimeError("the live dataset manifest is invalid")
+        preview = manifest.get("preview")
+        if preview is not None and (
+            not isinstance(preview, dict)
+            or preview.get("label") != "Machine-validated preview"
+            or not isinstance(preview.get("notice"), str)
+            or not preview["notice"]
+        ):
+            raise RuntimeError("the live dataset preview is invalid")
         files = []
         records = manifest.get("files")
         if not isinstance(records, dict):
@@ -1269,6 +1277,7 @@ class CorpusArtifacts:
             "updated_at_utc": manifest["updated_at_utc"],
             "item_count": manifest["item_count"],
             "selection": manifest.get("selection"),
+            "preview": preview,
             "files": files
             if include_paths
             else [

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import threading
 import urllib.error
 import urllib.request
@@ -1141,6 +1142,10 @@ def test_live_dataset_browser_and_downloads_are_joined_and_allowlisted(
                 "generation_prompt_version": "arctic-qa-generation-v16",
                 "scope_contract_version": "selected-evidence-literal-scope-v4",
             },
+            "preview": {
+                "label": "Machine-validated preview",
+                "notice": "The reviewer rows retain validation details.",
+            },
             "files": {
                 "benchmark": {
                     "path": benchmark_path.name,
@@ -1173,7 +1178,12 @@ def test_live_dataset_browser_and_downloads_are_joined_and_allowlisted(
         live_dataset_dir=live,
     )
 
-    assert artifacts.state()["live_dataset"]["item_count"] == 2
+    live_state = artifacts.state()["live_dataset"]
+    assert live_state["item_count"] == 2
+    assert live_state["preview"] == {
+        "label": "Machine-validated preview",
+        "notice": "The reviewer rows retain validation details.",
+    }
     page = artifacts.live_dataset_records(
         {"q": ["Beaufort"], "page": ["1"], "page_size": ["10"]}
     )
@@ -1560,7 +1570,12 @@ def test_page_contains_vertical_activity_and_persistent_on_demand_inspector() ->
     assert "sessionStorage.setItem(`trace-open:" in page
     assert "/api/pipeline-trace/stage?paper_key=" in page
     assert "rawJsonDetails('selected stage', payload)" in page
+    assert "detailController: null" in page
+    assert "state.trace.detailController.abort()" in page
+    assert "state.trace.selectedPaper !== paperKey" in page
     assert "Machine acceptance is a retained engineering label" in page
+    assert 'id="live-dataset-preview"' in page
+    assert "liveDataset.preview?.label" in page
     assert (
         ".telemetry-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));"
         in page
@@ -1590,9 +1605,16 @@ def test_page_contains_readable_trace_views_and_bounded_table_widths() -> None:
     assert "Answer choices" in page
     assert "Distractors" in page
     assert ".trace-table { table-layout: fixed; }" in page
-    assert ".trace-table .trace-paper-column { width: 31%; }" in page
-    assert ".trace-table .trace-time-column { width: 18%; }" in page
-    assert "Current state since (UTC)" in page
+    assert ".trace-table .trace-paper-column { width: 40%; }" in page
+    assert ".trace-table .trace-time-column" not in page
+    assert "Current state since (UTC)" not in page
+    assert "const centralStateTime = (value)" in page
+    assert "timeZone: 'America/Chicago'" in page
+    assert (
+        "stateTime.dataset.stateEnteredAtUtc = item.state_entered_at_utc || ''" in page
+    )
+    assert "stateTime.title = item.state_entered_at_utc" in page
+    assert "paper.append(select, stateTime);" in page
     assert "item.state_entered_at_utc" in page
     assert "grid-template-columns: minmax(460px, .95fr) minmax(0, 1.35fr)" in page
     assert "function displayTextBlocks(value)" in page
@@ -1601,6 +1623,13 @@ def test_page_contains_readable_trace_views_and_bounded_table_widths() -> None:
         "evidenceOffset(previous, 'end') === evidenceOffset(current, 'start')" in page
     )
     assert "['Reconstruction rationale', record.reconstruction_rationale]" in page
+    assert "function appendCandidateRejectionReasons(target, wrapper)" in page
+    assert "function appendRejectedDistractors(target, records)" in page
+    assert "Raw recorded reason and details" in page
+    assert (
+        "This rejected QA item has no reason recorded for its current payload." in page
+    )
+    assert "Recorded unresolved exit" in page
     assert "Model response text (display formatting)" in page
     assert "keeps the exact retained response" in page
     assert "The active latitude-first policy is v3." in page
@@ -1614,3 +1643,113 @@ def test_page_contains_readable_trace_views_and_bounded_table_widths() -> None:
     assert candidate["answer"]["text"] == "The measured value increased."
     assert candidate["options"][0]["is_correct"] is True
     assert candidate["answer"]["locator"]["chunk_id"] == "chunk-readable"
+
+
+def test_readable_evidence_resolver_uses_exact_payload_quotes_by_source_version() -> (
+    None
+):
+    page_path = Path(__file__).parents[1] / "src/arctic_qa/corpus_viewer.html"
+    payload = {
+        "identity": {
+            "paper_id": "paper-a",
+            "source_id": "source-a",
+            "source_version_id": "version-a",
+        },
+        "sources": [
+            {
+                "paper_id": "paper-a",
+                "source_id": "source-a",
+                "source_version_id": "version-a",
+                "scope_evidence": {
+                    "resolved_evidence": [
+                        {
+                            "spans": [
+                                {
+                                    "span_id": "shared-span",
+                                    "quote": "<script>Exact source A quotation.</script>",
+                                    "locator": {"section_id": "Results", "page": 3},
+                                },
+                                {
+                                    "span_id": "combined-span",
+                                    "quote": "First retained passage. Second retained passage.",
+                                    "source_span_ids": [
+                                        "component-one",
+                                        "component-two",
+                                    ],
+                                },
+                            ]
+                        }
+                    ]
+                },
+            },
+            {
+                "paper_id": "paper-a",
+                "source_id": "source-b",
+                "source_version_id": "version-b",
+                "scope_evidence": {
+                    "resolved_evidence": [
+                        {
+                            "spans": [
+                                {
+                                    "span_id": "shared-span",
+                                    "quote": "Different source B quotation.",
+                                }
+                            ]
+                        }
+                    ]
+                },
+            },
+        ],
+        "candidates": [
+            {
+                "candidate": {
+                    "answer": {"source_span_id": "shared-span"},
+                    "decision_evidence": [{"source_span_id": "combined-span"}],
+                }
+            }
+        ],
+    }
+    script = r"""
+const fs = require('fs');
+const page = fs.readFileSync(process.argv[1], 'utf8');
+const start = page.indexOf('    function evidenceQuote(value)');
+const end = page.indexOf('    function appendEvidenceLocator', start);
+function hasTraceValue(value) { return value !== null && value !== undefined && value !== ''; }
+eval(page.slice(start, end));
+const payload = JSON.parse(process.argv[2]);
+const resolver = createEvidenceResolver(payload);
+const answer = resolver.resolve({ source_span_id: 'shared-span', source_id: 'source-a', source_version_id: 'version-a' });
+const otherVersion = resolver.resolve({ source_span_id: 'shared-span', source_id: 'source-b', source_version_id: 'version-b' });
+const combined = resolver.resolve({ source_span_id: 'combined-span', source_id: 'source-a', source_version_id: 'version-a' });
+const missing = resolver.resolve({ source_span_id: 'missing-span', source_id: 'source-a', source_version_id: 'version-a' });
+process.stdout.write(JSON.stringify({
+  answer: answer.value.quote,
+  otherVersion: otherVersion.value.quote,
+  combined: combined.value.quote,
+  missing: missing.found,
+  preservedId: payload.candidates[0].candidate.answer.source_span_id
+}));
+"""
+    result = subprocess.run(
+        ["node", "-e", script, str(page_path), json.dumps(payload)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    resolved = json.loads(result.stdout)
+    assert resolved == {
+        "answer": "<script>Exact source A quotation.</script>",
+        "otherVersion": "Different source B quotation.",
+        "combined": "First retained passage. Second retained passage.",
+        "missing": False,
+        "preservedId": "shared-span",
+    }
+    page = page_path.read_text(encoding="utf-8")
+    assert "node.textContent = value" in page
+    resolver = page[
+        page.index("function createEvidenceResolver") : page.index(
+            "function appendEvidenceLocator"
+        )
+    ]
+    assert "fetch(" not in resolver
+    assert "Quotation not recorded or available for this source span." in page

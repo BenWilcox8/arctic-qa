@@ -20,13 +20,15 @@ LIVE_SELECTION_SCHEMA = "arctic-qa-live-dataset-selection-v1"
 LIVE_SNAPSHOT_SCHEMA = "arctic-qa-live-dataset-snapshot-v1"
 LIVE_POINTER_SCHEMA = "arctic-qa-live-dataset-pointer-v1"
 LIVE_REVIEWER_SCHEMA = "arctic-qa-live-reviewer-item-v1"
+LIVE_MACHINE_VALIDATED_PREVIEW = "machine_validated_preview"
+LIVE_PREVIEW_MINIMUM_MODEL_VERIFIED_DISTRACTORS = 3
 
 
 def _utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _live_selection(path: Path) -> tuple[dict[str, str], str]:
+def _live_selection(path: Path) -> tuple[dict[str, Any], str]:
     raw = path.read_bytes()
     value = json.loads(raw)
     if not isinstance(value, dict) or value.get("schema") != LIVE_SELECTION_SCHEMA:
@@ -39,6 +41,17 @@ def _live_selection(path: Path) -> tuple[dict[str, str], str]:
     selection = {name: value.get(name) for name in required}
     if any(not isinstance(item, str) or not item for item in selection.values()):
         raise ValueError("the live dataset selection has an invalid contract value")
+    if value.get("selection_mode") != LIVE_MACHINE_VALIDATED_PREVIEW:
+        raise ValueError("the live dataset selection has an unsupported mode")
+    if (
+        value.get("minimum_model_verified_distractors")
+        != LIVE_PREVIEW_MINIMUM_MODEL_VERIFIED_DISTRACTORS
+    ):
+        raise ValueError("the live dataset selection has an invalid preview threshold")
+    selection["selection_mode"] = LIVE_MACHINE_VALIDATED_PREVIEW
+    selection["minimum_model_verified_distractors"] = (
+        LIVE_PREVIEW_MINIMUM_MODEL_VERIFIED_DISTRACTORS
+    )
     return selection, hashlib.sha256(raw).hexdigest()
 
 
@@ -119,7 +132,7 @@ def _live_validation_events(
 
 
 def _live_candidate_matches(
-    candidate: dict[str, Any], selection: dict[str, str]
+    candidate: dict[str, Any], selection: dict[str, Any]
 ) -> bool:
     provenance = candidate.get("provenance")
     return bool(
@@ -141,6 +154,17 @@ def _live_latest_validation(
     ).fetchone()
 
 
+def _live_preview_distractors(validation_details: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return retained model-verified distractors for the live review preview."""
+    return [
+        item
+        for item in validation_details.get("distractors", [])
+        if isinstance(item, dict)
+        and item.get("accepted") is True
+        and item.get("model_verified") is True
+    ]
+
+
 def _live_reviewer_row(
     connection: sqlite3.Connection,
     candidate: dict[str, Any],
@@ -149,11 +173,7 @@ def _live_reviewer_row(
     seed: str,
 ) -> dict[str, Any]:
     accepted_text = {
-        item.get("text")
-        for item in validation_details.get("distractors", [])
-        if isinstance(item, dict)
-        and item.get("accepted") is True
-        and item.get("deterministic") is True
+        item.get("text") for item in _live_preview_distractors(validation_details)
     }
     distractors = [
         item
@@ -267,7 +287,7 @@ def _live_reviewer_row(
 
 
 def _live_rows(
-    state_db: Path, selection: dict[str, str], seed: str
+    state_db: Path, selection: dict[str, Any], seed: str
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     connection = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
@@ -297,13 +317,7 @@ def _live_rows(
             validation = _live_latest_validation(connection, row["item_id"])
             details = _json(validation["details_json"], {}) if validation else {}
             labels = details.get("labels", {}) if isinstance(details, dict) else {}
-            accepted_distractors = [
-                item
-                for item in details.get("distractors", [])
-                if isinstance(item, dict)
-                and item.get("accepted") is True
-                and item.get("deterministic") is True
-            ]
+            accepted_distractors = _live_preview_distractors(details)
             payload_hash = stable_id("candidate-payload", row["candidate_json"])
             if not (
                 validation
@@ -312,7 +326,14 @@ def _live_rows(
                 and details.get("candidate_hash") == payload_hash
                 and isinstance(labels, dict)
                 and labels.get("mcq_eligible") is True
-                and len(accepted_distractors) >= 3
+                and labels.get("schema_valid") is True
+                and labels.get("scope_complete") is True
+                and labels.get("reconstruction_agreement") is True
+                and labels.get("source_entailment_model_verified") is True
+                and labels.get("alternative_answer_search_passed") is True
+                and labels.get("model_verified") is True
+                and len(accepted_distractors)
+                >= selection["minimum_model_verified_distractors"]
             ):
                 exclusions["invalid_or_unbound_validation"] += 1
                 continue
@@ -414,6 +435,14 @@ def refresh_live_publication_snapshot(
                 for name in payloads
             },
             "prompt_files": prompt_records,
+            "preview": {
+                "label": "Machine-validated preview",
+                "notice": (
+                    "Some accepted distractors are model-verified but "
+                    "non-deterministic. The reviewer rows retain their "
+                    "validation and uncertainty details."
+                ),
+            },
             "excluded_counts": exclusions,
             "limitations": [
                 "Only candidates that match the selected current contracts can enter this snapshot.",

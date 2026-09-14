@@ -69,7 +69,8 @@ It does not present reconstructed context as a verbatim submitted request.
 The retained-paper list shows when each paper entered its current state.
 This value comes from the matching candidate, eligibility, or request-state transition.
 The viewer shows unknown when no matching event time exists.
-The readable value uses UTC, and its tooltip contains the exact retained timestamp.
+The readable value uses `America/Chicago` and shows CST or CDT for the event date.
+Its tooltip and data attribute contain the exact retained UTC timestamp.
 
 The private inspector can show retained source context that was supplied to a model.
 It removes credentials, authorization headers, provider thought signatures, and private paths.
