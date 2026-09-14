@@ -524,6 +524,124 @@ def test_progress_generation_continues_with_a_fresh_path_after_rejection(
     )["count"] == accept_on
 
 
+def test_existing_findings_seed_alternative_exclusions(tmp_path: Path) -> None:
+    database = _database(tmp_path)
+    campaign_id = "campaign"
+    family_id = "family"
+    source_id = "source"
+    with database.transaction():
+        for finding_index, span_id in ((1, "frozen-primary"), (2, "frozen-alt")):
+            database.connection.execute(
+                """INSERT INTO findings
+                (finding_id,run_id,source_id,paper_family_id,chunk_id,
+                 selection_policy_version,answer_json,status,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?)""",
+                (
+                    f"finding-{finding_index}",
+                    campaign_id,
+                    source_id,
+                    family_id,
+                    "chunk-1",
+                    f"{generation_contract.SCOPE_ROLE_FINDING_POLICY_VERSION}:finding-"
+                    f"{finding_index}",
+                    canonical_json({"source_span_id": span_id}),
+                    "frozen",
+                    now(),
+                ),
+            )
+
+    paths = streaming_module._generation_paths(
+        database,
+        campaign_id=campaign_id,
+        source_id=source_id,
+        family_id=family_id,
+    )
+
+    assert paths[(2, 0)]["attempt"]["excluded_finding_span_ids"] == [
+        "frozen-primary"
+    ]
+
+
+def test_malformed_alternative_state_becomes_a_paper_rejection(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = _database(tmp_path)
+    namespace = tmp_path / "namespace"
+    namespace.mkdir()
+    manifest = namespace / "run-manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    progress = _Progress(
+        namespace / "progress.json",
+        run_id="campaign",
+        invocation_run_id="invocation",
+        run_manifest_file=manifest,
+        counts={},
+    )
+    primary = streaming_module._generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        finding_attempt_index=1,
+        question_revision_index=0,
+        attempt_kind="primary",
+        parent_attempt_id=None,
+        parent_item_id=None,
+        trigger_reason_code=None,
+        excluded_finding_span_ids=[],
+    )
+    alternative = streaming_module._generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        finding_attempt_index=2,
+        question_revision_index=0,
+        attempt_kind="alternative_finding",
+        parent_attempt_id=primary["attempt_id"],
+        parent_item_id=None,
+        trigger_reason_code="generation_rejected",
+        excluded_finding_span_ids=[],
+    )
+    paths = {
+        (1, 0): {"attempt": primary, "candidate": None},
+        (2, 0): {
+            "attempt": alternative,
+            "candidate": None,
+            "partial_finding": True,
+        },
+    }
+    monkeypatch.setattr(
+        streaming_module,
+        "_generation_paths",
+        lambda *args, **kwargs: paths,
+    )
+
+    def raise_invalid_state(*args, **kwargs):
+        raise ValueError("alternative finding state is invalid")
+
+    monkeypatch.setattr(
+        streaming_module, "_generate_candidate_attempt", raise_invalid_state
+    )
+
+    result = _progress_generation(
+        database,
+        namespace,
+        progress,
+        campaign_id="campaign",
+        candidate_key="candidate-key",
+        source_id="source",
+        family_id="family",
+        selected={},
+        title="Fixture",
+        author=object(),
+        verifier=object(),
+    )
+
+    assert result["disposition"] == "generation_rejected"
+    assert result["reason_codes"] == ["alternative_finding_state_invalid"]
+    assert database.one(
+        "SELECT reason_code FROM rejection_ledger WHERE source_id=?",
+        ("source",),
+    ) == {"reason_code": "alternative_finding_state_invalid"}
+
+
 def test_budget_stop_is_terminal_when_generation_resumes(
     tmp_path: Path, monkeypatch
 ) -> None:

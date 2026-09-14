@@ -790,6 +790,32 @@ def _progress_generation(
                 "reason_codes": ["request_cost_bound_exceeded"],
                 "resumed": resumed,
             }
+        except ValueError as error:
+            if (
+                next_attempt["attempt_kind"] == "alternative_finding"
+                and str(error) == "alternative finding state is invalid"
+            ):
+                reason_code = "alternative_finding_state_invalid"
+                _record_generation_rejection(
+                    db,
+                    campaign_id=campaign_id,
+                    candidate_key=candidate_key,
+                    source_id=source_id,
+                    selected=selected,
+                    attempt=next_attempt,
+                    reason_code=reason_code,
+                    error=error,
+                )
+                paths[_path_key(next_attempt)] = {
+                    "attempt": next_attempt,
+                    "candidate": None,
+                    "candidate_status": None,
+                    "rejection": {"reason_codes": [reason_code]},
+                    "partial_finding": False,
+                }
+                continue
+            progress.error(source_id, title, "generation", error)
+            raise
         except Exception as error:
             progress.error(source_id, title, "generation", error)
             raise
@@ -1356,13 +1382,29 @@ def _prior_finding_span_ids(paths: dict[tuple[int, int], dict[str, Any]]) -> lis
         if path["attempt"]["finding_attempt_index"] != 1:
             continue
         candidate = path.get("candidate")
-        if candidate is None:
+        if candidate is not None:
+            payload = json.loads(candidate["candidate_json"])
+            answer = payload.get("answer") or {}
+        else:
+            finding = path.get("finding")
+            if finding is None:
+                continue
+            try:
+                answer = json.loads(finding["answer_json"])
+            except (KeyError, TypeError, json.JSONDecodeError):
+                continue
+        if not isinstance(answer, dict):
             continue
-        payload = json.loads(candidate["candidate_json"])
-        answer = payload.get("answer") or {}
         source_span_id = answer.get("source_span_id")
         if isinstance(source_span_id, str) and source_span_id:
             span_ids.add(source_span_id)
+        source_span_ids = answer.get("source_span_ids")
+        if isinstance(source_span_ids, list):
+            span_ids.update(
+                span_id
+                for span_id in source_span_ids
+                if isinstance(span_id, str) and span_id
+            )
     return sorted(span_ids)
 
 
