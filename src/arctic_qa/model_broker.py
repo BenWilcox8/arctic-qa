@@ -3108,7 +3108,7 @@ class SharedGeminiBroker:
                 atomic_json(path, event, immutable=True)
                 request["state"] = "orphaned_no_replay"
                 request["orphaned_continuation_sha256"] = sha256_file(path)
-                ledger["inflight"] = max(int(ledger["inflight"]) - 1, 0)
+                ledger["inflight"] = int(ledger["inflight"]) - 1
                 ledger["updated_at_utc"] = _now()
                 self._validate_immutable_events(ledger)
                 self._commit_ledger(ledger)
