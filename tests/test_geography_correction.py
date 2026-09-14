@@ -254,6 +254,93 @@ def test_scope_finding_span_allows_only_whitespace_equivalent_chunk_text() -> No
     assert spans[0]["eligibility_match_kind"] == "whitespace_equivalent"
 
 
+def test_scope_finding_span_ignores_a_whitespace_only_separator() -> None:
+    first_quote = "Mercury concentrations averaged 7.84 micrograms."
+    separator = "\n"
+    second_quote = "Concentrations varied with wintering area."
+    source = {
+        "scope_rule_version": "gemini-fulltext-arctic-eligibility-v2",
+        "scope_evidence_json": json.dumps(
+            {
+                "eligibility_job_key": "job-v3-line-separator",
+                "resolved_eligible_arctic_scope": {
+                    "component": "whole_study",
+                    "finding_spans": [
+                        {
+                            "span_id": "s1",
+                            "quote": first_quote,
+                            "source_bytes_sha256": sha256_bytes(
+                                first_quote.encode()
+                            ),
+                        },
+                        {
+                            "span_id": "s2",
+                            "quote": separator,
+                            "source_bytes_sha256": sha256_bytes(separator.encode()),
+                        },
+                        {
+                            "span_id": "s3",
+                            "quote": second_quote,
+                            "source_bytes_sha256": sha256_bytes(
+                                second_quote.encode()
+                            ),
+                        },
+                    ],
+                    "question_scope_phrases": [],
+                },
+            }
+        ),
+    }
+
+    scope, spans = _eligible_generation_scope(
+        source,
+        [
+            {
+                "chunk_id": "chunk-1",
+                "text": first_quote + separator + second_quote,
+            }
+        ],
+    )
+
+    assert scope is not None
+    assert [row["span_id"] for row in scope["finding_spans"]] == ["s1", "s2", "s3"]
+    assert spans is not None
+    assert len(spans) == 1
+    assert spans[0]["text"] == first_quote + separator + second_quote
+    assert spans[0]["eligibility_span_ids"] == ["s1", "s3"]
+
+
+def test_scope_with_only_whitespace_finding_spans_is_paper_local_rejection() -> None:
+    separator = "\n"
+    source = {
+        "scope_rule_version": "gemini-fulltext-arctic-eligibility-v2",
+        "scope_evidence_json": json.dumps(
+            {
+                "eligibility_job_key": "job-v3-only-whitespace",
+                "resolved_eligible_arctic_scope": {
+                    "component": "whole_study",
+                    "finding_spans": [
+                        {
+                            "span_id": "s1",
+                            "quote": separator,
+                            "source_bytes_sha256": sha256_bytes(separator.encode()),
+                        }
+                    ],
+                    "question_scope_phrases": [],
+                },
+            }
+        ),
+    }
+
+    with pytest.raises(CandidateRejectedError) as error:
+        _eligible_generation_scope(
+            source,
+            [{"chunk_id": "chunk-1", "text": "Results contain no finding."}],
+        )
+
+    assert error.value.reason_code == "eligible_arctic_scope_finding_unbound"
+
+
 @pytest.mark.parametrize(
     ("eligibility_quote", "chunk_quote"),
     [

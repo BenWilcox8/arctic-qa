@@ -2008,10 +2008,12 @@ def _eligible_generation_scope(
         )
         if (
             not isinstance(quote, str)
-            or not quote.strip()
+            or not quote
             or source_hash != sha256_bytes(quote.encode("utf-8"))
         ):
             raise ValueError("an eligible Arctic finding span is invalid")
+        if not quote.strip():
+            continue
         located = None
         for chunk in chunks:
             chunk_text = str(chunk["text"])
@@ -2066,6 +2068,11 @@ def _eligible_generation_scope(
             )
         if located["span_id"] not in {span["span_id"] for span in spans}:
             spans.append(located)
+    if not spans:
+        raise CandidateRejectedError(
+            "eligible_arctic_scope_finding_unbound",
+            "the eligible Arctic finding spans contain no source content",
+        )
     scope = {
         "component": component,
         "question_scope_phrases": list(phrases),
