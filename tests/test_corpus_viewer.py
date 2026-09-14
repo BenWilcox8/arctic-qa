@@ -1070,6 +1070,11 @@ class FakePipelineTraceStore:
                     "current_stage": "answer_verification",
                     "attempt_count": 2,
                     "latest_at_utc": "2026-09-13T19:29:00Z",
+                    "final_reason": "answer_verifier_scope_not_source_bound",
+                    "reason": {
+                        "category": "qa_rejection",
+                        "summary": "The paper stayed eligible, but the QA candidate failed source-bound scope.",
+                    },
                 }
             ],
             "next_cursor": "next-safe-cursor",
@@ -1087,6 +1092,34 @@ class FakePipelineTraceStore:
                 "title": "<script>retained title</script>",
             },
             "runs": [{"run_id": "run-test", "state": self.state}],
+            "plain_reason": {
+                "category": "qa_rejection",
+                "summary": "The paper stayed eligible, but the QA candidate failed source-bound scope.",
+                "explanation": "This applies to the generated candidate, not the paper.",
+                "failed_stage": "automated_acceptance",
+                "failed_check": "answer_verifier_scope_not_source_bound",
+                "reason_code": "answer_verifier_scope_not_source_bound",
+                "reason_codes": ["answer_verifier_scope_not_source_bound"],
+                "model_statements": [
+                    {
+                        "label": "Answer verifier statement",
+                        "text": "<script>The scope was not bound.</script>",
+                    }
+                ],
+                "comparisons": [
+                    {
+                        "label": "Recorded comparison",
+                        "proposed_answer": "It increased.",
+                        "reconstructed_answer": "It changed.",
+                    }
+                ],
+                "evidence": [
+                    {
+                        "quote": "The value increased during the period.",
+                        "locator": {"chunk_id": "chunk-readable"},
+                    }
+                ],
+            },
             "source": {"context": "<b>full retained context</b>"},
             "findings": [],
             "candidates": [
@@ -1256,6 +1289,11 @@ def test_page_contains_readable_trace_views_and_bounded_table_widths() -> None:
     assert "renderCandidatesReadable" in page
     assert "renderEligibilityReadable" in page
     assert "renderStagePayloadReadable" in page
+    assert "renderPlainReason" in page
+    assert "Why this paper stopped" in page
+    assert "Failed stage" in page
+    assert "Source evidence used for this check" in page
+    assert "item.reason?.summary" in page
     assert "Complete raw JSON for ${caption}" in page
     assert "traceValueText(record.question)" in page
     assert "Reference answer" in page

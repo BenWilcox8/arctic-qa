@@ -211,6 +211,12 @@
     .trace-option-marker { font-weight: 800; min-width: 1.6rem; }
     .trace-evidence { background: #eef4f6; border-left: 4px solid #78909a; line-height: 1.5; margin: .55rem 0; overflow-wrap: anywhere; padding: .65rem .75rem; white-space: pre-wrap; }
     .trace-evidence strong { display: block; font-size: .72rem; letter-spacing: .04em; margin-bottom: .25rem; text-transform: uppercase; }
+    .trace-reason { border-left: 5px solid #b85c38; margin-bottom: .85rem; }
+    .trace-reason > p { line-height: 1.5; }
+    .trace-reason-summary { font-size: 1rem; font-weight: 700; margin: .25rem 0 .5rem; }
+    .trace-list-reason { color: var(--ink); font-size: .78rem; line-height: 1.35; margin-top: .35rem; }
+    .trace-comparison { display: grid; gap: .5rem; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: .55rem 0; }
+    .trace-comparison > div { background: #f4f7f8; min-width: 0; overflow-wrap: anywhere; padding: .6rem; }
     .trace-readable-list { margin: .4rem 0; padding-left: 1.25rem; }
     .trace-readable-list li { margin: .25rem 0; overflow-wrap: anywhere; }
     .trace-raw { border-top: 1px solid var(--line); margin-top: .8rem; padding-top: .65rem; }
@@ -285,6 +291,7 @@
       .stages, .filters, .trace-filters { grid-template-columns: 1fr; }
       .filters .search, .trace-filters .search { grid-column: auto; }
       .trace-head .badge { margin-top: .75rem; }
+      .trace-comparison { grid-template-columns: 1fr; }
       .trace-attempts { grid-template-columns: 1fr; }
       .trace-kv { grid-template-columns: 1fr; }
       .trace-kv-item.wide { grid-column: auto; }
@@ -1282,6 +1289,46 @@
       });
       return wrap;
     }
+    function renderPlainReason(reason) {
+      const card = readableCard('Why this paper stopped', reason.category);
+      card.classList.add('trace-reason');
+      card.append(text('p', reason.summary || 'No plain-language reason is recorded.', 'trace-reason-summary'));
+      if (reason.explanation) card.append(text('p', reason.explanation));
+      card.append(readableKeyValues([
+        ['Failed stage', label(reason.failed_stage)],
+        ['Failed check', label(reason.failed_check)],
+        ['Evidence status', reason.evidence?.length ? 'Retained source evidence is shown below.' : 'No source quote is retained for this failed check.']
+      ]));
+      card.append(readableList('Exact reason codes', reason.reason_codes || [reason.reason_code]));
+      (reason.model_statements || []).forEach((statement) => {
+        const block = text('div', '', 'trace-evidence');
+        block.append(text('strong', statement.label || 'Model statement'));
+        block.append(document.createTextNode(statement.text || 'No statement was retained.'));
+        card.append(block);
+      });
+      (reason.comparisons || []).forEach((comparison) => {
+        card.append(text('strong', comparison.label || 'Recorded comparison'));
+        const grid = document.createElement('div');
+        grid.className = 'trace-comparison';
+        const proposed = document.createElement('div');
+        proposed.append(text('strong', 'Proposed answer'), document.createTextNode(comparison.proposed_answer || 'Not retained'));
+        const reconstructed = document.createElement('div');
+        reconstructed.append(text('strong', 'Independent reconstruction'), document.createTextNode(comparison.reconstructed_answer || 'Not retained'));
+        grid.append(proposed, reconstructed);
+        card.append(grid);
+      });
+      if (reason.evidence?.length) {
+        card.append(text('strong', 'Source evidence used for this check'));
+        reason.evidence.forEach((span) => {
+          const quote = String(span.quote || '');
+          appendEvidence(card, { ...span, quote: quote.length > 500 ? `${quote.slice(0, 500).trimEnd()}…` : quote });
+        });
+        card.append(text('p', 'Long quotes are shortened here. The complete retained record remains available in the sections below and in raw JSON.', 'trace-section-note'));
+      } else {
+        card.append(text('p', reason.evidence_note || 'No source evidence was retained for this failed check.', 'trace-section-note'));
+      }
+      return card;
+    }
     function renderExportsReadable(records) {
       const wrap = document.createElement('div'); wrap.className = 'trace-readable';
       records.forEach((entry, index) => {
@@ -1349,6 +1396,7 @@
         paper.append(select, text('div', item.doi || item.paper_id || item.source_id || 'No DOI or paper ID', 'subtle'));
         const finalState = document.createElement('td'); finalState.dataset.label = 'State';
         finalState.append(text('span', label(item.state), `badge ${item.state || 'unknown'}`));
+        if (item.reason?.summary) finalState.append(text('div', item.reason.summary, 'trace-list-reason'));
         const stage = text('td', label(item.current_stage)); stage.dataset.label = 'Stage';
         const attempts = text('td', formatNumber(item.attempt_count)); attempts.dataset.label = 'Attempts';
         row.append(paper, finalState, stage, attempts);
@@ -1407,6 +1455,7 @@
       heading.append(actions);
       target.append(heading);
       target.append(text('p', 'Machine labels report retained pipeline state. They do not establish scientific acceptance or truth.', 'trace-section-note'));
+      if (payload.plain_reason) target.append(renderPlainReason(payload.plain_reason));
       const sections = [
         ['Generated QA and distractors', payload.candidates, renderCandidatesReadable, true],
         ['Frozen findings', payload.findings, renderFindingsReadable],

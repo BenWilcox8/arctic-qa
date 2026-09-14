@@ -52,6 +52,126 @@ _ROLE_BY_STAGE = {
 }
 
 
+def _plain_reason(final_reason: str | None, state: str, current_stage: str) -> dict[str, Any] | None:
+    if not final_reason:
+        return None
+    reason = str(final_reason)
+    check = reason.split(":", 1)[1] if ":" in reason else reason
+    plain_check = check.replace("_", " ")
+    if reason == "criterion_failed:published_primary_findings":
+        return {
+            "category": "eligibility_exclusion",
+            "summary": "Excluded because the source was classified as a review or synthesis, not a primary research report.",
+            "explanation": "The scientific eligibility check failed the primary-findings criterion. This is a retained model decision, not a new scientific judgment by the viewer.",
+            "failed_stage": "scientific_eligibility",
+            "failed_check": "published_primary_findings",
+            "reason_code": reason,
+        }
+    if reason.startswith("criterion_failed:"):
+        return {
+            "category": "eligibility_exclusion",
+            "summary": f"Excluded because the {plain_check} eligibility check failed.",
+            "explanation": "The retained eligibility result marked this required criterion as failed.",
+            "failed_stage": "scientific_eligibility",
+            "failed_check": check,
+            "reason_code": reason,
+        }
+    if reason.startswith(("criterion_evidence_missing:", "criterion_missing_context_absent:")):
+        return {
+            "category": "eligibility_unresolved",
+            "summary": f"Eligibility is unresolved because evidence for {plain_check} is missing from the retained context.",
+            "explanation": "Missing evidence does not prove that the study is out of scope. The pipeline kept this paper unresolved.",
+            "failed_stage": "scientific_eligibility",
+            "failed_check": check,
+            "reason_code": reason,
+        }
+    if reason.startswith("criterion_unresolved:"):
+        return {
+            "category": "eligibility_unresolved",
+            "summary": f"Eligibility is unresolved for the {plain_check} check.",
+            "explanation": "The retained evidence did not support a final eligibility decision. This is not an exclusion.",
+            "failed_stage": "scientific_eligibility",
+            "failed_check": check,
+            "reason_code": reason,
+        }
+    if reason == "reconstruction_disagreement":
+        return {
+            "category": "qa_rejection",
+            "summary": "The paper stayed eligible, but its generated question was rejected because the independent reconstruction did not agree with the proposed answer.",
+            "explanation": "This rejection applies to the generated QA candidate. It does not exclude the source paper from the corpus.",
+            "failed_stage": "automated_acceptance",
+            "failed_check": reason,
+            "reason_code": reason,
+        }
+    if "scope_not_source_bound" in reason or reason == "relation_scope_mismatch":
+        return {
+            "category": "qa_rejection",
+            "summary": "The paper stayed eligible, but its generated question was rejected because the stated scope was not fully bound to the selected source passage.",
+            "explanation": "This rejection applies to the generated QA candidate. It does not exclude the source paper from the corpus.",
+            "failed_stage": "automated_acceptance",
+            "failed_check": reason,
+            "reason_code": reason,
+        }
+    if reason.endswith("_response_invalid") or any(
+        token in reason.casefold() for token in ("malformed", "schema_invalid", "parse_error")
+    ):
+        return {
+            "category": "invalid_model_response",
+            "summary": "The paper stayed eligible, but this QA attempt was rejected because the model response was invalid.",
+            "explanation": "The response failed the required structured-output contract. The viewer preserves the settled response for inspection.",
+            "failed_stage": current_stage,
+            "failed_check": reason,
+            "reason_code": reason,
+        }
+    if any(token in reason.casefold() for token in ("distractor", "option_verification")):
+        return {
+            "category": "distractor_rejection",
+            "summary": "The paper stayed eligible, but the generated distractor set failed validation.",
+            "explanation": "This rejection applies to the generated QA options. It does not exclude the source paper from the corpus.",
+            "failed_stage": "option_verification",
+            "failed_check": reason,
+            "reason_code": reason,
+        }
+    if any(token in reason.casefold() for token in ("access", "source_unavailable", "source_missing")):
+        return {
+            "category": "source_or_access_problem",
+            "summary": "Processing could not continue because the required source or access evidence was unavailable.",
+            "explanation": "Unavailable evidence is not an eligibility exclusion. The record remains separate until the source problem is resolved.",
+            "failed_stage": current_stage,
+            "failed_check": reason,
+            "reason_code": reason,
+        }
+    if any(
+        token in reason.casefold()
+        for token in ("accounting", "budget", "ambiguous_charge", "infrastructure")
+    ):
+        return {
+            "category": "infrastructure_or_accounting_stop",
+            "summary": "Processing stopped because an infrastructure, budget, or accounting guard did not allow continuation.",
+            "explanation": "This operational stop is not an eligibility or QA-quality decision.",
+            "failed_stage": current_stage,
+            "failed_check": reason,
+            "reason_code": reason,
+        }
+    if state == "error" or reason in {"ValueError", "RuntimeError"}:
+        return {
+            "category": "processing_error",
+            "summary": f"Processing stopped with {reason} during {current_stage.replace('_', ' ')}.",
+            "explanation": "The progress record does not retain a more specific error message. This is a processing stop, not a scientific decision.",
+            "failed_stage": current_stage,
+            "failed_check": reason,
+            "reason_code": reason,
+        }
+    return {
+        "category": "qa_rejection" if state == "generation_rejected" else "recorded_exit",
+        "summary": f"Processing ended with the retained reason: {plain_check}.",
+        "explanation": "The exact reason code is preserved below.",
+        "failed_stage": current_stage,
+        "failed_check": reason,
+        "reason_code": reason,
+    }
+
+
 def _now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -192,17 +312,24 @@ class PipelineTraceStore:
         source_ids = record["source_ids"]
         sources = [self._source_detail(source_id) for source_id in source_ids]
         stages = self._stage_summaries(record)
+        findings = self._table_json_rows("findings", "source_id", source_ids)
+        candidates = self._table_json_rows("candidates", "source_id", source_ids)
+        rejections = self._rejection_rows(source_ids, record)
+        eligibility = self._eligibility_jobs(record)
         return {
             "schema": PAPER_SCHEMA,
             "generated_at_utc": _now(),
             "identity": self._list_item(record),
             "runs": self._runs(record, stages),
             "sources": sources,
-            "findings": self._table_json_rows("findings", "source_id", source_ids),
-            "candidates": self._table_json_rows("candidates", "source_id", source_ids),
+            "plain_reason": self._plain_reason_detail(
+                record, eligibility, candidates, findings, rejections
+            ),
+            "findings": findings,
+            "candidates": candidates,
             "validation_events": self._validation_rows(source_ids),
-            "rejections": self._rejection_rows(source_ids, record),
-            "eligibility": self._eligibility_jobs(record),
+            "rejections": rejections,
+            "eligibility": eligibility,
             "exports": self._export_rows(record, source_ids),
             "stages": stages,
         }
@@ -310,7 +437,12 @@ class PipelineTraceStore:
         families = set(source_by_family) | {
             str(event.get("family_id")) for event in receipts if event.get("family_id")
         }
-        progress_titles = self._progress_titles()
+        progress = self._progress_snapshot()
+        progress_titles = {
+            str(row.get("paper_id")): str(row.get("title"))
+            for row in progress.get("recent_papers", [])
+            if row.get("paper_id") and row.get("title")
+        }
         for family_id in families:
             family_sources = source_by_family.get(family_id, [])
             family_receipts = [
@@ -398,7 +530,7 @@ class PipelineTraceStore:
                 ),
                 default={},
             )
-            groups[key] = {
+            record = {
                 "paper_key": key,
                 "paper_id": paper_id,
                 "source_id": source_ids[0] if source_ids else None,
@@ -415,6 +547,15 @@ class PipelineTraceStore:
                 "receipts": family_receipts,
                 "candidate_rows": relevant_candidates,
             }
+            progress_row = self._matching_progress_row(record, progress)
+            if progress_row:
+                record["progress_row"] = progress_row
+                record["progress_snapshot"] = {
+                    "run_id": progress.get("run_id"),
+                    "invocation_run_id": progress.get("invocation_run_id"),
+                }
+                record.update(self._progress_projection(progress_row))
+            groups[key] = record
         return groups
 
     def _project_run(self, record: dict[str, Any], run_id: str) -> dict[str, Any]:
@@ -455,7 +596,7 @@ class PipelineTraceStore:
             )
             if value
         }
-        return {
+        projected = {
             **record,
             "run_ids": [run_id],
             "state": self._paper_state(
@@ -476,6 +617,14 @@ class PipelineTraceStore:
             "receipts": receipts,
             "candidate_rows": candidates,
         }
+        progress = record.get("progress_row")
+        snapshot = record.get("progress_snapshot") or {}
+        if progress and run_id in {
+            snapshot.get("run_id"),
+            snapshot.get("invocation_run_id"),
+        }:
+            projected.update(self._progress_projection(progress))
+        return projected
 
     def _receipt_events(self) -> list[dict[str, Any]]:
         if not self.receipts_dir.is_dir():
@@ -876,6 +1025,153 @@ class PipelineTraceStore:
             )
         return runs
 
+    def _plain_reason_detail(
+        self,
+        record: dict[str, Any],
+        eligibility: list[dict[str, Any]],
+        candidates: list[dict[str, Any]],
+        findings: list[dict[str, Any]],
+        rejections: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        reason = record.get("reason")
+        if not reason:
+            return None
+        detail = dict(reason)
+        codes = [str(reason["reason_code"])]
+        codes.extend(
+            str(row.get("reason_code"))
+            for row in rejections
+            if row.get("reason_code")
+        )
+        model_statements: list[dict[str, str]] = []
+        evidence: list[dict[str, Any]] = []
+        comparisons: list[dict[str, Any]] = []
+
+        failed_check = reason.get("failed_check")
+        for job in eligibility:
+            validation = job.get("validation") or {}
+            if str(reason.get("category", "")).startswith("eligibility_"):
+                codes.extend(
+                    str(value)
+                    for value in validation.get("overall_reason_codes") or []
+                )
+            criteria = (job.get("parsed_response") or {}).get("criteria") or []
+            for criterion in criteria:
+                if criterion.get("criterion_id") != failed_check:
+                    continue
+                criterion_codes = [
+                    str(value) for value in criterion.get("reason_codes") or []
+                ]
+                codes.extend(criterion_codes)
+                statement = (
+                    f"The model marked {failed_check.replace('_', ' ')} as "
+                    f"{criterion.get('status') or 'not resolved'}"
+                )
+                if criterion_codes:
+                    statement += f" and returned {', '.join(criterion_codes)}."
+                else:
+                    statement += "."
+                model_statements.append(
+                    {"label": "Eligibility model result", "text": statement}
+                )
+                missing = [str(value) for value in criterion.get("missing_context") or []]
+                if missing:
+                    model_statements.append(
+                        {
+                            "label": "Missing context reported by the model",
+                            "text": ", ".join(missing),
+                        }
+                    )
+            for group in validation.get("resolved_evidence") or []:
+                if group.get("criterion") == failed_check:
+                    evidence.extend(
+                        {
+                            "quote": span.get("quote"),
+                            "locator": span.get("locator"),
+                            "span_id": span.get("span_id"),
+                        }
+                        for span in group.get("spans") or []
+                        if span.get("quote")
+                    )
+
+        for row in candidates:
+            candidate = row.get("candidate") or {}
+            codes.extend(str(value) for value in candidate.get("qa_gate_reasons") or [])
+            answer = candidate.get("answer") or {}
+            reconstruction = candidate.get("reconstruction") or {}
+            verification = candidate.get("answer_verification") or {}
+            if verification.get("verification_rationale"):
+                model_statements.append(
+                    {
+                        "label": "Answer verifier statement",
+                        "text": str(verification["verification_rationale"]),
+                    }
+                )
+            if verification.get("residual_error"):
+                model_statements.append(
+                    {
+                        "label": "Verifier error statement",
+                        "text": str(verification["residual_error"]),
+                    }
+                )
+            if answer.get("text") or reconstruction.get("answer"):
+                comparisons.append(
+                    {
+                        "label": "Proposed answer compared with independent reconstruction",
+                        "proposed_answer": answer.get("text"),
+                        "reconstructed_answer": reconstruction.get("answer"),
+                    }
+                )
+            source = answer if answer.get("evidence_quote") else reconstruction
+            if source.get("evidence_quote"):
+                evidence.append(
+                    {
+                        "quote": source.get("evidence_quote"),
+                        "locator": source.get("locator"),
+                        "span_id": source.get("source_span_id"),
+                    }
+                )
+
+        if not model_statements and record.get("state") == "error":
+            latest = max(
+                record.get("receipts") or [],
+                key=lambda row: str(
+                    row.get("completed_at_utc") or row.get("submitted_at_utc") or ""
+                ),
+                default={},
+            )
+            model_text = self._model_text(latest.get("response"))
+            if model_text:
+                model_statements.append(
+                    {"label": "Last retained model response", "text": model_text}
+                )
+                parsed = self._parse_model_text(latest.get("response")) or {}
+                source_span_id = parsed.get("source_span_id")
+                for finding in findings:
+                    answer = finding.get("answer") or {}
+                    if source_span_id and answer.get("source_span_id") != source_span_id:
+                        continue
+                    if answer.get("evidence_quote"):
+                        evidence.append(
+                            {
+                                "quote": answer.get("evidence_quote"),
+                                "locator": answer.get("locator"),
+                                "span_id": answer.get("source_span_id"),
+                            }
+                        )
+                        break
+
+        detail["reason_codes"] = list(dict.fromkeys(codes))
+        detail["model_statements"] = model_statements
+        detail["comparisons"] = comparisons
+        detail["evidence"] = evidence
+        if not evidence:
+            detail["evidence_note"] = (
+                "No source quote is retained for this failed check. "
+                "Missing evidence is not proof that the paper is out of scope."
+            )
+        return self._safe_value(detail)
+
     def _paper_state(
         self,
         candidates: list[dict[str, Any]],
@@ -912,13 +1208,55 @@ class PipelineTraceStore:
             return str(latest.get("state") or "unknown")
         return "not_started"
 
-    def _progress_titles(self) -> dict[str, str]:
+    def _progress_snapshot(self) -> dict[str, Any]:
         path = self.namespace / "streaming-dataset-r1" / "progress.json"
         value = self._read_json(path) if path.is_file() else {}
+        if not isinstance(value, dict):
+            return {}
+        value["recent_papers"] = [
+            row for row in (value.get("recent_papers") or []) if isinstance(row, dict)
+        ]
+        return value
+
+    @staticmethod
+    def _matching_progress_row(
+        record: dict[str, Any], progress: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        identifiers = {
+            str(value).casefold()
+            for value in (
+                record.get("paper_id"),
+                record.get("doi"),
+                *record.get("source_ids", []),
+            )
+            if value
+        }
+        title = str(record.get("title") or "").strip().casefold()
+        for row in reversed(progress.get("recent_papers", [])):
+            paper_id = str(row.get("paper_id") or "").casefold()
+            row_title = str(row.get("title") or "").strip().casefold()
+            if paper_id in identifiers or (title and row_title == title):
+                return dict(row)
+        return None
+
+    @staticmethod
+    def _progress_projection(row: dict[str, Any]) -> dict[str, Any]:
+        final_state = str(row.get("final_state") or "unknown")
+        if final_state == "accepted":
+            final_state = "machine_accepted_unverified"
+        if final_state == "rejected" and str(row.get("final_reason") or "").startswith(
+            "criterion_"
+        ):
+            final_state = "eligibility_rejected"
+        if final_state == "unresolved":
+            final_state = "eligibility_unresolved"
+        current_stage = str(row.get("current_stage") or "not_started")
+        reason = _plain_reason(row.get("final_reason"), final_state, current_stage)
         return {
-            str(row.get("paper_id")): str(row.get("title"))
-            for row in (value.get("recent_papers") or [])
-            if isinstance(row, dict) and row.get("paper_id") and row.get("title")
+            "state": final_state,
+            "current_stage": current_stage,
+            "final_reason": row.get("final_reason"),
+            "reason": reason,
         }
 
     def _freshness(self) -> dict[str, Any]:
@@ -967,6 +1305,8 @@ class PipelineTraceStore:
                 "current_stage",
                 "attempt_count",
                 "latest_at_utc",
+                "final_reason",
+                "reason",
             )
         }
 

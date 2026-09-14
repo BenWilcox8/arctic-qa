@@ -11,6 +11,7 @@ from arctic_qa.pipeline_trace import (
     PAPER_SCHEMA,
     STAGE_SCHEMA,
     PipelineTraceStore,
+    _plain_reason,
     record_model_request_trace,
 )
 from arctic_qa.util import canonical_json, sha256_bytes
@@ -352,6 +353,105 @@ def test_detail_exposes_retained_scientific_records_and_separate_attempts(
     encoded = json.dumps(detail)
     assert "/private/must-not-leak" not in encoded
     assert "thoughtSignature" not in encoded
+
+
+def test_progress_reason_overlays_list_and_builds_plain_evidence(tmp_path: Path) -> None:
+    namespace, _, _ = fixture_namespace(tmp_path)
+    progress_path = namespace / "streaming-dataset-r1" / "progress.json"
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    progress["invocation_run_id"] = "campaign-fixture"
+    progress["recent_papers"] = [
+        {
+            "paper_id": "src-fixture",
+            "title": "Arctic fixture paper",
+            "current_stage": "completed",
+            "final_state": "generation_rejected",
+            "final_reason": "answer_verifier_scope_not_source_bound",
+        }
+    ]
+    write_json(progress_path, progress)
+    store = PipelineTraceStore(namespace)
+
+    item = store.list_papers(run_id="campaign-fixture", query="Arctic fixture")[
+        "items"
+    ][0]
+    assert item["state"] == "generation_rejected"
+    assert item["reason"]["summary"].startswith("The paper stayed eligible")
+    assert item["final_reason"] == "answer_verifier_scope_not_source_bound"
+
+    detail = store.paper_detail(item["paper_key"])
+    assert detail["plain_reason"]["failed_stage"] == "automated_acceptance"
+    assert detail["plain_reason"]["reason_codes"] == [
+        "answer_verifier_scope_not_source_bound",
+        "fixture_rejection",
+    ]
+    assert detail["plain_reason"]["evidence"][0]["quote"].startswith(
+        "The retained Arctic result"
+    )
+    assert detail["plain_reason"]["comparisons"][0] == {
+        "label": "Proposed answer compared with independent reconstruction",
+        "proposed_answer": "It increased.",
+        "reconstructed_answer": "It increased.",
+    }
+
+
+@pytest.mark.parametrize(
+    ("reason", "state", "category", "stage"),
+    [
+        (
+            "criterion_failed:published_primary_findings",
+            "eligibility_rejected",
+            "eligibility_exclusion",
+            "scientific_eligibility",
+        ),
+        (
+            "criterion_evidence_missing:study_geography",
+            "eligibility_unresolved",
+            "eligibility_unresolved",
+            "scientific_eligibility",
+        ),
+        (
+            "reconstruction_disagreement",
+            "generation_rejected",
+            "qa_rejection",
+            "automated_acceptance",
+        ),
+        (
+            "reconstructor_response_invalid",
+            "generation_rejected",
+            "invalid_model_response",
+            "blinded_reconstruction",
+        ),
+        ("ValueError", "error", "processing_error", "generation"),
+        (
+            "source_unavailable",
+            "unresolved",
+            "source_or_access_problem",
+            "retrieval",
+        ),
+        (
+            "distractor_not_false",
+            "generation_rejected",
+            "distractor_rejection",
+            "option_verification",
+        ),
+        (
+            "ambiguous_charge",
+            "ambiguous_charge",
+            "infrastructure_or_accounting_stop",
+            "generation",
+        ),
+    ],
+)
+def test_plain_reason_distinguishes_exit_categories(
+    reason: str, state: str, category: str, stage: str
+) -> None:
+    result = _plain_reason(reason, state, stage)
+
+    assert result is not None
+    assert result["category"] == category
+    assert result["failed_stage"] == stage
+    assert result["reason_code"] == reason
 
 
 def test_stage_payload_is_full_on_demand_and_historical_absence_is_honest(
