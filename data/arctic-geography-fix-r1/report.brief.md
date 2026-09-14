@@ -10,15 +10,17 @@ The first v3 attempt preserved its immutable manifest at
 `1f0dc22f6a8fc304978e2f26fda60ebee1a014a8fe34c20a59f07e21aca2d669`.
 It refused before provider transport because it was bound to v2 inputs.
 
-The replacement segment is `first-production-6fbdf41-r1-geo-v3` with separate
-v3 eligibility records and manifest
+The first replacement segment was `first-production-6fbdf41-r1-geo-v3` with
+separate v3 eligibility records and manifest
 `stream-invocation-6107660d3e0758844998/run-manifest.json`, SHA-256
 `4a4385f0d6932061e0f3f60c6ee86476e52202a49afca40c40f0c48b3e3e0c4e`.
 Its original v3 gate was
 `gate-6fbdf41-production-50usd-r1-v3-geo-segment-r1.json`, SHA-256
 `3801fe6312eb282329a15aba235ebce9513b2f1accf1d75d8c6a9e39fabcdfe7`.
 That gate is not used for the pending resume because code changed after the
-initial release.
+initial release. The final prompt-self-binding successor is
+`first-production-6fbdf41-r1-geo-v3-scope-r2`; it uses prompt v6 and gate
+`/home/ben/.config/arctic-qa/gate-6fbdf41-production-50usd-r1-v3-scope-r2.json`.
 
 The v3 policy, prompt, and schema SHA-256 values are respectively
 `64bd4d99527b96c1b52e1dbc91c3b02a3c7c58610e07770ea40fa8f90f65a773`,
