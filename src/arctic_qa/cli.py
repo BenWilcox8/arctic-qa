@@ -404,7 +404,7 @@ def parser() -> argparse.ArgumentParser:
 
     continuation = commands.add_parser(
         "authorize-ambiguous-continuation",
-        help="Authorize unrelated papers after a reviewed HTTP 500 unknown charge.",
+        help="Authorize unrelated papers after a reviewed ambiguous charge.",
     )
     continuation.add_argument("--request-key", required=True)
     continuation.add_argument("--expected-ledger-sha256", required=True)

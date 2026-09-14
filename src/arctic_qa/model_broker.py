@@ -100,6 +100,12 @@ AMBIGUOUS_CONTINUATION_SCHEMA = "shared-paid-call-ambiguous-continuation-v1"
 AMBIGUOUS_CONTINUATION_EVIDENCE_SCHEMA = (
     "shared-paid-call-ambiguous-continuation-evidence-v1"
 )
+RECEIVED_MAX_TOKENS_CONTINUATION_SCHEMA = (
+    "shared-paid-call-received-max-tokens-continuation-v1"
+)
+RECEIVED_MAX_TOKENS_CONTINUATION_EVIDENCE_SCHEMA = (
+    "shared-paid-call-received-max-tokens-continuation-evidence-v1"
+)
 AMBIGUOUS_CONTINUATION_RESERVATION_POLICY = (
     "retain_full_reservation_in_ambiguous_reserved_and_count_against_all_caps"
 )
@@ -135,6 +141,16 @@ AMBIGUOUS_CONTINUATION_FIELDS = {
     "authorized_at_utc",
     "operator_id",
 }
+RECEIVED_MAX_TOKENS_CONTINUATION_FIELDS = (
+    AMBIGUOUS_CONTINUATION_FIELDS
+    - {"http_status", "received_receipt_absent"}
+    | {
+        "received_receipt_sha256",
+        "request_trace_sha256",
+        "finish_reason",
+        "received_receipt_present",
+    }
+)
 ORPHANED_CONTINUATION_FIELDS = {
     "schema",
     "request_key",
@@ -208,6 +224,64 @@ def _now() -> str:
 def _read(path: Path) -> Any:
     with path.open(encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _is_received_max_tokens_ambiguous_case(
+    final: dict[str, Any],
+    received: dict[str, Any],
+    trace: dict[str, Any],
+    request: dict[str, Any],
+) -> bool:
+    if not all(
+        isinstance(value, dict) for value in (final, received, trace, request)
+    ):
+        return False
+    response = received.get("response")
+    if not isinstance(response, dict):
+        return False
+    candidates = response.get("candidates")
+    usage = response.get("usageMetadata")
+    if (
+        not isinstance(candidates, list)
+        or candidates
+        != [{"content": {}, "finishReason": "MAX_TOKENS", "index": 0}]
+        or not isinstance(usage, dict)
+        or "candidatesTokenCount" in usage
+        or "thoughtsTokenCount" in usage
+        or isinstance(usage.get("promptTokenCount"), bool)
+        or not isinstance(usage.get("promptTokenCount"), int)
+        or usage.get("totalTokenCount") != usage.get("promptTokenCount")
+    ):
+        return False
+    payload = trace.get("payload")
+    generation = payload.get("generationConfig") if isinstance(payload, dict) else None
+    return (
+        final.get("state") == "ambiguous_charge"
+        and final.get("error")
+        == "ValueError: provider usage cannot prove zero thinking tokens"
+        and final.get("live_call_made") is True
+        and final.get("response") == response
+        and final.get("reserved_usd") == request.get("reserved_usd")
+        and final.get("actual_cost_usd") is None
+        and received.get("state") == "response_received"
+        and received.get("live_call_made") is True
+        and received.get("response") == response
+        and trace.get("request_key") == request.get("request_key")
+        and trace.get("request_sha256") == request.get("request_sha256")
+        and trace.get("stage") == "answer_agreement"
+        and trace.get("model") == "gemini-3.1-flash-lite"
+        and generation
+        == {
+            "candidateCount": 1,
+            "maxOutputTokens": 4,
+            "responseJsonSchema": {"enum": ["yes", "no"], "type": "string"},
+            "responseMimeType": "text/x.enum",
+            "temperature": 0,
+            "thinkingConfig": {"thinkingLevel": "minimal"},
+        }
+        and request.get("stage") == "answer_agreement"
+        and request.get("model") == "gemini-3.1-flash-lite"
+    )
 
 
 def exclusive_batch_marker_path(ledger_file: Path) -> Path:
@@ -1814,6 +1888,10 @@ class SharedGeminiBroker:
 
     def _read_ambiguous_continuation(self, path: Path) -> dict[str, Any]:
         event = _read(path)
+        if isinstance(event, dict) and event.get(
+            "schema"
+        ) == RECEIVED_MAX_TOKENS_CONTINUATION_SCHEMA:
+            return self._validate_received_max_tokens_continuation(event, path)
         if (
             not isinstance(event, dict)
             or set(event) != AMBIGUOUS_CONTINUATION_FIELDS
@@ -1919,6 +1997,100 @@ class SharedGeminiBroker:
             raise ValueError("an ambiguous continuation time changed")
         return event
 
+    def _validate_received_max_tokens_continuation(
+        self, event: dict[str, Any], path: Path
+    ) -> dict[str, Any]:
+        if set(event) != RECEIVED_MAX_TOKENS_CONTINUATION_FIELDS:
+            raise ValueError("an ambiguous continuation event changed")
+        request_key = event.get("request_key")
+        if (
+            not isinstance(request_key, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", request_key)
+            or path.name != f"ambiguous-continuation-{request_key}.json"
+        ):
+            raise ValueError("an ambiguous continuation event changed")
+        for field in (
+            "ambiguous_receipt_sha256",
+            "received_receipt_sha256",
+            "request_trace_sha256",
+            "evidence_file_sha256",
+            "review_file_sha256",
+            "ledger_sha256_before",
+            "gate_sha256",
+        ):
+            if not re.fullmatch(r"[a-f0-9]{64}", str(event.get(field) or "")):
+                raise ValueError("an ambiguous continuation event changed")
+        if (
+            event.get("error_class") != "received_max_tokens_usage_unknown"
+            or event.get("finish_reason") != "MAX_TOKENS"
+            or event.get("live_call_made") is not True
+            or event.get("received_receipt_present") is not True
+            or event.get("reservation_policy")
+            != AMBIGUOUS_CONTINUATION_RESERVATION_POLICY
+            or event.get("scope") != "unrelated_families_only"
+            or event.get("skip_reason_code")
+            != "operational_ambiguous_charge_received_max_tokens"
+            or not str(event.get("affected_family_id") or "").strip()
+            or not str(event.get("authorized_run_id") or "").strip()
+            or not str(event.get("integrated_code_commit") or "").strip()
+            or not str(event.get("operator_id") or "").strip()
+        ):
+            raise ValueError("an ambiguous continuation event changed")
+        request_identity = event.get("request_identity")
+        if (
+            not isinstance(request_identity, dict)
+            or set(request_identity)
+            != {
+                "run_id",
+                "stage",
+                "paper_id",
+                "family_id",
+                "source_version_id",
+                "request_sha256",
+                "reserved_usd",
+            }
+            or not all(
+                isinstance(value, str) and value for value in request_identity.values()
+            )
+            or _money(
+                event.get("reserved_usd"), "continuation reservation", positive=True
+            )
+            <= 0
+        ):
+            raise ValueError("an ambiguous continuation request identity changed")
+        evidence_path = Path(str(event.get("evidence_file") or "")).resolve()
+        review_path = Path(str(event.get("review_file") or "")).resolve()
+        if (
+            not evidence_path.is_file()
+            or sha256_file(evidence_path) != event["evidence_file_sha256"]
+            or not review_path.is_file()
+            or sha256_file(review_path) != event["review_file_sha256"]
+        ):
+            raise ValueError("an ambiguous continuation evidence changed")
+        evidence = _read(evidence_path)
+        if evidence != {
+            "schema": RECEIVED_MAX_TOKENS_CONTINUATION_EVIDENCE_SCHEMA,
+            "request_key": request_key,
+            "error_class": event["error_class"],
+            "finish_reason": event["finish_reason"],
+            "live_call_made": True,
+            "received_receipt_present": True,
+            "actual_cost_known": False,
+            "replay_prohibited": True,
+            "affected_family_id": event["affected_family_id"],
+            "authorized_run_id": event["authorized_run_id"],
+        }:
+            raise ValueError("an ambiguous continuation evidence changed")
+        try:
+            authorized = datetime.fromisoformat(
+                str(event["authorized_at_utc"]).replace("Z", "+00:00")
+            )
+        except ValueError as error:
+            raise ValueError("an ambiguous continuation time changed") from error
+        if authorized.tzinfo is None:
+            raise ValueError("an ambiguous continuation time changed")
+        return event
+
     def _ambiguous_continuation_events(
         self, ledger: dict[str, Any]
     ) -> dict[str, dict[str, Any]]:
@@ -1951,21 +2123,37 @@ class SharedGeminiBroker:
                 raise ValueError("an ambiguous continuation request identity changed")
             final_path = self.receipts_dir / f"{request_key}.json"
             received_path = self.receipts_dir / f"{request_key}.received.json"
-            if (
-                not final_path.is_file()
-                or event["ambiguous_receipt_sha256"] != sha256_file(final_path)
-                or received_path.exists()
-            ):
+            if not final_path.is_file() or event[
+                "ambiguous_receipt_sha256"
+            ] != sha256_file(final_path):
                 raise ValueError("an ambiguous continuation receipt changed")
             final = _read(final_path)
-            if (
-                final.get("state") != "ambiguous_charge"
-                or final.get("error_class") != event["error_class"]
-                or final.get("http_status") != event["http_status"]
-                or final.get("live_call_made") is not True
-                or "response" in final
-            ):
-                raise ValueError("an ambiguous continuation receipt changed")
+            if event["schema"] == AMBIGUOUS_CONTINUATION_SCHEMA:
+                if (
+                    received_path.exists()
+                    or final.get("state") != "ambiguous_charge"
+                    or final.get("error_class") != event["error_class"]
+                    or final.get("http_status") != event["http_status"]
+                    or final.get("live_call_made") is not True
+                    or "response" in final
+                ):
+                    raise ValueError("an ambiguous continuation receipt changed")
+            else:
+                trace_path = self.receipts_dir / f"{request_key}.request-trace.json"
+                if (
+                    not received_path.is_file()
+                    or not trace_path.is_file()
+                    or event["received_receipt_sha256"]
+                    != sha256_file(received_path)
+                    or event["request_trace_sha256"] != sha256_file(trace_path)
+                    or not _is_received_max_tokens_ambiguous_case(
+                        final,
+                        _read(received_path),
+                        _read(trace_path),
+                        request,
+                    )
+                ):
+                    raise ValueError("an ambiguous continuation receipt changed")
             events[request_key] = event
         return events
 
@@ -3011,7 +3199,7 @@ class SharedGeminiBroker:
         authorized_run_id: str,
         operator_id: str,
     ) -> dict[str, Any]:
-        """Authorize unrelated work after one preserved HTTP 500 charge.
+        """Authorize unrelated work after one preserved ambiguous charge.
 
         This operation never settles or retries the ambiguous request. It only
         records the reviewed skip and releases the global stop when every
@@ -3067,36 +3255,63 @@ class SharedGeminiBroker:
                     raise ValueError("the ambiguous continuation gate changed")
                 final_path = self.receipts_dir / f"{request_key}.json"
                 received_path = self.receipts_dir / f"{request_key}.received.json"
+                trace_path = self.receipts_dir / f"{request_key}.request-trace.json"
                 final = _read(final_path)
                 reserved = _money(
                     request.get("reserved_usd"), "ambiguous reservation", positive=True
                 )
-                if (
-                    final.get("state") != "ambiguous_charge"
-                    or final.get("error_class") != "known_http_response_unknown_charge"
-                    or final.get("http_status") != 500
-                    or final.get("live_call_made") is not True
-                    or "response" in final
-                    or received_path.exists()
-                    or final.get("reserved_usd") != request.get("reserved_usd")
-                    or final.get("actual_cost_usd") is not None
-                ):
-                    raise ValueError("the request is not the supported HTTP 500 case")
+                http_500_case = (
+                    final.get("state") == "ambiguous_charge"
+                    and final.get("error_class")
+                    == "known_http_response_unknown_charge"
+                    and final.get("http_status") == 500
+                    and final.get("live_call_made") is True
+                    and "response" not in final
+                    and not received_path.exists()
+                    and final.get("reserved_usd") == request.get("reserved_usd")
+                    and final.get("actual_cost_usd") is None
+                )
+                received_max_tokens_case = (
+                    received_path.is_file()
+                    and trace_path.is_file()
+                    and _is_received_max_tokens_ambiguous_case(
+                        final,
+                        _read(received_path),
+                        _read(trace_path),
+                        request,
+                    )
+                )
+                if not http_500_case and not received_max_tokens_case:
+                    raise ValueError("the request is not a supported ambiguous case")
                 if not review_file.is_file() or not evidence_file.is_file():
                     raise ValueError("the ambiguous continuation evidence is absent")
                 evidence = _read(evidence_file)
-                expected_evidence = {
-                    "schema": AMBIGUOUS_CONTINUATION_EVIDENCE_SCHEMA,
-                    "request_key": request_key,
-                    "error_class": "known_http_response_unknown_charge",
-                    "http_status": 500,
-                    "live_call_made": True,
-                    "received_receipt_absent": True,
-                    "actual_cost_known": False,
-                    "replay_prohibited": True,
-                    "affected_family_id": request["family_id"],
-                    "authorized_run_id": authorized_run_id,
-                }
+                if http_500_case:
+                    expected_evidence = {
+                        "schema": AMBIGUOUS_CONTINUATION_EVIDENCE_SCHEMA,
+                        "request_key": request_key,
+                        "error_class": "known_http_response_unknown_charge",
+                        "http_status": 500,
+                        "live_call_made": True,
+                        "received_receipt_absent": True,
+                        "actual_cost_known": False,
+                        "replay_prohibited": True,
+                        "affected_family_id": request["family_id"],
+                        "authorized_run_id": authorized_run_id,
+                    }
+                else:
+                    expected_evidence = {
+                        "schema": RECEIVED_MAX_TOKENS_CONTINUATION_EVIDENCE_SCHEMA,
+                        "request_key": request_key,
+                        "error_class": "received_max_tokens_usage_unknown",
+                        "finish_reason": "MAX_TOKENS",
+                        "live_call_made": True,
+                        "received_receipt_present": True,
+                        "actual_cost_known": False,
+                        "replay_prohibited": True,
+                        "affected_family_id": request["family_id"],
+                        "authorized_run_id": authorized_run_id,
+                    }
                 if evidence != expected_evidence:
                     raise ValueError("the ambiguous continuation evidence is not exact")
                 continuation_events = self._ambiguous_continuation_events(ledger)
@@ -3110,7 +3325,11 @@ class SharedGeminiBroker:
                         "every outstanding ambiguous request needs a continuation event"
                     )
                 event = {
-                    "schema": AMBIGUOUS_CONTINUATION_SCHEMA,
+                    "schema": (
+                        AMBIGUOUS_CONTINUATION_SCHEMA
+                        if http_500_case
+                        else RECEIVED_MAX_TOKENS_CONTINUATION_SCHEMA
+                    ),
                     "request_key": request_key,
                     "ambiguous_receipt_sha256": sha256_file(final_path),
                     "request_identity": {
@@ -3125,15 +3344,21 @@ class SharedGeminiBroker:
                             "reserved_usd",
                         )
                     },
-                    "error_class": "known_http_response_unknown_charge",
-                    "http_status": 500,
+                    "error_class": (
+                        "known_http_response_unknown_charge"
+                        if http_500_case
+                        else "received_max_tokens_usage_unknown"
+                    ),
                     "live_call_made": True,
-                    "received_receipt_absent": True,
                     "reserved_usd": str(reserved),
                     "reservation_policy": AMBIGUOUS_CONTINUATION_RESERVATION_POLICY,
                     "scope": "unrelated_families_only",
                     "affected_family_id": request["family_id"],
-                    "skip_reason_code": "operational_ambiguous_charge_http_500",
+                    "skip_reason_code": (
+                        "operational_ambiguous_charge_http_500"
+                        if http_500_case
+                        else "operational_ambiguous_charge_received_max_tokens"
+                    ),
                     "authorized_run_id": authorized_run_id,
                     "evidence_file": str(evidence_file.resolve()),
                     "evidence_file_sha256": sha256_file(evidence_file),
@@ -3145,6 +3370,22 @@ class SharedGeminiBroker:
                     "authorized_at_utc": _now(),
                     "operator_id": operator_id,
                 }
+                if http_500_case:
+                    event.update(
+                        {
+                            "http_status": 500,
+                            "received_receipt_absent": True,
+                        }
+                    )
+                else:
+                    event.update(
+                        {
+                            "received_receipt_sha256": sha256_file(received_path),
+                            "request_trace_sha256": sha256_file(trace_path),
+                            "finish_reason": "MAX_TOKENS",
+                            "received_receipt_present": True,
+                        }
+                    )
                 atomic_json(continuation_path, event, immutable=True)
                 ledger["halted"] = False
                 ledger["halt_reason"] = None

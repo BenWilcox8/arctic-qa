@@ -82,6 +82,43 @@ class DeadOwnerAfterSubmission:
         }
 
 
+class EmptyMaxTokensThenSuccess(Http500ThenSuccess):
+    def post(self, model: str, method: str, body: dict) -> dict:
+        self.methods.append(method)
+        if method == "countTokens":
+            return {"totalTokens": 171}
+        self.generation_calls += 1
+        if self.generation_calls == 1:
+            return {
+                "responseId": "empty-max-tokens-response",
+                "modelVersion": "gemini-3.1-flash-lite",
+                "candidates": [
+                    {
+                        "finishReason": "MAX_TOKENS",
+                        "content": {},
+                        "index": 0,
+                    }
+                ],
+                "usageMetadata": {
+                    "promptTokenCount": 171,
+                    "promptTokensDetails": [
+                        {"modality": "TEXT", "tokenCount": 171}
+                    ],
+                    "serviceTier": "standard",
+                    "totalTokenCount": 171,
+                },
+            }
+        return {
+            "candidates": [{"content": {"parts": [{"text": "{}"}]}}],
+            "usageMetadata": {
+                "promptTokenCount": 100,
+                "candidatesTokenCount": 10,
+                "thoughtsTokenCount": 5,
+                "totalTokenCount": 115,
+            },
+        }
+
+
 def fixture(tmp_path: Path, transport: object) -> dict[str, object]:
     review = tmp_path / "review.md"
     review.write_text("The bounded continuation passed independent review.\n")
@@ -140,6 +177,46 @@ def execute(broker: SharedGeminiBroker, *, paper: str, run_id: str) -> dict:
         phase="live_test",
         run_id=run_id,
         stage="question_generation",
+        paper_id=paper,
+        family_id=family,
+        source_version_id=source,
+        request_key=key,
+        payload=payload,
+    )
+
+
+def execute_answer_judge(
+    broker: SharedGeminiBroker, *, paper: str, run_id: str
+) -> dict:
+    payload = {
+        "systemInstruction": {"parts": [{"text": "Return only yes or no."}]},
+        "contents": [{"role": "user", "parts": [{"text": "DATA\n{}"}]}],
+        "generationConfig": {
+            "candidateCount": 1,
+            "temperature": 0,
+            "responseMimeType": "text/x.enum",
+            "responseJsonSchema": {"type": "string", "enum": ["yes", "no"]},
+            "maxOutputTokens": 4,
+            "thinkingConfig": {"thinkingLevel": "minimal"},
+        },
+        "store": False,
+    }
+    family = f"family-{paper}"
+    source = f"source-{paper}"
+    key = broker_request_key(
+        model="gemini-3.1-flash-lite",
+        run_id=run_id,
+        phase="live_test",
+        stage="answer_agreement",
+        paper_id=paper,
+        family_id=family,
+        source_version_id=source,
+        payload=payload,
+    )
+    return broker.execute(
+        phase="live_test",
+        run_id=run_id,
+        stage="answer_agreement",
         paper_id=paper,
         family_id=family,
         source_version_id=source,
@@ -290,6 +367,67 @@ def test_unknown_charge_continuation_retains_cap_and_never_replays(tmp_path: Pat
     assert json.loads(values["ledger"].read_text(encoding="utf-8"))["ambiguous_reserved_usd"] == first[
         "reserved_usd"
     ]
+
+
+def test_received_max_tokens_continuation_preserves_response_and_never_replays(
+    tmp_path: Path,
+) -> None:
+    transport = EmptyMaxTokensThenSuccess()
+    values = fixture(tmp_path, transport)
+    broker = values["broker"]
+    first = execute_answer_judge(
+        broker, paper="affected-max-tokens", run_id="run-current"
+    )
+    assert first["state"] == "ambiguous_charge"
+    assert first["response"]["candidates"] == [
+        {"finishReason": "MAX_TOKENS", "content": {}, "index": 0}
+    ]
+    assert first.get("actual_cost_usd") is None
+
+    evidence = tmp_path / "max-tokens-evidence.json"
+    write_json(
+        evidence,
+        {
+            "schema": (
+                "shared-paid-call-received-max-tokens-"
+                "continuation-evidence-v1"
+            ),
+            "request_key": first["request_key"],
+            "error_class": "received_max_tokens_usage_unknown",
+            "finish_reason": "MAX_TOKENS",
+            "live_call_made": True,
+            "received_receipt_present": True,
+            "actual_cost_known": False,
+            "replay_prohibited": True,
+            "affected_family_id": first["family_id"],
+            "authorized_run_id": first["run_id"],
+        },
+    )
+    result = broker.authorize_ambiguous_continuation(
+        request_key=first["request_key"],
+        expected_ledger_sha256=sha256_file(values["ledger"]),
+        review_file=values["review"],
+        evidence_file=evidence,
+        authorized_run_id="run-current",
+        operator_id="test-operator",
+    )
+
+    assert result["applied"] is True
+    assert result["reserved_usd_retained"] == first["reserved_usd"]
+    after = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    assert after["halted"] is False
+    assert after["ambiguous_reserved_usd"] == first["reserved_usd"]
+    assert broker.operational_unresolved_family_ids() == {
+        first["family_id"]: first["request_key"]
+    }
+    with pytest.raises(ValueError, match="request key already exists"):
+        execute_answer_judge(
+            broker, paper="affected-max-tokens", run_id="run-current"
+        )
+    assert execute(
+        broker, paper="unrelated-max-tokens", run_id="run-current"
+    )["state"] == "completed"
+    assert transport.generation_calls == 2
 
 
 def test_continuation_requires_exact_http500_evidence_and_run(tmp_path: Path):
