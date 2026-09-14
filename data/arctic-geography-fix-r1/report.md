@@ -22,6 +22,13 @@ phrase failures stay uncertain, and finding/reconstruction failures stay
 paper-local generation rejections. No new accepted family is claimed from the
 retained campaign acceptance counter.
 
+`*_scope_not_source_bound` outcomes are custody/format failures: the generated
+record omitted an exact required scope phrase or source-bound scope value. They
+do not alone show that a model made an out-of-scope scientific claim.
+`reconstruction_disagreement` is separately a blinded reconstruction validation
+failure. Both classes are retained as paper-local rejections, not conflated with
+scientific geography exclusion.
+
 ## Current checkpoint
 
 The correction and question-context integration are committed locally. No focused
