@@ -22,6 +22,8 @@ from .validation import (
     NUMERIC_RULE_CONTRACT_VERSION,
     SCOPE_CONTRACT_VERSION,
     numeric_rule_is_source_bound,
+    question_context_leaks_answer,
+    question_context_verification_reason,
     reconstruction_matches,
     scope_is_evidence_bound,
 )
@@ -60,6 +62,16 @@ QUESTION_ALIGNMENT_INSTRUCTIONS = (
     "one quantity or category, ask only for that quantity or category. If the answer "
     "requires multiple values, ask for every value. Do not request an explanation, "
     "evidence, or selection justification as part of the answer."
+)
+QUESTION_CONTEXT_INSTRUCTIONS = (
+    "Set question_context to an empty string when the question is self-contained. "
+    "Otherwise, add only source-supported information that is necessary to understand "
+    "the question. The context can expand an unfamiliar acronym, identify an ambiguous "
+    "referent, or distinguish a study group or measurement meaning. Keep this context "
+    "separate from the question. Do not put the task in the context or hide a second "
+    "question there. Do not include answer-bearing numbers, relationships, results, "
+    "conclusions, answer-choice eliminators, or a paper summary. If an acronym expansion "
+    "answers the question, do not supply that expansion. Do not invent a definition."
 )
 DISTRACTOR_WRITER_INSTRUCTIONS = """Propose 4 to 6 typed distractors so that at least three can survive independent verification. Do not self-verify them. Each option must be a concise positive assertion with one interpretation. Avoid explicit negation and compound assertions. For a numeric option, display exactly one displayed number and unit, and provide numeric canonical_value and unit metadata that match that display. Prefer nonnumeric categorical or directional contradictions when the answer lacks a source-bound numeric tolerance rule. Select source_span_id for each evidence record. For each option, provide a concise generation_rationale that explains why the option is plausible and how it differs from the source-supported answer. This is a model-generated justification, not proof and not hidden reasoning."""
 
@@ -294,18 +306,25 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "question_writer": {
         "type": "object",
-        "required": ["question", "question_rationale"],
+        "required": ["question", "question_context", "question_rationale"],
         "properties": {
             "question": {"type": "string", "minLength": 1},
+            "question_context": {"type": "string"},
             "question_rationale": JUSTIFICATION_SCHEMA,
         },
         "additionalProperties": False,
     },
     "direct_joint": {
         "type": "object",
-        "required": ["question", "question_rationale", "answer"],
+        "required": [
+            "question",
+            "question_context",
+            "question_rationale",
+            "answer",
+        ],
         "properties": {
             "question": {"type": "string", "minLength": 1},
+            "question_context": {"type": "string"},
             "question_rationale": JUSTIFICATION_SCHEMA,
             "answer": FROZEN_ANSWER_SCHEMA,
         },
@@ -363,6 +382,9 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
                 "relation_scope_match",
                 "ambiguity_resolved",
                 "alternative_answer_search_passed",
+                "question_context_required",
+                "question_context_source_supported",
+                "question_context_answer_leakage_absent",
                 "question_claim_type",
                 "evidence_quote",
                 "locator",
@@ -374,6 +396,9 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
                 "relation_scope_match": {"type": "boolean"},
                 "ambiguity_resolved": {"type": "boolean"},
                 "alternative_answer_search_passed": {"type": "boolean"},
+                "question_context_required": {"type": "boolean"},
+                "question_context_source_supported": {"type": "boolean"},
+                "question_context_answer_leakage_absent": {"type": "boolean"},
                 "question_claim_type": {
                     "enum": ["observation", "association", "causal", "definition"]
                 },
@@ -606,6 +631,7 @@ def generate_candidate(
     entity_id = stable_id("unit", finding_id, arm)
     arm_answer_proposal = answer
     question_rationale: str
+    question_context: str
     if arm == "answer_first":
         question_record = _call(
             db,
@@ -621,6 +647,8 @@ def generate_candidate(
             "to a concise evidence-grounded justification for the question's "
             "wording and scope. "
             + QUESTION_ALIGNMENT_INSTRUCTIONS
+            + " "
+            + QUESTION_CONTEXT_INSTRUCTIONS
             + " Do not provide hidden reasoning.",
             parameters,
             reservation,
@@ -629,6 +657,7 @@ def generate_candidate(
             rate_limit_seconds,
         )
         question = question_record["question"]
+        question_context = question_record["question_context"]
         question_rationale = question_record["question_rationale"]
     elif arm == "direct_joint":
         joint = _call(
@@ -648,6 +677,8 @@ def generate_candidate(
             + ANSWER_FORMAT_INSTRUCTIONS
             + " Preserve every field of the frozen answer record exactly. "
             + QUESTION_ALIGNMENT_INSTRUCTIONS
+            + " "
+            + QUESTION_CONTEXT_INSTRUCTIONS
             + " Do not provide hidden reasoning.",
             parameters,
             reservation,
@@ -656,6 +687,7 @@ def generate_candidate(
             rate_limit_seconds,
         )
         question = joint["question"]
+        question_context = joint["question_context"]
         question_rationale = joint["question_rationale"]
         arm_answer_proposal = joint["answer"]
     else:
@@ -664,6 +696,8 @@ def generate_candidate(
         context
         + "\nQUESTION\n"
         + str(question)
+        + "\nQUESTION_CONTEXT\n"
+        + question_context
         + "\nReconstruct the answer. The proposed answer is hidden. "
         "Select one source_span_id for the evidence. Copy each non-null scope "
         "value exactly from its selected SOURCE_DATA span, without aliases or "
@@ -699,11 +733,21 @@ def generate_candidate(
         context
         + "\nQUESTION\n"
         + str(question)
+        + "\nQUESTION_CONTEXT\n"
+        + question_context
         + "\nANSWER_RECORD\n"
         + canonical_json(answer)
         + "\nRECONSTRUCTION\n"
         + canonical_json(reconstruction)
         + "\nVerify entailment, relation, scope, ambiguity, alternatives, evidence, and the question claim type. "
+        "Treat QUESTION and QUESTION_CONTEXT as the complete model-facing task. "
+        "Set question_context_required to true only when the nonempty context supplies "
+        "information necessary to understand the question. Set it to false when the "
+        "question is self-contained. Set question_context_source_supported to true "
+        "only when every context statement has source support. Set "
+        "question_context_answer_leakage_absent to false when the context gives the "
+        "answer, a result, a conclusion, a relationship, an answer-bearing number, "
+        "or an answer-choice eliminator. "
         "Independently verify every non-null ANSWER_RECORD.scope value against the "
         "selected SOURCE_DATA span and the QUESTION. Do not assume any proposed "
         "scope value is true. Select one source_span_id for the evidence. It must "
@@ -736,13 +780,18 @@ def generate_candidate(
         reason_code="answer_verifier_evidence_span_not_found",
     )
     qa_gate_reasons = _qa_gate_reasons(
-        chunk, question, answer, reconstruction, answer_verification
+        chunk,
+        question,
+        answer,
+        reconstruction,
+        answer_verification,
+        question_context,
     )
     if canonical_json(arm_answer_proposal) != canonical_json(answer):
         qa_gate_reasons.append("generation_arm_finding_mismatch")
     distractors: list[dict[str, Any]] = []
     option_verdicts: list[dict[str, Any]] = []
-    qa_hash = stable_id("qa", question, canonical_json(answer))
+    qa_hash = stable_id("qa", question, question_context, canonical_json(answer))
     if not qa_gate_reasons:
         distractors, option_verdicts = _generate_distractors(
             db=db,
@@ -750,6 +799,7 @@ def generate_candidate(
             context=context,
             context_spans=context_spans,
             question=question,
+            question_context=question_context,
             answer=answer,
             qa_hash=qa_hash,
             entity_id=entity_id,
@@ -763,7 +813,14 @@ def generate_candidate(
             rate_limit_seconds=rate_limit_seconds,
         )
     item_id = stable_id(
-        "aqa", run_id, source_id, source["paper_family_id"], arm, question, answer
+        "aqa",
+        run_id,
+        source_id,
+        source["paper_family_id"],
+        arm,
+        question,
+        question_context,
+        answer,
     )
     same_provider_family = (
         author.name == verifier.name and author.model == verifier.model
@@ -784,6 +841,7 @@ def generate_candidate(
             "section_id": chunk["section_id"],
         },
         "question": question,
+        "question_context": question_context,
         "question_rationale": question_rationale,
         "answer": answer,
         "arm_answer_proposal": arm_answer_proposal,
@@ -881,6 +939,7 @@ def _generate_distractors(
     context: str,
     context_spans: dict[str, dict[str, Any]],
     question: str,
+    question_context: str,
     answer: dict[str, Any],
     qa_hash: str,
     entity_id: str,
@@ -906,6 +965,8 @@ def _generate_distractors(
         context
         + "\nQUESTION\n"
         + question
+        + "\nQUESTION_CONTEXT\n"
+        + question_context
         + "\nANSWER_RECORD\n"
         + canonical_json(answer)
         + attempt_context
@@ -940,6 +1001,8 @@ def _generate_distractors(
             context
             + "\nQUESTION\n"
             + question
+            + "\nQUESTION_CONTEXT\n"
+            + question_context
             + "\nANSWER_RECORD\n"
             + canonical_json(answer)
             + "\nOPTION_RECORD\n"
@@ -1013,6 +1076,7 @@ def resume_candidate_distractors(
         base["answer"],
         base["reconstruction"],
         base["answer_verification"],
+        base.get("question_context", ""),
     )
     if qa_reasons:
         raise ValueError("the targeted candidate no longer passes its QA gate")
@@ -1032,13 +1096,19 @@ def resume_candidate_distractors(
         "billable_token_overhead": 1024,
     }
     attempt_id = stable_id("targeted-distractor-resume", item_id, PROMPT_VERSION)
-    qa_hash = stable_id("qa", base["question"], canonical_json(base["answer"]))
+    qa_hash = stable_id(
+        "qa",
+        base["question"],
+        base.get("question_context", ""),
+        canonical_json(base["answer"]),
+    )
     distractors, verdicts = _generate_distractors(
         db=db,
         source=source,
         context=_context(chunk),
         context_spans={span["span_id"]: span for span in _finding_spans(chunk)},
         question=base["question"],
+        question_context=base.get("question_context", ""),
         answer=base["answer"],
         qa_hash=qa_hash,
         entity_id=stable_id("unit", base["finding_id"], row["generation_arm"]),
@@ -1253,6 +1323,7 @@ def _qa_gate_reasons(
     answer: dict[str, Any],
     reconstruction: dict[str, Any],
     verification: dict[str, Any],
+    question_context: str = "",
 ) -> list[str]:
     reasons: list[str] = []
     if not _record_resolves(answer, chunk):
@@ -1281,6 +1352,16 @@ def _qa_gate_reasons(
         reasons.append("answer_ambiguous")
     if not verification.get("alternative_answer_search_passed"):
         reasons.append("alternative_answer_unresolved")
+    if not isinstance(question_context, str) or (
+        question_context and not question_context.strip()
+    ):
+        reasons.append("question_context_invalid")
+    else:
+        context_reason = question_context_verification_reason(
+            question_context, answer, verification
+        )
+        if context_reason:
+            reasons.append(context_reason)
     claim_types = {
         reconstruction.get("question_claim_type"),
         verification.get("question_claim_type"),

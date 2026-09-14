@@ -152,7 +152,7 @@ def test_compound_unit_rule_without_source_tolerance_remains_rejected() -> None:
 def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
     properties = generation_module.NUMERIC_RULE_SCHEMA["properties"]
 
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v13"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v14"
     assert (
         generation_module.NUMERIC_RULE_CONTRACT_VERSION
         == "numeric-rule-source-support-v2"
@@ -206,7 +206,7 @@ def test_generation_prompt_requires_atomic_answers_and_aligned_questions() -> No
 
 
 def test_generation_schemas_require_concise_review_justifications() -> None:
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v13"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v14"
     assert (
         generation_module.MODEL_JUSTIFICATION_CONTRACT_VERSION
         == "model-justification-v1"
@@ -362,6 +362,9 @@ def test_position_1043_counterfactual_keeps_scope_rejection() -> None:
         "relation_scope_match": True,
         "ambiguity_resolved": True,
         "alternative_answer_search_passed": True,
+        "question_context_required": False,
+        "question_context_source_supported": True,
+        "question_context_answer_leakage_absent": True,
         "question_claim_type": "observation",
         "evidence_quote": quote,
         "locator": locator,
@@ -1565,7 +1568,10 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
     }
     assert transport.methods.count("generateContent") == 10
     prompts = dict(transport.role_prompts)
-    assert "Select a complete prose finding sentence" in prompts["extractor"]
+    assert (
+        "Select one atomic claim from a complete prose finding sentence"
+        in prompts["extractor"]
+    )
     assert (
         "Do not select a title, heading, figure or table caption"
         in prompts["extractor"]

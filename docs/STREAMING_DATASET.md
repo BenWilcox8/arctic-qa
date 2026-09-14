@@ -280,7 +280,17 @@ It keeps necessary units, entities, relations, and qualifiers in the answer.
 It permits multiple values only when the question requests all of them.
 The question writer must request exactly the content of `answer.text`.
 Version 13 does not change the blind reconstruction input or the acceptance gates.
+Generation prompt version 14 adds a separate `question_context` string.
+The writer leaves this field empty when the question is self-contained.
+Otherwise, the field contains only source-supported information that is necessary to understand the question.
+The verifier checks the context in the existing answer-verification call.
+The checks cover necessity, source support, and answer leakage.
+The blinded reconstruction call receives the question and the question context.
+It does not receive the reference answer, answer evidence, rationale, paper-selection data, or reviewer data.
+All later option checks bind to the question and the question context.
 Existing records and receipts keep their original prompt versions and decisions.
+The pipeline does not add context to an existing record without a new versioned process.
+See [the benchmark input contract](BENCHMARK_INPUT_CONTRACT.md) for external evaluation custody.
 See [the shared model broker guide](SHARED_MODEL_BROKER.md) for the exact command and rules.
 An immutable-event failure republishes broker status with `halted` set to `true` and `integrity_valid` set to `false`.
 The broker observer updates streaming progress to bind that halted status.

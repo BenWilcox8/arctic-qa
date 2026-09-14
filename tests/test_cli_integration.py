@@ -72,7 +72,12 @@ def write_candidate(tmp_path: Path, payload: dict, name: str) -> Path:
 def bind_option_verdicts(
     item: dict, quote: str, locator: dict, *, receipt_root: Path | None = None
 ) -> None:
-    qa_hash = stable_id("qa", item["question"], canonical_json(item["answer"]))
+    qa_hash = stable_id(
+        "qa",
+        item["question"],
+        item.get("question_context", ""),
+        canonical_json(item["answer"]),
+    )
     item["option_verdicts"] = []
     for option in item["distractors"]:
         option_hash = stable_id("option", qa_hash, option["text"], option["type"])
@@ -1308,6 +1313,7 @@ def test_generation_runs_qa_gates_before_exact_option_verification(
     assert item["finding_id"]
     assert item["answer"]["selection_rationale"]
     assert item["question_rationale"]
+    assert item["question_context"] == ""
     assert item["reconstruction"]["reconstruction_rationale"]
     assert item["answer_verification"]["verification_rationale"]
     assert all(row["generation_rationale"] for row in item["distractors"])
@@ -1349,7 +1355,7 @@ def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> No
     command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(verifier)
     generated = json.loads(cli(tmp_path, *command).stdout)
     assert generated["status"] == "qa_gate_failed"
-    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v13"
+    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v14"
     assert (
         generated["provenance"]["numeric_rule_contract_version"]
         == "numeric-rule-source-support-v2"
@@ -1399,6 +1405,7 @@ def test_generation_arms_share_one_frozen_finding(tmp_path: Path) -> None:
                         "role": "direct_joint",
                         "response": {
                             "question": "What reported water depth was documented?",
+                            "question_context": "",
                             "question_rationale": (
                                 "The question preserves the source-bound method "
                                 "qualifier and asks for one measured value."

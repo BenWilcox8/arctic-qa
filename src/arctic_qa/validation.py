@@ -20,7 +20,7 @@ UNIT_FACTORS: dict[tuple[str, str], Decimal] = {
     ("g", "kg"): Decimal("0.001"),
 }
 SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v2"
-GENERATION_PROMPT_VERSION = "arctic-qa-generation-v13"
+GENERATION_PROMPT_VERSION = "arctic-qa-generation-v14"
 NUMERIC_RULE_CONTRACT_VERSION = "numeric-rule-source-support-v2"
 SCOPE_CONTRACT_VERSION = "selected-evidence-literal-scope-v2"
 
@@ -210,6 +210,12 @@ def validate_candidate(
     if REQUIRED_ANSWER_KEYS - candidate["answer"].keys():
         reasons.append("answer_schema_invalid")
         return _finish(db, candidate, labels, reasons, [], "rejected")
+    question_context = candidate.get("question_context", "")
+    if not isinstance(question_context, str) or (
+        question_context and not question_context.strip()
+    ):
+        reasons.append("question_context_invalid")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
     labels["schema_valid"] = True
     source_record = db.one(
         """SELECT source_id,paper_family_id,content_hash,scope_rule_version,
@@ -320,6 +326,12 @@ def validate_candidate(
     if not scope_is_evidence_bound(verification.get("scope"), verification):
         reasons.append("answer_verifier_scope_not_source_bound")
         return _finish(db, candidate, labels, reasons, [], "rejected")
+    context_reason = question_context_verification_reason(
+        question_context, candidate["answer"], verification
+    )
+    if context_reason:
+        reasons.append(context_reason)
+        return _finish(db, candidate, labels, reasons, [], "rejected")
     if reconstruction.get("question_claim_type") != verification.get(
         "question_claim_type"
     ):
@@ -368,7 +380,10 @@ def validate_candidate(
         reasons.append("qa_verification_call_receipt_missing")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     qa_hash = stable_id(
-        "qa", candidate["question"], canonical_json(candidate["answer"])
+        "qa",
+        candidate["question"],
+        question_context,
+        canonical_json(candidate["answer"]),
     )
     verdicts = candidate.get("option_verdicts") or []
     distractor_results = []
@@ -482,6 +497,56 @@ def reconstruction_matches(
     numeric = answer.get("numeric_rule")
     rebuilt_numeric = reconstruction.get("numeric")
     return bool(numeric and rebuilt_numeric and numeric_equal(numeric, rebuilt_numeric))
+
+
+def question_context_verification_reason(
+    question_context: str,
+    answer: dict[str, Any],
+    verification: dict[str, Any],
+) -> str | None:
+    """Return the first failed question-context gate."""
+    if question_context_leaks_answer(question_context, answer):
+        return "question_context_answer_leakage"
+    required = verification.get("question_context_required")
+    supported = verification.get("question_context_source_supported")
+    leakage_absent = verification.get("question_context_answer_leakage_absent")
+    if any(type(value) is not bool for value in (required, supported, leakage_absent)):
+        return "question_context_verification_missing"
+    if question_context:
+        if not required:
+            return "question_context_unnecessary"
+        if not supported:
+            return "question_context_not_source_supported"
+    elif required:
+        return "question_context_missing"
+    if not leakage_absent:
+        return "question_context_answer_leakage"
+    return None
+
+
+def question_context_leaks_answer(
+    question_context: str, answer: dict[str, Any]
+) -> bool:
+    """Detect direct answer strings in model-facing question context."""
+    context = _answer_match_text(question_context)
+    if not context:
+        return False
+    variants = answer.get("variants")
+    values = [
+        answer.get("text", ""),
+        *(variants if isinstance(variants, list) else []),
+    ]
+    for value in values:
+        normalized = _answer_match_text(str(value))
+        if not normalized or normalized in {"yes", "no"}:
+            continue
+        if len(normalized) >= 4 and re.search(
+            rf"(?<!\w){re.escape(normalized)}(?!\w)", context
+        ):
+            return True
+    answer_numbers = set(NUMERIC_LITERAL_PATTERN.findall(str(answer.get("text", ""))))
+    context_numbers = set(NUMERIC_LITERAL_PATTERN.findall(question_context))
+    return bool(answer_numbers & context_numbers)
 
 
 def _answer_match_text(value: str) -> str:

@@ -35,6 +35,11 @@ This control adapts the frozen-manifest method in the project study.
 The author and verifier use separate calls.
 Provider separation can reduce one source of correlated error.
 It cannot guarantee independence or factual truth.
+The author stores necessary question context separately from the question.
+This context can define an unfamiliar acronym or resolve an ambiguous referent.
+It must not contain the answer, an answer-bearing result, or a gratuitous paper summary.
+The blinded reconstructor receives both the question and this context.
+External benchmark evaluators must receive the same pair under the [benchmark input contract](BENCHMARK_INPUT_CONTRACT.md).
 The initial matched-arm policy freezes one proposed finding per paper family and run.
 Both arms use that finding, and a failed finding remains in the rejection record.
 Generation from a second source version in the same family stops instead of selecting another finding.

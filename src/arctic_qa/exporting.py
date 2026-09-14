@@ -104,6 +104,7 @@ def _short_answer(candidate: dict[str, Any]) -> dict[str, Any]:
         "item_id": candidate["item_id"],
         "task_type": "short_answer",
         "question": candidate["question"],
+        "question_context": candidate.get("question_context", ""),
         "reference_answers": [
             candidate["answer"]["text"],
             *candidate["answer"].get("variants", []),
@@ -139,6 +140,7 @@ def _present_mcq(
         "paired_item_id": candidate["item_id"],
         "task_type": "answer_present_mcq",
         "question": candidate["question"],
+        "question_context": candidate.get("question_context", ""),
         "options": options,
         "release_label": "machine_accepted_unverified",
         "source": candidate["source"],
@@ -185,6 +187,7 @@ def _absent_mcq(
         "evidence_state": "invalid_option_set",
         "interpretation_limit": "This item tests rejection of an invalid option set. It does not establish model ignorance.",
         "question": candidate["question"],
+        "question_context": candidate.get("question_context", ""),
         "options": options,
         "release_label": "machine_accepted_unverified",
         "source": candidate["source"],
