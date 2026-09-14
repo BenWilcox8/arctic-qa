@@ -313,34 +313,37 @@ def test_retained_direct_value_requires_a_new_bound_contract() -> None:
 def test_bound_direct_value_contract_accepts_the_retained_source_value() -> None:
     answer, provenance = _retained_direct_value_record()
     numeric_rule = answer["numeric_rule"]  # type: ignore[index]
-    numeric_rule["direct_value_contract_version"] = (  # type: ignore[index]
+    provenance["direct_value_contract_version"] = (
         validation.DIRECT_SOURCE_VALUE_CONTRACT_VERSION
     )
-    numeric_rule["direct_value_request_id"] = "6lemavaDKp7bz7IP_--l8AY"  # type: ignore[index]
+    provenance["direct_value_request_id"] = "6lemavaDKp7bz7IP_--l8AY"
 
     assert validation.numeric_rule_is_source_bound(answer, provenance)
+    assert "direct_value_contract_version" not in numeric_rule
+    assert "direct_value_request_id" not in numeric_rule
 
 
 @pytest.mark.parametrize(
-    "field,value",
+    "target,field,value",
     [
-        ("direct_value_contract_version", "numeric-rule-source-support-v2"),
-        ("direct_value_request_id", "other-request"),
-        ("tolerance", "0.1"),
-        ("reported_precision", "0.01"),
-        ("rounding_rule", "rounded to one decimal place"),
-        ("conversion_rule", "directly converted from a fraction"),
+        ("provenance", "direct_value_contract_version", "numeric-rule-source-support-v2"),
+        ("provenance", "direct_value_request_id", "other-request"),
+        ("numeric_rule", "tolerance", "0.1"),
+        ("numeric_rule", "reported_precision", "0.01"),
+        ("numeric_rule", "rounding_rule", "rounded to one decimal place"),
+        ("numeric_rule", "conversion_rule", "directly converted from a fraction"),
     ],
 )
 def test_bound_direct_value_contract_rejects_changed_guards(
-    field: str, value: str
+    target: str, field: str, value: str
 ) -> None:
     answer, provenance = _retained_direct_value_record()
     numeric_rule = answer["numeric_rule"]  # type: ignore[index]
-    numeric_rule["direct_value_contract_version"] = (  # type: ignore[index]
+    provenance["direct_value_contract_version"] = (
         validation.DIRECT_SOURCE_VALUE_CONTRACT_VERSION
     )
-    numeric_rule["direct_value_request_id"] = "6lemavaDKp7bz7IP_--l8AY"  # type: ignore[index]
-    numeric_rule[field] = value  # type: ignore[index]
+    provenance["direct_value_request_id"] = "6lemavaDKp7bz7IP_--l8AY"
+    record = provenance if target == "provenance" else numeric_rule
+    record[field] = value  # type: ignore[index]
 
     assert not validation.numeric_rule_is_source_bound(answer, provenance)

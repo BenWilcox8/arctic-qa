@@ -1513,12 +1513,15 @@ def _is_direct_exact_source_literal_rule(
 def _direct_source_value_request_is_bound(
     rule: dict[str, Any], provenance: dict[str, Any] | None
 ) -> bool:
-    if rule.get("direct_value_contract_version") != DIRECT_SOURCE_VALUE_CONTRACT_VERSION:
-        return False
-    request_id = rule.get("direct_value_request_id")
-    if not isinstance(request_id, str) or not request_id:
-        return False
     if not isinstance(provenance, dict):
+        return False
+    if (
+        provenance.get("direct_value_contract_version")
+        != DIRECT_SOURCE_VALUE_CONTRACT_VERSION
+    ):
+        return False
+    request_id = provenance.get("direct_value_request_id")
+    if not isinstance(request_id, str) or not request_id:
         return False
     calls = provenance.get("verification_calls")
     if not isinstance(calls, dict):
