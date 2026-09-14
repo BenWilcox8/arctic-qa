@@ -56,6 +56,16 @@ DIRECTION_PAIRS = {
     ("north", "south"),
     ("greater", "less"),
 }
+SAFE_UNIT_SPELLINGS = {
+    "%": "%",
+    "percent": "%",
+    "percentage": "%",
+    "m": "m",
+    "meter": "m",
+    "meters": "m",
+    "metre": "m",
+    "metres": "m",
+}
 INTEGER_WORDS = {
     "zero": 0,
     "one": 1,
@@ -627,15 +637,25 @@ def reconstruction_matches(
 ) -> bool:
     proposed = [answer.get("text", ""), *answer.get("variants", [])]
     rebuilt = reconstruction.get("answer", "")
+    if _requires_structured_numeric_match(str(answer.get("text", ""))):
+        return _source_bound_numeric_text_matches(answer, str(rebuilt))
+    if _source_bound_directional_answer_matches(answer, str(rebuilt)):
+        return True
     rebuilt_text = _answer_match_text(str(rebuilt))
     if any(
         _bounded_text_match(_answer_match_text(str(value)), rebuilt_text)
         for value in proposed
     ):
         return True
+    if _source_bound_numeric_text_matches(answer, str(rebuilt)):
+        return True
     numeric = answer.get("numeric_rule")
     rebuilt_numeric = reconstruction.get("numeric")
-    return bool(numeric and rebuilt_numeric and numeric_equal(numeric, rebuilt_numeric))
+    return bool(
+        numeric
+        and rebuilt_numeric
+        and _reconstruction_numeric_matches(answer, rebuilt_numeric)
+    )
 
 
 def question_context_verification_reason(
@@ -696,6 +716,100 @@ def _answer_match_text(value: str) -> str:
     return " ".join(normalized.split())
 
 
+def _source_bound_directional_answer_matches(
+    answer: dict[str, Any], rebuilt: str
+) -> bool:
+    rule = answer.get("deterministic_rule")
+    if not isinstance(rule, dict) or rule.get("kind") != "directional_relation":
+        return False
+    direction = normalize_text(str(rule.get("source_value", "")))
+    answer_text = normalize_text(str(answer.get("text", "")))
+    source_text = normalize_text(str(answer.get("evidence_quote", "")))
+    rebuilt_text = normalize_text(rebuilt)
+    return bool(
+        direction
+        and rebuilt_text == direction
+        and direction in answer_text
+        and direction in source_text
+    )
+
+
+def _source_bound_numeric_text_matches(answer: dict[str, Any], rebuilt: str) -> bool:
+    answer_text = _numeric_equivalence_text(str(answer.get("text", "")))
+    rebuilt_text = _numeric_equivalence_text(rebuilt)
+    source_text = _numeric_equivalence_text(str(answer.get("evidence_quote", "")))
+    return bool(
+        answer_text
+        and answer_text == rebuilt_text
+        and answer_text in source_text
+        and _has_numeric_equivalence_marker(answer_text)
+    )
+
+
+def _numeric_equivalence_text(value: str) -> str:
+    normalized = normalize_text(value)
+    normalized = re.sub(r"\b(?:per\s*cent|percentage)\b", "%", normalized)
+    for spelling, canonical in SAFE_UNIT_SPELLINGS.items():
+        if spelling == "%":
+            continue
+        normalized = re.sub(rf"\b{re.escape(spelling)}\b", canonical, normalized)
+    normalized = re.sub(
+        r"\b(?:approximately|approx(?:\.|imately)?|about)\b", "approx", normalized
+    )
+    normalized = re.sub(r"\b(?:above|greater than|more than)\s*", "> ", normalized)
+    normalized = re.sub(r"\b(?:below|less than|fewer than)\s*", "< ", normalized)
+    normalized = normalized.replace("≥", ">=").replace("≤", "<=")
+    normalized = re.sub(r"(?<=\d)\s*[-–]\s*(?=\d)", " to ", normalized)
+    normalized = re.sub(r"\s*%\s*", "%", normalized)
+    normalized = re.sub(r"[^\w%°.+<>=\-]+", " ", normalized)
+    return " ".join(normalized.split()).strip(".")
+
+
+def _requires_structured_numeric_match(value: str) -> bool:
+    normalized = _numeric_equivalence_text(value)
+    return bool(
+        _has_numeric_equivalence_marker(normalized)
+        and (
+            "approx" in normalized.split()
+            or re.search(r"(?:^|\s)[<>]=?\s*", normalized)
+            or re.search(r"\b(?:above|below|greater|less|more|fewer)\b", value)
+            or bool(re.search(r"\d(?:\.\d+)?\s+to\s+\d", normalized))
+        )
+    )
+
+
+def _has_numeric_equivalence_marker(value: str) -> bool:
+    return bool(
+        NUMERIC_LITERAL_PATTERN.search(value)
+        and (
+            "%" in value
+            or any(
+                re.search(rf"(?<!\w){re.escape(unit)}(?!\w)", value) for unit in {"m"}
+            )
+        )
+    )
+
+
+def _reconstruction_numeric_matches(
+    answer: dict[str, Any], rebuilt: dict[str, Any]
+) -> bool:
+    rule = answer.get("numeric_rule")
+    if not isinstance(rule, dict):
+        return False
+    try:
+        value = Decimal(str(rule["canonical_value"]))
+        rebuilt_value = Decimal(str(rebuilt["canonical_value"]))
+    except (KeyError, InvalidOperation, ValueError):
+        return False
+    return bool(
+        value == rebuilt_value
+        and _units_are_safe_equivalents(
+            str(rule.get("unit", "")), str(rebuilt.get("unit", ""))
+        )
+        and _source_bound_numeric_text_matches(answer, str(rebuilt.get("display", "")))
+    )
+
+
 def _bounded_text_match(left: str, right: str) -> bool:
     if not left or not right:
         return False
@@ -724,6 +838,10 @@ def reconstruction_has_competing_alternatives(
     for alternative in alternatives:
         normalized = normalize_text(str(alternative))
         if normalized in aliases:
+            continue
+        if _source_bound_directional_answer_matches(answer, str(alternative)):
+            continue
+        if _source_bound_numeric_text_matches(answer, str(alternative)):
             continue
         if _bare_count_alias_matches(answer, reconstruction, normalized):
             continue
@@ -1200,6 +1318,8 @@ def numeric_rule_is_source_bound(answer: dict[str, Any]) -> bool:
             _contains_count_quantity(displayed, answer_value, unit)
             and _contains_count_quantity(evidence, answer_value, unit)
         )
+    if _is_direct_exact_source_literal_rule(rule, evidence, displayed):
+        return True
     return bool(
         tolerance >= 0
         and tolerance_basis
@@ -1208,6 +1328,31 @@ def numeric_rule_is_source_bound(answer: dict[str, Any]) -> bool:
         and _contains_quantity(evidence, answer_value, unit)
         and _contains_quantity(evidence, tolerance, unit)
         and _numeric_metadata_is_source_bound(rule, evidence, displayed)
+    )
+
+
+def _is_direct_exact_source_literal_rule(
+    rule: dict[str, Any], evidence: str, displayed: str
+) -> bool:
+    try:
+        value = Decimal(str(rule["canonical_value"]))
+        tolerance = Decimal(str(rule["tolerance"]))
+        unit = str(rule["unit"])
+    except (KeyError, InvalidOperation, ValueError):
+        return False
+    tolerance_basis = normalize_text(str(rule.get("tolerance_basis", "")))
+    reported_precision = normalize_text(str(rule.get("reported_precision", "")))
+    rounding_rule = normalize_text(str(rule.get("rounding_rule", "")))
+    conversion_rule = normalize_text(str(rule.get("conversion_rule", "")))
+    literal = str(rule["canonical_value"]).replace(",", "")
+    return bool(
+        tolerance == 0
+        and tolerance_basis.startswith("exact")
+        and _contains_quantity_literal(evidence, value, unit)
+        and _contains_quantity_literal(displayed, value, unit)
+        and reported_precision == normalize_text(literal)
+        and _rounding_rule_matches_literal(rounding_rule, literal)
+        and conversion_rule.startswith("direct")
     )
 
 
@@ -1363,7 +1508,7 @@ def _numeric_metadata_is_source_bound(
 
 
 def _rounding_rule_matches_literal(rounding_rule: str, value: str) -> bool:
-    if rounding_rule == "none":
+    if rounding_rule in {"none", "exact match"}:
         return True
     literal = value.replace(",", "").casefold()
     if "e" in literal:
@@ -1419,7 +1564,23 @@ def _unit_literal_starts(text: str, expected_unit: str) -> bool:
     if not unit_parts:
         return False
     pattern = r"^\s*" + r"\s+".join(re.escape(part) for part in unit_parts)
-    return bool(re.match(pattern + r"(?!\w)", text.casefold()))
+    if re.match(pattern + r"(?!\w)", text.casefold()):
+        return True
+    matched = re.match(r"^\s*(%|[A-Za-z]+)(?!\w)", text)
+    return bool(
+        matched and _units_are_safe_equivalents(expected_unit, matched.group(1))
+    )
+
+
+def _units_are_safe_equivalents(left: str, right: str) -> bool:
+    left_normalized = normalize_text(left)
+    right_normalized = normalize_text(right)
+    return bool(
+        left_normalized
+        and right_normalized
+        and SAFE_UNIT_SPELLINGS.get(left_normalized, left_normalized)
+        == SAFE_UNIT_SPELLINGS.get(right_normalized, right_normalized)
+    )
 
 
 def _finish(
