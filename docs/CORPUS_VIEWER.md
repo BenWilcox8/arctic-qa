@@ -25,6 +25,7 @@ PYTHONPATH=src python -m arctic_qa corpus-view \
   --pipeline-db-file /private/arctic-qa-data/state.sqlite3 \
   --pipeline-receipts-dir /private/arctic-qa-data/streaming-dataset-r1/model-receipts \
   --pipeline-eligibility-root /private/arctic-qa-data/gemini-eligibility-r1/run-RUN_ID \
+  --live-dataset-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/live-publication \
   --project-overview-file /private/status/project-progress-overview-v1.json \
   --research-timeline-file /private/status/research-fleet-timeline-v1.json \
   --host 127.0.0.1 \
@@ -34,8 +35,16 @@ PYTHONPATH=src python -m arctic_qa corpus-view \
 
 Stop the foreground process with `Ctrl-C`.
 
-The server exposes only `/`, `/api/state`, `/api/candidates`, `/api/pipeline-trace`, `/api/pipeline-trace/paper`, `/api/pipeline-trace/stage`, `/healthz`, and fixed download routes.
+The server exposes only `/`, the named APIs, `/healthz`, and fixed download routes.
 It does not expose source files, PDFs, credentials, directories, or arbitrary paths.
+
+The live dataset browser uses `/api/live-dataset`.
+It shows joined benchmark and reviewer rows from the hash-checked current snapshot.
+Search covers questions, context, options, answers, DOI values, and titles.
+The API permits page sizes of 10, 25, 50, and 100.
+
+The fixed live downloads are `/downloads/live-dataset/benchmark` and `/downloads/live-dataset/reviewer`.
+No route accepts a file path.
 
 ## Per-paper pipeline inspector
 
@@ -56,6 +65,11 @@ Select a paper to load its run history and small structured records.
 Select one stage to load its retained request context, model response, parsed result, checks, timing, cost, and provenance.
 The adapter labels unavailable and unretained payloads explicitly.
 It does not present reconstructed context as a verbatim submitted request.
+
+The retained-paper list shows when each paper entered its current state.
+This value comes from the matching candidate, eligibility, or request-state transition.
+The viewer shows unknown when no matching event time exists.
+The readable value uses UTC, and its tooltip contains the exact retained timestamp.
 
 The private inspector can show retained source context that was supplied to a model.
 It removes credentials, authorization headers, provider thought signatures, and private paths.

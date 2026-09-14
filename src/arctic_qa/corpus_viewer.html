@@ -167,8 +167,9 @@
     .trace-subhead p { color: var(--muted); font-size: .8rem; margin: .2rem 0 0; }
     .trace-table-wrap { max-height: 44rem; overflow: auto; }
     .trace-table { table-layout: fixed; }
-    .trace-table .trace-paper-column { width: 46%; }
-    .trace-table .trace-state-column { width: 25%; }
+    .trace-table .trace-paper-column { width: 31%; }
+    .trace-table .trace-time-column { width: 18%; }
+    .trace-table .trace-state-column { width: 22%; }
     .trace-table .trace-stage-column { width: 19%; }
     .trace-table .trace-attempt-column { width: 10%; }
     .trace-table button { background: transparent; border: 0; color: #0b6486; min-height: 0; padding: 0; text-align: left; text-decoration: underline; text-underline-offset: 2px; }
@@ -240,6 +241,15 @@
     .compact-table { border: 1px solid var(--line); border-radius: 6px; overflow: auto; }
     .compact-table table { font-size: .8rem; }
     .download-link[hidden] { display: none; }
+    .dataset-head { align-items: flex-start; display: flex; gap: 1rem; justify-content: space-between; }
+    .dataset-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin: .8rem 0; }
+    .dataset-actions a { background: var(--navy); border-radius: 5px; color: #fff; padding: .55rem .7rem; text-decoration: none; }
+    .dataset-filters { display: grid; gap: .65rem; grid-template-columns: minmax(220px, 1fr) 150px auto; margin: .8rem 0; }
+    .dataset-list { display: grid; gap: .8rem; }
+    .dataset-card { background: var(--paper); border: 1px solid var(--line); border-radius: 7px; padding: .9rem; }
+    .dataset-card h3 { margin: 0 0 .25rem; }
+    .dataset-card .trace-option-list { margin-bottom: .8rem; }
+    .dataset-answer { background: var(--green-bg); border-left: 4px solid var(--green); margin: .65rem 0; padding: .65rem .75rem; }
     .stages { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .7rem; margin-top: .8rem; }
     .stage { border-top: 4px solid #9bb0b8; background: var(--wash); padding: .8rem; min-width: 0; }
     .stage p { color: var(--muted); font-size: .86rem; line-height: 1.45; margin: .5rem 0 0; }
@@ -296,7 +306,7 @@
       .progress-details { grid-template-columns: 1fr; }
       .timeline-filters { grid-template-columns: 1fr; }
       .timeline-summary { grid-column: auto; }
-      .stages, .filters, .trace-filters { grid-template-columns: 1fr; }
+      .stages, .filters, .trace-filters, .dataset-filters { grid-template-columns: 1fr; }
       .filters .search, .trace-filters .search { grid-column: auto; }
       .trace-head .badge { margin-top: .75rem; }
       .trace-comparison { grid-template-columns: 1fr; }
@@ -530,6 +540,31 @@
       </div>
     </section>
 
+    <section class="panel" id="live-dataset" aria-labelledby="live-dataset-title">
+      <div class="dataset-head">
+        <div>
+          <h2 id="live-dataset-title">Live accepted dataset</h2>
+          <p id="live-dataset-detail">Loading the current-contract publication snapshot...</p>
+          <div class="meta" id="live-dataset-meta"></div>
+        </div>
+        <span class="badge" id="live-dataset-count">Loading</span>
+      </div>
+      <div class="dataset-actions" id="live-dataset-downloads" hidden>
+        <a href="/downloads/live-dataset/benchmark" download="accepted-benchmark.jsonl">Download benchmark JSONL</a>
+        <a href="/downloads/live-dataset/reviewer" download="accepted-reviewer.jsonl">Download reviewer JSONL</a>
+      </div>
+      <form class="dataset-filters" id="live-dataset-filters">
+        <div class="field"><label for="live-dataset-q">Question, context, option, answer, DOI, or title</label><input id="live-dataset-q" name="q" maxlength="200" placeholder="Search accepted questions"></div>
+        <div class="field"><label for="live-dataset-page-size">Items per page</label><select id="live-dataset-page-size" name="page_size"><option value="10">10</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select></div>
+        <button class="filter-action" type="submit">Search dataset</button>
+      </form>
+      <div class="dataset-list" id="live-dataset-list"><div class="loading">Loading accepted questions...</div></div>
+      <div class="pager">
+        <span id="live-dataset-page-summary">Page 1</span>
+        <div class="pager-controls"><button type="button" id="live-dataset-previous">Previous</button><button type="button" id="live-dataset-next">Next</button></div>
+      </div>
+    </section>
+
     <div class="grid">
       <article class="panel readiness">
         <h2>Metadata discovery</h2>
@@ -591,6 +626,7 @@
       pages: 1,
       revision: null,
       timeline: [],
+      dataset: { page: 1, pages: 1, available: false },
       trace: {
         cursor: null,
         cursors: [null],
@@ -605,6 +641,9 @@
     const formatNumber = (value) => new Intl.NumberFormat().format(value ?? 0);
     const label = (value) => value ? String(value).replaceAll('_', ' ').replaceAll('-', ' ') : 'Not available';
     const dateText = (value) => value ? new Date(value).toLocaleString() : 'Not available';
+    const utcStateTime = (value) => value ? new Intl.DateTimeFormat(undefined, {
+      year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit', timeZone: 'UTC', timeZoneName: 'short'
+    }).format(new Date(value)) : 'Unknown';
     const timelineDateText = (value) => {
       if (!value) return 'Time not available';
       const instant = new Date(value);
@@ -634,6 +673,61 @@
         link.rel = 'noopener noreferrer';
       }
       return link;
+    }
+    function renderLiveDatasetCard(record) {
+      const benchmark = record.benchmark || {};
+      const reviewer = record.reviewer || {};
+      const card = document.createElement('article');
+      card.className = 'dataset-card';
+      card.append(text('h3', benchmark.question || 'Question not available'));
+      const paper = reviewer.paper || {};
+      card.append(text('div', [paper.title, paper.doi].filter(Boolean).join(' | ') || 'Paper identity not available', 'meta'));
+      if (benchmark.question_context) card.append(text('p', `Context: ${benchmark.question_context}`, 'trace-section-note'));
+      const correct = new Map((reviewer.options || []).map((option) => [option.option_id, option.is_correct]));
+      const options = document.createElement('ol');
+      options.className = 'trace-option-list';
+      (benchmark.options || []).forEach((option) => {
+        const item = document.createElement('li');
+        item.className = `trace-option${correct.get(option.option_id) ? ' correct' : ''}`;
+        item.append(text('span', `${option.position}.`, 'trace-option-marker'), text('span', option.text));
+        options.append(item);
+      });
+      card.append(options);
+      const answer = reviewer.reference_answer || {};
+      card.append(text('p', `Answer: ${answer.text || 'Not available'}`, 'dataset-answer'));
+      const evidence = reviewer.answer_evidence || {};
+      if (evidence.excerpt) {
+        const block = text('p', evidence.excerpt, 'trace-evidence');
+        block.prepend(text('strong', 'Answer evidence'));
+        if (evidence.locator) block.title = JSON.stringify(evidence.locator);
+        card.append(block);
+      }
+      const rationales = Object.entries(reviewer.rationales || {}).filter(([, value]) => value);
+      if (rationales.length) {
+        const rationaleList = document.createElement('ul');
+        rationaleList.className = 'trace-readable-list';
+        rationales.forEach(([name, value]) => rationaleList.append(text('li', `${label(name)}: ${value}`)));
+        card.append(text('strong', 'Rationales'), rationaleList);
+      }
+      card.append(rawJsonDetails('Raw benchmark and reviewer JSON', record));
+      return card;
+    }
+    async function loadLiveDataset() {
+      if (!state.dataset.available) return;
+      const parameters = new URLSearchParams(new FormData($('live-dataset-filters')));
+      parameters.set('page', state.dataset.page);
+      try {
+        const data = await fetchJson(`/api/live-dataset?${parameters}`);
+        state.dataset.page = data.page;
+        state.dataset.pages = data.pages;
+        $('live-dataset-list').replaceChildren(...data.records.map(renderLiveDatasetCard));
+        if (!data.records.length) $('live-dataset-list').append(text('div', 'No accepted question matches this search.', 'empty'));
+        $('live-dataset-page-summary').textContent = `Page ${formatNumber(data.page)} of ${formatNumber(data.pages)} | ${formatNumber(data.total)} items`;
+        $('live-dataset-previous').disabled = data.page <= 1;
+        $('live-dataset-next').disabled = data.page >= data.pages;
+      } catch (error) {
+        $('live-dataset-list').replaceChildren(text('div', error.message, 'fatal'));
+      }
     }
     const SVG_NS = 'http://www.w3.org/2000/svg';
     const progressStatusLabels = {
@@ -1529,7 +1623,7 @@
       }
       const table = document.createElement('table');
       table.className = 'trace-table';
-      table.innerHTML = '<colgroup><col class="trace-paper-column"><col class="trace-state-column"><col class="trace-stage-column"><col class="trace-attempt-column"></colgroup><thead><tr><th>Paper</th><th>State</th><th>Stage</th><th>Attempts</th></tr></thead>';
+      table.innerHTML = '<colgroup><col class="trace-paper-column"><col class="trace-time-column"><col class="trace-state-column"><col class="trace-stage-column"><col class="trace-attempt-column"></colgroup><thead><tr><th>Paper</th><th>Current state since (UTC)</th><th>State</th><th>Stage</th><th>Attempts</th></tr></thead>';
       const body = document.createElement('tbody');
       items.forEach((item) => {
         const row = document.createElement('tr');
@@ -1538,13 +1632,15 @@
         const select = text('button', item.title || item.doi || item.paper_id || item.source_id || 'Untitled paper');
         select.type = 'button';
         select.addEventListener('click', () => selectTracePaper(item.paper_key));
-        paper.append(select, text('div', item.doi || item.paper_id || item.source_id || 'No DOI or paper ID', 'subtle'));
+        paper.append(select);
+        const entered = text('td', utcStateTime(item.state_entered_at_utc)); entered.dataset.label = 'State since (UTC)';
+        if (item.state_entered_at_utc) entered.title = item.state_entered_at_utc;
         const finalState = document.createElement('td'); finalState.dataset.label = 'State';
         finalState.append(text('span', label(item.state), `badge ${item.state || 'unknown'}`));
         if (item.reason?.summary) finalState.append(text('div', item.reason.summary, 'trace-list-reason'));
         const stage = text('td', label(item.current_stage)); stage.dataset.label = 'Stage';
         const attempts = text('td', formatNumber(item.attempt_count)); attempts.dataset.label = 'Attempts';
-        row.append(paper, finalState, stage, attempts);
+        row.append(paper, entered, finalState, stage, attempts);
         body.append(row);
       });
       table.append(body);
@@ -1904,6 +2000,15 @@
           fragment.append(link);
           return fragment;
         }));
+        const liveDataset = data.live_dataset || {};
+        state.dataset.available = liveDataset.state === 'available';
+        $('live-dataset-detail').textContent = liveDataset.message || 'No live dataset is selected.';
+        $('live-dataset-meta').textContent = state.dataset.available ? `Updated ${timelineDateText(liveDataset.updated_at_utc)} | ${label(liveDataset.selection?.generation_prompt_version)}` : '';
+        $('live-dataset-count').textContent = `${formatNumber(liveDataset.item_count)} items`;
+        $('live-dataset-count').className = `badge ${state.dataset.available ? 'fresh' : liveDataset.state || 'unavailable'}`;
+        $('live-dataset-downloads').hidden = !state.dataset.available;
+        $('live-dataset-filters').hidden = !state.dataset.available;
+        if (!state.dataset.available) $('live-dataset-list').replaceChildren(text('div', liveDataset.message || 'No live dataset is selected.', 'empty'));
         setBadge($('discovery-verdict'), data.readiness.metadata_discovery.verdict);
         $('discovery-condition').textContent = data.readiness.metadata_discovery.completion_condition;
         setBadge($('prefilter-verdict'), data.readiness.metadata_prefilter.verdict);
@@ -1922,7 +2027,7 @@
         $('sources').replaceChildren(...data.artifacts.map((source) => text('li', `${source.name}: ${source.available ? dateText(source.updated_at_utc) : 'unavailable'}`)));
         if (force || state.revision !== data.data_revision) {
           state.revision = data.data_revision;
-          await Promise.all([loadAccepted(), loadCandidates()]);
+          await Promise.all([loadAccepted(), loadCandidates(), loadLiveDataset()]);
         }
       } catch (error) {
         $('process-title').textContent = 'Corpus data is unavailable';
@@ -1948,6 +2053,9 @@
       } catch (error) { $('candidate-table').replaceChildren(text('div', error.message, 'fatal')); }
     }
     $('filters').addEventListener('submit', (event) => { event.preventDefault(); state.page = 1; loadCandidates(); });
+    $('live-dataset-filters').addEventListener('submit', (event) => { event.preventDefault(); state.dataset.page = 1; loadLiveDataset(); });
+    $('live-dataset-previous').addEventListener('click', () => { state.dataset.page = Math.max(1, state.dataset.page - 1); loadLiveDataset(); });
+    $('live-dataset-next').addEventListener('click', () => { state.dataset.page = Math.min(state.dataset.pages, state.dataset.page + 1); loadLiveDataset(); });
     $('previous').addEventListener('click', () => { state.page = Math.max(1, state.page - 1); loadCandidates(); });
     $('next').addEventListener('click', () => { state.page = Math.min(state.pages, state.page + 1); loadCandidates(); });
     $('refresh').addEventListener('click', () => { loadState(true); loadTraceList(false); });
