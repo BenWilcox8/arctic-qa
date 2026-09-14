@@ -747,7 +747,33 @@ class CorpusArtifacts:
                 "message": f"Read-only Gemini connection record error: {error}",
             }
 
-    def _streaming_state(self) -> dict[str, Any]:
+    def _streaming_custody_hashes(self) -> tuple[tuple[str, str], ...] | None:
+        status_file = (
+            self.shared_ledger_file.with_name(
+                f"{self.shared_ledger_file.stem}.status.json"
+            )
+            if self.shared_ledger_file
+            else None
+        )
+        paths = (
+            self.streaming_progress_file,
+            self.shared_ledger_file,
+            status_file,
+            self.streaming_budget_policy_file,
+            self.dataset_metadata_file,
+        )
+        try:
+            return tuple(
+                (str(path), sha256_file(path))
+                for path in paths
+                if path is not None and path.is_file()
+            )
+        except OSError:
+            return None
+
+    def _streaming_state(
+        self, *, retry_inconsistent_custody: bool = True
+    ) -> dict[str, Any]:
         result: dict[str, Any] = {
             "telemetry": "absent",
             "state": "not_started",
@@ -755,6 +781,7 @@ class CorpusArtifacts:
             "counts": {},
             "recent_papers": [],
         }
+        custody_hashes = self._streaming_custody_hashes()
         try:
             progress = None
             if self.streaming_progress_file and self.streaming_progress_file.is_file():
@@ -994,6 +1021,19 @@ class CorpusArtifacts:
                 }
             return result
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+            if (
+                retry_inconsistent_custody
+                and str(error)
+                in {
+                    "the invariant-checked broker status is invalid",
+                    "the broker status and budget policy do not match",
+                    "the streaming progress and broker custody records do not match",
+                    "the streaming progress and dataset metadata do not match",
+                }
+                and custody_hashes is not None
+                and custody_hashes != self._streaming_custody_hashes()
+            ):
+                return self._streaming_state(retry_inconsistent_custody=False)
             return {
                 **result,
                 "telemetry": "invalid",

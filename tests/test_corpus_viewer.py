@@ -703,7 +703,7 @@ def test_source_text_is_escaped_in_json(tmp_path: Path) -> None:
 
 
 def test_streaming_budget_and_progress_are_bounded_and_read_only(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fixture_corpus(tmp_path)
     ledger = tmp_path / "shared-ledger.json"
@@ -866,6 +866,33 @@ def test_streaming_budget_and_progress_are_bounded_and_read_only(
     assert state["project_overview"]["live_metrics"]["accepted_qa"] == 0
     assert b"<script>" not in _safe_json_bytes(streaming)
     assert json.loads(artifacts.dataset_metadata())["export_id"] == "export-1"
+
+    original_sha256_file = corpus_viewer.sha256_file
+    ledger_hash_reads = 0
+
+    def advance_custody_during_read(path: Path) -> str:
+        nonlocal ledger_hash_reads
+        if Path(path) == ledger:
+            ledger_hash_reads += 1
+            if ledger_hash_reads == 2:
+                replacement_ledger = json.loads(ledger.read_text(encoding="utf-8"))
+                replacement_ledger["viewer_snapshot_revision"] = 2
+                write_json(ledger, replacement_ledger)
+                replacement_status = json.loads(status.read_text(encoding="utf-8"))
+                replacement_status["ledger_sha256"] = original_sha256_file(ledger)
+                write_json(status, replacement_status)
+                replacement_progress = json.loads(progress.read_text(encoding="utf-8"))
+                replacement_progress["broker_status_sha256"] = original_sha256_file(
+                    status
+                )
+                write_json(progress, replacement_progress)
+        return original_sha256_file(path)
+
+    monkeypatch.setattr(corpus_viewer, "sha256_file", advance_custody_during_read)
+    retried = artifacts._streaming_state()
+    assert retried["telemetry"] == "observed"
+    assert retried["state"] == "paused"
+    monkeypatch.setattr(corpus_viewer, "sha256_file", original_sha256_file)
 
     unrestricted_policy = json.loads(policy.read_text(encoding="utf-8"))
     unrestricted_policy["live_test_maximum_papers"] = None
