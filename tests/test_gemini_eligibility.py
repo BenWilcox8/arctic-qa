@@ -656,9 +656,32 @@ def test_config_requires_low_thinking_for_bounded_structured_output(
     config_path = ROOT / "config" / "gemini-eligibility-v1.json"
     value = json.loads(config_path.read_text())
 
-    assert _config(config_path)["thinking_level"] == "low"
+    config = _config(config_path)
+    assert config["thinking_level"] == "low"
+    assert config["config_id"] == "arctic-gemini-eligibility-r1-config-v5"
+    assert config["stage_models"]["answer_agreement"][
+        "maximum_output_tokens"
+    ] == 128
     assert value["maximum_output_tokens"] == 8192
 
+    legacy = json.loads(config_path.read_text())
+    legacy["config_id"] = "arctic-gemini-eligibility-r1-config-v4"
+    legacy["stage_models"]["answer_agreement"]["maximum_output_tokens"] = 4
+    legacy_path = tmp_path / "legacy-four-token-answer-judge.json"
+    write_json(legacy_path, legacy)
+    assert _config(legacy_path)["config_id"] == (
+        "arctic-gemini-eligibility-r1-config-v4"
+    )
+
+    value["stage_models"]["answer_agreement"]["maximum_output_tokens"] = 4
+    changed_path = tmp_path / "four-token-answer-judge.json"
+    write_json(changed_path, value)
+    with pytest.raises(
+        ValueError, match="answer agreement model configuration changed"
+    ):
+        _config(changed_path)
+
+    value["stage_models"]["answer_agreement"]["maximum_output_tokens"] = 128
     value["thinking_level"] = "medium"
     changed_path = tmp_path / "medium-thinking.json"
     write_json(changed_path, value)

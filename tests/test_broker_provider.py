@@ -190,7 +190,7 @@ def test_answer_judge_uses_flash_lite_and_reuses_immutable_receipt(
     schema = {"type": "string", "enum": ["yes", "no"]}
     parameters = {
         "temperature": 0,
-        "max_tokens": 4,
+        "max_tokens": 128,
         "response_mime_type": "text/x.enum",
         "json_schema": schema,
     }
@@ -208,7 +208,7 @@ def test_answer_judge_uses_flash_lite_and_reuses_immutable_receipt(
     generation = transport.bodies[1]["generationConfig"]
     assert generation["responseMimeType"] == "text/x.enum"
     assert generation["responseJsonSchema"] == schema
-    assert generation["maxOutputTokens"] == 4
+    assert generation["maxOutputTokens"] == 128
     assert generation["thinkingConfig"] == {"thinkingLevel": "minimal"}
     receipt = json.loads(Path(reference["receipt_file"]).read_text(encoding="utf-8"))
     assert receipt["model"] == "gemini-3.1-flash-lite"

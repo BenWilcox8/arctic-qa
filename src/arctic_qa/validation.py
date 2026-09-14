@@ -1862,7 +1862,7 @@ def answer_agreement_resolves(
         return False
     if parameters != {
         "temperature": 0,
-        "max_tokens": 4,
+        "max_tokens": 128,
         "response_mime_type": "text/x.enum",
         "json_schema": {"type": "string", "enum": ["yes", "no"]},
     }:

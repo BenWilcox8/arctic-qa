@@ -58,6 +58,7 @@ def _config(path: Path) -> dict[str, Any]:
         "arctic-gemini-eligibility-r1-config-v2",
         "arctic-gemini-eligibility-r1-config-v3",
         "arctic-gemini-eligibility-r1-config-v4",
+        "arctic-gemini-eligibility-r1-config-v5",
     }:
         raise ValueError("the Gemini eligibility config revision is not approved")
     if value.get("model") != "gemini-3.8-flash":
@@ -96,6 +97,7 @@ def _config(path: Path) -> dict[str, Any]:
     if value["config_id"] in {
         "arctic-gemini-eligibility-r1-config-v3",
         "arctic-gemini-eligibility-r1-config-v4",
+        "arctic-gemini-eligibility-r1-config-v5",
     }:
         if not isinstance(stage_models, dict) or set(stage_models) != {
             "answer_agreement"
@@ -103,6 +105,10 @@ def _config(path: Path) -> dict[str, Any]:
             raise ValueError("the Gemini stage model registry changed")
         if value["config_id"] == "arctic-gemini-eligibility-r1-config-v3":
             _validate_legacy_answer_agreement_config(stage_models["answer_agreement"])
+        elif value["config_id"] == "arctic-gemini-eligibility-r1-config-v4":
+            _validate_legacy_flash_lite_answer_agreement_config(
+                stage_models["answer_agreement"]
+            )
         else:
             _validate_answer_agreement_config(stage_models["answer_agreement"])
     elif stage_models is not None:
@@ -123,7 +129,7 @@ def _validate_answer_agreement_config(value: Any) -> None:
         "model": "gemini-3.1-flash-lite",
         "maximum_input_tokens": 1_048_576,
         "model_output_token_limit": 65_536,
-        "maximum_output_tokens": 4,
+        "maximum_output_tokens": 128,
         "thinking_level": "minimal",
         "input_usd_per_million_tokens": "0.25",
         "output_usd_per_million_tokens_including_thinking": "1.50",
@@ -173,6 +179,49 @@ def _validate_legacy_answer_agreement_config(value: Any) -> None:
     }
     if any(value.get(name) != expected for name, expected in exact.items()):
         raise ValueError("the legacy answer agreement configuration changed")
+
+
+def _validate_legacy_flash_lite_answer_agreement_config(value: Any) -> None:
+    """Keep the immutable v4 route readable for reviewed ledger recovery."""
+    if not isinstance(value, dict):
+        raise ValueError("the legacy answer agreement configuration is invalid")
+    exact = {
+        "model": "gemini-3.1-flash-lite",
+        "maximum_input_tokens": 1_048_576,
+        "model_output_token_limit": 65_536,
+        "maximum_output_tokens": 4,
+        "thinking_level": "minimal",
+        "input_usd_per_million_tokens": "0.25",
+        "output_usd_per_million_tokens_including_thinking": "1.50",
+        "price_source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "model_source": (
+            "https://ai.google.dev/gemini-api/docs/models/"
+            "gemini-3.1-flash-lite"
+        ),
+        "thinking_source": (
+            "https://ai.google.dev/gemini-api/docs/generate-content/thinking"
+        ),
+        "structured_output_source": "https://ai.google.dev/api/generate-content",
+    }
+    if any(value.get(name) != expected for name, expected in exact.items()):
+        raise ValueError("the legacy answer agreement configuration changed")
+    if value.get("documented_supported_methods") != [
+        "generateContent",
+        "countTokens",
+        "batchGenerateContent",
+    ]:
+        raise ValueError("the documented answer agreement methods changed")
+    checked = datetime.fromisoformat(
+        str(value.get("documented_availability_checked_at_utc") or "").replace(
+            "Z", "+00:00"
+        )
+    )
+    if checked.tzinfo is None:
+        raise ValueError("the answer agreement availability date is invalid")
+    start = date.fromisoformat(str(value.get("price_valid_from")))
+    end = date.fromisoformat(str(value.get("price_valid_through")))
+    if not start <= date.today() <= end:
+        raise ValueError("answer agreement pricing is not active")
 
 
 def model_config_for_stage(config: dict[str, Any], stage: str) -> dict[str, Any]:

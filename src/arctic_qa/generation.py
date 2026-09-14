@@ -1372,7 +1372,7 @@ def generate_candidate(
         agreement_prompt = "DATA\n" + canonical_json(agreement_input)
         agreement_parameters = {
             "temperature": 0,
-            "max_tokens": 4,
+            "max_tokens": 128,
             "response_mime_type": "text/x.enum",
         }
         agreement_result = _call_result(

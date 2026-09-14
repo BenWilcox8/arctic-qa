@@ -136,7 +136,7 @@ def test_batch_answer_judge_uses_flash_lite_price_and_payload(
     )
     parameters = {
         "temperature": 0,
-        "max_tokens": 4,
+        "max_tokens": 128,
         "response_mime_type": "text/x.enum",
         "json_schema": {"type": "string", "enum": ["yes", "no"]},
     }
@@ -156,7 +156,12 @@ def test_batch_answer_judge_uses_flash_lite_price_and_payload(
         "source": "https://ai.google.dev/gemini-api/docs/pricing",
     }
     generation = request["request"]["generationConfig"]
+    assert generation["maxOutputTokens"] == 128
     assert generation["responseMimeType"] == "text/x.enum"
+    assert generation["responseJsonSchema"] == {
+        "type": "string",
+        "enum": ["yes", "no"],
+    }
     assert generation["thinkingConfig"] == {"thinkingLevel": "minimal"}
     manifest = store.make_round(
         run_identity={"run_id": "judge-batch-run"},
