@@ -1075,7 +1075,8 @@ class PipelineTraceStore:
                     f"{criterion.get('status') or 'not resolved'}"
                 )
                 if criterion_codes:
-                    statement += f" and returned {', '.join(criterion_codes)}."
+                    plain_codes = [value.replace("_", " ") for value in criterion_codes]
+                    statement += f". Model reason: {', '.join(plain_codes)}."
                 else:
                     statement += "."
                 model_statements.append(

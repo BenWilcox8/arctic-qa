@@ -454,6 +454,48 @@ def test_plain_reason_distinguishes_exit_categories(
     assert result["reason_code"] == reason
 
 
+def test_plain_eligibility_statement_does_not_require_decoding_reason_code(
+    tmp_path: Path,
+) -> None:
+    namespace, _, _ = fixture_namespace(tmp_path)
+    store = PipelineTraceStore(namespace)
+    detail = store._plain_reason_detail(
+        {
+            "reason": _plain_reason(
+                "criterion_failed:study_geography",
+                "eligibility_rejected",
+                "completed",
+            ),
+            "state": "eligibility_rejected",
+            "receipts": [],
+        },
+        [
+            {
+                "parsed_response": {
+                    "criteria": [
+                        {
+                            "criterion_id": "study_geography",
+                            "status": "failed",
+                            "reason_codes": ["marine_mixed_setting"],
+                        }
+                    ]
+                },
+                "validation": {
+                    "overall_reason_codes": ["criterion_failed:study_geography"]
+                },
+            }
+        ],
+        [],
+        [],
+        [],
+    )
+
+    assert detail is not None
+    assert "marine mixed setting" in detail["model_statements"][0]["text"]
+    assert "marine_mixed_setting" not in detail["model_statements"][0]["text"]
+    assert "marine_mixed_setting" in detail["reason_codes"]
+
+
 def test_stage_payload_is_full_on_demand_and_historical_absence_is_honest(
     tmp_path: Path,
 ) -> None:
