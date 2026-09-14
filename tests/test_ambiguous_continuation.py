@@ -59,6 +59,29 @@ class Http500ThenSuccess:
         }
 
 
+class DeadOwnerAfterSubmission:
+    def __init__(self) -> None:
+        self.methods: list[str] = []
+        self.generation_calls = 0
+
+    def post(self, model: str, method: str, body: dict) -> dict:
+        self.methods.append(method)
+        if method == "countTokens":
+            return {"totalTokens": 100}
+        self.generation_calls += 1
+        if self.generation_calls == 1:
+            raise KeyboardInterrupt("simulated owner death after submitted sidecars")
+        return {
+            "candidates": [{"content": {"parts": [{"text": "{}"}]}}],
+            "usageMetadata": {
+                "promptTokenCount": 100,
+                "candidatesTokenCount": 10,
+                "thoughtsTokenCount": 5,
+                "totalTokenCount": 115,
+            },
+        }
+
+
 def fixture(tmp_path: Path, transport: object) -> dict[str, object]:
     review = tmp_path / "review.md"
     review.write_text("The bounded continuation passed independent review.\n")
@@ -155,6 +178,78 @@ def authorize(values: dict[str, object], receipt: dict) -> dict:
         authorized_run_id="run-current",
         operator_id="test-operator",
     )
+
+
+def orphan_evidence(request: dict, path: Path, authorized_run_id: str) -> None:
+    write_json(
+        path,
+        {
+            "schema": "shared-paid-call-orphaned-continuation-evidence-v1",
+            "request_key": request["request_key"],
+            "submitted_receipt_present": True,
+            "request_trace_present": True,
+            "final_receipt_absent": True,
+            "received_receipt_absent": True,
+            "provider_usage_known": False,
+            "owner_process_confirmed_dead": True,
+            "replay_prohibited": True,
+            "affected_family_id": request["family_id"],
+            "authorized_run_id": authorized_run_id,
+        },
+    )
+
+
+def test_dead_owner_continuation_retains_reserve_releases_only_concurrency(
+    tmp_path: Path,
+) -> None:
+    transport = DeadOwnerAfterSubmission()
+    values = fixture(tmp_path, transport)
+    broker = values["broker"]
+    with pytest.raises(KeyboardInterrupt, match="owner death"):
+        execute(broker, paper="orphaned", run_id="run-old")
+
+    ledger = json.loads(Path(values["ledger"]).read_text(encoding="utf-8"))
+    request_key, request = next(iter(ledger["requests"].items()))
+    assert request["state"] == "submitted"
+    assert ledger["inflight"] == 1
+    assert (Path(values["receipts"]) / f"{request_key}.submitted.json").is_file()
+    assert (Path(values["receipts"]) / f"{request_key}.request-trace.json").is_file()
+
+    evidence = tmp_path / "orphan-evidence.json"
+    orphan_evidence(request, evidence, "run-current")
+    result = broker.authorize_orphaned_request_continuation(
+        request_key=request_key,
+        expected_ledger_sha256=sha256_file(Path(values["ledger"])),
+        review_file=Path(values["review"]),
+        evidence_file=evidence,
+        authorized_run_id="run-current",
+        operator_id="test-operator",
+    )
+
+    after = json.loads(Path(values["ledger"]).read_text(encoding="utf-8"))
+    assert result["applied"] is True
+    assert after["requests"][request_key]["state"] == "orphaned_no_replay"
+    assert after["reserved_usd"] == request["reserved_usd"]
+    assert after["inflight"] == 0
+    assert broker.operational_unresolved_families() == {
+        request["family_id"]: {
+            "request_key": request_key,
+            "reason_code": "operational_orphaned_request_no_replay",
+        }
+    }
+    with pytest.raises(ValueError, match="request key already exists"):
+        execute(broker, paper="orphaned", run_id="run-old")
+    broker.policy["away_session_total_ceiling_usd"] = request["reserved_usd"]
+    assert execute(broker, paper="budget-check", run_id="run-current")["state"] == "not_submitted"
+    broker.policy["away_session_total_ceiling_usd"] = "25.00"
+    assert execute(broker, paper="unrelated", run_id="run-current")["state"] == "completed"
+    assert transport.methods == [
+        "countTokens",
+        "generateContent",
+        "countTokens",
+        "countTokens",
+        "generateContent",
+    ]
 
 
 def test_unknown_charge_continuation_retains_cap_and_never_replays(tmp_path: Path):

@@ -89,6 +89,13 @@ AMBIGUOUS_CONTINUATION_EVIDENCE_SCHEMA = (
 AMBIGUOUS_CONTINUATION_RESERVATION_POLICY = (
     "retain_full_reservation_in_ambiguous_reserved_and_count_against_all_caps"
 )
+ORPHANED_CONTINUATION_SCHEMA = "shared-paid-call-orphaned-continuation-v1"
+ORPHANED_CONTINUATION_EVIDENCE_SCHEMA = (
+    "shared-paid-call-orphaned-continuation-evidence-v1"
+)
+ORPHANED_CONTINUATION_RESERVATION_POLICY = (
+    "retain_full_reservation_in_reserved_and_count_against_all_caps"
+)
 AMBIGUOUS_CONTINUATION_FIELDS = {
     "schema",
     "request_key",
@@ -98,6 +105,28 @@ AMBIGUOUS_CONTINUATION_FIELDS = {
     "http_status",
     "live_call_made",
     "received_receipt_absent",
+    "reserved_usd",
+    "reservation_policy",
+    "scope",
+    "affected_family_id",
+    "skip_reason_code",
+    "authorized_run_id",
+    "evidence_file",
+    "evidence_file_sha256",
+    "review_file",
+    "review_file_sha256",
+    "ledger_sha256_before",
+    "gate_sha256",
+    "integrated_code_commit",
+    "authorized_at_utc",
+    "operator_id",
+}
+ORPHANED_CONTINUATION_FIELDS = {
+    "schema",
+    "request_key",
+    "submitted_receipt_sha256",
+    "request_trace_sha256",
+    "request_identity",
     "reserved_usd",
     "reservation_policy",
     "scope",
@@ -1341,6 +1370,7 @@ class SharedGeminiBroker:
                     raise ValueError("an immutable submitted event changed identity")
                 if request.get("state") in {
                     "submitted",
+                    "orphaned_no_replay",
                     "completed",
                     "ambiguous_charge",
                 } and _money(
@@ -1420,6 +1450,7 @@ class SharedGeminiBroker:
             raise ValueError("a usage reconciliation event lacks a ledger request")
 
         self._ambiguous_continuation_events(ledger)
+        self._orphaned_continuation_events(ledger)
 
         accepted_roots: dict[str, tuple[str, Path]] = {}
         accepted_successors: dict[
@@ -1773,6 +1804,102 @@ class SharedGeminiBroker:
             events[request_key] = event
         return events
 
+    def _read_orphaned_continuation(self, path: Path) -> dict[str, Any]:
+        event = _read(path)
+        if (
+            not isinstance(event, dict)
+            or set(event) != ORPHANED_CONTINUATION_FIELDS
+            or event.get("schema") != ORPHANED_CONTINUATION_SCHEMA
+        ):
+            raise ValueError("an orphaned continuation event changed")
+        request_key = event.get("request_key")
+        if (
+            not isinstance(request_key, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", request_key)
+            or path.name != f"orphaned-continuation-{request_key}.json"
+        ):
+            raise ValueError("an orphaned continuation event changed")
+        for field in (
+            "submitted_receipt_sha256",
+            "request_trace_sha256",
+            "evidence_file_sha256",
+            "review_file_sha256",
+            "ledger_sha256_before",
+            "gate_sha256",
+        ):
+            if not re.fullmatch(r"[a-f0-9]{64}", str(event.get(field) or "")):
+                raise ValueError("an orphaned continuation event changed")
+        if (
+            event.get("reservation_policy")
+            != ORPHANED_CONTINUATION_RESERVATION_POLICY
+            or event.get("scope") != "unrelated_families_only"
+            or event.get("skip_reason_code")
+            != "operational_orphaned_request_no_replay"
+            or not str(event.get("affected_family_id") or "").strip()
+            or not str(event.get("authorized_run_id") or "").strip()
+            or not str(event.get("integrated_code_commit") or "").strip()
+            or not str(event.get("operator_id") or "").strip()
+        ):
+            raise ValueError("an orphaned continuation event changed")
+        identity = event.get("request_identity")
+        if not isinstance(identity, dict) or set(identity) != {
+            "run_id", "stage", "paper_id", "family_id", "source_version_id",
+            "request_sha256", "reserved_usd", "submitted_at_utc",
+        }:
+            raise ValueError("an orphaned continuation event changed")
+        try:
+            authorized = datetime.fromisoformat(
+                str(event["authorized_at_utc"]).replace("Z", "+00:00")
+            )
+        except ValueError as error:
+            raise ValueError("an orphaned continuation time changed") from error
+        if authorized.tzinfo is None:
+            raise ValueError("an orphaned continuation time changed")
+        return event
+
+    def _orphaned_continuation_events(
+        self, ledger: dict[str, Any]
+    ) -> dict[str, dict[str, Any]]:
+        events: dict[str, dict[str, Any]] = {}
+        for path in self.receipts_dir.glob("orphaned-continuation-*.json"):
+            event = self._read_orphaned_continuation(path)
+            request_key = event["request_key"]
+            request = ledger["requests"].get(request_key)
+            if request_key in events or request is None or request.get("state") != "orphaned_no_replay":
+                raise ValueError("an orphaned continuation request changed")
+            if any(
+                event["request_identity"].get(field) != request.get(field)
+                for field in event["request_identity"]
+            ) or event["affected_family_id"] != request.get("family_id"):
+                raise ValueError("an orphaned continuation request changed")
+            event_stem = self._request_event_stem(request_key, request)
+            submitted_path = self.receipts_dir / f"{event_stem}.submitted.json"
+            trace_path = self.receipts_dir / f"{request_key}.request-trace.json"
+            if (
+                not submitted_path.is_file()
+                or not trace_path.is_file()
+                or sha256_file(submitted_path) != event["submitted_receipt_sha256"]
+                or sha256_file(trace_path) != event["request_trace_sha256"]
+                or request.get("orphaned_continuation_sha256") != sha256_file(path)
+            ):
+                raise ValueError("an orphaned continuation custody changed")
+            evidence_path = Path(event["evidence_file"])
+            review_path = Path(event["review_file"])
+            if (
+                not evidence_path.is_file()
+                or not review_path.is_file()
+                or sha256_file(evidence_path) != event["evidence_file_sha256"]
+                or sha256_file(review_path) != event["review_file_sha256"]
+            ):
+                raise ValueError("an orphaned continuation review evidence changed")
+            events[request_key] = event
+        if {
+            key for key, request in ledger["requests"].items()
+            if request.get("state") == "orphaned_no_replay"
+        } != set(events):
+            raise ValueError("an orphaned request lacks its continuation event")
+        return events
+
     def _validate_ledger(self, ledger: dict[str, Any]) -> None:
         required = {
             "schema",
@@ -1822,13 +1949,19 @@ class SharedGeminiBroker:
         }
         submissions = 0
         inflight = 0
-        submitted_states = {"submitted", "completed", "ambiguous_charge"}
+        submitted_states = {
+            "submitted",
+            "orphaned_no_replay",
+            "completed",
+            "ambiguous_charge",
+        }
         terminal_states = {
             "completed",
             "ambiguous_charge",
             "count_error",
             "too_large_not_ready",
             "not_submitted",
+            "orphaned_no_replay",
         }
         for key, request in ledger["requests"].items():
             if not re.fullmatch(r"[a-f0-9]{64}", key) or not isinstance(request, dict):
@@ -1925,8 +2058,9 @@ class SharedGeminiBroker:
                     request["family_id"], self._empty_live_row()
                 )
                 live["submissions"] += 1
-            if state == "submitted":
-                inflight += 1
+            if state in {"submitted", "orphaned_no_replay"}:
+                if state == "submitted":
+                    inflight += 1
                 totals["reserved"] += reserved
                 stage["reserved_usd"] = str(
                     _money(stage["reserved_usd"], "stage reserved") + reserved
@@ -2862,15 +2996,157 @@ class SharedGeminiBroker:
         finally:
             operation.close()
 
-    def operational_unresolved_family_ids(self) -> dict[str, str]:
-        """Return families explicitly skipped by an ambiguous-charge event."""
+    def authorize_orphaned_request_continuation(
+        self,
+        *,
+        request_key: str,
+        expected_ledger_sha256: str,
+        review_file: Path,
+        evidence_file: Path,
+        authorized_run_id: str,
+        operator_id: str,
+    ) -> dict[str, Any]:
+        """Release only concurrency for one dead-owner submitted request."""
+        if not re.fullmatch(r"[a-f0-9]{64}", request_key):
+            raise ValueError("the orphaned continuation request key is invalid")
+        if not authorized_run_id.strip() or not operator_id.strip():
+            raise ValueError("the orphaned continuation operator identity is missing")
+        operation = self._operation_lock_file.open("a+")
+        try:
+            fcntl.flock(operation, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            operation.close()
+            raise ValueError("another paid broker operation is active") from error
+        try:
+            with self._lock_file.open("a+") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                ledger = self._validated_ledger()
+                request = ledger["requests"].get(request_key)
+                if request is None:
+                    raise ValueError("the orphaned continuation request does not exist")
+                path = self.receipts_dir / f"orphaned-continuation-{request_key}.json"
+                if path.is_file():
+                    event = self._read_orphaned_continuation(path)
+                    return {
+                        "schema": "shared-paid-call-orphaned-continuation-result-v1",
+                        "request_key": request_key,
+                        "applied": False,
+                        "continuation_receipt": str(path),
+                        "continuation_receipt_sha256": sha256_file(path),
+                        "affected_family_id": event["affected_family_id"],
+                        "reserved_usd_retained": event["reserved_usd"],
+                        "replay_prohibited": True,
+                    }
+                if sha256_file(self.ledger_file) != expected_ledger_sha256:
+                    raise ValueError("the orphaned continuation ledger changed")
+                if request.get("state") != "submitted":
+                    raise ValueError("the request is not a submitted liability")
+                gate = _validate_gate(self.execution_gate_file, request["phase"])
+                gate_sha256 = sha256_file(self.execution_gate_file)
+                if gate.get("authorized_new_run_id") != authorized_run_id:
+                    raise ValueError("the orphaned continuation run is not authorized")
+                event_stem = self._request_event_stem(request_key, request)
+                submitted_path = self.receipts_dir / f"{event_stem}.submitted.json"
+                trace_path = self.receipts_dir / f"{request_key}.request-trace.json"
+                final_path = self.receipts_dir / f"{event_stem}.json"
+                received_path = self.receipts_dir / f"{event_stem}.received.json"
+                if (
+                    not submitted_path.is_file()
+                    or not trace_path.is_file()
+                    or final_path.exists()
+                    or received_path.exists()
+                    or not review_file.is_file()
+                    or not evidence_file.is_file()
+                ):
+                    raise ValueError("the orphaned continuation custody evidence is absent")
+                evidence = _read(evidence_file)
+                expected_evidence = {
+                    "schema": ORPHANED_CONTINUATION_EVIDENCE_SCHEMA,
+                    "request_key": request_key,
+                    "submitted_receipt_present": True,
+                    "request_trace_present": True,
+                    "final_receipt_absent": True,
+                    "received_receipt_absent": True,
+                    "provider_usage_known": False,
+                    "owner_process_confirmed_dead": True,
+                    "replay_prohibited": True,
+                    "affected_family_id": request["family_id"],
+                    "authorized_run_id": authorized_run_id,
+                }
+                if evidence != expected_evidence:
+                    raise ValueError("the orphaned continuation evidence is not exact")
+                reserved = _money(request["reserved_usd"], "orphan reservation", positive=True)
+                event = {
+                    "schema": ORPHANED_CONTINUATION_SCHEMA,
+                    "request_key": request_key,
+                    "submitted_receipt_sha256": sha256_file(submitted_path),
+                    "request_trace_sha256": sha256_file(trace_path),
+                    "request_identity": {
+                        key: request[key]
+                        for key in (
+                            "run_id", "stage", "paper_id", "family_id",
+                            "source_version_id", "request_sha256", "reserved_usd",
+                            "submitted_at_utc",
+                        )
+                    },
+                    "reserved_usd": str(reserved),
+                    "reservation_policy": ORPHANED_CONTINUATION_RESERVATION_POLICY,
+                    "scope": "unrelated_families_only",
+                    "affected_family_id": request["family_id"],
+                    "skip_reason_code": "operational_orphaned_request_no_replay",
+                    "authorized_run_id": authorized_run_id,
+                    "evidence_file": str(evidence_file.resolve()),
+                    "evidence_file_sha256": sha256_file(evidence_file),
+                    "review_file": str(review_file.resolve()),
+                    "review_file_sha256": sha256_file(review_file),
+                    "ledger_sha256_before": expected_ledger_sha256,
+                    "gate_sha256": gate_sha256,
+                    "integrated_code_commit": gate["integrated_code_commit"],
+                    "authorized_at_utc": _now(),
+                    "operator_id": operator_id,
+                }
+                atomic_json(path, event, immutable=True)
+                request["state"] = "orphaned_no_replay"
+                request["orphaned_continuation_sha256"] = sha256_file(path)
+                ledger["inflight"] = max(int(ledger["inflight"]) - 1, 0)
+                ledger["updated_at_utc"] = _now()
+                self._validate_immutable_events(ledger)
+                self._commit_ledger(ledger)
+                return {
+                    "schema": "shared-paid-call-orphaned-continuation-result-v1",
+                    "request_key": request_key,
+                    "applied": True,
+                    "continuation_receipt": str(path),
+                    "continuation_receipt_sha256": sha256_file(path),
+                    "affected_family_id": request["family_id"],
+                    "reserved_usd_retained": str(reserved),
+                    "replay_prohibited": True,
+                }
+        finally:
+            operation.close()
+
+    def operational_unresolved_families(self) -> dict[str, dict[str, str]]:
+        """Return reviewed no-replay families with their exact skip reasons."""
         with self._lock_file.open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             ledger = self._validated_ledger()
+            events = [
+                *self._ambiguous_continuation_events(ledger).items(),
+                *self._orphaned_continuation_events(ledger).items(),
+            ]
             return {
-                event["affected_family_id"]: request_key
-                for request_key, event in self._ambiguous_continuation_events(ledger).items()
+                event["affected_family_id"]: {
+                    "request_key": request_key,
+                    "reason_code": event["skip_reason_code"],
+                }
+                for request_key, event in events
             }
+
+    def operational_unresolved_family_ids(self) -> dict[str, str]:
+        return {
+            family_id: value["request_key"]
+            for family_id, value in self.operational_unresolved_families().items()
+        }
 
     def settle_pretransport_reservation(
         self,

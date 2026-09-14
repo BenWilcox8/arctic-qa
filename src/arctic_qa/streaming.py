@@ -261,13 +261,14 @@ def run_stream(
         )
         source_version_id = str(access["source_content_hash"])
         operational_unresolved = (
-            verifier_broker.operational_unresolved_family_ids()
+            verifier_broker.operational_unresolved_families()
             if verifier_broker is not None
             else {}
         )
         if family_id in operational_unresolved:
-            request_key = operational_unresolved[family_id]
-            reason_code = "operational_ambiguous_charge_http_500"
+            unresolved = operational_unresolved[family_id]
+            request_key = unresolved["request_key"]
+            reason_code = unresolved["reason_code"]
             _record_operational_unresolved(
                 db,
                 campaign_id=campaign_id,
@@ -275,6 +276,7 @@ def run_stream(
                 selected=selected,
                 family_id=family_id,
                 request_key=request_key,
+                reason_code=reason_code,
             )
             counts.setdefault("operational_unresolved", 0)
             counts["operational_unresolved"] += 1
@@ -1479,8 +1481,8 @@ def _record_operational_unresolved(
     selected: dict[str, Any],
     family_id: str,
     request_key: str,
+    reason_code: str,
 ) -> None:
-    reason_code = "operational_ambiguous_charge_http_500"
     detail = {
         "campaign_id": campaign_id,
         "candidate_key": candidate_key,
