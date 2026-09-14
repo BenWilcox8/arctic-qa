@@ -37,3 +37,14 @@ It must not create context for an older candidate during export.
 
 Question context is part of the question identity and option-verification binding.
 A context change creates a different generated item and invalidates old option bindings.
+
+## Scope roles
+
+Generation roles use `scope-role-semantics-v2`.
+Each scope field identifies an independent qualifier for a result.
+Scope fields do not contain a value that the question asks the model to supply.
+This rule includes seasons, percentages, entities, locations, counts, directions, and relationships.
+The question and context state each independent place, period, sample or cohort, method, comparison, and condition needed to interpret the result.
+Generation keeps a sample descriptor in the population field, even when the descriptor contains Arctic or another place name.
+Generation uses geography only for an independent place qualifier.
+Generation uses comparison for an independent comparison or condition qualifier.

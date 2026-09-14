@@ -30,10 +30,13 @@ from .validation import (
 
 PROMPT_VERSION = GENERATION_PROMPT_VERSION
 FINDING_POLICY_VERSION = "one-finding-per-paper-full-context-v6"
+SCOPE_ROLE_FINDING_POLICY_VERSION = "one-finding-per-paper-full-context-v7"
 FINDING_SPAN_CONTRACT_VERSION = "finding-evidence-span-v3"
 MODEL_JUSTIFICATION_CONTRACT_VERSION = "model-justification-v1"
 ARCTIC_SCOPE_CONTRACT_VERSION = "eligible-arctic-finding-scope-v1"
 EVIDENCE_COMBINATION_CONTRACT_VERSION = "contiguous-source-evidence-v1"
+SCOPE_ROLE_SEMANTICS_VERSION = "scope-role-semantics-v2"
+SCOPE_ROLE_BINDING_CONTRACT_VERSION = "scope-role-question-context-binding-v1"
 MAX_FINDING_CONTEXT_CHARS = 3_000_000
 MAX_FINDING_SPAN_CHARS = 1_600
 FINDING_SPAN_OVERLAP_CHARS = 400
@@ -65,6 +68,23 @@ QUESTION_ALIGNMENT_INSTRUCTIONS = (
     "one quantity or category, ask only for that quantity or category. If the answer "
     "requires multiple values, ask for every value. Do not request an explanation, "
     "evidence, or selection justification as part of the answer."
+)
+SCOPE_ROLE_SEMANTICS_INSTRUCTIONS = (
+    "SCOPE_ROLE_SEMANTICS "
+    + SCOPE_ROLE_SEMANTICS_VERSION
+    + ". Scope fields are not answer slots. A scope field contains only an "
+    "independent qualifier that identifies the result. Do not put a value that "
+    "the QUESTION asks the reader to supply in any scope field. This rule applies "
+    "when the answer is a season, percentage, entity, location, count, direction, "
+    "or relationship. Retain every independent place, time, sample or cohort, "
+    "method, comparison, and condition that is necessary to interpret the result. "
+    "Use geography only for an independent place. Use population for a sample, "
+    "cohort, specimen, material, or sample descriptor. A sample descriptor remains "
+    "population when it contains Arctic or another place name. Use comparison for "
+    "a comparison or condition. Use the same classification in every role. "
+    "The QUESTION and QUESTION_CONTEXT together must state every independent "
+    "qualifier that a reader needs. Do not add a qualifier that SOURCE_DATA does "
+    "not support."
 )
 BENCHMARK_STANDALONE_INSTRUCTIONS = (
     "For benchmark-facing text, write for a reader who cannot see the source paper. "
@@ -136,6 +156,24 @@ def _source_span_selected_schema(schema: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_SCOPE_DIMENSION_DESCRIPTIONS = {
+    "geography": (
+        "An exact selected-span independent place qualifier, or null when absent. "
+        "Do not use geography for a sample descriptor only because it contains Arctic."
+    ),
+    "population": (
+        "An exact selected-span independent sample, cohort, specimen, material, or "
+        "sample descriptor, or null when absent. Keep a sample descriptor here even "
+        "when it contains Arctic or another place name."
+    ),
+    "period": "An exact selected-span independent time qualifier, or null when absent.",
+    "method": "An exact selected-span independent method qualifier, or null when absent.",
+    "comparison": (
+        "An exact selected-span independent comparison or condition qualifier, or null "
+        "when absent."
+    ),
+    "uncertainty": "An exact selected-span independent uncertainty qualifier, or null when absent.",
+}
 SCOPE_SCHEMA = {
     "type": "object",
     "required": [
@@ -150,16 +188,13 @@ SCOPE_SCHEMA = {
         key: {
             "type": ["string", "null"],
             "minLength": 1,
-            "description": "Exact selected-span text for this scope dimension, or null when absent.",
+            "description": (
+                "Exact selected-span text. Scope role semantics v2. "
+                + description
+                + " Scope must not repeat a value that the question asks the reader to supply."
+            ),
         }
-        for key in (
-            "geography",
-            "population",
-            "period",
-            "method",
-            "comparison",
-            "uncertainty",
-        )
+        for key, description in _SCOPE_DIMENSION_DESCRIPTIONS.items()
     },
     "additionalProperties": False,
 }
@@ -571,7 +606,7 @@ def generate_candidate(
     existing_finding = db.one(
         """SELECT * FROM findings
         WHERE run_id=? AND paper_family_id=? AND selection_policy_version=?""",
-        (run_id, source["paper_family_id"], FINDING_POLICY_VERSION),
+        (run_id, source["paper_family_id"], SCOPE_ROLE_FINDING_POLICY_VERSION),
     )
     if existing_finding:
         if existing_finding["source_id"] != source_id:
@@ -602,11 +637,15 @@ def generate_candidate(
             db,
             author,
             run_id,
-            stable_id("finding-selection", source_id, FINDING_POLICY_VERSION),
+            stable_id(
+                "finding-selection", source_id, SCOPE_ROLE_FINDING_POLICY_VERSION
+            ),
             "extractor",
             context
             + scope_instruction
             + "\nExtract one bounded answer record. Select one source_span_id. "
+            + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS
+            + " "
             "Select a complete prose finding sentence. Select one atomic claim from a complete prose finding sentence "
             "in the results or discussion. Do not select a title, heading, figure or table caption, "
             "legend, axis label, methods-only description, or sentence fragment. "
@@ -659,7 +698,12 @@ def generate_candidate(
                 "the selected finding does not resolve to one source chunk",
             )
         finding_id = stable_id(
-            "finding", run_id, source_id, chunk["chunk_id"], canonical_json(answer)
+            "finding",
+            run_id,
+            source_id,
+            SCOPE_ROLE_FINDING_POLICY_VERSION,
+            chunk["chunk_id"],
+            canonical_json(answer),
         )
         with db.transaction():
             db.connection.execute(
@@ -672,7 +716,7 @@ def generate_candidate(
                     source_id,
                     source["paper_family_id"],
                     chunk["chunk_id"],
-                    FINDING_POLICY_VERSION,
+                    SCOPE_ROLE_FINDING_POLICY_VERSION,
                     canonical_json(answer),
                     now(),
                 ),
@@ -688,8 +732,7 @@ def generate_candidate(
         else None
     )
     context_spans = {
-        span["span_id"]: span
-        for span in (scoped_chunk_spans or _finding_spans(chunk))
+        span["span_id"]: span for span in (scoped_chunk_spans or _finding_spans(chunk))
     }
     context = _context(chunk, scoped_chunk_spans)
     entity_id = stable_id("unit", finding_id, arm)
@@ -711,6 +754,8 @@ def generate_candidate(
             "to a concise evidence-grounded justification for the question's "
             "wording and scope. "
             + QUESTION_ALIGNMENT_INSTRUCTIONS
+            + " "
+            + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS
             + " "
             + QUESTION_CONTEXT_INSTRUCTIONS
             + " "
@@ -744,6 +789,8 @@ def generate_candidate(
             + " Preserve every field of the frozen answer record exactly. "
             + QUESTION_ALIGNMENT_INSTRUCTIONS
             + " "
+            + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS
+            + " "
             + QUESTION_CONTEXT_INSTRUCTIONS
             + " "
             + BENCHMARK_STANDALONE_INSTRUCTIONS
@@ -769,6 +816,8 @@ def generate_candidate(
         + "\n"
         + BENCHMARK_STANDALONE_INSTRUCTIONS
         + " Read QUESTION and QUESTION_CONTEXT alone before you read SOURCE_DATA. "
+        + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS
+        + " "
         "Do not use SOURCE_DATA to repair a missing system, location, sample, period, "
         "condition, or referent. If the displayed task is incomplete, report ambiguity "
         "instead of resolving it from SOURCE_DATA. SOURCE_DATA can still determine the "
@@ -817,7 +866,8 @@ def generate_candidate(
         + "\n"
         + BENCHMARK_STANDALONE_INSTRUCTIONS
         + " Read QUESTION and QUESTION_CONTEXT alone before you use SOURCE_DATA, ANSWER_RECORD, "
-        "or RECONSTRUCTION. Do not use those records to repair a missing system, location, "
+        "or RECONSTRUCTION. " + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS + " "
+        "Do not use those records to repair a missing system, location, "
         "sample, period, condition, or referent. If the displayed task needs SOURCE_DATA to "
         "identify a referent or interpret scope, set relation_scope_match to false. SOURCE_DATA "
         "can still determine or verify the answer. Verify entailment, relation, scope, ambiguity, "
@@ -909,6 +959,7 @@ def generate_candidate(
         source_id,
         source["paper_family_id"],
         arm,
+        SCOPE_ROLE_SEMANTICS_VERSION,
         question,
         question_context,
         answer,
@@ -920,7 +971,7 @@ def generate_candidate(
         "schema_version": "2.1.0",
         "item_id": item_id,
         "finding_id": finding_id,
-        "finding_policy_version": FINDING_POLICY_VERSION,
+        "finding_policy_version": SCOPE_ROLE_FINDING_POLICY_VERSION,
         "status": "candidate" if not qa_gate_reasons else "qa_gate_failed",
         "task_type": "short_answer",
         "question_claim_type": answer_verification.get("question_claim_type"),
@@ -949,6 +1000,10 @@ def generate_candidate(
             "prompt_version": PROMPT_VERSION,
             "numeric_rule_contract_version": NUMERIC_RULE_CONTRACT_VERSION,
             "scope_contract_version": SCOPE_CONTRACT_VERSION,
+            "scope_role_semantics_version": SCOPE_ROLE_SEMANTICS_VERSION,
+            "scope_role_binding_contract_version": (
+                SCOPE_ROLE_BINDING_CONTRACT_VERSION
+            ),
             "evidence_combination_contract_version": (
                 EVIDENCE_COMBINATION_CONTRACT_VERSION
             ),
@@ -1068,6 +1123,8 @@ def _generate_distractors(
         + "\n"
         + BENCHMARK_STANDALONE_INSTRUCTIONS
         + " "
+        + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS
+        + " "
         + DISTRACTOR_WRITER_INSTRUCTIONS,
         parameters,
         reservation,
@@ -1110,7 +1167,8 @@ def _generate_distractors(
             + "\n"
             + BENCHMARK_STANDALONE_INSTRUCTIONS
             + " Read QUESTION, QUESTION_CONTEXT, and the displayed option before you use "
-            "SOURCE_DATA or ANSWER_RECORD. Do not use those records to repair a missing "
+            "SOURCE_DATA or ANSWER_RECORD. " + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS + " "
+            "Do not use those records to repair a missing "
             "system, location, sample, period, condition, or referent. If the displayed task "
             "or option needs SOURCE_DATA to identify a referent or interpret scope, set "
             "alternative_answer_search_passed to false. SOURCE_DATA can still determine or "
@@ -1323,7 +1381,9 @@ def apply_one_correction(
         "correction",
         "CANDIDATE\n"
         + canonical_json(candidate)
-        + f"\nCorrect only the {component} component.",
+        + "\n"
+        + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS
+        + f" Correct only the {component} component.",
         {"temperature": 0, "max_tokens": 2048},
         reservation,
         timeout,
@@ -1570,11 +1630,7 @@ def _finding_context(
     rendered_chunks = []
     for row in ordered:
         evidence_spans = (
-            [
-                span
-                for span in eligible_spans
-                if span["chunk_id"] == row["chunk_id"]
-            ]
+            [span for span in eligible_spans if span["chunk_id"] == row["chunk_id"]]
             if eligible_spans is not None
             else _finding_spans(row)
         )
@@ -1652,9 +1708,7 @@ def _intervals_can_combine(
         gap_is_supported = True
     else:
         gap = chunk_text[left["end_offset"] : right["start_offset"]]
-        gap_is_supported = (
-            len(gap) <= MAX_ADJACENT_WHITESPACE_CHARS and gap.isspace()
-        )
+        gap_is_supported = len(gap) <= MAX_ADJACENT_WHITESPACE_CHARS and gap.isspace()
     combined_size = max(left["end_offset"], right["end_offset"]) - min(
         left["start_offset"], right["start_offset"]
     )
@@ -1780,12 +1834,8 @@ def _decision_evidence(
                         "evidence_quote": record["evidence_quote"],
                         "locator": locator,
                         "source_span_id": record.get("source_span_id"),
-                        "evidence_text_sha256": record.get(
-                            "evidence_text_sha256"
-                        ),
-                        "span_contract_version": record.get(
-                            "span_contract_version"
-                        ),
+                        "evidence_text_sha256": record.get("evidence_text_sha256"),
+                        "span_contract_version": record.get("span_contract_version"),
                     }
                 ],
             }
@@ -1809,8 +1859,7 @@ def _decision_evidence(
                     **left,
                     "evidence_components": [
                         {
-                            "source_span_id": row.get("source_span_id")
-                            or row["role"],
+                            "source_span_id": row.get("source_span_id") or row["role"],
                             "locator": row["locator"],
                             "text_sha256": row.get("evidence_text_sha256"),
                         }
@@ -1821,8 +1870,7 @@ def _decision_evidence(
                     **entry,
                     "evidence_components": [
                         {
-                            "source_span_id": row.get("source_span_id")
-                            or row["role"],
+                            "source_span_id": row.get("source_span_id") or row["role"],
                             "locator": row["locator"],
                             "text_sha256": row.get("evidence_text_sha256"),
                         }
@@ -1833,9 +1881,7 @@ def _decision_evidence(
             )
         )
         if can_combine:
-            left["start_offset"] = min(
-                left["start_offset"], entry["start_offset"]
-            )
+            left["start_offset"] = min(left["start_offset"], entry["start_offset"])
             left["end_offset"] = max(left["end_offset"], entry["end_offset"])
             left["role_evidence"].extend(entry["role_evidence"])
         else:
@@ -2012,8 +2058,10 @@ def _require_arctic_scope_custody(
         for phrase in arctic_scope.get("question_scope_phrases", [])
         if phrase in quote
     ]
-    if not scope_phrases or not isinstance(required, list) or not any(
-        phrase in required for phrase in scope_phrases
+    if (
+        not scope_phrases
+        or not isinstance(required, list)
+        or not any(phrase in required for phrase in scope_phrases)
     ):
         raise CandidateRejectedError(
             "eligible_arctic_scope_missing_from_finding",
