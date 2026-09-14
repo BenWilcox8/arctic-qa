@@ -90,6 +90,14 @@ git diff --check
 
 ## Reviewed restart path
 
+The original v3 launch kept its immutable invocation manifest and stopped before
+generation transport because that manifest was bound to v2 eligibility inputs.
+The corrected continuation uses run ID `first-production-6fbdf41-r1-geo-v3` and
+a separate v3 eligibility directory of the same name. It keeps the campaign ID,
+ranked input, shared ledger, historical USD11.614496 baseline, USD50 new-spend
+cap, and all family-level accounting. The successor gate records the original
+manifest hash and no-call refusal; it does not overwrite either old artifact.
+
 Do not run this before the supervisor releases the corrected gate and verifies
 the external ledger state. The supervisor must first create a new immutable
 execution gate that binds the v3 policy, v5 prompt, v3 schema, prompt version 14,

@@ -38,10 +38,10 @@ canonical policy are installed, run:
 cd /home/ben/.treehouse/arctic-qa-e52b57/6/arctic-qa
 nix develop -c env PYTHONPATH=src python -m arctic_qa --json --data-root /mnt/crdata/research-abstention stream \
   --phase away_production \
-  --run-id first-production-6fbdf41-r1 \
+  --run-id first-production-6fbdf41-r1-geo-v3 \
   --campaign-id arctic-qa-production-campaign-001 \
   --access-run-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/production-campaign-r1/quality-order-r1/materialized-top-800 \
-  --eligibility-run-dir /mnt/crdata/research-abstention/arctic-qa/gemini-eligibility-r1/first-production-6fbdf41-r1 \
+  --eligibility-run-dir /mnt/crdata/research-abstention/arctic-qa/gemini-eligibility-r1/first-production-6fbdf41-r1-geo-v3 \
   --eligibility-prompt-file config/gemini-eligibility-prompt-v5.txt \
   --eligibility-schema-file schemas/gemini-eligibility.v3.schema.json \
   --eligibility-policy-file /mnt/crdata/research-abstention/arctic-qa/corpus-search-r1/protocol/protocol-v3.json \
@@ -51,7 +51,7 @@ nix develop -c env PYTHONPATH=src python -m arctic_qa --json --data-root /mnt/cr
   --model-receipts-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/model-receipts \
   --streaming-budget-policy-file /home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-qa-build-r1/proposed-streaming-dataset-budget-policy-v7.json \
   --price-config-file config/gemini-eligibility-v1.json \
-  --execution-gate-file /home/ben/.config/arctic-qa/gate-6fbdf41-production-50usd-r1-v3.json \
+  --execution-gate-file /home/ben/.config/arctic-qa/gate-6fbdf41-production-50usd-r1-v3-geo-segment-r1.json \
   --max-papers 800 \
   --ledger-config-transition-file /home/ben/.config/arctic-qa/config-transition-v2-6fbdf41-production-50usd-r1.json
 ```

@@ -5,7 +5,7 @@
   "authorization_record": "/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/streaming-dataset-r1/First production campaign - 50 dollars.md",
   "authorization_record_sha256": "32a936348ba0bcb3ccff10acf4b14b2015f224444e975c0a19a8261752a25f56",
   "authorization_scope": "Run the first production campaign on at most 800 quality-ranked frozen papers with at most USD50 new spend, a USD61.614496 cumulative campaign bound, and the preserved USD250 construction checkpoint.",
-  "authorized_new_run_id": "first-production-6fbdf41-r1",
+  "authorized_new_run_id": "first-production-6fbdf41-r1-geo-v3",
   "authorized_campaign_id": "arctic-qa-production-campaign-001",
   "automatic_model_fallback": false,
   "automatic_transport_retries": 0,
@@ -51,5 +51,12 @@
     "integrated_code_commit": "6fbdf417827ef929a8bc3cf8b6fd45d97edf695f",
     "review_record": "/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-full-run-workflow-r1/production-launch-review-6fbdf41.md",
     "review_record_sha256": "74e70211ce10680afcf8a243e4d34cb59618d4a9e46ad5a8a2b5383fdc3f752b"
+  },
+  "supersedes_stream_invocation": {
+    "run_id": "first-production-6fbdf41-r1",
+    "run_manifest": "/mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/runs/stream-invocation-021795104ae043a532e5/run-manifest.json",
+    "run_manifest_sha256": "1f0dc22f6a8fc304978e2f26fda60ebee1a014a8fe34c20a59f07e21aca2d669",
+    "refusal": "immutable streaming run inputs changed",
+    "refusal_live_call_made": false
   }
 }
