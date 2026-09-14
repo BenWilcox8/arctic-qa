@@ -118,6 +118,7 @@ def _row(connection: sqlite3.Connection, candidate: dict[str, Any], source: sqli
         },
         "selection": {"source_selection": _source_selection(source), "inclusion_reason": source["inclusion_reason"]},
         "question": candidate["question"],
+        "question_context": _question_context(candidate),
         "question_rationale": candidate.get("question_rationale"),
         "reference_answer": candidate["answer"],
         "rationales": {
@@ -141,6 +142,17 @@ def _row(connection: sqlite3.Connection, candidate: dict[str, Any], source: sqli
             "note": "Null rationale fields mean that this input did not retain that rationale. They do not mean that a rationale passed.",
         },
     }
+
+
+def _question_context(item: dict[str, Any]) -> str:
+    value = item.get("question_context")
+    return value if isinstance(value, str) else ""
+
+
+def _manifest_question_context(item: dict[str, Any], candidate: dict[str, Any]) -> str:
+    if isinstance(item.get("question_context"), str):
+        return item["question_context"]
+    return _question_context(candidate)
 
 
 def _short_evidence(value: Any) -> dict[str, Any] | None:
@@ -238,6 +250,7 @@ def _matching_candidate(connection: sqlite3.Connection, item: dict[str, Any]) ->
     source = item.get("source") if isinstance(item.get("source"), dict) else {}
     source_id = source.get("source_id")
     question = item.get("question")
+    question_context = _question_context(item)
     candidate_id = item.get("paired_item_id") or item.get("item_id")
     if not isinstance(source_id, str) or not isinstance(question, str):
         return None
@@ -248,7 +261,7 @@ def _matching_candidate(connection: sqlite3.Connection, item: dict[str, Any]) ->
         ).fetchone()
         if row:
             candidate = _json(row["candidate_json"], {})
-            if candidate.get("question") == question:
+            if candidate.get("question") == question and _question_context(candidate) == question_context:
                 candidate["_database_item_id"] = row["item_id"]
                 return candidate
     matches = []
@@ -256,7 +269,7 @@ def _matching_candidate(connection: sqlite3.Connection, item: dict[str, Any]) ->
         "SELECT item_id,candidate_json FROM candidates WHERE source_id=? ORDER BY item_id", (source_id,)
     ):
         candidate = _json(row["candidate_json"], {})
-        if candidate.get("question") == question:
+        if candidate.get("question") == question and _question_context(candidate) == question_context:
             matches.append((row["item_id"], candidate))
     if len(matches) != 1:
         return None
@@ -319,6 +332,7 @@ def _manifest_row(connection: sqlite3.Connection | None, item: dict[str, Any]) -
         "variant_id": item.get("task_type"),
         "paper": source,
         "question": item.get("question"),
+        "question_context": _manifest_question_context(item, candidate),
         "reference_answer": {
             name: candidate_answer[name]
             for name in ("text", "claim_type", "scope", "deterministic_rule", "numeric_rule")
@@ -361,6 +375,7 @@ def _reviewer_csv_record(row: dict[str, Any]) -> dict[str, Any]:
         "doi": row["paper"].get("doi"),
         "title": row["paper"].get("title"),
         "question": row["question"],
+        "question_context": row["question_context"],
         "reference_answer": (row.get("reference_answer") or {}).get("text"),
         "question_rationale": row["rationales"].get("question"),
         "answer_selection_rationale": row["rationales"].get("answer_selection"),
@@ -411,7 +426,7 @@ def _write_manifest_package(
     benchmark = output_dir / "benchmark-inputs.jsonl"
     scoring = output_dir / "scoring-labels.jsonl"
     reviewer.write_text("".join(canonical_json(row) + "\n" for row in records), encoding="utf-8")
-    benchmark_rows = [{"item_id": row["item_id"], "question_id": row["question_id"], "variant_id": row["variant_id"], "question": row["question"], "options": [{name: option[name] for name in ("option_id", "position", "text")} for option in row["options"]]} for row in records]
+    benchmark_rows = [{"item_id": row["item_id"], "question_id": row["question_id"], "variant_id": row["variant_id"], "question": row["question"], "question_context": row["question_context"], "options": [{name: option[name] for name in ("option_id", "position", "text")} for option in row["options"]]} for row in records]
     scoring_rows = [{"item_id": row["item_id"], "correct_option_id": next((option["option_id"] for option in row["options"] if option["is_correct"] is True), None), "answer_present": any(option["is_correct"] is True for option in row["options"])} for row in records]
     benchmark.write_text("".join(canonical_json(row) + "\n" for row in benchmark_rows), encoding="utf-8")
     scoring.write_text("".join(canonical_json(row) + "\n" for row in scoring_rows), encoding="utf-8")
@@ -420,8 +435,8 @@ def _write_manifest_package(
     scoring_csv = output_dir / "scoring-labels.csv"
     reviewer_csv_rows = [_reviewer_csv_record(row) for row in records]
     for path, rows, fields in (
-        (reviewer_csv, reviewer_csv_rows, ["item_id", "question_id", "variant_id", "doi", "title", "question", "reference_answer", "question_rationale", "answer_selection_rationale", "answer_rationale", "reconstruction_rationale", "verification_rationale", "option_a", "option_a_generation_rationale", "option_a_verification_rationale", "option_b", "option_b_generation_rationale", "option_b_verification_rationale", "option_c", "option_c_generation_rationale", "option_c_verification_rationale", "option_d", "option_d_generation_rationale", "option_d_verification_rationale", "paper_json", "reference_answer_json", "answer_evidence_json", "options_json", "validation_json", "rationales_json", "stage_results_json", "model_trace_json", "interpretation_limit", "evidence_state"]),
-        (benchmark_csv, benchmark_rows, ["item_id", "question_id", "variant_id", "question", "options_json"]),
+        (reviewer_csv, reviewer_csv_rows, ["item_id", "question_id", "variant_id", "doi", "title", "question", "question_context", "reference_answer", "question_rationale", "answer_selection_rationale", "answer_rationale", "reconstruction_rationale", "verification_rationale", "option_a", "option_a_generation_rationale", "option_a_verification_rationale", "option_b", "option_b_generation_rationale", "option_b_verification_rationale", "option_c", "option_c_generation_rationale", "option_c_verification_rationale", "option_d", "option_d_generation_rationale", "option_d_verification_rationale", "paper_json", "reference_answer_json", "answer_evidence_json", "options_json", "validation_json", "rationales_json", "stage_results_json", "model_trace_json", "interpretation_limit", "evidence_state"]),
+        (benchmark_csv, benchmark_rows, ["item_id", "question_id", "variant_id", "question", "question_context", "options_json"]),
         (scoring_csv, scoring_rows, ["item_id", "correct_option_id", "answer_present"]),
     ):
         with path.open("w", encoding="utf-8", newline="") as handle:
@@ -489,7 +504,7 @@ def export_publication_package(state_db: Path | None, output_dir: Path, *, run_i
         templates.append({"stage": path.stem, "path": str(destination.relative_to(output_dir)), "sha256": _sha256(destination)})
     jsonl_path.write_text("".join(canonical_json(row) + "\n" for row in records), encoding="utf-8")
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
-        fields = ["item_id", "question_id", "variant_id", "doi", "title", "selection_reason", "question", "question_rationale", "reference_answer", "answer_selection_rationale", "answer_rationale", "reconstruction_rationale", "verification_rationale", "option_a", "option_a_generation_rationale", "option_a_rationale", "option_a_verdict", "option_b", "option_b_generation_rationale", "option_b_rationale", "option_b_verdict", "option_c", "option_c_generation_rationale", "option_c_rationale", "option_c_verdict", "option_d", "option_d_generation_rationale", "option_d_rationale", "option_d_verdict", "correct_option", "reference_answer_json", "options_json", "selection_json", "validation_json", "provenance_json", "rationale_availability_json"]
+        fields = ["item_id", "question_id", "variant_id", "doi", "title", "selection_reason", "question", "question_context", "question_rationale", "reference_answer", "answer_selection_rationale", "answer_rationale", "reconstruction_rationale", "verification_rationale", "option_a", "option_a_generation_rationale", "option_a_rationale", "option_a_verdict", "option_b", "option_b_generation_rationale", "option_b_rationale", "option_b_verdict", "option_c", "option_c_generation_rationale", "option_c_rationale", "option_c_verdict", "option_d", "option_d_generation_rationale", "option_d_rationale", "option_d_verdict", "correct_option", "reference_answer_json", "options_json", "selection_json", "validation_json", "provenance_json", "rationale_availability_json"]
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for row in records:
@@ -505,18 +520,18 @@ def export_publication_package(state_db: Path | None, output_dir: Path, *, run_i
             writer.writerow({
                 "item_id": row["item_id"], "question_id": row["question_id"], "variant_id": row["variant_id"],
                 "doi": row["paper"]["doi"], "title": row["paper"]["title"], "selection_reason": row["selection"]["inclusion_reason"],
-                "question": row["question"], "question_rationale": row["question_rationale"], "reference_answer": row["reference_answer"].get("text"), "answer_selection_rationale": row["rationales"]["answer_selection"], "answer_rationale": row["rationales"]["answer_generation"], "reconstruction_rationale": row["rationales"]["reconstruction"], "verification_rationale": row["rationales"]["answer_verification"],
+                "question": row["question"], "question_context": row["question_context"], "question_rationale": row["question_rationale"], "reference_answer": row["reference_answer"].get("text"), "answer_selection_rationale": row["rationales"]["answer_selection"], "answer_rationale": row["rationales"]["answer_generation"], "reconstruction_rationale": row["rationales"]["reconstruction"], "verification_rationale": row["rationales"]["answer_verification"],
                 **readable_options,
                 "correct_option": next("abcd"[index] for index, option in enumerate(options) if option["is_correct"]),
                 "reference_answer_json": canonical_json(row["reference_answer"]), "options_json": canonical_json(options),
                 "selection_json": canonical_json(row["selection"]), "validation_json": canonical_json(row["validation"]),
                 "provenance_json": canonical_json(row["provenance"]), "rationale_availability_json": canonical_json(row["rationale_availability"]),
             })
-    benchmark = [{"item_id": row["item_id"], "question_id": row["question_id"], "variant_id": row["variant_id"], "question": row["question"], "options": [{"option_id": option["option_id"], "position": option["position"], "text": option["text"]} for option in row["options"]]} for row in records]
+    benchmark = [{"item_id": row["item_id"], "question_id": row["question_id"], "variant_id": row["variant_id"], "question": row["question"], "question_context": row["question_context"], "options": [{"option_id": option["option_id"], "position": option["position"], "text": option["text"]} for option in row["options"]]} for row in records]
     scoring = [{"item_id": row["item_id"], "correct_option_id": next(option["option_id"] for option in row["options"] if option["is_correct"])} for row in records]
     benchmark_jsonl.write_text("".join(canonical_json(row) + "\n" for row in benchmark), encoding="utf-8")
     scoring_jsonl.write_text("".join(canonical_json(row) + "\n" for row in scoring), encoding="utf-8")
-    for path, values, fields in ((benchmark_csv, benchmark, ["item_id", "question_id", "variant_id", "question", "options_json"]), (scoring_csv, scoring, ["item_id", "correct_option_id"])):
+    for path, values, fields in ((benchmark_csv, benchmark, ["item_id", "question_id", "variant_id", "question", "question_context", "options_json"]), (scoring_csv, scoring, ["item_id", "correct_option_id"])):
         with path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=fields)
             writer.writeheader()

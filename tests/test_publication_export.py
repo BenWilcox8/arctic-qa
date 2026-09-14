@@ -23,7 +23,7 @@ def test_reviewer_preserves_verdict_rationale_while_benchmark_hides_labels(tmp_p
         CREATE TABLE calls (call_id TEXT,role TEXT,request_id TEXT,returned_model TEXT,response_json TEXT,attempt INTEGER);
     """)
     source = ("source-1", "paper-1", "10.1/example", "Example paper", 2026, "hash-1", "family-1", "selected", json.dumps({"selection": {"position": 4, "reason_codes": ["arctic"]}}))
-    candidate = {"item_id": "qa-1", "question": "Which value?", "answer": {"text": "Correct", "evidence_quote": "short evidence", "locator": {"page": 2}}, "distractors": [{"text": text, "type": "wrong", "evidence_quote": "evidence"} for text in ("Wrong A", "Wrong B", "Wrong C")], "option_verdicts": [{"option_text": text, "rationale": f"why {text} is wrong", "provenance": {"request_id": f"request-{index}"}} for index, text in enumerate(("Wrong A", "Wrong B", "Wrong C"))], "provenance": {"run_id": "trial-r1", "verification_calls": {}}}
+    candidate = {"item_id": "qa-1", "question": "Which value?", "question_context": "The measurement describes the yearly mean.", "answer": {"text": "Correct", "evidence_quote": "short evidence", "locator": {"page": 2}}, "distractors": [{"text": text, "type": "wrong", "evidence_quote": "evidence"} for text in ("Wrong A", "Wrong B", "Wrong C")], "option_verdicts": [{"option_text": text, "rationale": f"why {text} is wrong", "provenance": {"request_id": f"request-{index}"}} for index, text in enumerate(("Wrong A", "Wrong B", "Wrong C"))], "provenance": {"run_id": "trial-r1", "verification_calls": {}}}
     details = {"distractors": [{"text": text, "accepted": True, "deterministic": True} for text in ("Wrong A", "Wrong B", "Wrong C")]}
     connection.execute("INSERT INTO sources VALUES (?,?,?,?,?,?,?,?,?)", source)
     connection.execute("INSERT INTO candidates VALUES (?,?,?,?,?)", ("qa-1", "trial-r1", "source-1", "machine_accepted_unverified", json.dumps(candidate)))
@@ -35,6 +35,8 @@ def test_reviewer_preserves_verdict_rationale_while_benchmark_hides_labels(tmp_p
     reviewer = json.loads((tmp_path / "package" / "reviewer-items.jsonl").read_text())
     benchmark = json.loads((tmp_path / "package" / "benchmark-inputs.jsonl").read_text())
     assert reviewer["paper"]["doi"] == "10.1/example"
+    assert reviewer["question_context"] == "The measurement describes the yearly mean."
+    assert benchmark["question_context"] == reviewer["question_context"]
     assert any(option.get("verdict") for option in reviewer["options"])
     assert "is_correct" not in benchmark["options"][0]
     assert "rationale" not in (tmp_path / "package" / "benchmark-inputs.jsonl").read_text()
@@ -42,6 +44,10 @@ def test_reviewer_preserves_verdict_rationale_while_benchmark_hides_labels(tmp_p
         csv_row = next(csv.DictReader(handle))
     assert csv_row["reference_answer"] == "Correct"
     assert csv_row["option_a_verdict"] or csv_row["option_b_verdict"]
+    assert csv_row["question_context"] == reviewer["question_context"]
+    with (tmp_path / "package" / "benchmark-inputs.csv").open(newline="", encoding="utf-8") as handle:
+        benchmark_csv = next(csv.DictReader(handle))
+    assert benchmark_csv["question_context"] == benchmark["question_context"]
 
 
 def test_manifest_selected_variants_keep_their_exact_options(tmp_path: Path) -> None:
@@ -163,3 +169,76 @@ def test_manifest_selected_variants_keep_their_exact_options(tmp_path: Path) -> 
     assert json.loads(csv_row["stage_results_json"])["answer_verification"]["source_entailment_model_verified"] is True
     assert manifest["historical_prompt_templates"][0]["kind"] == "renderer"
     assert (tmp_path / "package" / "historical-prompt-bundle" / "generation-v10.py").read_text() == renderer.read_text()
+
+
+def test_manifest_package_exports_question_context_without_benchmark_leakage(tmp_path: Path) -> None:
+    export_dir = tmp_path / "exports" / "trial"
+    export_dir.mkdir(parents=True)
+    present_context = "The measurement is for sea ice extent."
+    variants = [
+        {
+            "item_id": "mcq-context",
+            "paired_item_id": "missing-candidate-id",
+            "task_type": "answer_present_mcq",
+            "question": "What changed?",
+            "question_context": present_context,
+            "source": {"source_id": "source-1"},
+            "options": [{"text": "It increased", "is_correct": True}],
+        },
+        {
+            "item_id": "mcq-empty",
+            "paired_item_id": "question-empty",
+            "task_type": "answer_present_mcq",
+            "question": "Which season?",
+            "question_context": "",
+            "source": {"source_id": "source-1"},
+            "options": [{"text": "Winter", "is_correct": True}],
+        },
+        {
+            "item_id": "mcq-legacy",
+            "paired_item_id": "question-legacy",
+            "task_type": "answer_present_mcq",
+            "question": "Which instrument?",
+            "source": {"source_id": "source-1"},
+            "options": [{"text": "Satellite", "is_correct": True}],
+        },
+    ]
+    (export_dir / "mcq.jsonl").write_text("".join(json.dumps(row) + "\n" for row in variants), encoding="utf-8")
+    manifest_path = export_dir / "manifest.json"
+    manifest_path.write_text(json.dumps({"files": {"mcq": "exports/trial/mcq.jsonl"}}), encoding="utf-8")
+    db_path = tmp_path / "state.sqlite3"
+    connection = sqlite3.connect(db_path)
+    connection.executescript("""
+        CREATE TABLE sources (source_id TEXT,stable_id TEXT,doi TEXT,title TEXT,year INTEGER,content_hash TEXT,metadata_json TEXT,inclusion_reason TEXT);
+        CREATE TABLE candidates (item_id TEXT,source_id TEXT,candidate_json TEXT);
+        CREATE TABLE validation_events (item_id TEXT,stage TEXT,label TEXT,reason_codes_json TEXT,details_json TEXT);
+    """)
+    connection.execute("INSERT INTO sources VALUES (?,?,?,?,?,?,?,?)", ("source-1", "paper-1", "10.1/example", "Example paper", 2026, "source-hash", "{}", "selected"))
+    candidates = [
+        ("question-context", {"question": "What changed?", "question_context": present_context, "answer": {"text": "Correct context match"}}),
+        ("question-decoy", {"question": "What changed?", "question_context": "The measurement is for sea ice concentration.", "answer": {"text": "Wrong context match"}}),
+        ("question-empty", {"question": "Which season?", "question_context": "", "answer": {"text": "Winter"}}),
+        ("question-legacy", {"question": "Which instrument?", "answer": {"text": "Satellite"}}),
+    ]
+    connection.executemany("INSERT INTO candidates VALUES (?,?,?)", [(item_id, "source-1", json.dumps(candidate)) for item_id, candidate in candidates])
+    connection.commit()
+    connection.close()
+
+    export_publication_package(db_path, tmp_path / "package", seed="fixed", export_manifest=manifest_path)
+
+    reviewer = [json.loads(line) for line in (tmp_path / "package" / "reviewer-items.jsonl").read_text().splitlines()]
+    benchmark = [json.loads(line) for line in (tmp_path / "package" / "benchmark-inputs.jsonl").read_text().splitlines()]
+    with (tmp_path / "package" / "reviewer-items.csv").open(encoding="utf-8", newline="") as handle:
+        reviewer_csv = list(csv.DictReader(handle))
+    with (tmp_path / "package" / "benchmark-inputs.csv").open(encoding="utf-8", newline="") as handle:
+        benchmark_reader = csv.DictReader(handle)
+        benchmark_csv = list(benchmark_reader)
+        assert benchmark_reader.fieldnames[benchmark_reader.fieldnames.index("question") + 1] == "question_context"
+
+    assert [row["question_context"] for row in reviewer] == [present_context, "", ""]
+    assert [row["question_context"] for row in benchmark] == [present_context, "", ""]
+    assert [row["question_context"] for row in reviewer_csv] == [present_context, "", ""]
+    assert [row["question_context"] for row in benchmark_csv] == [present_context, "", ""]
+    assert reviewer[0]["reference_answer"]["text"] == "Correct context match"
+    assert set(benchmark[0]) == {"item_id", "question_id", "variant_id", "question", "question_context", "options"}
+    assert not {"reference_answer", "answer_evidence", "rationales", "validation", "provenance", "selection"} & set(benchmark[0])
