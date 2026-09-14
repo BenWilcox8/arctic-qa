@@ -1,6 +1,6 @@
 {
   "schema": "streaming-live-execution-gate-v1",
-  "release_status": "draft_pending_internal_review",
+  "release_status": "reviewed_pending_external_state_checks",
   "allowed_phase": "away_production",
   "authorization_record": "/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/streaming-dataset-r1/First production campaign - 50 dollars.md",
   "authorization_record_sha256": "32a936348ba0bcb3ccff10acf4b14b2015f224444e975c0a19a8261752a25f56",
@@ -28,7 +28,7 @@
   "generation_prompt_version": "arctic-qa-generation-v14",
   "historical_family_budget_carryover": "Every selected family remains subject to its prior shared-ledger spend. A prior family is not excluded, its fresh production requests use the new run identity, and the broker refuses new transport when the USD1 family ceiling has insufficient capacity.",
   "independent_review_applies_to": "d56f115f7a287745addf2e54ac14b3bdd24ecf80",
-  "independent_review_verdict": "pending",
+  "independent_review_verdict": "pass",
   "integrated_code_commit": "d56f115f7a287745addf2e54ac14b3bdd24ecf80",
   "live_generation_enabled": false,
   "maximum_authorized_cumulative_tranche_usd": "61.614496",
@@ -42,8 +42,8 @@
   "providers_code_sha256": "fd1a47b1492e1b4c503dfe6ab028ece4fb9a6eb27731482a9ac576e2d7868842",
   "quality_order_sha256": "304a11470127cd55c951b5c727f66a0a3ec209c0c029b3ef47a073d8d8ebd1ad",
   "ranked_manifest_descriptor_sha256": "875cd0d8b446f816c1e75f32e614ed3d7b785721c62ef8218e48a5a3ba4594f9",
-  "review_record": "/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-geography-fix-r1/internal-release-review.md",
-  "review_record_sha256": "REPLACE_AFTER_INTERNAL_REVIEW",
+  "review_record": "/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-geography-release-review-r1/report.md",
+  "review_record_sha256": "926dcb37ebf87e13846aedcdb0c70faf63bea83163248fbc886be31396f93c33",
   "validation_code_sha256": "c0080f2a4a059e8b82fda66d652f844da3601ee36cd8deb6b1389bc86f6b71a9",
   "correction_overlay_sha256": "1ecefe47cf7cbe66cf430a9fcc08f6ae089132f620ad6cf988ac578ec1563467",
   "supersedes_config_transition_review": {

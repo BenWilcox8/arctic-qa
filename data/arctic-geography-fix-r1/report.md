@@ -101,7 +101,7 @@ baseline. Do not create a ledger or submit a batch.
 
 The reviewable successor gate draft is
 `data/arctic-geography-fix-r1/release-draft/successor-execution-gate-v3.draft.json`.
-It is deliberately disabled and has a pending review hash. The exact recovery
+It is deliberately disabled and binds the completed independent review. The exact recovery
 and restart commands are in
 `data/arctic-geography-fix-r1/release-draft/recovery-and-restart.md`.
 They run from this reviewed worktree with code at
