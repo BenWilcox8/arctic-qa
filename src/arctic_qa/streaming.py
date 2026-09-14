@@ -34,25 +34,42 @@ from .util import atomic_json, canonical_json, sha256_bytes, sha256_file, stable
 from .validation import validate_candidate
 
 
-GENERATION_ATTEMPT_CONTRACT_VERSION = "bounded-paper-progression-v1"
+GENERATION_ATTEMPT_CONTRACT_VERSION = "bounded-paper-progression-v2"
 MAX_FINDING_ATTEMPTS = 2
-MAX_QUESTION_REVISIONS = 1
-MAX_CANDIDATE_PATHS = 3
+MAX_QUESTION_REVISIONS = 2
+MAX_CANDIDATE_PATHS = MAX_FINDING_ATTEMPTS * (MAX_QUESTION_REVISIONS + 1)
 REPAIRABLE_QUESTION_REASONS = frozenset(
     {
+        "answer_ambiguous",
+        "alternative_answer_unresolved",
+        "causal_overclaim",
         "question_context_invalid",
         "question_context_missing",
         "question_context_unnecessary",
         "question_context_not_source_supported",
         "question_context_answer_leakage",
+        "question_context_required",
+        "question_context_referent_unresolved",
+        "question_answer_leakage",
+        "revision_unchanged_payload",
+        "question_claim_type_disagreement",
+        "reconstruction_disagreement",
+        "relation_scope_mismatch",
         "scope_qualifier_missing",
+        "scope_qualifier_not_source_bound",
+        "source_entailment_not_verified",
+        "insufficient_verified_distractors",
     }
 )
 ALTERNATIVE_FINDING_REASONS = frozenset(
     {
+        "finding_answer_phrase_in_required_question_phrases",
         "insufficient_verified_distractors",
         "reconstruction_disagreement",
     }
+)
+IMMEDIATE_ALTERNATIVE_FINDING_REASONS = frozenset(
+    {"finding_answer_phrase_in_required_question_phrases"}
 )
 
 
@@ -903,7 +920,7 @@ def _validate_generation_attempt(attempt: Any) -> dict[str, Any]:
         else "alternative_finding"
         if (finding_index, revision_index) == (2, 0)
         else "question_revision"
-        if revision_index == 1
+        if revision_index in {1, 2}
         else None
     )
     if attempt["attempt_kind"] != expected_kind:
@@ -1150,7 +1167,7 @@ def _validate_generation_lineage(
             candidate = parent.get("candidate")
             if candidate is None or candidate["item_id"] != attempt["parent_item_id"]:
                 raise ValueError("the generation attempt parent item is inconsistent")
-        if key[1] == 1 and _path_key(parent["attempt"])[0] != key[0]:
+        if key[1] in {1, 2} and _path_key(parent["attempt"])[0] != key[0]:
             raise ValueError("a question revision changed its finding")
         if key == (2, 0) and _path_key(parent["attempt"]) == (2, 0):
             raise ValueError("the alternative finding parent is invalid")
@@ -1200,25 +1217,41 @@ def _next_generation_attempt(
     reason_codes: list[str],
 ) -> dict[str, Any] | None:
     failed_attempt = failed_path["attempt"]
-    used_revisions = sum(
-        path["attempt"]["question_revision_index"] == 1
-        for path in paths.values()
-    )
+    finding_index = int(failed_attempt["finding_attempt_index"])
+    revision_index = int(failed_attempt["question_revision_index"])
     if (
+        finding_index == 1
+        and revision_index == 0
+        and len(reason_codes) == 1
+        and reason_codes[0] in IMMEDIATE_ALTERNATIVE_FINDING_REASONS
+        and (2, 0) not in paths
+    ):
+        excluded = _prior_finding_span_ids(paths)
+        if excluded:
+            return _generation_attempt(
+                campaign_id=campaign_id,
+                family_id=family_id,
+                finding_attempt_index=2,
+                question_revision_index=0,
+                attempt_kind="alternative_finding",
+                parent_attempt_id=failed_attempt["attempt_id"],
+                parent_item_id=(failed_path.get("candidate") or {}).get("item_id"),
+                trigger_reason_code=reason_codes[0],
+                excluded_finding_span_ids=excluded,
+            )
+    reason_is_repairable = (
         len(reason_codes) == 1
         and reason_codes[0] in REPAIRABLE_QUESTION_REASONS
-        and used_revisions < MAX_QUESTION_REVISIONS
-    ):
-        key = (
-            int(failed_attempt["finding_attempt_index"]),
-            1,
-        )
+    )
+    next_revision = int(failed_attempt["question_revision_index"]) + 1
+    if reason_is_repairable and next_revision <= MAX_QUESTION_REVISIONS:
+        key = (int(failed_attempt["finding_attempt_index"]), next_revision)
         if key not in paths:
             return _generation_attempt(
                 campaign_id=campaign_id,
                 family_id=family_id,
                 finding_attempt_index=key[0],
-                question_revision_index=1,
+                question_revision_index=next_revision,
                 attempt_kind="question_revision",
                 parent_attempt_id=failed_attempt["attempt_id"],
                 parent_item_id=(
@@ -1227,6 +1260,11 @@ def _next_generation_attempt(
                 trigger_reason_code=reason_codes[0],
                 excluded_finding_span_ids=[],
             )
+    if (
+        finding_index != 1
+        or revision_index < MAX_QUESTION_REVISIONS
+    ):
+        return None
     if (2, 0) in paths:
         return None
     if len(reason_codes) != 1 or reason_codes[0] not in ALTERNATIVE_FINDING_REASONS:

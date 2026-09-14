@@ -16,7 +16,9 @@ def export_run(
         (run_id,),
     )
     incomplete_rows = db.rows(
-        "SELECT * FROM candidates WHERE run_id=? AND status='incomplete_non_mcq' ORDER BY item_id",
+        """SELECT * FROM candidates
+        WHERE run_id=? AND status='incomplete_non_mcq'
+        ORDER BY paper_family_id,updated_at DESC,item_id DESC""",
         (run_id,),
     )
     short_answers: list[dict[str, Any]] = []
@@ -45,7 +47,11 @@ def export_run(
             mcqs.append(_present_mcq(candidate, accepted[:3], seed))
             if len(accepted) >= 4:
                 mcqs.append(_absent_mcq(candidate, accepted[:4], seed))
+    incomplete_families: set[str] = set()
     for row in incomplete_rows:
+        if row["paper_family_id"] in incomplete_families:
+            continue
+        incomplete_families.add(row["paper_family_id"])
         candidate = json.loads(row["candidate_json"])
         candidate["release_label"] = "incomplete_non_mcq"
         incomplete_short_answers.append(_short_answer(candidate))

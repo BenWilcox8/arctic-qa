@@ -82,7 +82,7 @@ def _insert_candidate(
         )
 
 
-def test_fallback_prefers_one_question_revision_then_alternative() -> None:
+def test_fallback_allows_two_revisions_before_an_alternative_finding() -> None:
     primary = streaming_module._generation_attempt(
         campaign_id="campaign",
         family_id="family",
@@ -127,11 +127,34 @@ def test_fallback_prefers_one_question_revision_then_alternative() -> None:
         },
     }
 
-    alternative = streaming_module._next_generation_attempt(
+    second_revision = streaming_module._next_generation_attempt(
         campaign_id="campaign",
         family_id="family",
         paths=paths,
         failed_path=paths[(1, 1)],
+        reason_codes=["question_context_missing"],
+    )
+
+    assert second_revision is not None
+    assert second_revision["attempt_kind"] == "question_revision"
+    assert second_revision["finding_attempt_index"] == 1
+    assert second_revision["question_revision_index"] == 2
+    assert second_revision["parent_attempt_id"] == revision["attempt_id"]
+    paths[(1, 2)] = {
+        "attempt": second_revision,
+        "candidate": {
+            "item_id": "item-second-revision",
+            "candidate_json": canonical_json(
+                {"answer": {"source_span_id": "span-primary"}}
+            ),
+        },
+    }
+
+    alternative = streaming_module._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths=paths,
+        failed_path=paths[(1, 2)],
         reason_codes=["reconstruction_disagreement"],
     )
 
@@ -139,7 +162,95 @@ def test_fallback_prefers_one_question_revision_then_alternative() -> None:
     assert alternative["attempt_kind"] == "alternative_finding"
     assert alternative["finding_attempt_index"] == 2
     assert alternative["question_revision_index"] == 0
-    assert alternative["parent_attempt_id"] == revision["attempt_id"]
+    assert alternative["parent_attempt_id"] == second_revision["attempt_id"]
+
+    assert len({
+        primary["attempt_id"],
+        revision["attempt_id"],
+        second_revision["attempt_id"],
+        alternative["attempt_id"],
+    }) == 4
+
+
+def test_answer_bearing_required_phrase_routes_immediately_to_alternative() -> None:
+    primary = streaming_module._generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        finding_attempt_index=1,
+        question_revision_index=0,
+        attempt_kind="primary",
+        parent_attempt_id=None,
+        parent_item_id=None,
+        trigger_reason_code=None,
+        excluded_finding_span_ids=[],
+    )
+    path = {
+        "attempt": primary,
+        "candidate": {
+            "item_id": "item-primary",
+            "candidate_json": canonical_json(
+                {"answer": {"source_span_id": "span-primary"}}
+            ),
+        },
+    }
+
+    alternative = streaming_module._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths={(1, 0): path},
+        failed_path=path,
+        reason_codes=["finding_answer_phrase_in_required_question_phrases"],
+    )
+
+    assert alternative is not None
+    assert alternative["attempt_kind"] == "alternative_finding"
+    assert alternative["finding_attempt_index"] == 2
+    assert alternative["question_revision_index"] == 0
+    assert alternative["excluded_finding_span_ids"] == ["span-primary"]
+
+
+def test_generation_lineage_allows_six_bounded_paths() -> None:
+    paths: dict[tuple[int, int], dict] = {}
+    parent_attempt_id: str | None = None
+    parent_item_id: str | None = None
+    for finding_index in (1, 2):
+        for revision_index in range(3):
+            kind = (
+                "primary"
+                if (finding_index, revision_index) == (1, 0)
+                else "alternative_finding"
+                if (finding_index, revision_index) == (2, 0)
+                else "question_revision"
+            )
+            attempt = streaming_module._generation_attempt(
+                campaign_id="campaign",
+                family_id="family",
+                finding_attempt_index=finding_index,
+                question_revision_index=revision_index,
+                attempt_kind=kind,
+                parent_attempt_id=parent_attempt_id,
+                parent_item_id=parent_item_id,
+                trigger_reason_code="reconstruction_disagreement"
+                if parent_attempt_id
+                else None,
+                excluded_finding_span_ids=(
+                    ["span-primary"]
+                    if (finding_index, revision_index) == (2, 0)
+                    else []
+                ),
+            )
+            item_id = f"item-{finding_index}-{revision_index}"
+            paths[(finding_index, revision_index)] = {
+                "attempt": attempt,
+                "candidate": {"item_id": item_id, "candidate_json": "{}"},
+            }
+            parent_attempt_id = attempt["attempt_id"]
+            parent_item_id = item_id
+
+    streaming_module._validate_generation_lineage(paths)
+    assert len(paths) == streaming_module.MAX_CANDIDATE_PATHS == 6
+    with pytest.raises(ValueError, match="bounded generation path limit"):
+        streaming_module._validate_generation_lineage({**paths, (3, 0): paths[(1, 0)]})
 
 
 def test_fallback_does_not_progress_from_a_contract_mismatch() -> None:
@@ -176,15 +287,98 @@ def test_fallback_does_not_progress_from_a_contract_mismatch() -> None:
     )
 
 
+def test_fallback_stops_after_two_revisions_or_multiple_reasons() -> None:
+    primary = streaming_module._generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        finding_attempt_index=1,
+        question_revision_index=0,
+        attempt_kind="primary",
+        parent_attempt_id=None,
+        parent_item_id=None,
+        trigger_reason_code=None,
+        excluded_finding_span_ids=[],
+    )
+    paths = {
+        (1, 0): {
+            "attempt": primary,
+            "candidate": {"item_id": "item-primary", "candidate_json": "{}"},
+        }
+    }
+    first_revision = streaming_module._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths=paths,
+        failed_path=paths[(1, 0)],
+        reason_codes=["reconstruction_disagreement"],
+    )
+    assert first_revision is not None
+    paths[(1, 1)] = {
+        "attempt": first_revision,
+        "candidate": {"item_id": "item-first", "candidate_json": "{}"},
+    }
+    second_revision = streaming_module._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths=paths,
+        failed_path=paths[(1, 1)],
+        reason_codes=["reconstruction_disagreement"],
+    )
+    assert second_revision is not None
+    paths[(1, 2)] = {
+        "attempt": second_revision,
+        "candidate": {"item_id": "item-second", "candidate_json": "{}"},
+    }
+
+    assert (
+        streaming_module._next_generation_attempt(
+            campaign_id="campaign",
+            family_id="family",
+            paths=paths,
+            failed_path=paths[(1, 2)],
+            reason_codes=["reconstruction_disagreement"],
+        )
+        is not None
+    )
+    assert (
+        streaming_module._next_generation_attempt(
+            campaign_id="campaign",
+            family_id="family",
+            paths=paths,
+            failed_path=paths[(1, 0)],
+            reason_codes=["reconstruction_disagreement", "answer_ambiguous"],
+        )
+        is None
+    )
+    assert (
+        streaming_module._next_generation_attempt(
+            campaign_id="campaign",
+            family_id="family",
+            paths=paths,
+            failed_path=paths[(1, 2)],
+            reason_codes=["provider_response_ambiguous"],
+        )
+        is None
+    )
+
+
 @pytest.mark.parametrize(
-    ("failure_reason", "expected_kind"),
+    ("failure_reason", "accept_on", "expected_kinds"),
     [
-        ("reconstruction_disagreement", "alternative_finding"),
-        ("question_context_missing", "question_revision"),
+        ("question_context_missing", 2, ["primary", "question_revision"]),
+        (
+            "reconstruction_disagreement",
+            3,
+            ["primary", "question_revision", "question_revision"],
+        ),
     ],
 )
 def test_progress_generation_continues_with_a_fresh_path_after_rejection(
-    tmp_path: Path, monkeypatch, failure_reason: str, expected_kind: str
+    tmp_path: Path,
+    monkeypatch,
+    failure_reason: str,
+    accept_on: int,
+    expected_kinds: list[str],
 ) -> None:
     database = _database(tmp_path)
     namespace = tmp_path / "namespace"
@@ -222,7 +416,7 @@ def test_progress_generation_continues_with_a_fresh_path_after_rejection(
         return candidate
 
     def fake_validate(database, namespace, candidate):
-        accepted = len(calls) == 2
+        accepted = len(calls) == accept_on
         status = "machine_accepted_unverified" if accepted else "rejected"
         reasons = [] if accepted else [failure_reason]
         labels = {"mcq_eligible": accepted}
@@ -278,16 +472,15 @@ def test_progress_generation_continues_with_a_fresh_path_after_rejection(
     )
 
     assert result["disposition"] == "accepted"
-    assert [attempt["attempt_kind"] for attempt in calls] == ["primary", expected_kind]
-    assert calls[1]["excluded_finding_span_ids"] == (
-        [f"span-{stable_id('candidate', calls[0]['attempt_id'])}"]
-        if expected_kind == "alternative_finding"
-        else []
+    assert [attempt["attempt_kind"] for attempt in calls] == expected_kinds
+    assert all(
+        attempt["parent_attempt_id"] == previous["attempt_id"]
+        for previous, attempt in zip(calls, calls[1:])
     )
-    assert calls[1]["parent_attempt_id"] == calls[0]["attempt_id"]
+    assert all(not attempt["excluded_finding_span_ids"] for attempt in calls)
     assert database.one(
         "SELECT COUNT(*) AS count FROM candidates WHERE run_id=?", ("campaign",)
-    )["count"] == 2
+    )["count"] == accept_on
 
 
 def test_budget_stop_is_terminal_when_generation_resumes(

@@ -22,8 +22,11 @@ from .validation import (
     GENERATION_PROMPT_VERSION,
     NUMERIC_RULE_CONTRACT_VERSION,
     SCOPE_CONTRACT_VERSION,
+    benchmark_context_verification_reason,
     numeric_rule_is_source_bound,
+    question_answer_leaks_answer,
     question_context_verification_reason,
+    required_question_phrases_contain_answer,
     reconstruction_matches,
     scope_is_evidence_bound,
 )
@@ -33,7 +36,7 @@ PROMPT_VERSION = GENERATION_PROMPT_VERSION
 CANDIDATE_SCHEMA_VERSION = "2.3.0"
 FINDING_POLICY_VERSION = "one-finding-per-paper-full-context-v6"
 SCOPE_ROLE_FINDING_POLICY_VERSION = "one-finding-per-paper-full-context-v7"
-GENERATION_ATTEMPT_CONTRACT_VERSION = "bounded-paper-progression-v1"
+GENERATION_ATTEMPT_CONTRACT_VERSION = "bounded-paper-progression-v2"
 FINDING_SPAN_CONTRACT_VERSION = "finding-evidence-span-v3"
 MODEL_JUSTIFICATION_CONTRACT_VERSION = "model-justification-v1"
 ARCTIC_SCOPE_CONTRACT_VERSION = "eligible-arctic-finding-scope-v1"
@@ -59,7 +62,8 @@ ANSWER_FORMAT_INSTRUCTIONS = (
     "Do not include unrelated values or neighboring statistics from the selected span. "
     "Keep the necessary unit, entity, relation, and qualifier that makes the answer "
     "correct. Use multiple values only when the focused question requires every value. "
-    "For an exact count, include its unit in answer.text and matching numeric metadata. "
+    "For an exact count, include its complete source-supported count noun phrase in "
+    "answer.text and matching numeric metadata, including a multi-word unit when needed. "
     "For example, if the source says 'Group A had 12 cases and Group B had 8 cases,' "
     "use '12 cases' for a Group A question. For a categorical source result, use "
     "'higher at Site A' when the direction and site are necessary. Put explanations, "
@@ -102,6 +106,14 @@ BENCHMARK_STANDALONE_INSTRUCTIONS = (
     "identified OTUs'. Make each answer and displayed distractor understandable with the "
     "question and question_context alone. A reader can need SOURCE_DATA to determine or "
     "verify the answer. A reader must not need it to identify a referent or interpret scope. "
+    "Treat study-local definite descriptions as unresolved unless question or context "
+    "identifies the subject, place, time, sample, or event. This includes 'the southern "
+    "station', 'the identified OTUs', 'the sampled group', and 'this experiment'. A "
+    "latitude alone does not identify a station or event. Expand an abbreviated species "
+    "name in question_context when the full name is needed. Apply the same rule to each "
+    "displayed distractor. Do not add answer-bearing information to resolve a referent. "
+    "Never state the proposed answer in the question or question_context, including "
+    "an explicit phrase such as 'the correct answer is'. "
     "These rules do not restrict exact evidence quotes, source locators, or rationale fields."
 )
 QUESTION_CONTEXT_INSTRUCTIONS = (
@@ -116,14 +128,19 @@ QUESTION_CONTEXT_INSTRUCTIONS = (
     "taxonomic counts, relationships, results, conclusions, answer-choice eliminators, "
     "or a paper summary. If an acronym expansion answers the question, do not supply that "
     "expansion. Expand an unfamiliar acronym only when its expansion occurs in "
-    "SOURCE_DATA. Do not infer or invent a definition."
+    "SOURCE_DATA. For a study-local definite description or abbreviated species name, "
+    "the context must identify the source-supported subject, place, time, sample, or "
+    "event. A latitude alone does not identify a station or event. Do not infer or invent "
+    "a definition."
 )
 RECONSTRUCTION_NUMERIC_INSTRUCTIONS = (
     "Populate numeric only for one scalar value with one applicable unit. Omit "
     "numeric for ranges, tuples, counts written as words, nonnumeric answers, or "
-    "directional answers. Never put the string 'null' in a numeric field."
+    "directional answers. Never put the string 'null' in a numeric field. Return only "
+    "the concise answer required by QUESTION. Do not add p-values, confidence intervals, "
+    "explanations, or other source values."
 )
-DISTRACTOR_WRITER_INSTRUCTIONS = """Treat QUESTION and QUESTION_CONTEXT as the complete benchmark task. Do not use SOURCE_DATA to resolve a missing system, location, sample, period, condition, or referent. If the displayed task needs SOURCE_DATA to identify a referent or interpret scope, do not propose distractors. SOURCE_DATA can still determine the answer. Propose 4 to 6 typed distractors so that at least three can survive independent verification. Do not self-verify them. Each option must be a concise positive assertion with one interpretation. Avoid explicit negation and compound assertions. Each option must be understandable with QUESTION and QUESTION_CONTEXT alone. For a numeric option, display exactly one displayed number and unit, and provide numeric canonical_value and unit metadata that match that display. Prefer nonnumeric categorical or directional contradictions when the answer lacks a source-bound numeric tolerance rule. Select source_span_id for each evidence record. For each option, provide a concise generation_rationale that explains why the option is plausible and how it differs from the source-supported answer. This is a model-generated justification, not proof and not hidden reasoning."""
+DISTRACTOR_WRITER_INSTRUCTIONS = """Treat QUESTION and QUESTION_CONTEXT as the complete benchmark task. Do not use SOURCE_DATA to resolve a missing system, location, sample, period, condition, or referent. If the displayed task needs SOURCE_DATA to identify a referent or interpret scope, do not propose distractors. Apply this rule to each option. A study-local definite description such as 'the southern station', 'the identified OTUs', or 'this experiment' needs source-supported identifying context. A latitude alone does not identify a station or event. SOURCE_DATA can still determine the answer. Propose 4 to 6 typed distractors so that at least three can survive independent verification. Do not self-verify them. Each option must be a concise positive assertion with one interpretation. Avoid explicit negation and compound assertions. Each option must be understandable with QUESTION and QUESTION_CONTEXT alone. For a numeric option, display exactly one displayed number and unit, and provide numeric canonical_value and unit metadata that match that display. Prefer nonnumeric categorical or directional contradictions when the answer lacks a source-bound numeric tolerance rule. Select source_span_id for each evidence record. For each option, provide a concise generation_rationale that explains why the option is plausible and how it differs from the source-supported answer. This is a model-generated justification, not proof and not hidden reasoning."""
 
 JUSTIFICATION_SCHEMA = {
     "type": "string",
@@ -513,6 +530,9 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
                 "question_context_required": {"type": "boolean"},
                 "question_context_source_supported": {"type": "boolean"},
                 "question_context_answer_leakage_absent": {"type": "boolean"},
+                "question_context_referent_resolved": {"type": "boolean"},
+                "question_context_missing_detail": {"type": "string"},
+                "question_answer_leakage_absent": {"type": "boolean"},
                 "question_claim_type": {
                     "enum": ["observation", "association", "causal", "definition"]
                 },
@@ -590,7 +610,7 @@ def _validated_generation_attempt(
         raise ValueError("generation attempt kind is invalid")
     finding_index = value["finding_attempt_index"]
     revision_index = value["question_revision_index"]
-    if finding_index not in {1, 2} or revision_index not in {0, 1}:
+    if finding_index not in {1, 2} or revision_index not in {0, 1, 2}:
         raise ValueError("generation attempt indexes exceed the bounded contract")
     if not isinstance(value["attempt_id"], str) or not value["attempt_id"]:
         raise ValueError("generation attempt ID is invalid")
@@ -618,7 +638,10 @@ def _validated_generation_attempt(
         if not isinstance(value["trigger_reason_code"], str) or not value["trigger_reason_code"]:
             raise ValueError("fallback generation attempt lacks a trigger reason")
     if value["attempt_kind"] == "question_revision":
-        if revision_index != 1 or not isinstance(value["parent_item_id"], str):
+        if revision_index not in {1, 2} or (
+            value["parent_item_id"] is not None
+            and not isinstance(value["parent_item_id"], str)
+        ):
             raise ValueError("question revision parent state is invalid")
         if exclusions:
             raise ValueError("question revision cannot exclude a finding")
@@ -712,28 +735,35 @@ def generate_candidate(
         }
     revision_parent: dict[str, Any] | None = None
     if attempt is not None and attempt["attempt_kind"] == "question_revision":
-        parent_row = db.one(
-            "SELECT candidate_json FROM candidates WHERE item_id=? AND run_id=?",
-            (attempt["parent_item_id"], run_id),
-        )
-        if parent_row is None:
-            raise ValueError("question revision parent candidate is unavailable")
-        revision_parent = json.loads(parent_row["candidate_json"])
-        if (
-            revision_parent.get("source", {}).get("paper_family_id")
-            != source["paper_family_id"]
-        ):
-            raise ValueError("question revision parent belongs to another family")
-        existing_finding = db.one(
-            "SELECT * FROM findings WHERE finding_id=? AND run_id=?",
-            (revision_parent.get("finding_id"), run_id),
-        )
-        if (
-            existing_finding is None
-            or existing_finding["selection_policy_version"]
-            != finding_policy_version
-        ):
-            raise ValueError("question revision frozen finding is unavailable")
+        if attempt["parent_item_id"] is not None:
+            parent_row = db.one(
+                "SELECT candidate_json FROM candidates WHERE item_id=? AND run_id=?",
+                (attempt["parent_item_id"], run_id),
+            )
+            if parent_row is None:
+                raise ValueError("question revision parent candidate is unavailable")
+            revision_parent = json.loads(parent_row["candidate_json"])
+            if (
+                revision_parent.get("source", {}).get("paper_family_id")
+                != source["paper_family_id"]
+            ):
+                raise ValueError("question revision parent belongs to another family")
+            existing_finding = db.one(
+                "SELECT * FROM findings WHERE finding_id=? AND run_id=?",
+                (revision_parent.get("finding_id"), run_id),
+            )
+            if (
+                existing_finding is None
+                or existing_finding["selection_policy_version"]
+                != finding_policy_version
+            ):
+                raise ValueError("question revision frozen finding is unavailable")
+        else:
+            existing_finding = db.one(
+                """SELECT * FROM findings
+                WHERE run_id=? AND paper_family_id=? AND selection_policy_version=?""",
+                (run_id, source["paper_family_id"], finding_policy_version),
+            )
     else:
         existing_finding = db.one(
             """SELECT * FROM findings
@@ -804,7 +834,8 @@ def generate_candidate(
             "only the minimum scope qualifiers needed to make the answer unique. "
             "Each non-null scope value must also appear in "
             "required_question_phrases. Every required_question_phrases entry must "
-            "be exact selected-span text. Prefer a non-numeric finding unless the "
+            "be exact selected-span text and must not contain answer.text or any "
+            "answer variant. Prefer a non-numeric finding unless the "
             "selected span supports the complete numeric contract. Add numeric_rule "
             "only for one scalar value when the same selected span explicitly "
             "supports its value, unit, tolerance, tolerance basis, precision, "
@@ -883,6 +914,11 @@ def generate_candidate(
                 ),
             )
     _require_arctic_scope_custody(answer, arctic_scope)
+    finding_quality_reason = (
+        "finding_answer_phrase_in_required_question_phrases"
+        if required_question_phrases_contain_answer(answer)
+        else None
+    )
     scoped_chunk_spans = (
         [
             span
@@ -904,20 +940,36 @@ def generate_candidate(
     arm_answer_proposal = answer
     question_rationale: str
     question_context: str
-    revision_instruction = (
-        "\nQUESTION_REVISION\n"
-        + canonical_json(
+    revision_payload: dict[str, Any] = {
+        "trigger_reason_code": attempt["trigger_reason_code"]
+        if attempt is not None
+        else None,
+        "failure_feedback": (
+            revision_parent.get("qa_gate_reasons")
+            if revision_parent is not None
+            else [attempt["trigger_reason_code"]]
+            if attempt is not None
+            else []
+        ),
+    }
+    if revision_parent is not None:
+        revision_payload.update(
             {
                 "parent_question": revision_parent["question"],
                 "parent_question_context": revision_parent.get(
                     "question_context", ""
                 ),
-                "trigger_reason_code": attempt["trigger_reason_code"],
             }
         )
+    revision_instruction = (
+        "\nQUESTION_REVISION\n"
+        + canonical_json(revision_payload)
         + "\nRevise only the question and question_context. Fix the recorded "
-        "stand-alone wording or context defect. Do not change the frozen finding. "
-        if revision_parent is not None and attempt is not None
+        "stand-alone wording or context defect named in failure_feedback. Use the "
+        "source only to add supported subject, place, time, sample, or event context. "
+        "Do not add answer-bearing information. Do not repeat the parent question and "
+        "question_context unchanged. Do not change the frozen finding. "
+        if attempt is not None and attempt["attempt_kind"] == "question_revision"
         else ""
     )
     if arm == "answer_first":
@@ -989,6 +1041,19 @@ def generate_candidate(
         arm_answer_proposal = joint["answer"]
     else:
         raise ValueError(f"unknown generation arm: {arm}")
+    creation_context_reason = (
+        "question_answer_leakage"
+        if question_answer_leaks_answer(question, answer)
+        else benchmark_context_verification_reason(question, question_context)
+    )
+    if revision_parent is not None and (
+        question == revision_parent.get("question")
+        and question_context == revision_parent.get("question_context", "")
+    ):
+        raise CandidateRejectedError(
+            "revision_unchanged_payload",
+            "question revision repeated its parent question and context",
+        )
     reconstruction_prompt = (
         context
         + "\nQUESTION\n"
@@ -1064,6 +1129,18 @@ def generate_candidate(
         "question_context_answer_leakage_absent to false when the context gives the "
         "answer, a result, a conclusion, a relationship, an answer-bearing number, "
         "or an answer-choice eliminator. "
+        "Reject study-local definite descriptions or abbreviated species names when "
+        "QUESTION and QUESTION_CONTEXT do not identify the subject, place, time, sample, "
+        "or event. A latitude alone does not identify a station or event. "
+        "Set question_context_referent_resolved to false when QUESTION and "
+        "QUESTION_CONTEXT leave a study-local referent or scope unresolved, and set "
+        "question_context_missing_detail to name the missing subject, place, time, "
+        "sample, or event. Set it to true and leave the detail empty when the "
+        "benchmark-facing wording is self-contained. "
+        "Set question_answer_leakage_absent to false when QUESTION itself states the "
+        "proposed answer or an explicit answer cue such as 'the correct answer is'. "
+        "Do not accept an answer merely because QUESTION, QUESTION_CONTEXT, and "
+        "SOURCE_DATA agree. "
         "Independently verify every non-null ANSWER_RECORD.scope value against the "
         "selected SOURCE_DATA span and the QUESTION. Do not assume any proposed "
         "scope value is true. Select one source_span_id for the evidence. A selectable "
@@ -1134,6 +1211,10 @@ def generate_candidate(
         question_context,
         direct_value_provenance,
     )
+    if finding_quality_reason:
+        qa_gate_reasons = [finding_quality_reason]
+    if creation_context_reason and creation_context_reason not in qa_gate_reasons:
+        qa_gate_reasons.insert(0, creation_context_reason)
     if canonical_json(arm_answer_proposal) != canonical_json(answer):
         qa_gate_reasons.append("generation_arm_finding_mismatch")
     distractors: list[dict[str, Any]] = []
@@ -1380,6 +1461,9 @@ def _generate_distractors(
             "Absence of mention is not falsity. Set question_admits_option_as_correct only when "
             "a reasonable reading of THIS question admits the option. Truth at another location "
             "or time alone does not make a scoped substitution correct."
+            " Reject an option with a study-local definite description or abbreviated species "
+            "name when QUESTION and QUESTION_CONTEXT do not identify its subject, place, "
+            "time, sample, or event. A latitude alone does not identify a station or event."
             + " Select one source_span_id for the evidence. Set rationale to a "
             "concise evidence-grounded justification for the verdict fields. "
             "Do not provide hidden reasoning."
@@ -1744,7 +1828,7 @@ def _qa_gate_reasons(
         reasons.append("question_context_invalid")
     else:
         context_reason = question_context_verification_reason(
-            question_context, answer, verification
+            question_context, answer, verification, question=question
         )
         if context_reason:
             reasons.append(context_reason)
@@ -1771,6 +1855,8 @@ def _qa_gate_reasons(
     ):
         reasons.append("scope_qualifier_missing")
         required_phrases = []
+    if required_question_phrases_contain_answer(answer):
+        reasons.append("finding_answer_phrase_in_required_question_phrases")
     answer_evidence = normalize_text(str(answer.get("evidence_quote", "")))
     if any(
         normalize_text(phrase) not in answer_evidence for phrase in required_phrases

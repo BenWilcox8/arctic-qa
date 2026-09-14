@@ -409,7 +409,7 @@ def test_retained_direct_value_requires_a_new_bound_contract() -> None:
         ),
         (
             "sustained and statistically significant decline",
-            "A sustained and statistically significant decline",
+            "sustained and statistically significant decline",
             {"canonical_value": "null", "unit": "null"},
         ),
     ],
@@ -424,6 +424,108 @@ def test_grounded_text_match_survives_incomplete_optional_numeric_metadata(
     )
 
     assert validation.reconstruction_matches(answer, reconstruction)
+
+
+@pytest.mark.parametrize(
+    "answer_text,numeric",
+    [
+        (
+            "more persistent periods in spring with enhanced energy flux to the surface",
+            {"canonical_value": "1", "unit": "None"},
+        ),
+        ("−1.3 (−46 %)", {"canonical_value": "-1.3", "unit": "(-46 %)"}),
+        ("0.7 °C", {"canonical_value": "0.7", "unit": "°C"}),
+        ("399.7263", {"canonical_value": "399.7263", "unit": "dimensionless"}),
+    ],
+)
+def test_current_payload_accepts_exact_agreement_with_optional_metadata(
+    answer_text: str, numeric: dict[str, str]
+) -> None:
+    answer, reconstruction = _audit_text_record(
+        answer_text,
+        answer_text,
+        numeric,
+    )
+
+    assert validation.reconstruction_matches(answer, reconstruction)
+
+
+def test_current_fungal_otu_payload_accepts_bare_count_reconstruction() -> None:
+    answer = {
+        "text": "250 fungal OTUs",
+        "evidence_quote": (
+            "250 fungal OTUs of 76,691 reads were included in the final matrix."
+        ),
+        "scope": {"population": "76,691 reads", "method": "final matrix"},
+        "required_question_phrases": ["final matrix", "76,691 reads"],
+        "numeric_rule": {
+            "canonical_value": "250",
+            "unit": "fungal OTUs",
+            "tolerance": "0",
+            "tolerance_basis": "count",
+            "reported_precision": "exact integer",
+            "rounding_rule": "none",
+            "conversion_rule": "direct count of fungal OTUs",
+        },
+    }
+    reconstruction = {
+        "answer": "250",
+        "numeric": {"canonical_value": "250", "unit": "fungal OTUs"},
+        "scope": {"population": "76,691 reads", "method": "final matrix"},
+    }
+
+    assert validation.reconstruction_matches(answer, reconstruction)
+
+
+@pytest.mark.parametrize(
+    ("reconstruction_text", "canonical_value", "unit"),
+    [("250", "251", "fungal OTUs"), ("250", "250", "bacterial OTUs")],
+)
+def test_bare_count_reconstruction_rejects_cardinality_or_unit_near_miss(
+    reconstruction_text: str, canonical_value: str, unit: str
+) -> None:
+    answer = {
+        "text": "250 fungal OTUs",
+        "evidence_quote": "250 fungal OTUs were included in the final matrix.",
+        "scope": {"population": "final matrix"},
+        "required_question_phrases": ["final matrix"],
+        "numeric_rule": {
+            "canonical_value": "250",
+            "unit": "fungal OTUs",
+            "tolerance": "0",
+            "tolerance_basis": "count",
+            "reported_precision": "exact integer",
+            "rounding_rule": "none",
+            "conversion_rule": "direct count of fungal OTUs",
+        },
+    }
+    reconstruction = {
+        "answer": reconstruction_text,
+        "numeric": {"canonical_value": canonical_value, "unit": unit},
+        "scope": {"population": "final matrix"},
+    }
+
+    assert not validation.reconstruction_matches(answer, reconstruction)
+
+
+def test_bare_numeric_metadata_rejects_a_changed_canonical_value() -> None:
+    answer, reconstruction = _audit_text_record(
+        "399.7263",
+        "399.7263",
+        {"canonical_value": "399.7264", "unit": "dimensionless"},
+    )
+
+    assert not validation.reconstruction_matches(answer, reconstruction)
+
+
+def test_reconstruction_agreement_does_not_use_substring_acceptance() -> None:
+    answer, reconstruction = _audit_text_record(
+        "enhanced energy flux to the surface",
+        "enhanced energy flux to the surface during spring",
+        {"canonical_value": "none", "unit": "none"},
+    )
+
+    assert not validation.reconstruction_matches(answer, reconstruction)
 
 
 @pytest.mark.parametrize(

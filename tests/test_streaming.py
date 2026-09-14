@@ -59,6 +59,63 @@ def test_exact_integer_count_is_source_bound_without_a_written_zero_tolerance() 
     assert validation_module.numeric_rule_is_source_bound(answer) is True
 
 
+def test_exact_integer_count_with_compound_unit_is_source_bound() -> None:
+    answer = {
+        "text": "250 fungal OTUs",
+        "evidence_quote": (
+            "250 fungal OTUs of 76,691 reads were included in the final matrix."
+        ),
+        "numeric_rule": {
+            "canonical_value": "250",
+            "unit": "fungal OTUs",
+            "tolerance": "0",
+            "tolerance_basis": "count",
+            "reported_precision": "exact integer",
+            "rounding_rule": "none",
+            "conversion_rule": "direct count of fungal OTUs",
+        },
+    }
+
+    assert validation_module.numeric_rule_is_source_bound(answer) is True
+
+
+@pytest.mark.parametrize(
+    ("displayed", "evidence", "canonical_value", "unit"),
+    [
+        (
+            "250 fungal OTUs",
+            "250 bacterial OTUs of 76,691 reads were included in the final matrix.",
+            "250",
+            "fungal OTUs",
+        ),
+        (
+            "250 fungal OTUs",
+            "250 fungal OTUs of 76,691 reads were included in the final matrix.",
+            "251",
+            "fungal OTUs",
+        ),
+    ],
+)
+def test_exact_integer_count_compound_unit_rejects_unit_or_cardinality_near_miss(
+    displayed: str, evidence: str, canonical_value: str, unit: str
+) -> None:
+    answer = {
+        "text": displayed,
+        "evidence_quote": evidence,
+        "numeric_rule": {
+            "canonical_value": canonical_value,
+            "unit": unit,
+            "tolerance": "0",
+            "tolerance_basis": "count",
+            "reported_precision": "exact integer",
+            "rounding_rule": "none",
+            "conversion_rule": "direct count of fungal OTUs",
+        },
+    }
+
+    assert validation_module.numeric_rule_is_source_bound(answer) is False
+
+
 def test_unqualified_exact_percentage_remains_not_source_bound() -> None:
     answer = {
         "text": "10.5 %",
@@ -152,7 +209,7 @@ def test_compound_unit_rule_without_source_tolerance_remains_rejected() -> None:
 def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
     properties = generation_module.NUMERIC_RULE_SCHEMA["properties"]
 
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v17"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v18"
     assert (
         generation_module.NUMERIC_RULE_CONTRACT_VERSION
         == "numeric-rule-source-support-v2"
@@ -198,6 +255,7 @@ def test_generation_prompt_requires_atomic_answers_and_aligned_questions() -> No
     assert "higher at Site A" in answer_instructions
     assert "necessary unit" in answer_instructions
     assert "matching numeric metadata" in answer_instructions
+    assert "complete source-supported count noun phrase" in answer_instructions
     assert "exactly the content of answer.text" in question_instructions
     assert "one component of a multi-value answer" in question_instructions
     assert "multiple values" in question_instructions
@@ -206,7 +264,7 @@ def test_generation_prompt_requires_atomic_answers_and_aligned_questions() -> No
 
 
 def test_generation_schemas_require_concise_review_justifications() -> None:
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v17"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v18"
     assert (
         generation_module.MODEL_JUSTIFICATION_CONTRACT_VERSION
         == "model-justification-v1"
@@ -289,13 +347,19 @@ def test_numeric_format_alias_is_not_a_competing_reconstruction_answer() -> None
     )
 
 
-def test_reconstruction_match_accepts_bounded_semantic_form() -> None:
+def test_reconstruction_match_accepts_only_exact_normalized_form() -> None:
     answer = {
         "text": "All wetland sequences lacked this loop.",
         "variants": [],
     }
 
     assert validation_module.reconstruction_matches(
+        answer,
+        {
+            "answer": "Yes, all wetland sequences lacked this loop.",
+        },
+    )
+    assert not validation_module.reconstruction_matches(
         answer,
         {
             "answer": "Yes, all wetland sequences lacked this loop corresponding "
@@ -1678,7 +1742,7 @@ def test_same_campaign_regenerates_a_stale_terminal_candidate(
     assert second["counts"]["generation_rejected"] == 1
     assert len(candidates) == 2
     assert {json.loads(row["candidate_json"])["provenance"]["prompt_version"] for row in candidates} == {
-        "arctic-qa-generation-v17",
+        "arctic-qa-generation-v18",
         "arctic-qa-generation-test-next",
     }
 
@@ -2147,7 +2211,13 @@ def test_failed_reconstruction_never_reaches_distractor_generation(
     alternative_author_script.write_text(
         "\n".join(
             json.dumps(event)
-            for event in [author_events[0], author_events[1], author_events[0]]
+            for event in [
+                author_events[0],
+                author_events[1],
+                author_events[1],
+                author_events[1],
+                author_events[0],
+            ]
         )
         + "\n",
         encoding="utf-8",
@@ -2162,7 +2232,10 @@ def test_failed_reconstruction_never_reaches_distractor_generation(
     verifier_events[0]["response"]["alternatives"] = ["1.9 m"]
     verifier_script = tmp_path / "ambiguous-verifier.jsonl"
     verifier_script.write_text(
-        "\n".join(json.dumps(event) for event in verifier_events) + "\n",
+        "\n".join(
+            json.dumps(event) for event in [verifier_events[0], verifier_events[1]]
+        )
+        + "\n",
         encoding="utf-8",
     )
     paths = DataPaths.open(tmp_path, test_mode=True)
@@ -2195,7 +2268,7 @@ def test_failed_reconstruction_never_reaches_distractor_generation(
     assert result["counts"]["accepted_base_questions"] == 0
     assert result["counts"]["generation_rejected"] == 1
     status = broker.status()
-    assert status["generation_submissions"] == 5
+    assert status["generation_submissions"] == 7
     assert "distractor_generation" not in status["stages"]
     assert "option_verification" not in status["stages"]
 
@@ -2259,9 +2332,24 @@ def test_short_answer_without_three_distractors_is_not_counted_as_accepted(
         .read_text(encoding="utf-8")
         .splitlines()
     ]
+    revised_question_writer = json.loads(json.dumps(author_events[1]))
+    revised_question_writer["response"]["question"] = (
+        "What reported water depth was documented in the study?"
+    )
     alternative_author_script = tmp_path / "incomplete-alternative-author.jsonl"
     alternative_author_script.write_text(
-        "\n".join(json.dumps(event) for event in [*author_events, author_events[0]])
+        "\n".join(
+            json.dumps(event)
+            for event in [
+                author_events[0],
+                author_events[1],
+                author_events[2],
+                author_events[1],
+                revised_question_writer,
+                author_events[2],
+                author_events[0],
+            ]
+        )
         + "\n",
         encoding="utf-8",
     )
@@ -2275,7 +2363,11 @@ def test_short_answer_without_three_distractors_is_not_counted_as_accepted(
     verifier_events[3]["response"]["question_admits_option_as_correct"] = True
     verifier_script = tmp_path / "two-accepted-distractor-verifier.jsonl"
     verifier_script.write_text(
-        "\n".join(json.dumps(event) for event in verifier_events) + "\n",
+        "\n".join(
+            json.dumps(event)
+            for event in [*verifier_events, *json.loads(json.dumps(verifier_events))]
+        )
+        + "\n",
         encoding="utf-8",
     )
     paths = DataPaths.open(tmp_path, test_mode=True)

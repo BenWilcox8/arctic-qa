@@ -21,7 +21,7 @@ UNIT_FACTORS: dict[tuple[str, str], Decimal] = {
 }
 SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v3"
 LEGACY_SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v2"
-GENERATION_PROMPT_VERSION = "arctic-qa-generation-v17"
+GENERATION_PROMPT_VERSION = "arctic-qa-generation-v18"
 NUMERIC_RULE_CONTRACT_VERSION = "numeric-rule-source-support-v2"
 DIRECT_SOURCE_VALUE_CONTRACT_VERSION = "direct-source-value-v1"
 MULTI_VALUE_NUMERIC_CONTRACT_VERSION = "numeric-rule-multiple-values-v1"
@@ -37,6 +37,67 @@ SUPPORTED_SOURCE_SPAN_CONTRACTS = {
 
 _ALPHABETIC_LINE_BREAK_HYPHEN = re.compile(
     r"(?<=[^\W\d_])-[^\S\r\n]*(?:\r\n|\r|\n)[^\S\r\n]*(?=[^\W\d_])"
+)
+_BENCHMARK_REFERENT_PATTERN = re.compile(
+    r"\b(?:this|that|these|those)\s+(?:study|experiment|sampling|dataset|"
+    r"station|site|group|sample(?:s)?|otu(?:s)?)\b|"
+    r"\b(?:the|this|these|those)\s+(?:(?:southern|northern|eastern|western|"
+    r"central|upper|lower|identified|sampled|selected)\s+)?"
+    r"(?:station|site|group|sample(?:s)?|experiment|dataset|sampling|otu(?:s)?)\b|"
+    r"\b(?:identified|sampled|selected)\s+(?:otu(?:s)?|groups?|samples?)\b|"
+    r"\bsampled\s+group\b",
+    re.IGNORECASE,
+)
+_SCIENTIFIC_ABBREVIATION_PATTERN = re.compile(
+    r"\b[A-Z]\.\s*[a-z][a-z-]+\b"
+)
+_REFERENT_CONTEXT_FILLER = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "at",
+        "central",
+        "degree",
+        "degrees",
+        "during",
+        "e",
+        "east",
+        "eastern",
+        "experiment",
+        "from",
+        "group",
+        "identified",
+        "in",
+        "latitude",
+        "lower",
+        "n",
+        "north",
+        "northern",
+        "of",
+        "on",
+        "or",
+        "s",
+        "sample",
+        "sampled",
+        "samples",
+        "sampling",
+        "selected",
+        "site",
+        "south",
+        "southern",
+        "station",
+        "study",
+        "the",
+        "this",
+        "those",
+        "to",
+        "upper",
+        "was",
+        "were",
+        "west",
+        "western",
+    }
 )
 CANDIDATE_CONTRACTS = {
     "2.0.0": {
@@ -67,7 +128,7 @@ CANDIDATE_CONTRACTS = {
     },
     "2.3.0": {
         "prompt_version": GENERATION_PROMPT_VERSION,
-        "generation_attempt_contract_version": "bounded-paper-progression-v1",
+        "generation_attempt_contract_version": "bounded-paper-progression-v2",
         "numeric_rule_contract_version": NUMERIC_RULE_CONTRACT_VERSION,
         "direct_value_contract_version": DIRECT_SOURCE_VALUE_CONTRACT_VERSION,
         "scope_contract_version": SCOPE_CONTRACT_VERSION,
@@ -425,6 +486,9 @@ def validate_candidate(
     ):
         reasons.append("scope_qualifier_missing")
         return _finish(db, candidate, labels, reasons, [], "rejected")
+    if required_question_phrases_contain_answer(candidate["answer"]):
+        reasons.append("finding_answer_phrase_in_required_question_phrases")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
     answer_evidence = str(candidate["answer"].get("evidence_quote", ""))
     if any(
         not _scope_phrase_in_text(phrase, answer_evidence)
@@ -456,7 +520,10 @@ def validate_candidate(
         reasons.append("answer_verifier_scope_not_source_bound")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     context_reason = question_context_verification_reason(
-        question_context, candidate["answer"], verification
+        question_context,
+        candidate["answer"],
+        verification,
+        question=candidate["question"],
     )
     if context_reason:
         reasons.append(context_reason)
@@ -696,16 +763,20 @@ def reconstruction_matches(
     if _has_unrepresented_multiple_numeric_values(answer):
         text_matches = _reconstruction_text_matches(answer, str(rebuilt))
         incomplete_metadata = _reconstruction_numeric_metadata_is_incomplete(
-            reconstruction
+            reconstruction, answer
         )
         if not (
             answer.get("numeric_rule") is None and text_matches and incomplete_metadata
         ):
             return False
     if _reconstruction_text_matches(answer, str(rebuilt)):
-        if _reconstruction_numeric_metadata_conflicts_with_text(reconstruction):
+        if _reconstruction_numeric_metadata_conflicts_with_text(
+            reconstruction, answer
+        ):
             return False
-        if _reconstruction_numeric_metadata_is_incomplete(reconstruction):
+        if _reconstruction_numeric_metadata_is_incomplete(reconstruction, answer):
+            return True
+        if _reconstruction_numeric_metadata_matches_text(reconstruction, answer):
             return True
     if _requires_structured_numeric_match(str(answer.get("text", ""))):
         return _source_bound_numeric_text_matches(answer, str(rebuilt))
@@ -727,10 +798,23 @@ def question_context_verification_reason(
     question_context: str,
     answer: dict[str, Any],
     verification: dict[str, Any],
+    *,
+    question: str = "",
 ) -> str | None:
     """Return the first failed question-context gate."""
+    if question_answer_leaks_answer(question, answer):
+        return "question_answer_leakage"
     if question_context_leaks_answer(question_context, answer):
         return "question_context_answer_leakage"
+    standalone_reason = benchmark_context_verification_reason(
+        question, question_context
+    )
+    if standalone_reason:
+        return standalone_reason
+    if verification.get("question_context_referent_resolved") is False:
+        return "question_context_referent_unresolved"
+    if verification.get("question_answer_leakage_absent") is False:
+        return "question_answer_leakage"
     required = verification.get("question_context_required")
     supported = verification.get("question_context_source_supported")
     leakage_absent = verification.get("question_context_answer_leakage_absent")
@@ -746,6 +830,91 @@ def question_context_verification_reason(
     if not leakage_absent:
         return "question_context_answer_leakage"
     return None
+
+
+def benchmark_text_requires_context(value: str) -> bool:
+    """Return whether benchmark text contains a study-local referent."""
+    return bool(
+        _BENCHMARK_REFERENT_PATTERN.search(value)
+        or _SCIENTIFIC_ABBREVIATION_PATTERN.search(value)
+    )
+
+
+def benchmark_context_verification_reason(
+    benchmark_text: str, question_context: str
+) -> str | None:
+    """Return a deterministic failure for an unresolved benchmark referent."""
+    if not benchmark_text_requires_context(benchmark_text):
+        return None
+    if not isinstance(question_context, str) or not question_context.strip():
+        return "question_context_missing"
+    if not _context_has_referent_information(question_context):
+        return "question_context_referent_unresolved"
+    return None
+
+
+def option_context_verification_reason(
+    option_text: str, question_context: str
+) -> str | None:
+    """Return a deterministic failure for an unresolved option referent."""
+    if not benchmark_text_requires_context(option_text):
+        return None
+    if not isinstance(question_context, str) or not question_context.strip():
+        return "option_context_missing"
+    if not _context_has_referent_information(question_context):
+        return "option_context_referent_unresolved"
+    return None
+
+
+def _context_has_referent_information(question_context: str) -> bool:
+    words = re.findall(r"[^\W\d_][\w-]*", question_context.casefold())
+    return any(word not in _REFERENT_CONTEXT_FILLER for word in words)
+
+
+def question_answer_leaks_answer(question: str, answer: dict[str, Any]) -> bool:
+    """Detect an answer or variant repeated in benchmark-facing question text."""
+    if not isinstance(question, str) or not question.strip():
+        return False
+    normalized_question = _answer_match_text(question)
+    if not normalized_question:
+        return False
+    values = [
+        answer.get("text", ""),
+        *(answer.get("variants", []) if isinstance(answer.get("variants"), list) else []),
+    ]
+    return any(
+        normalized not in {"yes", "no"}
+        and normalized
+        and re.search(rf"(?<!\w){re.escape(normalized)}(?!\w)", normalized_question)
+        for normalized in (_answer_match_text(str(value)) for value in values)
+    )
+
+
+def required_question_phrases_contain_answer(answer: dict[str, Any]) -> bool:
+    """Return whether a required scope phrase would force the answer into a question."""
+    required = answer.get("required_question_phrases")
+    if not isinstance(required, list):
+        return False
+    answer_values = [
+        answer.get("text", ""),
+        *(answer.get("variants", []) if isinstance(answer.get("variants"), list) else []),
+    ]
+    normalized_answers = [
+        _answer_match_text(str(value))
+        for value in answer_values
+        if _answer_match_text(str(value)) not in {"", "yes", "no"}
+    ]
+    return any(
+        normalized_phrase
+        and any(
+            re.search(
+                rf"(?<!\w){re.escape(normalized_answer)}(?!\w)",
+                normalized_phrase,
+            )
+            for normalized_answer in normalized_answers
+        )
+        for normalized_phrase in (_answer_match_text(str(value)) for value in required)
+    )
 
 
 def question_context_leaks_answer(
@@ -787,7 +956,7 @@ def _reconstruction_text_matches(answer: dict[str, Any], rebuilt: str) -> bool:
         return False
     return any(
         _contains_negation(str(value)) == _contains_negation(rebuilt)
-        and _bounded_text_match(_answer_match_text(str(value)), rebuilt_text)
+        and _answer_match_text(str(value)) == rebuilt_text
         for value in [answer.get("text", ""), *answer.get("variants", [])]
     )
 
@@ -856,6 +1025,7 @@ def _source_bound_numeric_text_matches(answer: dict[str, Any], rebuilt: str) -> 
 
 def _reconstruction_numeric_metadata_is_incomplete(
     reconstruction: dict[str, Any],
+    answer: dict[str, Any] | None = None,
 ) -> bool:
     numeric = reconstruction.get("numeric")
     if not isinstance(numeric, dict):
@@ -866,41 +1036,124 @@ def _reconstruction_numeric_metadata_is_incomplete(
         Decimal(canonical_value)
     except (KeyError, InvalidOperation, ValueError):
         return True
-    return not canonical_value.strip() or not unit.strip()
+    if not canonical_value.strip() or not unit.strip():
+        return True
+    if normalize_text(canonical_value) in {
+        "null",
+        "none",
+        "nil",
+        "n/a",
+        "na",
+        "not applicable",
+        "unknown",
+        "unsupported",
+    } or normalize_text(unit) in {
+        "null",
+        "none",
+        "nil",
+        "n/a",
+        "na",
+        "not applicable",
+        "unknown",
+        "unsupported",
+        "dimensionless",
+    }:
+        return True
+    if answer is None:
+        return False
+    return _single_numeric_text_quantity(str(answer.get("text", ""))) is None
 
 
 def _reconstruction_numeric_metadata_conflicts_with_text(
     reconstruction: dict[str, Any],
+    answer: dict[str, Any] | None = None,
 ) -> bool:
-    if _reconstruction_numeric_metadata_is_incomplete(reconstruction):
+    if _reconstruction_numeric_metadata_is_incomplete(reconstruction, answer):
+        if answer is None or not isinstance(reconstruction.get("numeric"), dict):
+            return False
+        answer_value = _single_numeric_literal(str(answer.get("text", "")))
+        if answer_value is None:
+            return False
+        try:
+            return answer_value != Decimal(
+                str(reconstruction["numeric"]["canonical_value"])
+            )
+        except (KeyError, InvalidOperation, ValueError):
+            return False
+    return not _reconstruction_numeric_metadata_matches_text(reconstruction, answer)
+
+
+def _reconstruction_numeric_metadata_matches_text(
+    reconstruction: dict[str, Any], answer: dict[str, Any] | None
+) -> bool:
+    if answer is None or _reconstruction_numeric_metadata_is_incomplete(
+        reconstruction, answer
+    ):
         return False
-    numeric = reconstruction["numeric"]
-    rebuilt = str(reconstruction.get("answer", ""))
-    quantities = []
-    for match in NUMERIC_LITERAL_PATTERN.finditer(rebuilt):
-        unit_match = re.match(r"\s*(%|°?[A-Za-z]+)(?!\w)", rebuilt[match.end() :])
-        if unit_match and normalize_text(unit_match.group(1)) in SAFE_UNIT_SPELLINGS:
-            quantities.append(match)
-    if not quantities:
+    quantity = _single_numeric_text_quantity(str(reconstruction.get("answer", "")))
+    numeric = reconstruction.get("numeric")
+    if not isinstance(numeric, dict):
         return False
-    if len(quantities) != 1:
-        return True
+    if quantity is None:
+        rule = answer.get("numeric_rule")
+        try:
+            expected_value = Decimal(str(numeric["canonical_value"]))
+            expected_unit = str(numeric["unit"])
+            answer_value = Decimal(str(rule["canonical_value"]))
+            answer_unit = str(rule["unit"])
+        except (AttributeError, KeyError, InvalidOperation, TypeError, ValueError):
+            return False
+        return bool(
+            isinstance(rule, dict)
+            and _is_exact_integer_count_rule(rule)
+            and _bare_integer_count_reconstruction_matches(
+                reconstruction, expected_value, expected_unit
+            )
+            and expected_value == answer_value
+            and _units_are_safe_equivalents(expected_unit, answer_unit)
+        )
+    literal_value, literal_unit, suffix = quantity
     try:
         expected_value = Decimal(str(numeric["canonical_value"]))
-        literal_value = Decimal(
-            quantities[0].group("value").replace(",", "").replace("−", "-")
-        )
+        expected_unit = str(numeric["unit"])
     except (KeyError, InvalidOperation, ValueError):
         return False
-    expected_unit = str(numeric["unit"])
-    unit_match = re.match(r"\s*(%|°?[A-Za-z]+)(?!\w)", rebuilt[quantities[0].end() :])
-    if not unit_match:
-        return True
+    if normalize_text(expected_unit) in normalize_text(suffix):
+        return literal_value == expected_value
     try:
-        converted = convert(literal_value, unit_match.group(1), expected_unit)
+        return convert(literal_value, literal_unit, expected_unit) == expected_value
     except ValueError:
-        return True
-    return converted != expected_value
+        return (
+            literal_value == expected_value
+            and normalize_text(literal_unit) == normalize_text(expected_unit)
+        )
+
+
+def _single_numeric_text_quantity(
+    text: str,
+) -> tuple[Decimal, str, str] | None:
+    matches = list(NUMERIC_LITERAL_PATTERN.finditer(text))
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    unit_match = re.match(r"\s*(%|°?[A-Za-z]+)(?!\w)", text[match.end() :])
+    if not unit_match:
+        return None
+    try:
+        value = Decimal(match.group("value").replace(",", "").replace("−", "-"))
+    except (InvalidOperation, ValueError):
+        return None
+    return value, unit_match.group(1), text[match.end() :]
+
+
+def _single_numeric_literal(text: str) -> Decimal | None:
+    matches = list(NUMERIC_LITERAL_PATTERN.finditer(text))
+    if len(matches) != 1:
+        return None
+    try:
+        return Decimal(matches[0].group("value").replace(",", "").replace("−", "-"))
+    except (InvalidOperation, ValueError):
+        return None
 
 
 def _numeric_equivalence_text(value: str) -> str:
@@ -959,6 +1212,22 @@ def _reconstruction_numeric_matches(
     except (KeyError, InvalidOperation, ValueError):
         return False
     rebuilt_unit = str(rebuilt.get("unit", ""))
+    if (
+        isinstance(rule, dict)
+        and _is_exact_integer_count_rule(rule)
+        and _bare_integer_count_reconstruction_matches(
+            reconstruction, rebuilt_value, rebuilt_unit
+        )
+    ):
+        try:
+            answer_value = Decimal(str(rule["canonical_value"]))
+        except (KeyError, InvalidOperation, ValueError):
+            return False
+        return bool(
+            answer_value == rebuilt_value
+            and _units_are_safe_equivalents(str(rule.get("unit", "")), rebuilt_unit)
+            and _typed_numeric_scope_is_complete(answer, reconstruction)
+        )
     if not _text_matches_typed_numeric(
         str(reconstruction.get("answer", "")), rebuilt, rebuilt_value, rebuilt_unit
     ):
@@ -980,6 +1249,23 @@ def _reconstruction_numeric_matches(
         value == rebuilt_value
         and _units_are_safe_equivalents(str(rule.get("unit", "")), rebuilt_unit)
     )
+
+
+def _bare_integer_count_reconstruction_matches(
+    reconstruction: dict[str, Any], value: Decimal, unit: str
+) -> bool:
+    """Accept a bare integer when its separate count metadata supplies the unit."""
+    answer_text = str(reconstruction.get("answer", "")).strip()
+    if not re.fullmatch(
+        r"[+\-\u2212]?(?:\d{1,3}(?:,\d{3})+|\d+)", answer_text
+    ):
+        return False
+    try:
+        return Decimal(answer_text.replace(",", "").replace("−", "-")) == value and bool(
+            normalize_text(unit)
+        )
+    except (InvalidOperation, ValueError):
+        return False
 
 
 def _text_matches_typed_numeric(
@@ -1080,17 +1366,6 @@ def _typed_numeric_quantities(value: str) -> list[tuple[Decimal, str]]:
     return quantities
 
 
-def _bounded_text_match(left: str, right: str) -> bool:
-    if not left or not right:
-        return False
-    if left == right:
-        return True
-    negations = {"no", "not", "never", "neither", "nor", "without"}
-    if bool(set(left.split()) & negations) != bool(set(right.split()) & negations):
-        return False
-    return len(left) >= 4 and len(left.split()) >= 2 and left in right
-
-
 def reconstruction_has_competing_alternatives(
     answer: dict[str, Any], reconstruction: dict[str, Any]
 ) -> bool:
@@ -1185,6 +1460,13 @@ def validate_distractor(
     normalized_option = normalize_text(str(distractor.get("text", "")))
     if normalized_option in {"all of the above", "none of the above"}:
         result["reasons"].append("forbidden_meta_option")
+        return result
+    option_context_reason = option_context_verification_reason(
+        str(distractor.get("text", "")),
+        str(candidate.get("question_context", "")),
+    )
+    if option_context_reason:
+        result["reasons"].append(option_context_reason)
         return result
     numeric = distractor.get("numeric")
     if not numeric:
@@ -1826,13 +2108,15 @@ def _is_exact_integer_count_rule(rule: dict[str, Any]) -> bool:
 
 def _contains_count_quantity(text: str, expected: Decimal, expected_unit: str) -> bool:
     normalized_unit = normalize_text(expected_unit)
-    if not re.fullmatch(r"[a-z][a-z-]*", normalized_unit):
+    unit_word = r"[a-z][a-z-]*"
+    if not re.fullmatch(unit_word + r"(?:\s+" + unit_word + r")*", normalized_unit):
         return False
+    unit_pattern = re.escape(normalized_unit).replace(r"\ ", r"\s+")
     pattern = (
         r"(?<![\w.])([-+]?\d+|"
         + "|".join(INTEGER_WORDS)
         + r")(?:\s+[a-z][a-z-]*){0,2}\s+"
-        + re.escape(normalized_unit)
+        + unit_pattern
         + r"\b"
     )
     for raw_value in re.findall(pattern, text.casefold()):
