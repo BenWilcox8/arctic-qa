@@ -2253,6 +2253,18 @@ def test_short_answer_without_three_distractors_is_not_counted_as_accepted(
     tmp_path: Path,
 ) -> None:
     access, eligibility = streaming_fixture(tmp_path)
+    author_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-author.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    alternative_author_script = tmp_path / "incomplete-alternative-author.jsonl"
+    alternative_author_script.write_text(
+        "\n".join(json.dumps(event) for event in [*author_events, author_events[0]])
+        + "\n",
+        encoding="utf-8",
+    )
     verifier_events = [
         json.loads(line)
         for line in (FIXTURES / "fake-verifier.jsonl")
@@ -2269,7 +2281,10 @@ def test_short_answer_without_three_distractors_is_not_counted_as_accepted(
     paths = DataPaths.open(tmp_path, test_mode=True)
     database = Database(paths.database)
     database.migrate(paths.namespace / "backups")
-    transport = ScriptedBrokerTransport(verifier_script=verifier_script)
+    transport = ScriptedBrokerTransport(
+        author_script=alternative_author_script,
+        verifier_script=verifier_script,
+    )
     broker = shared_broker(tmp_path, transport)
     provider = BrokerProvider(
         broker=broker,

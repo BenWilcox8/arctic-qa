@@ -634,6 +634,20 @@ def _progress_generation(
                 reason_codes=failure["reason_codes"],
             )
             if next_attempt is None:
+                incomplete = next(
+                    (
+                        path
+                        for path in sorted(paths.values(), key=_path_sort_key)
+                        if path.get("candidate_status") == "incomplete_non_mcq"
+                    ),
+                    None,
+                )
+                if incomplete is not None:
+                    return {
+                        "disposition": "incomplete_non_mcq",
+                        "reason_codes": _path_failure(db, incomplete)["reason_codes"],
+                        "resumed": resumed,
+                    }
                 return {
                     "disposition": "generation_rejected",
                     "reason_codes": failure["reason_codes"],

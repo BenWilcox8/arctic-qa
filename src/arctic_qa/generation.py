@@ -1472,6 +1472,17 @@ def resume_candidate_distractors(
         base.get("question_context", ""),
         canonical_json(base["answer"]),
     )
+    generation_attempt = (base.get("provenance") or {}).get("generation_attempt")
+    unit_entity_id = (
+        stable_id(
+            "unit",
+            base["finding_id"],
+            row["generation_arm"],
+            generation_attempt.get("attempt_id"),
+        )
+        if isinstance(generation_attempt, dict)
+        else stable_id("unit", base["finding_id"], row["generation_arm"])
+    )
     distractors, verdicts = _generate_distractors(
         db=db,
         source=source,
@@ -1481,7 +1492,7 @@ def resume_candidate_distractors(
         question_context=base.get("question_context", ""),
         answer=base["answer"],
         qa_hash=qa_hash,
-        entity_id=stable_id("unit", base["finding_id"], row["generation_arm"]),
+        entity_id=unit_entity_id,
         author=author,
         verifier=verifier,
         run_id=run_id,
