@@ -207,6 +207,43 @@ def test_separable_arctic_scope_limits_finding_context_and_requires_custody() ->
         )
 
 
+def test_scope_finding_span_allows_only_whitespace_equivalent_chunk_text() -> None:
+    eligibility_quote = "At 76.2 N, Arctic station nitrate declined by 15 percent.\n"
+    chunk_quote = eligibility_quote.rstrip()
+    source = {
+        "scope_rule_version": "gemini-fulltext-arctic-eligibility-v2",
+        "scope_evidence_json": json.dumps(
+            {
+                "eligibility_job_key": "job-v3-whitespace",
+                "resolved_eligible_arctic_scope": {
+                    "component": "whole_study",
+                    "finding_spans": [
+                        {
+                            "quote": eligibility_quote,
+                            "source_bytes_sha256": sha256_bytes(
+                                eligibility_quote.encode()
+                            ),
+                        }
+                    ],
+                    "question_scope_phrases": [],
+                },
+            }
+        ),
+    }
+
+    _, spans = _eligible_generation_scope(
+        source, [{"chunk_id": "chunk-1", "text": chunk_quote}]
+    )
+
+    assert spans is not None
+    assert spans[0]["text"] == chunk_quote
+    assert spans[0]["text_sha256"] == sha256_bytes(chunk_quote.encode())
+    assert spans[0]["eligibility_quote_sha256"] == sha256_bytes(
+        eligibility_quote.encode()
+    )
+    assert spans[0]["eligibility_match_kind"] == "whitespace_equivalent"
+
+
 @pytest.mark.parametrize(
     "text,geography_status",
     [

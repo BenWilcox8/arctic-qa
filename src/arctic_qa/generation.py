@@ -1544,11 +1544,28 @@ def _eligible_generation_scope(
             raise ValueError("an eligible Arctic finding span is invalid")
         located = None
         for chunk in chunks:
-            start = str(chunk["text"]).find(quote)
+            chunk_text = str(chunk["text"])
+            start = chunk_text.find(quote)
+            matched_text = quote
+            match_kind = "exact"
             if start < 0:
+                # Eligibility spans use the immutable full-text extraction while
+                # generation chunks can differ only at wrapping whitespace. Keep
+                # the chunk bytes as the downstream evidence, and retain the
+                # eligibility quote hash for custody. Do not normalize words or
+                # punctuation: any other difference remains fail-closed.
+                whitespace_equivalent = re.compile(
+                    r"\s+".join(re.escape(part) for part in quote.split())
+                ).search(chunk_text)
+                if whitespace_equivalent is None:
+                    continue
+                start = whitespace_equivalent.start()
+                matched_text = whitespace_equivalent.group(0)
+                match_kind = "whitespace_equivalent"
+            if not matched_text:
                 continue
-            end = start + len(quote)
-            text_hash = sha256_bytes(quote.encode("utf-8"))
+            end = start + len(matched_text)
+            text_hash = sha256_bytes(matched_text.encode("utf-8"))
             located = {
                 "span_id": stable_id(
                     FINDING_SPAN_CONTRACT_VERSION,
@@ -1561,7 +1578,9 @@ def _eligible_generation_scope(
                 "start_offset": start,
                 "end_offset": end,
                 "text_sha256": text_hash,
-                "text": quote,
+                "text": matched_text,
+                "eligibility_quote_sha256": source_hash,
+                "eligibility_match_kind": match_kind,
             }
             break
         if located is None:
