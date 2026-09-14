@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from arctic_qa import generation, validation
+from arctic_qa.errors import CandidateRejectedError
 from arctic_qa.util import sha256_bytes, stable_id
 
 
@@ -371,3 +374,111 @@ def test_combined_arctic_evidence_cannot_claim_an_unapproved_span() -> None:
     assert validation._eligible_arctic_scope_error(candidate, source) == (
         "eligible_arctic_finding_out_of_scope"
     )
+
+
+def test_model_contexts_expose_only_selectable_combined_span_ids() -> None:
+    text = "The reported value was 9.7 percent across adjacent source fragments."
+    boundary = text.index("across")
+    spans = [
+        _span("chunk-1", text, 0, boundary),
+        _span("chunk-1", text, boundary, len(text)),
+    ]
+    chunk = {
+        "chunk_id": "chunk-1",
+        "section_id": "results",
+        "heading": "Results",
+        "page": 4,
+        "text": text,
+    }
+    combined = generation._coalesce_source_spans(spans, {"chunk-1": chunk})
+    combined_span = combined[0]
+
+    role_context = generation._context(chunk, combined)
+    finding_context, resolver_spans = generation._finding_context(
+        [chunk], combined
+    )
+    serialized_contexts = [role_context, finding_context]
+
+    for context in serialized_contexts:
+        payload = json.loads(
+            context.removeprefix("SOURCE_DATA_BEGIN\n").removesuffix(
+                "\nSOURCE_DATA_END"
+            )
+        )
+        evidence_spans = (
+            payload["evidence_spans"]
+            if "evidence_spans" in payload
+            else payload["chunks"][0]["evidence_spans"]
+        )
+        assert evidence_spans == [
+            {
+                "span_id": combined_span["span_id"],
+                "chunk_id": "chunk-1",
+                "start_offset": 0,
+                "end_offset": len(text),
+                "text_sha256": combined_span["text_sha256"],
+                "text": text,
+            }
+        ]
+        serialized = json.dumps(payload)
+        for component in combined_span["evidence_components"]:
+            assert component["source_span_id"] not in serialized
+
+    assert resolver_spans[combined_span["span_id"]]["evidence_components"] == (
+        combined_span["evidence_components"]
+    )
+
+
+def test_projected_combined_span_roundtrips_with_component_provenance() -> None:
+    text = "The result changed from 10.1 percent to 9.7 percent."
+    boundary = text.index("to")
+    spans = [
+        _span("chunk-1", text, 0, boundary),
+        _span("chunk-1", text, boundary, len(text)),
+    ]
+    combined_span = generation._coalesce_source_spans(
+        spans, {"chunk-1": {"chunk_id": "chunk-1", "text": text}}
+    )[0]
+    projected = generation._model_source_span(combined_span)
+
+    resolved = generation._resolve_source_span(
+        {"source_span_id": projected["span_id"]},
+        {combined_span["span_id"]: combined_span},
+        reason_code="test_span_missing",
+    )
+
+    assert resolved["source_span_id"] == combined_span["span_id"]
+    assert resolved["evidence_quote"] == text
+    assert resolved["locator"] == {
+        "chunk_id": "chunk-1",
+        "start_offset": 0,
+        "end_offset": len(text),
+    }
+    assert resolved["source_span_ids"] == [row["span_id"] for row in spans]
+    assert resolved["evidence_components"] == combined_span["evidence_components"]
+
+
+def test_resolver_rejects_component_unknown_and_cross_source_ids() -> None:
+    text = "The source reports 9.7 percent."
+    boundary = text.index("9.7")
+    span = generation._coalesce_source_spans(
+        [
+            _span("chunk-1", text, 0, boundary),
+            _span("chunk-1", text, boundary, len(text)),
+        ],
+        {"chunk-1": {"chunk_id": "chunk-1", "text": text}},
+    )[0]
+    other_source_span = _span("chunk-from-other-source", text, 0, len(text))
+    spans_by_id = {span["span_id"]: span}
+
+    for invalid_id in (
+        span["evidence_components"][0]["source_span_id"],
+        "unknown-source-span",
+        other_source_span["span_id"],
+    ):
+        with pytest.raises(CandidateRejectedError, match="does not exist"):
+            generation._resolve_source_span(
+                {"source_span_id": invalid_id},
+                spans_by_id,
+                reason_code="test_span_missing",
+            )

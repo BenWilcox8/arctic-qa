@@ -1618,6 +1618,7 @@ def _context(
     chunk: dict[str, Any], evidence_spans: list[dict[str, Any]] | None = None
 ) -> str:
     selected_spans = evidence_spans or _finding_spans(chunk)
+    model_spans = [_model_source_span(span) for span in selected_spans]
     return (
         "SOURCE_DATA_BEGIN\n"
         + canonical_json(
@@ -1633,7 +1634,7 @@ def _context(
                 ),
                 "scope_restricted": evidence_spans is not None,
                 "span_contract_version": FINDING_SPAN_CONTRACT_VERSION,
-                "evidence_spans": selected_spans,
+                "evidence_spans": model_spans,
             }
         )
         + "\nSOURCE_DATA_END"
@@ -1670,6 +1671,9 @@ def _finding_context(
         if not evidence_spans:
             continue
         spans_by_id.update((span["span_id"], span) for span in evidence_spans)
+        model_evidence_spans = [
+            _model_source_span(span) for span in evidence_spans
+        ]
         rendered_chunks.append(
             {
                 "chunk_id": row["chunk_id"],
@@ -1681,7 +1685,7 @@ def _finding_context(
                     if eligible_spans is not None
                     else row["text"]
                 ),
-                "evidence_spans": evidence_spans,
+                "evidence_spans": model_evidence_spans,
             }
         )
     payload = canonical_json(
@@ -1723,6 +1727,18 @@ def _source_component(span: dict[str, Any]) -> dict[str, Any]:
         if span.get(source_name) is not None:
             component[target_name] = span[source_name]
     return component
+
+
+def _model_source_span(span: dict[str, Any]) -> dict[str, Any]:
+    """Expose one selectable span without its persisted component provenance."""
+    return {
+        "span_id": span["span_id"],
+        "chunk_id": span["chunk_id"],
+        "start_offset": span["start_offset"],
+        "end_offset": span["end_offset"],
+        "text_sha256": span["text_sha256"],
+        "text": span["text"],
+    }
 
 
 def _span_components(span: dict[str, Any]) -> list[dict[str, Any]]:
