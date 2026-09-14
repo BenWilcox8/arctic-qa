@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,22 @@ from .model_broker import PER_REQUEST_CAP_REASON, broker_request_key
 from .storage import store_original
 from .util import atomic_json, canonical_json, sha256_bytes, sha256_file, stable_id
 from .validation import validate_candidate
+
+
+GENERATION_ATTEMPT_CONTRACT_VERSION = "bounded-paper-progression-v1"
+MAX_FINDING_ATTEMPTS = 2
+MAX_QUESTION_REVISIONS = 1
+MAX_CANDIDATE_PATHS = 3
+REPAIRABLE_QUESTION_REASONS = frozenset(
+    {
+        "question_context_invalid",
+        "question_context_missing",
+        "question_context_unnecessary",
+        "question_context_not_source_supported",
+        "question_context_answer_leakage",
+        "scope_qualifier_missing",
+    }
+)
 
 
 def run_stream(
@@ -408,243 +425,52 @@ def run_stream(
         except Exception as error:
             progress.error(candidate_key, access.get("title"), "source_import", error)
             raise
-        existing_candidate = _candidate_for_current_contract(
+        generation_result = _progress_generation(
             db,
-            run_id=campaign_id,
+            namespace,
+            progress,
+            campaign_id=campaign_id,
+            candidate_key=str(candidate_key),
             source_id=source_id,
-        )
-        terminal_candidate = _candidate_for_current_contract(
-            db,
-            run_id=campaign_id,
-            source_id=source_id,
-            statuses={
-                "rejected",
-                "machine_accepted_unverified",
-                "incomplete_non_mcq",
-            },
-        )
-        if existing_candidate:
-            resumed_papers += 1
-        if terminal_candidate:
-            event = _validation_event_for_stored_candidate(db, terminal_candidate)
-            expected_label = (
-                "rejected"
-                if terminal_candidate["status"] == "rejected"
-                else "machine_accepted_unverified"
-            )
-            if event is None or event["label"] != expected_label:
-                raise ValueError(
-                    "a terminal streaming candidate lacks a validation event for its payload"
-                )
-            reason_codes = json.loads(event["reason_codes_json"])
-            if not isinstance(reason_codes, list) or any(
-                not isinstance(reason, str) for reason in reason_codes
-            ):
-                raise ValueError("a terminal streaming validation event changed")
-            dispositions = {
-                "rejected": "generation_rejected",
-                "machine_accepted_unverified": "accepted",
-                "incomplete_non_mcq": "incomplete_non_mcq",
-            }
-            disposition = dispositions[terminal_candidate["status"]]
-            counts[
-                {
-                    "generation_rejected": "generation_rejected",
-                    "accepted": "accepted_base_questions",
-                    "incomplete_non_mcq": "incomplete_non_mcq",
-                }[disposition]
-            ] += 1
-            counts["processed"] += 1
-            if disposition == "generation_rejected":
-                progress.increment("generation_rejected")
-            elif disposition == "accepted":
-                progress.set_count("accepted_qa", _accepted_count(db, campaign_id))
-            paper_results.append(
-                {
-                    "candidate_key": candidate_key,
-                    "disposition": disposition,
-                    "reason_codes": reason_codes,
-                    "source_id": source_id,
-                }
-            )
-            progress.paper(
-                paper_id=source_id,
-                title=access.get("title"),
-                current_stage="completed",
-                final_state=disposition,
-                final_reason=(
-                    expected_label
-                    if disposition == "accepted"
-                    else (reason_codes or [expected_label])[0]
-                ),
-            )
-            continue
-        progress.paper(
-            paper_id=source_id,
+            family_id=family_id,
+            selected=selected,
             title=access.get("title"),
-            current_stage="generation",
+            author=paper_author,
+            verifier=paper_verifier,
         )
-        try:
-            candidate = generate_candidate(
-                db,
-                namespace,
-                source_id=source_id,
-                run_id=campaign_id,
-                arm="answer_first",
-                author=paper_author,
-                verifier=paper_verifier,
-                budget_mode="tokens",
-                budget_limit=Decimal("1000000"),
-                reservation=Decimal("100"),
-                timeout=30,
-                retries=0,
-                rate_limit_seconds=0,
-            )
-        except (CandidateRejectedError, ProviderResponseError) as error:
-            reason_code = error.reason_code
-            with db.transaction():
-                db.connection.execute(
-                    """INSERT OR IGNORE INTO rejection_ledger
-                    (rejection_id,item_id,source_id,stage,reason_code,detail_json,created_at)
-                    VALUES (?,NULL,?,'generation',?,?,?)""",
-                    (
-                        stable_id(
-                            "rejection",
-                            campaign_id,
-                            candidate_key,
-                            "generation",
-                            reason_code,
-                        ),
-                        source_id,
-                        reason_code,
-                        canonical_json(
-                            {
-                                "candidate_key": candidate_key,
-                                "error": str(error),
-                                "selection": selected,
-                            }
-                        ),
-                        now(),
-                    ),
-                )
-            counts["generation_rejected"] += 1
-            counts["processed"] += 1
+        if generation_result["resumed"]:
+            resumed_papers += 1
+        disposition = generation_result["disposition"]
+        reason_codes = generation_result["reason_codes"]
+        counts[
+            {
+                "generation_rejected": "generation_rejected",
+                "accepted": "accepted_base_questions",
+                "incomplete_non_mcq": "incomplete_non_mcq",
+            }[disposition]
+        ] += 1
+        counts["processed"] += 1
+        if disposition == "generation_rejected":
             progress.increment("generation_rejected")
-            paper_results.append(
-                {
-                    "candidate_key": candidate_key,
-                    "disposition": "generation_rejected",
-                    "reason_codes": [reason_code],
-                    "source_id": source_id,
-                }
-            )
-            progress.paper(
-                paper_id=source_id,
-                title=access.get("title"),
-                current_stage="completed",
-                final_state="generation_rejected",
-                final_reason=reason_code,
-            )
-            continue
-        except BudgetError as error:
-            if str(error) != PER_REQUEST_CAP_REASON:
-                progress.error(source_id, access.get("title"), "generation", error)
-                raise
-            reason_code = "request_cost_bound_exceeded"
-            with db.transaction():
-                db.connection.execute(
-                    """INSERT OR IGNORE INTO rejection_ledger
-                    (rejection_id,item_id,source_id,stage,reason_code,detail_json,created_at)
-                    VALUES (?,NULL,?,'generation',?,?,?)""",
-                    (
-                        stable_id(
-                            "rejection",
-                            campaign_id,
-                            candidate_key,
-                            "generation",
-                            reason_code,
-                        ),
-                        source_id,
-                        reason_code,
-                        canonical_json(
-                            {
-                                "candidate_key": candidate_key,
-                                "error": str(error),
-                                "selection": selected,
-                            }
-                        ),
-                        now(),
-                    ),
-                )
-            counts["generation_rejected"] += 1
-            counts["processed"] += 1
-            progress.increment("generation_rejected")
-            paper_results.append(
-                {
-                    "candidate_key": candidate_key,
-                    "disposition": "generation_rejected",
-                    "reason_codes": [reason_code],
-                    "source_id": source_id,
-                }
-            )
-            progress.paper(
-                paper_id=source_id,
-                title=access.get("title"),
-                current_stage="completed",
-                final_state="generation_rejected",
-                final_reason=reason_code,
-            )
-            continue
-        except Exception as error:
-            progress.error(source_id, access.get("title"), "generation", error)
-            raise
-        try:
-            validation = validate_candidate(db, namespace, candidate).as_dict()
-        except Exception as error:
-            progress.error(source_id, access.get("title"), "validation", error)
-            raise
-        if (
-            validation["final_label"] == "machine_accepted_unverified"
-            and validation["labels"]["mcq_eligible"]
-        ):
-            if hasattr(paper_author, "record_accepted"):
-                paper_author.record_accepted(
-                    family_id=family_id, item_id=candidate["item_id"]
-                )
-            counts["accepted_base_questions"] += 1
-            disposition = "accepted"
-        elif validation["final_label"] == "machine_accepted_unverified":
-            with db.transaction():
-                db.connection.execute(
-                    "UPDATE candidates SET status='incomplete_non_mcq',updated_at=? WHERE item_id=?",
-                    (now(), candidate["item_id"]),
-                )
-            counts["incomplete_non_mcq"] += 1
-            disposition = "incomplete_non_mcq"
-        else:
-            counts["generation_rejected"] += 1
-            disposition = "generation_rejected"
-            progress.increment("generation_rejected")
+        elif disposition == "accepted":
+            progress.set_count("accepted_qa", _accepted_count(db, campaign_id))
         paper_results.append(
             {
                 "candidate_key": candidate_key,
                 "disposition": disposition,
-                "reason_codes": validation["reasons"],
+                "reason_codes": reason_codes,
                 "source_id": source_id,
             }
         )
-        counts["processed"] += 1
-        if disposition == "accepted":
-            progress.set_count("accepted_qa", _accepted_count(db, campaign_id))
         progress.paper(
             paper_id=source_id,
             title=access.get("title"),
             current_stage="completed",
             final_state=disposition,
             final_reason=(
-                validation["final_label"]
+                "machine_accepted_unverified"
                 if disposition == "accepted"
-                else (validation["reasons"] or ["validation_rejected"])[0]
+                else (reason_codes or [disposition])[0]
             ),
         )
     progress.write("running", "export", "Writing validated dataset exports.")
@@ -660,6 +486,7 @@ def run_stream(
     )
     same_model_roles = author.name == verifier.name and author.model == verifier.model
     live_provider = bool(getattr(author, "externally_metered", False))
+    generation_counts = _generation_counts(db, campaign_id)
     result = {
         "state": "completed",
         "run_id": run_id,
@@ -667,6 +494,7 @@ def run_stream(
         "counts": counts,
         "paper_results": paper_results,
         "resumed_papers": resumed_papers,
+        "generation_counts": generation_counts,
         "export": exported,
         "provider_policy": {
             "model": author.model,
@@ -677,6 +505,980 @@ def run_stream(
     }
     progress.write("completed", "completed", "Streaming pipeline completed.")
     return result
+
+
+def _progress_generation(
+    db: Database,
+    namespace: Path,
+    progress: _Progress,
+    *,
+    campaign_id: str,
+    candidate_key: str,
+    source_id: str,
+    family_id: str,
+    selected: dict[str, Any],
+    title: str | None,
+    author: Provider,
+    verifier: Provider,
+) -> dict[str, Any]:
+    paths = _generation_paths(
+        db,
+        campaign_id=campaign_id,
+        source_id=source_id,
+        family_id=family_id,
+    )
+    resumed = bool(paths)
+    generation_attempt_supported = _supports_generation_attempt()
+
+    while True:
+        for path in sorted(paths.values(), key=_path_sort_key):
+            candidate_row = path.get("candidate")
+            if candidate_row is None:
+                continue
+            candidate = json.loads(candidate_row["candidate_json"])
+            if candidate_row["status"] not in {
+                "candidate",
+                "qa_gate_failed",
+            }:
+                continue
+            try:
+                validation = validate_candidate(db, namespace, candidate).as_dict()
+            except Exception as error:
+                progress.error(source_id, title, "validation", error)
+                raise
+            path["validation"] = validation
+            path["candidate"] = _candidate_row(db, candidate["item_id"])
+
+        for path in paths.values():
+            candidate_row = path.get("candidate")
+            if candidate_row is None or path.get("validation") is not None:
+                continue
+            event = _require_validation_event(db, candidate_row)
+            path["validation"] = _validation_result_from_event(db, candidate_row, event)
+
+        accepted = _accepted_generation_path(paths)
+        if accepted is not None:
+            candidate_row = accepted["candidate"]
+            event = _require_validation_event(db, candidate_row)
+            reason_codes = _reason_codes(event)
+            return {
+                "disposition": "accepted",
+                "reason_codes": reason_codes,
+                "resumed": resumed,
+            }
+
+        budget_stop = next(
+            (
+                path
+                for path in sorted(paths.values(), key=_path_sort_key)
+                if path.get("budget_stop")
+            ),
+            None,
+        )
+        if budget_stop is not None:
+            return {
+                "disposition": "generation_rejected",
+                "reason_codes": _path_failure(db, budget_stop)["reason_codes"],
+                "resumed": resumed,
+            }
+
+        partial = next(
+            (
+                path
+                for path in sorted(paths.values(), key=_path_sort_key)
+                if path.get("candidate") is not None
+                and path["candidate"]["status"]
+                in {"candidate", "qa_gate_failed"}
+            ),
+            None,
+        )
+        if partial is not None:
+            raise ValueError(
+                "a generated candidate remained unvalidated after its validation checkpoint"
+            )
+
+        partial_finding = next(
+            (
+                path
+                for path in sorted(paths.values(), key=_path_sort_key)
+                if path.get("partial_finding")
+            ),
+            None,
+        )
+        if partial_finding is not None:
+            next_attempt = partial_finding["attempt"]
+        elif paths:
+            failed_path = max(paths.values(), key=_path_sort_key)
+            failure = _path_failure(db, failed_path)
+            if not generation_attempt_supported and failed_path.get("legacy"):
+                return {
+                    "disposition": (
+                        "incomplete_non_mcq"
+                        if failed_path.get("candidate_status") == "incomplete_non_mcq"
+                        else "generation_rejected"
+                    ),
+                    "reason_codes": failure["reason_codes"],
+                    "resumed": resumed,
+                }
+            next_attempt = _next_generation_attempt(
+                campaign_id=campaign_id,
+                family_id=family_id,
+                paths=paths,
+                failed_path=failed_path,
+                reason_codes=failure["reason_codes"],
+            )
+            if next_attempt is None:
+                return {
+                    "disposition": "generation_rejected",
+                    "reason_codes": failure["reason_codes"],
+                    "resumed": resumed,
+                }
+        else:
+            next_attempt = _generation_attempt(
+                campaign_id=campaign_id,
+                family_id=family_id,
+                finding_attempt_index=1,
+                question_revision_index=0,
+                attempt_kind="primary",
+                parent_attempt_id=None,
+                parent_item_id=None,
+                trigger_reason_code=None,
+                excluded_finding_span_ids=[],
+            )
+
+        progress.paper(
+            paper_id=source_id,
+            title=title,
+            current_stage="generation",
+        )
+        try:
+            candidate = _generate_candidate_attempt(
+                db,
+                namespace,
+                source_id=source_id,
+                run_id=campaign_id,
+                attempt=next_attempt,
+                author=author,
+                verifier=verifier,
+            )
+        except (CandidateRejectedError, ProviderResponseError) as error:
+            reason_code = error.reason_code
+            _record_generation_rejection(
+                db,
+                campaign_id=campaign_id,
+                candidate_key=candidate_key,
+                source_id=source_id,
+                selected=selected,
+                attempt=next_attempt,
+                reason_code=reason_code,
+                error=error,
+            )
+            paths[_path_key(next_attempt)] = {
+                "attempt": next_attempt,
+                "candidate": None,
+                "candidate_status": None,
+                "rejection": {"reason_codes": [reason_code]},
+                "legacy": not generation_attempt_supported,
+            }
+            continue
+        except BudgetError as error:
+            if str(error) != PER_REQUEST_CAP_REASON:
+                progress.error(source_id, title, "generation", error)
+                raise
+            _record_budget_stop(
+                db,
+                campaign_id=campaign_id,
+                candidate_key=candidate_key,
+                source_id=source_id,
+                selected=selected,
+                attempt=next_attempt,
+                error=error,
+            )
+            return {
+                "disposition": "generation_rejected",
+                "reason_codes": ["request_cost_bound_exceeded"],
+                "resumed": resumed,
+            }
+        except Exception as error:
+            progress.error(source_id, title, "generation", error)
+            raise
+
+        try:
+            validation = validate_candidate(db, namespace, candidate).as_dict()
+        except Exception as error:
+            progress.error(source_id, title, "validation", error)
+            raise
+        candidate_row = _candidate_row(db, candidate["item_id"])
+        if candidate_row is None:
+            raise ValueError("generation returned a candidate that was not persisted")
+        candidate_provenance = candidate.get("provenance") or {}
+        if generation_attempt_supported and "generation_attempt" not in candidate_provenance:
+            raise ValueError("generation did not persist its attempt provenance")
+        candidate_attempt = _candidate_generation_attempt(candidate, next_attempt)
+        if candidate_attempt != next_attempt:
+            raise ValueError("generation returned a candidate for another attempt")
+        path = {
+            "attempt": candidate_attempt,
+            "candidate": candidate_row,
+            "candidate_status": candidate_row["status"],
+            "validation": validation,
+            "legacy": not generation_attempt_supported,
+            "partial_finding": False,
+        }
+        paths[_path_key(path["attempt"])] = path
+        if (
+            validation["final_label"] == "machine_accepted_unverified"
+            and validation["labels"]["mcq_eligible"]
+        ):
+            if hasattr(author, "record_accepted"):
+                author.record_accepted(
+                    family_id=family_id, item_id=candidate["item_id"]
+                )
+            return {
+                "disposition": "accepted",
+                "reason_codes": validation["reasons"],
+                "resumed": resumed,
+            }
+        if validation["final_label"] == "machine_accepted_unverified":
+            with db.transaction():
+                db.connection.execute(
+                    "UPDATE candidates SET status='incomplete_non_mcq',updated_at=? WHERE item_id=?",
+                    (now(), candidate["item_id"]),
+                )
+            path["candidate"] = _candidate_row(db, candidate["item_id"])
+            path["candidate_status"] = "incomplete_non_mcq"
+            if not generation_attempt_supported:
+                return {
+                    "disposition": "incomplete_non_mcq",
+                    "reason_codes": validation["reasons"],
+                    "resumed": resumed,
+                }
+
+
+def _supports_generation_attempt() -> bool:
+    try:
+        parameters = inspect.signature(generate_candidate).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == "generation_attempt"
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
+def _generate_candidate_attempt(
+    db: Database,
+    namespace: Path,
+    *,
+    source_id: str,
+    run_id: str,
+    attempt: dict[str, Any],
+    author: Provider,
+    verifier: Provider,
+) -> dict[str, Any]:
+    arguments = {
+        "source_id": source_id,
+        "run_id": run_id,
+        "arm": "answer_first",
+        "author": author,
+        "verifier": verifier,
+        "budget_mode": "tokens",
+        "budget_limit": Decimal("1000000"),
+        "reservation": Decimal("100"),
+        "timeout": 30,
+        "retries": 0,
+        "rate_limit_seconds": 0,
+    }
+    if _supports_generation_attempt():
+        arguments["generation_attempt"] = attempt
+    return generate_candidate(db, namespace, **arguments)
+
+
+def _candidate_row(db: Database, item_id: str) -> dict[str, Any] | None:
+    return db.one(
+        "SELECT item_id,status,candidate_json FROM candidates WHERE item_id=?",
+        (item_id,),
+    )
+
+
+def _generation_attempt(
+    *,
+    campaign_id: str,
+    family_id: str,
+    finding_attempt_index: int,
+    question_revision_index: int,
+    attempt_kind: str,
+    parent_attempt_id: str | None,
+    parent_item_id: str | None,
+    trigger_reason_code: str | None,
+    excluded_finding_span_ids: list[str],
+) -> dict[str, Any]:
+    attempt_id = stable_id(
+        "generation-attempt",
+        campaign_id,
+        family_id,
+        finding_attempt_index,
+        question_revision_index,
+        GENERATION_ATTEMPT_CONTRACT_VERSION,
+    )
+    return {
+        "contract_version": GENERATION_ATTEMPT_CONTRACT_VERSION,
+        "attempt_id": attempt_id,
+        "attempt_kind": attempt_kind,
+        "finding_attempt_index": finding_attempt_index,
+        "question_revision_index": question_revision_index,
+        "parent_attempt_id": parent_attempt_id,
+        "parent_item_id": parent_item_id,
+        "trigger_reason_code": trigger_reason_code,
+        "finding_policy_version": (
+            f"{generation_contract.SCOPE_ROLE_FINDING_POLICY_VERSION}:finding-"
+            f"{finding_attempt_index}"
+        ),
+        "excluded_finding_span_ids": sorted(set(excluded_finding_span_ids)),
+    }
+
+
+def _path_key(attempt: dict[str, Any]) -> tuple[int, int]:
+    return (
+        int(attempt["finding_attempt_index"]),
+        int(attempt["question_revision_index"]),
+    )
+
+
+def _path_sort_key(path: dict[str, Any]) -> tuple[int, int, str]:
+    attempt = path["attempt"]
+    return (*_path_key(attempt), str(attempt["attempt_id"]))
+
+
+def _validate_generation_attempt(attempt: Any) -> dict[str, Any]:
+    fields = {
+        "contract_version",
+        "attempt_id",
+        "attempt_kind",
+        "finding_attempt_index",
+        "question_revision_index",
+        "parent_attempt_id",
+        "parent_item_id",
+        "trigger_reason_code",
+        "finding_policy_version",
+        "excluded_finding_span_ids",
+    }
+    if not isinstance(attempt, dict) or set(attempt) != fields:
+        raise ValueError("the generation attempt object is malformed")
+    if attempt["contract_version"] != GENERATION_ATTEMPT_CONTRACT_VERSION:
+        raise ValueError("the generation attempt contract version is unsupported")
+    finding_index = attempt["finding_attempt_index"]
+    revision_index = attempt["question_revision_index"]
+    if (
+        type(finding_index) is not int
+        or type(revision_index) is not int
+        or not 1 <= finding_index <= MAX_FINDING_ATTEMPTS
+        or not 0 <= revision_index <= MAX_QUESTION_REVISIONS
+    ):
+        raise ValueError("the generation attempt indexes are invalid")
+    expected_kind = (
+        "primary"
+        if (finding_index, revision_index) == (1, 0)
+        else "alternative_finding"
+        if (finding_index, revision_index) == (2, 0)
+        else "question_revision"
+        if revision_index == 1
+        else None
+    )
+    if attempt["attempt_kind"] != expected_kind:
+        raise ValueError("the generation attempt kind is inconsistent")
+    if not isinstance(attempt["attempt_id"], str) or not attempt["attempt_id"]:
+        raise ValueError("the generation attempt ID is missing")
+    if not isinstance(attempt["finding_policy_version"], str):
+        raise ValueError("the generation finding policy is missing")
+    if (
+        not isinstance(attempt["excluded_finding_span_ids"], list)
+        or any(
+            not isinstance(span_id, str) or not span_id
+            for span_id in attempt["excluded_finding_span_ids"]
+        )
+    ):
+        raise ValueError("the excluded finding span IDs are invalid")
+    if attempt["attempt_kind"] == "primary":
+        if any(
+            attempt[field] is not None
+            for field in ("parent_attempt_id", "parent_item_id", "trigger_reason_code")
+        ):
+            raise ValueError("the primary generation attempt has a parent")
+    elif not isinstance(attempt["parent_attempt_id"], str) or not isinstance(
+        attempt["trigger_reason_code"], str
+    ):
+        raise ValueError("the non-primary generation attempt lineage is incomplete")
+    if attempt["parent_item_id"] is not None and not isinstance(
+        attempt["parent_item_id"], str
+    ):
+        raise ValueError("the generation parent item ID is invalid")
+    return attempt
+
+
+def _candidate_generation_attempt(
+    candidate: dict[str, Any], fallback: dict[str, Any]
+) -> dict[str, Any]:
+    value = (candidate.get("provenance") or {}).get("generation_attempt")
+    if value is None:
+        return fallback
+    return _validate_generation_attempt(value)
+
+
+def _is_current_contract_candidate(candidate: dict[str, Any]) -> bool:
+    provenance = candidate.get("provenance") or {}
+    if (
+        candidate.get("schema_version") != generation_contract.CANDIDATE_SCHEMA_VERSION
+        or provenance.get("prompt_version") != generation_contract.PROMPT_VERSION
+        or provenance.get("numeric_rule_contract_version")
+        != generation_contract.NUMERIC_RULE_CONTRACT_VERSION
+        or provenance.get("direct_value_contract_version")
+        != generation_contract.DIRECT_SOURCE_VALUE_CONTRACT_VERSION
+        or provenance.get("scope_contract_version")
+        != generation_contract.SCOPE_CONTRACT_VERSION
+        or provenance.get("scope_role_semantics_version")
+        != generation_contract.SCOPE_ROLE_SEMANTICS_VERSION
+        or provenance.get("scope_role_binding_contract_version")
+        != generation_contract.SCOPE_ROLE_BINDING_CONTRACT_VERSION
+    ):
+        return False
+    attempt = provenance.get("generation_attempt")
+    if attempt is None:
+        return candidate.get("finding_policy_version") == (
+            generation_contract.SCOPE_ROLE_FINDING_POLICY_VERSION
+        )
+    if not isinstance(attempt, dict) or attempt.get("contract_version") != (
+        GENERATION_ATTEMPT_CONTRACT_VERSION
+    ):
+        return False
+    _validate_generation_attempt(attempt)
+    return candidate.get("finding_policy_version") in {
+        generation_contract.SCOPE_ROLE_FINDING_POLICY_VERSION,
+        attempt["finding_policy_version"],
+    }
+
+
+def _generation_paths(
+    db: Database,
+    *,
+    campaign_id: str,
+    source_id: str,
+    family_id: str,
+) -> dict[tuple[int, int], dict[str, Any]]:
+    paths: dict[tuple[int, int], dict[str, Any]] = {}
+    rows = db.rows(
+        """SELECT item_id,status,candidate_json FROM candidates
+        WHERE run_id=? AND source_id=? AND paper_family_id=?
+        ORDER BY updated_at,item_id""",
+        (campaign_id, source_id, family_id),
+    )
+    for row in rows:
+        candidate = json.loads(row["candidate_json"])
+        if not _is_current_contract_candidate(candidate):
+            continue
+        attempt_value = (candidate.get("provenance") or {}).get(
+            "generation_attempt"
+        )
+        legacy = attempt_value is None
+        attempt = (
+            _generation_attempt(
+                campaign_id=campaign_id,
+                family_id=family_id,
+                finding_attempt_index=1,
+                question_revision_index=0,
+                attempt_kind="primary",
+                parent_attempt_id=None,
+                parent_item_id=None,
+                trigger_reason_code=None,
+                excluded_finding_span_ids=[],
+            )
+            if legacy
+            else _validate_generation_attempt(attempt_value)
+        )
+        _validate_attempt_identity(attempt, campaign_id, family_id)
+        key = _path_key(attempt)
+        if key in paths:
+            raise ValueError("duplicate generation attempt path")
+        paths[key] = {
+            "attempt": attempt,
+            "candidate": row,
+            "candidate_status": row["status"],
+            "legacy": legacy,
+        }
+
+    for row in db.rows(
+        """SELECT rejection_id,stage,reason_code,detail_json FROM rejection_ledger
+        WHERE source_id=? AND stage IN ('generation','generation_budget')
+        ORDER BY rejection_id""",
+        (source_id,),
+    ):
+        detail = json.loads(row["detail_json"])
+        if detail.get("campaign_id") != campaign_id:
+            continue
+        attempt_value = detail.get("generation_attempt")
+        if attempt_value is None or not isinstance(attempt_value, dict):
+            continue
+        if attempt_value.get("contract_version") != GENERATION_ATTEMPT_CONTRACT_VERSION:
+            continue
+        attempt = _validate_generation_attempt(attempt_value)
+        _validate_attempt_identity(attempt, campaign_id, family_id)
+        key = _path_key(attempt)
+        if key in paths:
+            raise ValueError("generation attempt has both candidate and rejection")
+        paths[key] = {
+            "attempt": attempt,
+            "candidate": None,
+            "candidate_status": None,
+            "rejection": {"reason_codes": [row["reason_code"]]},
+            "budget_stop": row["stage"] == "generation_budget",
+        }
+
+    finding_policy_prefix = generation_contract.SCOPE_ROLE_FINDING_POLICY_VERSION
+    for row in db.rows(
+        """SELECT finding_id,selection_policy_version,answer_json FROM findings
+        WHERE run_id=? AND paper_family_id=? AND source_id=? ORDER BY finding_id""",
+        (campaign_id, family_id, source_id),
+    ):
+        policy = row["selection_policy_version"]
+        prefix = f"{finding_policy_prefix}:finding-"
+        if not isinstance(policy, str) or not policy.startswith(prefix):
+            continue
+        try:
+            finding_index = int(policy.removeprefix(prefix))
+        except ValueError:
+            continue
+        if finding_index not in {1, 2}:
+            raise ValueError("the finding policy index is outside the bounded range")
+        parent_path = max(
+            (
+                path
+                for path in paths.values()
+                if path["attempt"]["finding_attempt_index"] == 1
+            ),
+            key=_path_sort_key,
+            default=None,
+        )
+        attempt = _generation_attempt(
+            campaign_id=campaign_id,
+            family_id=family_id,
+            finding_attempt_index=finding_index,
+            question_revision_index=0,
+            attempt_kind=(
+                "primary" if finding_index == 1 else "alternative_finding"
+            ),
+            parent_attempt_id=(
+                parent_path["attempt"]["attempt_id"] if parent_path else None
+                if finding_index == 2
+                else None
+            ),
+            parent_item_id=(
+                parent_path["candidate"].get("item_id")
+                if finding_index == 2
+                and parent_path is not None
+                and parent_path.get("candidate") is not None
+                else None
+            ),
+            trigger_reason_code=(
+                _path_failure(db, parent_path)["reason_codes"][0]
+                if finding_index == 2 and parent_path is not None
+                else "generation_rejected"
+                if finding_index == 2
+                else None
+            ),
+            excluded_finding_span_ids=(
+                _prior_finding_span_ids(paths) if finding_index == 2 else []
+            ),
+        )
+        _validate_attempt_identity(attempt, campaign_id, family_id)
+        key = _path_key(attempt)
+        if key in paths:
+            paths[key]["finding"] = row
+            paths[key]["partial_finding"] = False
+            continue
+        paths[key] = {
+            "attempt": attempt,
+            "candidate": None,
+            "candidate_status": None,
+            "finding": row,
+            "partial_finding": True,
+        }
+    _validate_generation_lineage(paths)
+    return paths
+
+
+def _validate_generation_lineage(
+    paths: dict[tuple[int, int], dict[str, Any]]
+) -> None:
+    if len(paths) > MAX_CANDIDATE_PATHS:
+        raise ValueError("the paper exceeds the bounded generation path limit")
+    for key, path in paths.items():
+        attempt = path["attempt"]
+        if key == (1, 0):
+            continue
+        parent = next(
+            (
+                other
+                for other in paths.values()
+                if other["attempt"]["attempt_id"] == attempt["parent_attempt_id"]
+            ),
+            None,
+        )
+        if parent is None:
+            raise ValueError("the generation attempt parent is missing")
+        if attempt["parent_item_id"] is not None:
+            candidate = parent.get("candidate")
+            if candidate is None or candidate["item_id"] != attempt["parent_item_id"]:
+                raise ValueError("the generation attempt parent item is inconsistent")
+        if key[1] == 1 and _path_key(parent["attempt"])[0] != key[0]:
+            raise ValueError("a question revision changed its finding")
+        if key == (2, 0) and _path_key(parent["attempt"]) == (2, 0):
+            raise ValueError("the alternative finding parent is invalid")
+
+
+def _accepted_generation_path(
+    paths: dict[tuple[int, int], dict[str, Any]]
+) -> dict[str, Any] | None:
+    for path in sorted(paths.values(), key=_path_sort_key):
+        candidate = path.get("candidate")
+        validation = path.get("validation")
+        if candidate is None or validation is None:
+            continue
+        if (
+            validation["final_label"] == "machine_accepted_unverified"
+            and validation["labels"].get("mcq_eligible")
+        ):
+            return path
+        if (
+            candidate["status"] == "machine_accepted_unverified"
+            and validation["labels"].get("mcq_eligible")
+        ):
+            return path
+    return None
+
+
+def _path_failure(db: Database, path: dict[str, Any]) -> dict[str, list[str]]:
+    candidate = path.get("candidate")
+    if candidate is not None:
+        event = _require_validation_event(db, candidate)
+        reasons = _reason_codes(event)
+        if not reasons and candidate["status"] == "incomplete_non_mcq":
+            reasons = ["insufficient_verified_distractors"]
+        path["candidate_status"] = candidate["status"]
+        return {"reason_codes": reasons or ["validation_rejected"]}
+    rejection = path.get("rejection") or {}
+    reasons = rejection.get("reason_codes") or ["generation_rejected"]
+    return {"reason_codes": [str(reason) for reason in reasons]}
+
+
+def _next_generation_attempt(
+    *,
+    campaign_id: str,
+    family_id: str,
+    paths: dict[tuple[int, int], dict[str, Any]],
+    failed_path: dict[str, Any],
+    reason_codes: list[str],
+) -> dict[str, Any] | None:
+    failed_attempt = failed_path["attempt"]
+    used_revisions = sum(
+        path["attempt"]["question_revision_index"] == 1
+        for path in paths.values()
+    )
+    if (
+        len(reason_codes) == 1
+        and reason_codes[0] in REPAIRABLE_QUESTION_REASONS
+        and used_revisions < MAX_QUESTION_REVISIONS
+    ):
+        key = (
+            int(failed_attempt["finding_attempt_index"]),
+            1,
+        )
+        if key not in paths:
+            return _generation_attempt(
+                campaign_id=campaign_id,
+                family_id=family_id,
+                finding_attempt_index=key[0],
+                question_revision_index=1,
+                attempt_kind="question_revision",
+                parent_attempt_id=failed_attempt["attempt_id"],
+                parent_item_id=(
+                    failed_path.get("candidate") or {}
+                ).get("item_id"),
+                trigger_reason_code=reason_codes[0],
+                excluded_finding_span_ids=[],
+            )
+    if (2, 0) in paths:
+        return None
+    excluded = _prior_finding_span_ids(paths)
+    return _generation_attempt(
+        campaign_id=campaign_id,
+        family_id=family_id,
+        finding_attempt_index=2,
+        question_revision_index=0,
+        attempt_kind="alternative_finding",
+        parent_attempt_id=failed_attempt["attempt_id"],
+        parent_item_id=(failed_path.get("candidate") or {}).get("item_id"),
+        trigger_reason_code=reason_codes[0] if reason_codes else "generation_rejected",
+        excluded_finding_span_ids=excluded,
+    )
+
+
+def _prior_finding_span_ids(paths: dict[tuple[int, int], dict[str, Any]]) -> list[str]:
+    span_ids: set[str] = set()
+    for path in paths.values():
+        if path["attempt"]["finding_attempt_index"] != 1:
+            continue
+        candidate = path.get("candidate")
+        if candidate is None:
+            continue
+        payload = json.loads(candidate["candidate_json"])
+        answer = payload.get("answer") or {}
+        source_span_id = answer.get("source_span_id")
+        if isinstance(source_span_id, str) and source_span_id:
+            span_ids.add(source_span_id)
+    return sorted(span_ids)
+
+
+def _reason_codes(event: dict[str, Any]) -> list[str]:
+    reasons = json.loads(event["reason_codes_json"])
+    if not isinstance(reasons, list) or any(
+        not isinstance(reason, str) or not reason for reason in reasons
+    ):
+        raise ValueError("a streaming validation event has invalid reason codes")
+    return reasons
+
+
+def _validation_result_from_event(
+    db: Database, candidate: dict[str, Any], event: dict[str, Any]
+) -> dict[str, Any]:
+    details_row = db.one(
+        """SELECT details_json FROM validation_events
+        WHERE item_id=? AND json_extract(details_json, '$.candidate_hash')=?
+        ORDER BY created_at DESC,event_id DESC LIMIT 1""",
+        (
+            candidate["item_id"],
+            stable_id("candidate-payload", candidate["candidate_json"]),
+        ),
+    )
+    if details_row is None:
+        raise ValueError("a streaming validation event has no payload details")
+    details = json.loads(details_row["details_json"])
+    labels = details.get("labels")
+    if not isinstance(labels, dict):
+        raise ValueError("a streaming validation event has invalid labels")
+    return {
+        "final_label": event["label"],
+        "reasons": _reason_codes(event),
+        "labels": labels,
+    }
+
+
+def _validate_attempt_identity(
+    attempt: dict[str, Any], campaign_id: str, family_id: str
+) -> None:
+    expected_id = stable_id(
+        "generation-attempt",
+        campaign_id,
+        family_id,
+        attempt["finding_attempt_index"],
+        attempt["question_revision_index"],
+        GENERATION_ATTEMPT_CONTRACT_VERSION,
+    )
+    expected_policy = (
+        f"{generation_contract.SCOPE_ROLE_FINDING_POLICY_VERSION}:finding-"
+        f"{attempt['finding_attempt_index']}"
+    )
+    if (
+        attempt["attempt_id"] != expected_id
+        or attempt["finding_policy_version"] != expected_policy
+    ):
+        raise ValueError("the generation attempt identity is not deterministic")
+
+
+def _require_validation_event(
+    db: Database, candidate: dict[str, Any]
+) -> dict[str, Any]:
+    event = _validation_event_for_stored_candidate(db, candidate)
+    if event is None:
+        raise ValueError(
+            "a terminal streaming candidate lacks a validation event for its payload"
+        )
+    return event
+
+
+def _record_generation_rejection(
+    db: Database,
+    *,
+    campaign_id: str,
+    candidate_key: str,
+    source_id: str,
+    selected: dict[str, Any],
+    attempt: dict[str, Any],
+    reason_code: str,
+    error: Exception,
+) -> None:
+    detail = {
+        "campaign_id": campaign_id,
+        "candidate_key": candidate_key,
+        "error": str(error),
+        "selection": selected,
+        "generation_attempt": attempt,
+    }
+    with db.transaction():
+        db.connection.execute(
+            """INSERT OR IGNORE INTO rejection_ledger
+            (rejection_id,item_id,source_id,stage,reason_code,detail_json,created_at)
+            VALUES (?,NULL,?,'generation',?,?,?)""",
+            (
+                stable_id(
+                    "rejection",
+                    campaign_id,
+                    candidate_key,
+                    "generation",
+                    attempt["attempt_id"],
+                    reason_code,
+                ),
+                source_id,
+                reason_code,
+                canonical_json(detail),
+                now(),
+            ),
+        )
+
+
+def _record_budget_stop(
+    db: Database,
+    *,
+    campaign_id: str,
+    candidate_key: str,
+    source_id: str,
+    selected: dict[str, Any],
+    attempt: dict[str, Any],
+    error: Exception,
+) -> None:
+    detail = {
+        "campaign_id": campaign_id,
+        "candidate_key": candidate_key,
+        "error": str(error),
+        "selection": selected,
+        "budget_stop": True,
+        "generation_attempt": attempt,
+    }
+    with db.transaction():
+        db.connection.execute(
+            """INSERT OR IGNORE INTO rejection_ledger
+            (rejection_id,item_id,source_id,stage,reason_code,detail_json,created_at)
+            VALUES (?,NULL,?,'generation_budget',?,?,?)""",
+            (
+                stable_id(
+                    "rejection",
+                    campaign_id,
+                    candidate_key,
+                    "generation_budget",
+                    attempt["attempt_id"],
+                    "request_cost_bound_exceeded",
+                ),
+                source_id,
+                "request_cost_bound_exceeded",
+                canonical_json(detail),
+                now(),
+            ),
+        )
+
+
+def _generation_counts(db: Database, run_id: str) -> dict[str, int]:
+    """Return reproducible path, candidate, finding, and settled-call counts."""
+    attempt_ids: set[str] = set()
+    finding_indexes: set[int] = set()
+    revision_attempt_ids: set[str] = set()
+    candidate_count = 0
+    for row in db.rows(
+        "SELECT candidate_json FROM candidates WHERE run_id=?", (run_id,)
+    ):
+        candidate = json.loads(row["candidate_json"])
+        if not _is_current_contract_candidate(candidate):
+            continue
+        candidate_count += 1
+        attempt = (candidate.get("provenance") or {}).get("generation_attempt")
+        if isinstance(attempt, dict) and attempt.get("contract_version") == (
+            GENERATION_ATTEMPT_CONTRACT_VERSION
+        ):
+            attempt_ids.add(str(attempt["attempt_id"]))
+            finding_indexes.add(int(attempt["finding_attempt_index"]))
+            if attempt.get("question_revision_index") == 1:
+                revision_attempt_ids.add(str(attempt["attempt_id"]))
+        else:
+            family_id = candidate.get("source", {}).get("paper_family_id")
+            attempt_ids.add(
+                stable_id(
+                    "generation-attempt",
+                    run_id,
+                    family_id,
+                    1,
+                    0,
+                    GENERATION_ATTEMPT_CONTRACT_VERSION,
+                )
+            )
+            finding_indexes.add(1)
+
+    base_policy = generation_contract.SCOPE_ROLE_FINDING_POLICY_VERSION
+    for row in db.rows(
+        """SELECT paper_family_id,selection_policy_version FROM findings
+        WHERE run_id=?""",
+        (run_id,),
+    ):
+        policy = row["selection_policy_version"]
+        if not isinstance(policy, str) or not policy.startswith(
+            f"{base_policy}:finding-"
+        ):
+            continue
+        try:
+            index = int(policy.rsplit("-", 1)[1])
+        except ValueError:
+            continue
+        if index not in {1, 2}:
+            continue
+        attempt_ids.add(
+            stable_id(
+                "generation-attempt",
+                run_id,
+                row["paper_family_id"],
+                index,
+                0,
+                GENERATION_ATTEMPT_CONTRACT_VERSION,
+            )
+        )
+        finding_indexes.add(index)
+
+    for row in db.rows(
+        """SELECT detail_json FROM rejection_ledger
+        WHERE stage IN ('generation','generation_budget')"""
+    ):
+        detail = json.loads(row["detail_json"])
+        if detail.get("campaign_id") != run_id:
+            continue
+        attempt = detail.get("generation_attempt")
+        if not isinstance(attempt, dict) or attempt.get("contract_version") != (
+            GENERATION_ATTEMPT_CONTRACT_VERSION
+        ):
+            continue
+        attempt_ids.add(str(attempt["attempt_id"]))
+        finding_indexes.add(int(attempt["finding_attempt_index"]))
+        if attempt.get("question_revision_index") == 1:
+            revision_attempt_ids.add(str(attempt["attempt_id"]))
+
+    settled_call_count = db.one(
+        """SELECT COUNT(*) AS count FROM calls
+        WHERE run_id=? AND status <> 'started'""",
+        (run_id,),
+    )["count"]
+    return {
+        "model_call_count": int(settled_call_count),
+        "qa_candidate_count": candidate_count,
+        "finding_attempt_count": len(finding_indexes),
+        "candidate_path_count": len(attempt_ids),
+        "question_revision_count": len(revision_attempt_ids),
+    }
 
 
 def _validation_event_for_stored_candidate(
@@ -710,25 +1512,7 @@ def _candidate_for_current_contract(
         if statuses is not None and row["status"] not in statuses:
             continue
         candidate = json.loads(row["candidate_json"])
-        provenance = candidate.get("provenance") or {}
-        if (
-            candidate.get("schema_version")
-            == generation_contract.CANDIDATE_SCHEMA_VERSION
-            and candidate.get("finding_policy_version")
-            == generation_contract.SCOPE_ROLE_FINDING_POLICY_VERSION
-            and provenance.get("prompt_version")
-            == generation_contract.PROMPT_VERSION
-            and provenance.get("numeric_rule_contract_version")
-            == generation_contract.NUMERIC_RULE_CONTRACT_VERSION
-            and provenance.get("direct_value_contract_version")
-            == generation_contract.DIRECT_SOURCE_VALUE_CONTRACT_VERSION
-            and provenance.get("scope_contract_version")
-            == generation_contract.SCOPE_CONTRACT_VERSION
-            and provenance.get("scope_role_semantics_version")
-            == generation_contract.SCOPE_ROLE_SEMANTICS_VERSION
-            and provenance.get("scope_role_binding_contract_version")
-            == generation_contract.SCOPE_ROLE_BINDING_CONTRACT_VERSION
-        ):
+        if _is_current_contract_candidate(candidate):
             return row
     return None
 
