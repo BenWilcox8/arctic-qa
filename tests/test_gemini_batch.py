@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.error
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
@@ -24,7 +25,11 @@ from arctic_qa.gemini_batch import (
     submit_round,
     _terminal_dispositions,
 )
-from arctic_qa.model_broker import SharedGeminiBroker, exclusive_batch_marker_path
+from arctic_qa.model_broker import (
+    SharedGeminiBroker,
+    broker_request_key,
+    exclusive_batch_marker_path,
+)
 from arctic_qa.paths import DataPaths
 from arctic_qa.util import canonical_json, sha256_file
 
@@ -43,7 +48,9 @@ class NoCallTransport:
         raise AssertionError("no interactive provider call is permitted")
 
 
-def shared_ledger(tmp_path: Path) -> tuple[SharedGeminiBroker, Path]:
+def shared_ledger(
+    tmp_path: Path, transport: object | None = None
+) -> tuple[SharedGeminiBroker, Path]:
     review = tmp_path / "review.txt"
     review.write_text("offline test review\n", encoding="utf-8")
     gate = tmp_path / "gate.json"
@@ -57,6 +64,7 @@ def shared_ledger(tmp_path: Path) -> tuple[SharedGeminiBroker, Path]:
             "integrated_code_commit": "test-only",
             "review_record": str(review),
             "review_record_sha256": sha256_file(review),
+            "authorized_new_run_id": "run-current",
         },
     )
     credential = tmp_path / "credential"
@@ -68,10 +76,10 @@ def shared_ledger(tmp_path: Path) -> tuple[SharedGeminiBroker, Path]:
         price_config_file=REPO / "config" / "gemini-eligibility-v1.json",
         execution_gate_file=gate,
         ledger_file=ledger,
-        receipts_dir=tmp_path / "shared-receipts",
+        receipts_dir=tmp_path / "model-receipts",
         credential_file=credential,
         prior_construction_spend_usd=Decimal("0"),
-        transport=NoCallTransport(),
+        transport=transport or NoCallTransport(),
     )
     return broker, ledger
 
@@ -108,6 +116,84 @@ class FakeBatchTransport:
 
     def download(self, file_name: str) -> bytes:
         return b""
+
+
+class Http500Transport:
+    def post(self, model: str, method: str, body: dict[str, Any]) -> dict[str, Any]:
+        if method == "countTokens":
+            return {"totalTokens": 100}
+        raise urllib.error.HTTPError(
+            "https://fake.invalid", 500, "upstream failure", {}, None
+        )
+
+
+def ambiguous_hold(
+    tmp_path: Path,
+    *,
+    paper_id: str = "paper-ambiguous",
+    family_id: str = "family-ambiguous",
+    source_version_id: str = "source-ambiguous",
+) -> tuple[SharedGeminiBroker, Path, dict[str, Any]]:
+    broker, ledger = shared_ledger(tmp_path, Http500Transport())
+    payload = {
+        "systemInstruction": {"parts": [{"text": "Return JSON."}]},
+        "contents": [{"role": "user", "parts": [{"text": "Paper text."}]}],
+        "generationConfig": {
+            "candidateCount": 1,
+            "responseMimeType": "application/json",
+            "responseJsonSchema": {"type": "object"},
+            "maxOutputTokens": 1000,
+            "thinkingConfig": {"thinkingLevel": "medium"},
+        },
+        "store": False,
+    }
+    request_key = broker_request_key(
+        model=broker.config["model"],
+        run_id="run-current",
+        phase="away_production",
+        stage="question_generation",
+        paper_id=paper_id,
+        family_id=family_id,
+        source_version_id=source_version_id,
+        payload=payload,
+    )
+    receipt = broker.execute(
+        phase="away_production",
+        run_id="run-current",
+        stage="question_generation",
+        paper_id=paper_id,
+        family_id=family_id,
+        source_version_id=source_version_id,
+        request_key=request_key,
+        payload=payload,
+    )
+    evidence = tmp_path / "ambiguous-evidence.json"
+    write_json(
+        evidence,
+        {
+            "schema": "shared-paid-call-ambiguous-continuation-evidence-v1",
+            "request_key": request_key,
+            "error_class": "known_http_response_unknown_charge",
+            "http_status": 500,
+            "live_call_made": True,
+            "received_receipt_absent": True,
+            "actual_cost_known": False,
+            "replay_prohibited": True,
+            "affected_family_id": family_id,
+            "authorized_run_id": "run-current",
+        },
+    )
+    review = tmp_path / "review.md"
+    review.write_text("Reviewed no-replay continuation.\n", encoding="utf-8")
+    broker.authorize_ambiguous_continuation(
+        request_key=request_key,
+        expected_ledger_sha256=sha256_file(ledger),
+        review_file=review,
+        evidence_file=evidence,
+        authorized_run_id="run-current",
+        operator_id="batch-test",
+    )
+    return broker, ledger, receipt
 
 
 def authorization(manifest_path: Path, ledger: Path, destination: Path) -> Path:
@@ -948,3 +1034,123 @@ def test_batch_allocation_is_separate_from_shared_live_spend(tmp_path: Path) -> 
         manifest["reserved_cost_usd"]
     )
     assert authorized["batch_allocation_usd"] == "25"
+
+
+def test_batch_allows_covered_recovery_liability_and_retains_its_cost(
+    tmp_path: Path,
+) -> None:
+    _, ledger_path, ambiguous = ambiguous_hold(tmp_path)
+    store = batch_store(tmp_path, ledger_path, ceiling="25")
+    provider = BatchProvider(
+        store=store,
+        phase="away_production",
+        invocation_run_id="batch-with-recovery-hold",
+    ).bind(
+        paper_id="paper-batch",
+        family_id="family-batch",
+        source_version_id="b" * 64,
+    )
+    with pytest.raises(BatchPendingError):
+        provider.invoke(
+            "question_writer",
+            "system",
+            "prompt",
+            {"temperature": 0, "max_tokens": 2048, "json_schema": {"type": "object"}},
+            30,
+        )
+    manifest = store.make_round(
+        run_identity={"run_id": "batch-with-recovery-hold"},
+        ordered_inputs=[
+            {
+                "position": 1,
+                "paper_id": "paper-batch",
+                "family_id": "family-batch",
+                "source_version_id": "b" * 64,
+            }
+        ],
+    )
+    assert manifest is not None
+    manifest_path = Path(manifest["manifest_path"])
+    authorization_path = authorization(manifest_path, ledger_path, tmp_path / "auth.json")
+    preview = store.budget_preview(manifest["request_keys"])
+    expected_shared = Decimal(ambiguous["reserved_usd"])
+    assert Decimal(preview["shared_used_usd"]) == expected_shared
+    assert Decimal(preview["projected_total_usd"]) == (
+        expected_shared + Decimal(preview["new_reservation_usd"])
+    )
+    authorized = store.authorize_round(
+        json.loads(manifest_path.read_text(encoding="utf-8")),
+        json.loads(authorization_path.read_text(encoding="utf-8")),
+    )
+    assert authorized["shared_used_usd"] == str(expected_shared)
+
+
+def test_batch_rejects_an_uncovered_retained_liability(tmp_path: Path) -> None:
+    _, ledger_path = shared_ledger(tmp_path)
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    ledger["reserved_usd"] = "0.010000"
+    write_json(ledger_path, ledger)
+    with pytest.raises(ValueError, match="no-replay|recovery|liability"):
+        batch_store(tmp_path, ledger_path, ceiling="25").budget_preview([])
+
+
+def test_batch_rejects_integrity_halt_even_with_recovery_receipt(
+    tmp_path: Path,
+) -> None:
+    _, ledger_path, _ = ambiguous_hold(tmp_path)
+    write_json(
+        ledger_path.with_name(f".{ledger_path.name}.integrity-halt.json"),
+        {"schema": "shared-paid-call-integrity-halt-v1", "reason": "test"},
+    )
+    with pytest.raises(ValueError, match="integrity"):
+        batch_store(tmp_path, ledger_path, ceiling="25").budget_preview([])
+
+
+def test_continuation_selector_accepts_a_validated_recovery_hold(
+    tmp_path: Path,
+) -> None:
+    _, ledger_path, _ = ambiguous_hold(
+        tmp_path,
+        paper_id="paper-1",
+        family_id="family-1",
+        source_version_id="a" * 64,
+    )
+    access = tmp_path / "ranked-access"
+    write_json(
+        access / "run-manifest.json",
+        {
+            "schema": "article-access-manifest-v1",
+            "run_id": "ranked-one",
+            "target_total": 1,
+            "selection": [
+                {
+                    "position": 1,
+                    "candidate_key": "paper-1",
+                    "family_key": "family-1",
+                    "source_content_hash": "a" * 64,
+                    "extraction_sha256": "b" * 64,
+                }
+            ],
+        },
+    )
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+    database.close()
+    progress = tmp_path / "progress.json"
+    write_json(progress, {"state": "error"})
+
+    selected = select_continuation(
+        access_run_dir=access,
+        db_file=paths.database,
+        campaign_id="scientific-campaign",
+        prior_run_id="run-current",
+        eligibility_run_dir=tmp_path / "eligibility",
+        shared_ledger_file=ledger_path,
+        production_progress_file=progress,
+        output_file=tmp_path / "continuation.json",
+        require_stopped=True,
+    )
+
+    assert selected["provisional"] is False
+    assert selected["remaining_selection"] == []

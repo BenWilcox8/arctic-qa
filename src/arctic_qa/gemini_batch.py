@@ -22,6 +22,7 @@ from .exporting import export_run
 from .generation import generate_candidate
 from .gemini_eligibility import _config, _decimal
 from .model_broker import (
+    SharedGeminiBroker,
     _normalized_usage,
     activate_exclusive_batch_mode,
     broker_request_key,
@@ -110,6 +111,81 @@ def _cost(input_tokens: int, output_tokens: int) -> Decimal:
         Decimal(input_tokens) * BATCH_INPUT_USD_PER_MILLION
         + Decimal(output_tokens) * BATCH_OUTPUT_USD_PER_MILLION
     ) / Decimal("1000000")
+
+
+def _validate_batch_shared_ledger(
+    shared_ledger_file: Path, ledger: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    """Validate shared paid-call custody before a batch uses its budget.
+
+    The live broker owns the continuation evidence rules. This read-only
+    guard reuses those rules and permits only reviewed no-replay holds, whose
+    full reservations remain in the shared totals and therefore in all batch
+    projections. Every other unresolved request is a submission stop.
+    """
+    integrity_file = shared_ledger_file.with_name(
+        f".{shared_ledger_file.name}.integrity-halt.json"
+    )
+    if integrity_file.exists():
+        raise ValueError("the shared paid-call ledger has an integrity halt")
+    try:
+        liabilities = SharedGeminiBroker.validate_no_replay_liabilities(
+            ledger=ledger,
+            receipts_dir=shared_ledger_file.parent / "model-receipts",
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            "the shared paid-call ledger has an unaccounted retained liability "
+            f"or failed recovery validation: {error}"
+        ) from error
+    try:
+        reserved_expected = sum(
+            (
+                _money(request.get("reserved_usd"), "retained reservation", positive=True)
+                for request in ledger["requests"].values()
+                if request.get("state") == "orphaned_no_replay"
+            ),
+            Decimal("0"),
+        )
+        ambiguous_expected = sum(
+            (
+                _money(request.get("reserved_usd"), "ambiguous reservation", positive=True)
+                for request in ledger["requests"].values()
+                if request.get("state") == "ambiguous_charge"
+            ),
+            Decimal("0"),
+        )
+        reserved_actual = _money(ledger.get("reserved_usd"), "shared ledger reserved")
+        ambiguous_actual = _money(
+            ledger.get("ambiguous_reserved_usd"), "shared ledger ambiguous"
+        )
+    except (AttributeError, KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            "the shared paid-call ledger has an unaccounted retained liability "
+            f"or failed accounting validation: {error}"
+        ) from error
+    if reserved_actual != reserved_expected or ambiguous_actual != ambiguous_expected:
+        raise ValueError(
+            "the shared paid-call ledger has an unaccounted retained liability; "
+            "recovery holds must remain fully accounted for"
+        )
+    if ledger.get("halted") is not False:
+        raise ValueError("the shared paid-call ledger is halted")
+    inflight = ledger.get("inflight")
+    if isinstance(inflight, bool) or not isinstance(inflight, int) or inflight != 0:
+        raise ValueError("the shared paid-call producer still has inflight work")
+    for request_key, request in ledger["requests"].items():
+        state = request.get("state")
+        if state == "submitted" or state == "counting":
+            raise ValueError(
+                "the shared paid-call ledger has an unreviewed submitted liability"
+            )
+        if state in {"orphaned_no_replay", "ambiguous_charge"} and request_key not in liabilities:
+            raise ValueError(
+                "the shared paid-call ledger has a retained liability without "
+                "validated no-replay recovery evidence"
+            )
+    return liabilities
 
 
 class BatchStore:
@@ -267,6 +343,7 @@ class BatchStore:
             ledger.get("requests"), dict
         ):
             raise ValueError("the shared paid-call ledger is invalid")
+        _validate_batch_shared_ledger(self.shared_ledger_file, ledger)
         for name in (
             "prior_construction_spend_usd",
             "spent_usd",
@@ -468,15 +545,8 @@ class BatchStore:
         if not str(authorization.get("authorized_by") or "").strip():
             raise ValueError("the batch submission authorization lacks an author")
         ledger = self.shared_ledger()
-        if (
-            ledger.get("halted")
-            or int(ledger.get("inflight", 0)) != 0
-            or any(
-                _money(ledger[name], name) != 0
-                for name in ("reserved_usd", "ambiguous_reserved_usd")
-            )
-        ):
-            raise ValueError("the shared paid-call ledger is not settled")
+        if ledger.get("halted") or ledger.get("inflight") != 0:
+            raise ValueError("the shared paid-call producer has not stopped")
         preview = self.budget_preview(manifest["request_keys"])
         if Decimal(preview["projected_batch_total_usd"]) > self.overall_ceiling_usd:
             raise ValueError(
@@ -865,6 +935,7 @@ def select_continuation(
         ledger.get("requests"), dict
     ):
         raise ValueError("the shared paid-call ledger is invalid")
+    liabilities = _validate_batch_shared_ledger(shared_ledger_file, ledger)
     receipts: dict[str, list[dict[str, str]]] = {}
     for request_key, request in sorted(ledger["requests"].items()):
         if request.get("run_id") != prior_run_id:
@@ -953,15 +1024,10 @@ def select_continuation(
         row["request_key"]
         for rows in receipts.values()
         for row in rows
-        if row["state"] != "completed"
-    )
-    ledger_settled = (
-        int(ledger.get("inflight", 0)) == 0
-        and _money(ledger.get("reserved_usd"), "reserved") == 0
-        and _money(ledger.get("ambiguous_reserved_usd"), "ambiguous") == 0
+        if row["state"] != "completed" and row["request_key"] not in liabilities
     )
     provisional = (
-        progress.get("state") == "running" or not ledger_settled or bool(unsettled)
+        progress.get("state") == "running" or bool(unsettled)
     )
     if require_stopped and provisional:
         raise ValueError("the production campaign has not reached a settled stop")

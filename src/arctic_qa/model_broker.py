@@ -537,6 +537,29 @@ class SharedGeminiBroker:
             return f"{request_key}.resume-{request['config_transition_sha256']}"
         return request_key
 
+    @classmethod
+    def validate_no_replay_liabilities(
+        cls,
+        *,
+        ledger: dict[str, Any],
+        receipts_dir: Path,
+    ) -> dict[str, dict[str, Any]]:
+        """Validate reviewed no-replay holds without opening or changing the ledger.
+
+        Batch submission uses this read-only seam so it can share the exact
+        continuation evidence and custody checks used by the live broker.
+        Constructing a broker here would require live policy and credential
+        inputs and could write an integrity halt on malformed data.
+        """
+        validator = cls.__new__(cls)
+        validator.receipts_dir = receipts_dir.resolve()
+        ambiguous = validator._ambiguous_continuation_events(ledger)
+        orphaned = validator._orphaned_continuation_events(ledger)
+        overlap = set(ambiguous) & set(orphaned)
+        if overlap:
+            raise ValueError("a no-replay continuation request changed")
+        return {**ambiguous, **orphaned}
+
     def _ledger_identity(self) -> dict[str, Any]:
         return {
             "schema": "shared-paid-call-ledger-identity-v1",

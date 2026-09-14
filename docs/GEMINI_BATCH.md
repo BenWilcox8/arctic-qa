@@ -111,7 +111,9 @@ The batch allocation includes every prepared request in the campaign.
 Each request reserves input tokens plus its maximum output token limit.
 The output limit includes thinking tokens.
 The shared ledger amount appears in each budget preview, but it does not reduce the separate USD 25 batch allocation.
-Submission still stops when the shared ledger has an unknown charge, reservation, or in-flight request.
+Submission permits only reviewed no-replay recovery holds after the producer stops.
+Those holds remain fully reserved and count against every cap.
+Unreviewed submitted or ambiguous requests, integrity halts, and in-flight requests still stop submission.
 
 ### Archived provisional preview
 
@@ -147,8 +149,8 @@ Do not activate this preview automatically.
 
 ## Authorize and submit one round
 
-Wait until the current synchronous campaign is settled.
-Make sure that its ledger has no reservation, ambiguous charge, or in-flight request.
+Wait until the current synchronous campaign stops.
+Make sure that its ledger has zero in-flight requests and that every retained reservation or ambiguous charge has an exact reviewed no-replay recovery record.
 
 After captain approval, create an authorization file for each exact round manifest.
 The operator can create these files within the approved campaign budget, order, and model scope.
