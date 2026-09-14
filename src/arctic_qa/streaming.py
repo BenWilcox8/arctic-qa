@@ -13,6 +13,7 @@ from .extraction import extract_source
 from .generation import generate_candidate
 from .gemini_eligibility import (
     ELIGIBILITY_RESPONSE_V2,
+    ELIGIBILITY_RESPONSE_V3,
     ELIGIBILITY_STATUS_MAPPING_VERSION,
     _correction_metadata,
     _job_key,
@@ -60,15 +61,12 @@ def run_stream(
             _read(path) for path in sorted((access_run_dir / "items").glob("*.json"))
         )
     }
-    eligibility_jobs: dict[str, dict[str, Any]] = {}
-    for item in (
-        _read(path) for path in sorted((eligibility_run_dir / "jobs").glob("*.json"))
-    ):
-        key = item["candidate_key"]
-        if key not in eligibility_jobs or item.get("execution_authority") == (
-            "shared_gemini_broker"
-        ):
-            eligibility_jobs[key] = item
+    eligibility_jobs = _load_eligibility_jobs(
+        eligibility_run_dir,
+        prompt_file=eligibility_prompt_file,
+        schema_file=eligibility_schema_file,
+        policy_file=eligibility_policy_file,
+    )
     selection = access_manifest.get("selection")
     if not isinstance(selection, list):
         raise ValueError("the article-access selection is missing")
@@ -699,6 +697,41 @@ def _bind_provider(
     )
 
 
+def _load_eligibility_jobs(
+    run_dir: Path,
+    *,
+    prompt_file: Path | None,
+    schema_file: Path | None,
+    policy_file: Path | None,
+) -> dict[str, dict[str, Any]]:
+    expected_hashes = (
+        {
+            "prompt_sha256": sha256_file(prompt_file),
+            "schema_sha256": sha256_file(schema_file),
+            "policy_sha256": sha256_file(policy_file),
+        }
+        if prompt_file is not None
+        and schema_file is not None
+        and policy_file is not None
+        else None
+    )
+    selected: dict[str, dict[str, Any]] = {}
+    for path in sorted((run_dir / "jobs").glob("*.json")):
+        item = _read(path)
+        if expected_hashes is not None and any(
+            item.get(field) != expected
+            for field, expected in expected_hashes.items()
+        ):
+            continue
+        key = str(item["candidate_key"])
+        if key in selected:
+            raise ValueError(
+                "a candidate has more than one eligibility job for the active version"
+            )
+        selected[key] = item
+    return selected
+
+
 def _trusted_brokered_eligibility_decisions(
     *,
     selection: list[dict[str, Any]],
@@ -1097,12 +1130,14 @@ def _validate_brokered_eligibility(
         request_id=expected_job_key,
         policy_sha256=sha256_file(policy_file),
     )
-    if schema.get("properties", {}).get("schema_version", {}).get("const") == (
-        ELIGIBILITY_RESPONSE_V2
-    ):
+    response_version = schema.get("properties", {}).get("schema_version", {}).get(
+        "const"
+    )
+    if response_version in {ELIGIBILITY_RESPONSE_V2, ELIGIBILITY_RESPONSE_V3}:
         manifest_path = Path(str(eligibility.get("span_manifest_path") or ""))
         expected_manifest = _span_manifest_v2(
-            _span_blocks_v2(text, str(access["extraction_sha256"]))
+            _span_blocks_v2(text, str(access["extraction_sha256"])),
+            response_version,
         )
         expected_manifest_sha256 = sha256_bytes(
             canonical_json(expected_manifest).encode()
@@ -1209,7 +1244,7 @@ def _validate_pair(access: dict[str, Any], eligibility: dict[str, Any]) -> None:
     decision_consistent = (
         version == "eligibility-response-v1" and parsed.get("overall") == decision
     ) or (
-        version == ELIGIBILITY_RESPONSE_V2
+        version in {ELIGIBILITY_RESPONSE_V2, ELIGIBILITY_RESPONSE_V3}
         and "overall" not in parsed
         and "overall_reason_codes" not in parsed
         and (eligibility.get("validation") or {}).get("mapping_version")
@@ -1323,7 +1358,8 @@ def _import_source(
         ),
         **(
             {"status_mapping_version": eligibility["validation"].get("mapping_version")}
-            if parsed.get("schema_version") == ELIGIBILITY_RESPONSE_V2
+            if parsed.get("schema_version")
+            in {ELIGIBILITY_RESPONSE_V2, ELIGIBILITY_RESPONSE_V3}
             else {}
         ),
         "study_geography": geography,
@@ -1332,6 +1368,16 @@ def _import_source(
             for row in eligibility["validation"].get("resolved_evidence", [])
             if row.get("criterion") == "study_geography"
         ],
+        **(
+            {
+                "eligible_arctic_scope": parsed.get("eligible_arctic_scope"),
+                "resolved_eligible_arctic_scope": eligibility["validation"].get(
+                    "resolved_eligible_arctic_scope"
+                ),
+            }
+            if parsed.get("schema_version") == ELIGIBILITY_RESPONSE_V3
+            else {}
+        ),
         "known_missing_context": parsed.get("known_missing_context", []),
         "correction_metadata_used": parsed.get("correction_metadata_used"),
         "input_echo": parsed.get("input_echo"),
@@ -1342,9 +1388,16 @@ def _import_source(
             SET eligibility_state='eligible',geography_state='core_arctic',
                 geography_confidence='model_reviewed_unverified',
                 inclusion_reason='gemini_full_text_eligibility_with_located_evidence',
-                scope_rule_version='gemini-fulltext-arctic-eligibility-v1',
+                scope_rule_version=?,
                 scope_evidence_json=?,updated_at=?
             WHERE source_id=?""",
-            (canonical_json(scope_evidence), now(), source["source_id"]),
+            (
+                "gemini-fulltext-arctic-eligibility-v2"
+                if parsed.get("schema_version") == ELIGIBILITY_RESPONSE_V3
+                else "gemini-fulltext-arctic-eligibility-v1",
+                canonical_json(scope_evidence),
+                now(),
+                source["source_id"],
+            ),
         )
     return source["source_id"]

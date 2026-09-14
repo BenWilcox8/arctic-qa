@@ -28,6 +28,7 @@ from .errors import ArcticQAError
 from .exporting import export_run
 from .extraction import extract_source, load_chunks
 from .generation import generate_candidate, resume_candidate_distractors
+from .geography_correction import write_geography_correction_overlay
 from .gemini_eligibility import run_gemini_eligibility
 from .manifests import write_source_manifest
 from .metadata_prefilter import run_metadata_prefilter
@@ -191,6 +192,18 @@ def parser() -> argparse.ArgumentParser:
         default=Path("/home/ben/.config/arctic-qa/gemini-api-key"),
     )
     gemini.add_argument("--max-cost-usd", type=Decimal, required=True)
+
+    correction_overlay = commands.add_parser(
+        "geography-correction-overlay",
+        help="Write a reviewed geography-correction overlay without changing model jobs.",
+    )
+    correction_overlay.add_argument("--affected-papers-file", type=Path, required=True)
+    correction_overlay.add_argument("--historical-jobs-dir", type=Path, required=True)
+    correction_overlay.add_argument("--old-policy-file", type=Path, required=True)
+    correction_overlay.add_argument("--new-policy-file", type=Path, required=True)
+    correction_overlay.add_argument("--output-dir", type=Path, required=True)
+    correction_overlay.add_argument("--decision-source", required=True)
+    correction_overlay.add_argument("--decision-at-utc", required=True)
 
     discover = commands.add_parser(
         "discover", help="Discover and deduplicate source metadata."
@@ -378,6 +391,23 @@ def parser() -> argparse.ArgumentParser:
     reconcile.add_argument(
         "--prior-construction-spend-usd", type=Decimal, required=True
     )
+
+    settle = commands.add_parser(
+        "settle-pretransport-reservation",
+        help="Settle the reviewed reservation that stopped before generation transport.",
+    )
+    settle.add_argument("--request-key", required=True)
+    settle.add_argument("--expected-ledger-sha256", required=True)
+    settle.add_argument("--review-file", type=Path, required=True)
+    settle.add_argument("--traceback-evidence-file", type=Path, required=True)
+    settle.add_argument("--streaming-budget-policy-file", type=Path, required=True)
+    settle.add_argument("--price-config-file", type=Path, required=True)
+    settle.add_argument("--execution-gate-file", type=Path, required=True)
+    settle.add_argument("--shared-ledger-file", type=Path, required=True)
+    settle.add_argument("--model-receipts-dir", type=Path, required=True)
+    settle.add_argument("--ledger-config-transition-file", type=Path)
+    settle.add_argument("--credential-file", type=Path, required=True)
+    settle.add_argument("--prior-construction-spend-usd", type=Decimal, required=True)
     return root
 
 
@@ -495,8 +525,23 @@ def main(argv: list[str] | None = None) -> int:
                     credential_file=args.credential_file,
                 ),
             )
+        if args.command == "geography-correction-overlay":
+            return _emit(
+                args,
+                write_geography_correction_overlay(
+                    affected_papers_file=args.affected_papers_file,
+                    historical_jobs_dir=args.historical_jobs_dir,
+                    old_policy_file=args.old_policy_file,
+                    new_policy_file=args.new_policy_file,
+                    output_dir=args.output_dir,
+                    decision_source=args.decision_source,
+                    decision_at_utc=args.decision_at_utc,
+                ),
+            )
         if args.command == "reconcile-usage":
             return _emit(args, _reconcile_usage(args))
+        if args.command == "settle-pretransport-reservation":
+            return _emit(args, _settle_pretransport_reservation(args))
         paths, db = _open(args)
         try:
             handler = globals()[f"_{args.command}"]
@@ -568,6 +613,29 @@ def _reconcile_usage(args) -> dict[str, Any]:
         ),
     )
     return broker.reconcile_omitted_thought_usage(args.request_key)
+
+
+def _settle_pretransport_reservation(args) -> dict[str, Any]:
+    broker = SharedGeminiBroker(
+        policy_file=args.streaming_budget_policy_file.resolve(),
+        price_config_file=args.price_config_file.resolve(),
+        execution_gate_file=args.execution_gate_file.resolve(),
+        ledger_file=args.shared_ledger_file.resolve(),
+        receipts_dir=args.model_receipts_dir.resolve(),
+        credential_file=args.credential_file.resolve(),
+        prior_construction_spend_usd=args.prior_construction_spend_usd,
+        config_transition_file=(
+            args.ledger_config_transition_file.resolve()
+            if args.ledger_config_transition_file
+            else None
+        ),
+    )
+    return broker.settle_pretransport_reservation(
+        request_key=args.request_key,
+        expected_ledger_sha256=args.expected_ledger_sha256,
+        review_file=args.review_file.resolve(),
+        traceback_evidence_file=args.traceback_evidence_file.resolve(),
+    )
 
 
 def _discover(args, paths: DataPaths, db: Database) -> dict[str, Any]:

@@ -130,6 +130,51 @@ class ValidationResult:
         }
 
 
+def _eligible_arctic_scope_error(
+    candidate: dict[str, Any], source: dict[str, Any]
+) -> str | None:
+    if source.get("scope_rule_version") != "gemini-fulltext-arctic-eligibility-v2":
+        return None
+    try:
+        evidence = json.loads(source["scope_evidence_json"])
+    except (KeyError, TypeError, json.JSONDecodeError):
+        return "eligible_arctic_scope_invalid"
+    scope = evidence.get("resolved_eligible_arctic_scope")
+    provenance = candidate.get("provenance") or {}
+    if (
+        not isinstance(scope, dict)
+        or provenance.get("eligible_arctic_scope") != {
+            "component": scope.get("component"),
+            "question_scope_phrases": scope.get("question_scope_phrases"),
+            "eligibility_job_key": evidence.get("eligibility_job_key"),
+            "finding_spans": scope.get("finding_spans"),
+        }
+    ):
+        return "eligible_arctic_scope_provenance_mismatch"
+    if provenance.get("eligible_arctic_scope_sha256") != sha256_bytes(
+        canonical_json(provenance["eligible_arctic_scope"]).encode()
+    ):
+        return "eligible_arctic_scope_provenance_mismatch"
+    if scope.get("component") != "separable_arctic_component":
+        return None
+    answer_quote = str((candidate.get("answer") or {}).get("evidence_quote") or "")
+    question = str(candidate.get("question") or "")
+    finding_spans = scope.get("finding_spans") or []
+    scope_phrases = scope.get("question_scope_phrases") or []
+    finding_quotes = [
+        row.get("quote")
+        for row in finding_spans
+        if isinstance(row, dict) and isinstance(row.get("quote"), str)
+    ]
+    if not finding_quotes or not any(quote == answer_quote for quote in finding_quotes):
+        return "eligible_arctic_finding_out_of_scope"
+    if not scope_phrases or not any(
+        isinstance(phrase, str) and phrase in question for phrase in scope_phrases
+    ):
+        return "eligible_arctic_scope_missing_from_question"
+    return None
+
+
 def validate_candidate(
     db: Database,
     namespace,
@@ -167,7 +212,8 @@ def validate_candidate(
         return _finish(db, candidate, labels, reasons, [], "rejected")
     labels["schema_valid"] = True
     source_record = db.one(
-        "SELECT source_id,paper_family_id,content_hash FROM sources WHERE source_id=?",
+        """SELECT source_id,paper_family_id,content_hash,scope_rule_version,
+        scope_evidence_json FROM sources WHERE source_id=?""",
         (candidate.get("source", {}).get("source_id"),),
     )
     if not source_record or any(
@@ -175,6 +221,10 @@ def validate_candidate(
         for key in ("source_id", "paper_family_id", "content_hash")
     ):
         reasons.append("source_manifest_mismatch")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
+    scope_error = _eligible_arctic_scope_error(candidate, source_record)
+    if scope_error:
+        reasons.append(scope_error)
         return _finish(db, candidate, labels, reasons, [], "rejected")
     try:
         chunks = {

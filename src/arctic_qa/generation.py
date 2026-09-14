@@ -31,6 +31,7 @@ PROMPT_VERSION = GENERATION_PROMPT_VERSION
 FINDING_POLICY_VERSION = "one-finding-per-paper-full-context-v5"
 FINDING_SPAN_CONTRACT_VERSION = "finding-evidence-span-v2"
 MODEL_JUSTIFICATION_CONTRACT_VERSION = "model-justification-v1"
+ARCTIC_SCOPE_CONTRACT_VERSION = "eligible-arctic-finding-scope-v1"
 MAX_FINDING_CONTEXT_CHARS = 3_000_000
 MAX_FINDING_SPAN_CHARS = 1_600
 FINDING_SPAN_OVERLAP_CHARS = 400
@@ -460,6 +461,7 @@ def generate_candidate(
         raise ValueError(f"source has no usable chunks: {source_id}")
     prose_chunks = [row for row in chunks if not row.get("object_labels")]
     chunk = max(prose_chunks or chunks, key=lambda row: len(row["text"]))
+    arctic_scope, arctic_scope_spans = _eligible_generation_scope(source, chunks)
     externally_metered = (
         getattr(author, "externally_metered", False),
         getattr(verifier, "externally_metered", False),
@@ -498,16 +500,27 @@ def generate_candidate(
         if chunk is None:
             raise ValueError("the frozen finding chunk is unavailable")
     else:
-        context, finding_spans = _finding_context(chunks)
+        context, finding_spans = _finding_context(chunks, arctic_scope_spans)
+        scope_instruction = (
+            "\nELIGIBLE_ARCTIC_SCOPE\n"
+            + canonical_json(arctic_scope)
+            + "\nSelect a finding only from the supplied Arctic result spans. "
+            "For a separable Arctic component, include at least one supplied "
+            "question_scope_phrases value in required_question_phrases."
+            if arctic_scope is not None
+            else ""
+        )
         answer_proposal = _call(
             db,
             author,
             run_id,
             stable_id("finding-selection", source_id, FINDING_POLICY_VERSION),
             "extractor",
-            context + "\nExtract one bounded answer record. Select one source_span_id. "
-            "Select one atomic claim from a complete prose finding sentence in the "
-            "results or discussion. Do not select a title, heading, figure or table caption, "
+            context
+            + scope_instruction
+            + "\nExtract one bounded answer record. Select one source_span_id. "
+            "Select a complete prose finding sentence in the results or discussion. "
+            "Select one atomic claim from that sentence. Do not select a title, heading, figure or table caption, "
             "legend, axis label, methods-only description, or sentence fragment. "
             "The selected span must contain exact, sufficient evidence for the "
             "entire answer and every required question phrase. Evidence spans are "
@@ -542,6 +555,7 @@ def generate_candidate(
             finding_spans,
             reason_code="finding_evidence_span_not_found",
         )
+        _require_arctic_scope_custody(answer, arctic_scope)
         chunk = next(
             (
                 row
@@ -574,8 +588,21 @@ def generate_candidate(
                     now(),
                 ),
             )
-    context_spans = {span["span_id"]: span for span in _finding_spans(chunk)}
-    context = _context(chunk)
+    _require_arctic_scope_custody(answer, arctic_scope)
+    scoped_chunk_spans = (
+        [
+            span
+            for span in arctic_scope_spans or []
+            if span["chunk_id"] == chunk["chunk_id"]
+        ]
+        if arctic_scope is not None
+        else None
+    )
+    context_spans = {
+        span["span_id"]: span
+        for span in (scoped_chunk_spans or _finding_spans(chunk))
+    }
+    context = _context(chunk, scoped_chunk_spans)
     entity_id = stable_id("unit", finding_id, arm)
     arm_answer_proposal = answer
     question_rationale: str
@@ -774,6 +801,15 @@ def generate_candidate(
             "scope_contract_version": SCOPE_CONTRACT_VERSION,
             "model_justification_contract_version": (
                 MODEL_JUSTIFICATION_CONTRACT_VERSION
+            ),
+            "arctic_scope_contract_version": (
+                ARCTIC_SCOPE_CONTRACT_VERSION if arctic_scope is not None else None
+            ),
+            "eligible_arctic_scope": arctic_scope,
+            "eligible_arctic_scope_sha256": (
+                sha256_bytes(canonical_json(arctic_scope).encode())
+                if arctic_scope is not None
+                else None
             ),
             "author_provider": author.name,
             "author_model": author.model,
@@ -1297,8 +1333,10 @@ def _record_resolves(record: dict[str, Any], chunk: dict[str, Any]) -> bool:
     )
 
 
-def _context(chunk: dict[str, Any]) -> str:
-    evidence_spans = _finding_spans(chunk)
+def _context(
+    chunk: dict[str, Any], evidence_spans: list[dict[str, Any]] | None = None
+) -> str:
+    selected_spans = evidence_spans or _finding_spans(chunk)
     return (
         "SOURCE_DATA_BEGIN\n"
         + canonical_json(
@@ -1307,9 +1345,14 @@ def _context(chunk: dict[str, Any]) -> str:
                 "section_id": chunk["section_id"],
                 "heading": chunk["heading"],
                 "page": chunk.get("page"),
-                "text": chunk["text"],
+                "text": (
+                    "\n".join(span["text"] for span in selected_spans)
+                    if evidence_spans is not None
+                    else chunk["text"]
+                ),
+                "scope_restricted": evidence_spans is not None,
                 "span_contract_version": FINDING_SPAN_CONTRACT_VERSION,
-                "evidence_spans": evidence_spans,
+                "evidence_spans": selected_spans,
             }
         )
         + "\nSOURCE_DATA_END"
@@ -1318,6 +1361,7 @@ def _context(chunk: dict[str, Any]) -> str:
 
 def _finding_context(
     chunks: list[dict[str, Any]],
+    eligible_spans: list[dict[str, Any]] | None = None,
 ) -> tuple[str, dict[str, dict[str, Any]]]:
     priority_terms = ("result", "discussion", "finding", "conclusion")
     ordered = sorted(
@@ -1337,7 +1381,17 @@ def _finding_context(
     spans_by_id: dict[str, dict[str, Any]] = {}
     rendered_chunks = []
     for row in ordered:
-        evidence_spans = _finding_spans(row)
+        evidence_spans = (
+            [
+                span
+                for span in eligible_spans
+                if span["chunk_id"] == row["chunk_id"]
+            ]
+            if eligible_spans is not None
+            else _finding_spans(row)
+        )
+        if not evidence_spans:
+            continue
         spans_by_id.update((span["span_id"], span) for span in evidence_spans)
         rendered_chunks.append(
             {
@@ -1345,13 +1399,18 @@ def _finding_context(
                 "section_id": row["section_id"],
                 "heading": row["heading"],
                 "page": row.get("page"),
-                "text": row["text"],
+                "text": (
+                    "\n".join(span["text"] for span in evidence_spans)
+                    if eligible_spans is not None
+                    else row["text"]
+                ),
                 "evidence_spans": evidence_spans,
             }
         )
     payload = canonical_json(
         {
-            "context_complete": True,
+            "context_complete": eligible_spans is None,
+            "scope_restricted": eligible_spans is not None,
             "span_contract_version": FINDING_SPAN_CONTRACT_VERSION,
             "selection_priority": [
                 "results",
@@ -1366,6 +1425,99 @@ def _finding_context(
     if len(payload) > MAX_FINDING_CONTEXT_CHARS:
         raise ValueError("the complete finding context exceeds the configured limit")
     return "SOURCE_DATA_BEGIN\n" + payload + "\nSOURCE_DATA_END", spans_by_id
+
+
+def _eligible_generation_scope(
+    source: dict[str, Any], chunks: list[dict[str, Any]]
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]] | None]:
+    if source.get("scope_rule_version") != "gemini-fulltext-arctic-eligibility-v2":
+        return None, None
+    try:
+        evidence = json.loads(source["scope_evidence_json"])
+    except (KeyError, TypeError, json.JSONDecodeError) as error:
+        raise ValueError("the eligible Arctic scope record is invalid") from error
+    resolved = evidence.get("resolved_eligible_arctic_scope")
+    if not isinstance(resolved, dict):
+        raise ValueError("the eligible Arctic scope record is absent")
+    component = resolved.get("component")
+    finding_records = resolved.get("finding_spans")
+    phrases = resolved.get("question_scope_phrases")
+    if (
+        component not in {"whole_study", "separable_arctic_component"}
+        or not isinstance(finding_records, list)
+        or not finding_records
+        or not isinstance(phrases, list)
+        or any(not isinstance(phrase, str) or not phrase for phrase in phrases)
+    ):
+        raise ValueError("the eligible Arctic scope record is invalid")
+    spans: list[dict[str, Any]] = []
+    for record in finding_records:
+        quote = record.get("quote") if isinstance(record, dict) else None
+        source_hash = (
+            record.get("source_bytes_sha256") if isinstance(record, dict) else None
+        )
+        if (
+            not isinstance(quote, str)
+            or not quote.strip()
+            or source_hash != sha256_bytes(quote.encode("utf-8"))
+        ):
+            raise ValueError("an eligible Arctic finding span is invalid")
+        located = None
+        for chunk in chunks:
+            start = str(chunk["text"]).find(quote)
+            if start < 0:
+                continue
+            end = start + len(quote)
+            text_hash = sha256_bytes(quote.encode("utf-8"))
+            located = {
+                "span_id": stable_id(
+                    FINDING_SPAN_CONTRACT_VERSION,
+                    chunk["chunk_id"],
+                    start,
+                    end,
+                    text_hash,
+                ),
+                "chunk_id": chunk["chunk_id"],
+                "start_offset": start,
+                "end_offset": end,
+                "text_sha256": text_hash,
+                "text": quote,
+            }
+            break
+        if located is None:
+            raise ValueError("an eligible Arctic finding span is not in source chunks")
+        if located["span_id"] not in {span["span_id"] for span in spans}:
+            spans.append(located)
+    scope = {
+        "component": component,
+        "question_scope_phrases": list(phrases),
+        "eligibility_job_key": evidence.get("eligibility_job_key"),
+        "finding_spans": finding_records,
+    }
+    return scope, spans
+
+
+def _require_arctic_scope_custody(
+    answer: dict[str, Any], arctic_scope: dict[str, Any] | None
+) -> None:
+    if arctic_scope is None or arctic_scope.get("component") != (
+        "separable_arctic_component"
+    ):
+        return
+    quote = str(answer.get("evidence_quote") or "")
+    required = answer.get("required_question_phrases")
+    scope_phrases = [
+        phrase
+        for phrase in arctic_scope.get("question_scope_phrases", [])
+        if phrase in quote
+    ]
+    if not scope_phrases or not isinstance(required, list) or not any(
+        phrase in required for phrase in scope_phrases
+    ):
+        raise CandidateRejectedError(
+            "eligible_arctic_scope_missing_from_finding",
+            "the selected finding does not retain its separable Arctic scope",
+        )
 
 
 def _finding_spans(chunk: dict[str, Any]) -> list[dict[str, Any]]:

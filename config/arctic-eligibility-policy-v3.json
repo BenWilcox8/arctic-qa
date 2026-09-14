@@ -1,0 +1,66 @@
+{
+  "protocol_id": "arctic-corpus-search-r1-protocol-v3",
+  "supersedes": "arctic-corpus-search-r1-protocol-v2",
+  "frozen_at_utc": "2026-09-14T02:20:00Z",
+  "purpose": "Scientific eligibility for an Arctic paper corpus. This policy does not generate QA findings or evaluate models.",
+  "core_geography": {
+    "boundary_latitude_north": 66.56,
+    "latitude_first_rule": "An actual observation, sample, field site, modeled domain, or reported result at or north of 66.56 degrees north is Arctic on land or sea. A missing marine region name cannot override an explicit qualifying latitude.",
+    "actual_study_evidence_only": "Coordinates and location names must describe actual study activity or a reported result. Titles, affiliations, background statements, citations, temperature values, and longitude values do not prove study geography.",
+    "named_region_fallback": "When coordinates are absent, use only a documented bounded named region that is wholly north of 66.56 degrees north.",
+    "boundary_crossing_region_rule": "A region that crosses 66.56 degrees north requires evidence for a separable northern site, domain, stratum, or result.",
+    "mixed_study_rule": "Retain a separable Arctic component and restrict downstream findings and questions to its evidence spans. Keep a whole-paper aggregate uncertain when its Arctic component is not separable.",
+    "failure_rule": "Fail geography only when all actual study activity is outside the boundary or the Arctic reference is incidental.",
+    "bounded_region_fallback": {
+      "wholly_north": [
+        "Central Arctic Ocean",
+        "Arctic Ocean",
+        "Lincoln Sea",
+        "Canada Basin",
+        "Eurasian Basin",
+        "Nansen Basin",
+        "Amundsen Basin",
+        "Makarov Basin",
+        "Svalbard",
+        "Novaya Zemlya"
+      ],
+      "crosses_boundary_requires_northern_evidence": [
+        "Beaufort Sea",
+        "East Siberian Sea",
+        "Laptev Sea",
+        "Kara Sea",
+        "Chukchi Sea",
+        "Barents Sea",
+        "Greenland Sea",
+        "Baffin Bay",
+        "Bering Sea",
+        "Norwegian Sea",
+        "Hudson Bay"
+      ]
+    }
+  },
+  "inclusion": [
+    "Published primary scientific finding.",
+    "Stable DOI or repository identifier.",
+    "Actual study-setting evidence meets the core geography rule for the whole study or a separable component.",
+    "Source access and rights permit private analysis.",
+    "No accessible retraction or result-changing unresolved correction evidence."
+  ],
+  "exclusion": [
+    "Review, editorial, nonresearch, or source without primary findings.",
+    "Retracted source or result-changing correction.",
+    "Duplicate version when a preferred published version exists.",
+    "All actual study activity is outside the Arctic boundary or Arctic references are incidental.",
+    "Sensitive knowledge or location without approved handling."
+  ],
+  "pending_rules": [
+    "Metadata discovery never proves the study setting.",
+    "A mixed study remains uncertain when its Arctic findings are not separable.",
+    "A boundary-crossing named region remains uncertain without northern-site evidence.",
+    "Missing access is independent from scientific eligibility.",
+    "Preprints and version families remain separate until version relation is established.",
+    "Unknown correction or retraction status is recorded as unknown."
+  ],
+  "dates": "No publication-date cutoff.",
+  "languages": "No language restriction at discovery. English-readable full text is required for this automated text-screening run."
+}

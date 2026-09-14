@@ -987,6 +987,77 @@ def test_received_response_is_recovered_after_final_receipt_write_crash(
     assert transport.methods == ["countTokens", "generateContent"]
 
 
+def test_pretransport_settlement_recovers_only_a_reviewed_interrupted_reservation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import arctic_qa.model_broker as broker_module
+
+    transport = Transport()
+    values = fixture(tmp_path, transport=transport)
+    broker = values["broker"]
+    original_reserve = broker._reserve
+
+    def interrupted_after_reserve(**kwargs: object) -> None:
+        original_reserve(**kwargs)
+        raise OSError("simulated fsync interruption after reservation")
+
+    monkeypatch.setattr(broker, "_reserve", interrupted_after_reserve)
+    with pytest.raises(OSError, match="fsync interruption"):
+        execute(broker)
+
+    before = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    request_key, request = next(iter(before["requests"].items()))
+    assert request["state"] == "submitted"
+    assert list((tmp_path / "receipts").glob("*.json")) == []
+    assert transport.methods == ["countTokens"]
+
+    reviewed_request = {
+        "request_key": request_key,
+        "run_id": request["run_id"],
+        "stage": request["stage"],
+        "paper_id": request["paper_id"],
+        "family_id": request["family_id"],
+        "state": "submitted",
+        "reserved_usd": request["reserved_usd"],
+    }
+    monkeypatch.setattr(
+        broker_module, "PRETRANSPORT_SETTLEMENT_REQUEST", reviewed_request
+    )
+    review = tmp_path / "independent-review.md"
+    evidence = tmp_path / "interruption-evidence.md"
+    review.write_text("No transport occurred.\n", encoding="utf-8")
+    evidence.write_text("Reservation fsync completed before interruption.\n", encoding="utf-8")
+
+    result = broker.settle_pretransport_reservation(
+        request_key=request_key,
+        expected_ledger_sha256=sha256_file(values["ledger"]),
+        review_file=review,
+        traceback_evidence_file=evidence,
+    )
+
+    assert result["applied"] is True
+    assert transport.methods == ["countTokens"]
+    settlement = json.loads(
+        Path(result["settlement_receipt"]).read_text(encoding="utf-8")
+    )
+    assert settlement["sidecars_absent"] == ["final", "received", "submitted", "trace"]
+    after = broker.status()
+    assert Decimal(after["reserved_usd"]) == Decimal("0")
+    assert Decimal(after["spent_usd"]) == Decimal("0")
+    final = json.loads(
+        (tmp_path / "receipts" / f"{request_key}.json").read_text(encoding="utf-8")
+    )
+    assert final["live_call_made"] is False
+    assert "response" not in final
+    repeated = broker.settle_pretransport_reservation(
+        request_key=request_key,
+        expected_ledger_sha256=sha256_file(values["ledger"]),
+        review_file=review,
+        traceback_evidence_file=evidence,
+    )
+    assert repeated["applied"] is False
+
+
 def test_deleted_request_cannot_orphan_immutable_spend_events(tmp_path: Path):
     values = fixture(tmp_path, transport=Transport())
     assert execute(values["broker"])["state"] == "completed"

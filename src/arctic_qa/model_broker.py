@@ -75,6 +75,16 @@ AUTHORIZED_CAP_REASON = "the paid request exceeds the authorized live-test cap"
 PER_REQUEST_CAP_REASON = "the paid request exceeds USD 0.25"
 ALLOWED_LIVE_TEST_LIMITS = {(20, 100), (40, 100), (41, 101), (None, None)}
 STREAM_INPUT_BINDING_VERSION = "stream-input-binding-v1"
+PRETRANSPORT_SETTLEMENT_SCHEMA = "shared-paid-call-pretransport-settlement-v1"
+PRETRANSPORT_SETTLEMENT_REQUEST = {
+    "request_key": "445c8935c5dc9d1c5d03fe7d4d15308fd57d0e68f8d2d21bf310875b85b5512b",
+    "run_id": "first-production-6fbdf41-r1",
+    "stage": "finding_answer_extraction",
+    "paper_id": "10.1007/s44295-026-00097-4",
+    "family_id": "family-c44489994cd247de1375",
+    "state": "submitted",
+    "reserved_usd": "0.036094",
+}
 STREAM_INPUT_GATE_FIELDS = {
     "continuation_artifact",
     "continuation_access_run_id",
@@ -1233,6 +1243,22 @@ class SharedGeminiBroker:
             final = _read(final_path)
             if any(final.get(name) != request.get(name) for name in base_fields):
                 raise ValueError("an immutable final event changed request identity")
+            settlement_path = (
+                self.receipts_dir / f"{request_key}.pretransport-settlement.json"
+            )
+            settlement_sha256 = request.get("pretransport_settlement_sha256")
+            if settlement_sha256 is not None:
+                if (
+                    state != "completed"
+                    or not settlement_path.is_file()
+                    or sha256_file(settlement_path) != settlement_sha256
+                    or not self._pretransport_settlement_valid(
+                        settlement_path, request, final
+                    )
+                ):
+                    raise ValueError("a pretransport settlement event changed")
+            elif settlement_path.is_file():
+                raise ValueError("an unapplied pretransport settlement event exists")
             reconciliation = reconciliation_events.pop(request_key, None)
             reconciliation_sha256 = request.get("usage_reconciliation_sha256")
             if reconciliation_sha256 is not None:
@@ -1290,6 +1316,58 @@ class SharedGeminiBroker:
             accepted_events[family_id] = item_id
         if accepted_events != ledger["accepted_families"]:
             raise ValueError("the accepted-item ledger differs from immutable events")
+
+    def _pretransport_settlement_valid(
+        self, path: Path, request: dict[str, Any], final: dict[str, Any]
+    ) -> bool:
+        try:
+            event = _read(path)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return False
+        required = {
+            "schema", "request_key", "ledger_sha256_before", "request_identity",
+            "sidecars_absent", "traceback_evidence_file", "traceback_evidence_sha256",
+            "review_file", "review_file_sha256", "gate_sha256",
+            "config_transition_sha256", "actual_cost_usd", "live_call_made",
+            "settled_at_utc",
+        }
+        identity_keys = {
+            "run_id", "stage", "paper_id", "family_id", "source_version_id",
+            "request_sha256", "reserved_usd", "submitted_at_utc",
+        }
+        if (
+            not isinstance(event, dict)
+            or set(event) != required
+            or event.get("schema") != PRETRANSPORT_SETTLEMENT_SCHEMA
+            or event.get("request_key") != request.get("request_key")
+            or event.get("request_identity")
+            != {key: request.get(key) for key in identity_keys}
+            or event.get("sidecars_absent") != ["final", "received", "submitted", "trace"]
+            or event.get("actual_cost_usd") != "0"
+            or event.get("live_call_made") is not False
+            or event.get("config_transition_sha256")
+            != request.get("config_transition_sha256")
+            or event.get("gate_sha256") != request.get("gate_sha256")
+            or final.get("state") != "completed"
+            or final.get("live_call_made") is not False
+            or final.get("actual_cost_usd") != "0"
+            or final.get("usage")
+            != {
+                "promptTokenCount": 0,
+                "candidatesTokenCount": 0,
+                "thoughtsTokenCount": 0,
+            }
+            or final.get("pretransport_settlement_sha256") != sha256_file(path)
+        ):
+            return False
+        for path_key, hash_key in (
+            ("traceback_evidence_file", "traceback_evidence_sha256"),
+            ("review_file", "review_file_sha256"),
+        ):
+            evidence_path = Path(str(event.get(path_key) or ""))
+            if not evidence_path.is_file() or sha256_file(evidence_path) != event.get(hash_key):
+                return False
+        return True
 
     def _read_usage_reconciliation(self, path: Path) -> dict[str, Any]:
         event = _read(path)
@@ -2218,6 +2296,129 @@ class SharedGeminiBroker:
                     "actual_cost_usd": str(actual),
                     "reconciliation_receipt": str(reconciliation_path),
                     "reconciliation_receipt_sha256": reconciliation_sha256,
+                }
+        finally:
+            operation.close()
+
+    def settle_pretransport_reservation(
+        self,
+        *,
+        request_key: str,
+        expected_ledger_sha256: str,
+        review_file: Path,
+        traceback_evidence_file: Path,
+    ) -> dict[str, Any]:
+        """Settle one reviewed reservation that stopped before provider transport."""
+        if request_key != PRETRANSPORT_SETTLEMENT_REQUEST["request_key"]:
+            raise ValueError("the request is not approved for pretransport settlement")
+        operation = self._operation_lock_file.open("a+")
+        try:
+            fcntl.flock(operation, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            operation.close()
+            raise ValueError("another paid broker operation is active") from error
+        try:
+            with self._lock_file.open("a+") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                ledger = self._validated_ledger()
+                request = ledger["requests"].get(request_key)
+                if request is None:
+                    raise ValueError("the reviewed reservation does not exist")
+                settlement_path = self.receipts_dir / f"{request_key}.pretransport-settlement.json"
+                applied_hash = request.get("pretransport_settlement_sha256")
+                if applied_hash is not None:
+                    if not settlement_path.is_file() or sha256_file(settlement_path) != applied_hash:
+                        raise ValueError("the pretransport settlement record changed")
+                    return {
+                        "schema": "shared-paid-call-pretransport-settlement-result-v1",
+                        "request_key": request_key,
+                        "applied": False,
+                        "settlement_receipt": str(settlement_path),
+                        "settlement_receipt_sha256": applied_hash,
+                    }
+                if sha256_file(self.ledger_file) != expected_ledger_sha256:
+                    raise ValueError("the reviewed reservation ledger changed")
+                if any(
+                    request.get(field) != value
+                    for field, value in PRETRANSPORT_SETTLEMENT_REQUEST.items()
+                ):
+                    raise ValueError("the reviewed reservation identity changed")
+                event_stem = self._request_event_stem(request_key, request)
+                sidecars = {
+                    "final": self.receipts_dir / f"{event_stem}.json",
+                    "submitted": self.receipts_dir / f"{event_stem}.submitted.json",
+                    "received": self.receipts_dir / f"{event_stem}.received.json",
+                    "trace": self.receipts_dir / f"{request_key}.request-trace.json",
+                }
+                if settlement_path.exists() or any(path.exists() for path in sidecars.values()):
+                    raise ValueError("a pretransport settlement sidecar already exists")
+                if not review_file.is_file() or not traceback_evidence_file.is_file():
+                    raise ValueError("the reviewed pretransport evidence is absent")
+                gate = _validate_gate(self.execution_gate_file, request["phase"])
+                if request.get("gate_sha256") != sha256_file(self.execution_gate_file):
+                    raise ValueError("the reviewed reservation gate changed")
+                reserved = _money(request["reserved_usd"], "reservation", positive=True)
+                event = {
+                    "schema": PRETRANSPORT_SETTLEMENT_SCHEMA,
+                    "request_key": request_key,
+                    "ledger_sha256_before": expected_ledger_sha256,
+                    "request_identity": {key: request[key] for key in (
+                        "run_id", "stage", "paper_id", "family_id", "source_version_id",
+                        "request_sha256", "reserved_usd", "submitted_at_utc",
+                    )},
+                    "sidecars_absent": sorted(sidecars),
+                    "traceback_evidence_file": str(traceback_evidence_file.resolve()),
+                    "traceback_evidence_sha256": sha256_file(traceback_evidence_file),
+                    "review_file": str(review_file.resolve()),
+                    "review_file_sha256": sha256_file(review_file),
+                    "gate_sha256": sha256_file(self.execution_gate_file),
+                    "config_transition_sha256": request.get("config_transition_sha256"),
+                    "actual_cost_usd": "0",
+                    "live_call_made": False,
+                    "settled_at_utc": _now(),
+                }
+                atomic_json(settlement_path, event, immutable=True)
+                settlement_sha256 = sha256_file(settlement_path)
+                final_path = sidecars["final"]
+                final = {
+                    **request,
+                    "state": "completed",
+                    "actual_cost_usd": "0",
+                    "usage": {
+                        "promptTokenCount": 0,
+                        "candidatesTokenCount": 0,
+                        "thoughtsTokenCount": 0,
+                    },
+                    "live_call_made": False,
+                    "pretransport_settlement_sha256": settlement_sha256,
+                    "completed_at_utc": _now(),
+                }
+                atomic_json(final_path, final, immutable=True)
+                ledger["reserved_usd"] = str(_money(ledger["reserved_usd"], "reserved") - reserved)
+                ledger["inflight"] -= 1
+                for row in (
+                    ledger["stages"][request["stage"]],
+                    ledger["papers"][request["family_id"]],
+                ):
+                    row["reserved_usd"] = str(_money(row["reserved_usd"], "reserved") - reserved)
+                if request["phase"] == "live_test":
+                    live = ledger["live_test_papers"][request["family_id"]]
+                    live["reserved_usd"] = str(_money(live["reserved_usd"], "reserved") - reserved)
+                request.update({
+                    "state": "completed",
+                    "actual_cost_usd": "0",
+                    "usage": final["usage"],
+                    "pretransport_settlement_sha256": settlement_sha256,
+                    "completed_at_utc": final["completed_at_utc"],
+                })
+                ledger["updated_at_utc"] = _now()
+                self._commit_ledger(ledger)
+                return {
+                    "schema": "shared-paid-call-pretransport-settlement-result-v1",
+                    "request_key": request_key,
+                    "applied": True,
+                    "settlement_receipt": str(settlement_path),
+                    "settlement_receipt_sha256": settlement_sha256,
                 }
         finally:
             operation.close()

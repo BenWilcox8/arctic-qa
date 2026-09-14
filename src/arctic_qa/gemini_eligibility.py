@@ -26,6 +26,7 @@ CRITERIA = (
 )
 
 ELIGIBILITY_RESPONSE_V2 = "eligibility-response-v2"
+ELIGIBILITY_RESPONSE_V3 = "eligibility-response-v3"
 ELIGIBILITY_STATUS_MAPPING_VERSION = "eligibility-criterion-status-map-v1"
 
 
@@ -155,7 +156,11 @@ def _segments(text: str, page_chars: int = 12000) -> list[dict[str, Any]]:
 
 def _response_contract_version(schema: dict[str, Any]) -> str:
     value = (schema.get("properties") or {}).get("schema_version", {}).get("const")
-    return value if value == ELIGIBILITY_RESPONSE_V2 else "eligibility-response-v1"
+    return (
+        value
+        if value in {ELIGIBILITY_RESPONSE_V2, ELIGIBILITY_RESPONSE_V3}
+        else "eligibility-response-v1"
+    )
 
 
 def _line_fragments(text: str, maximum_bytes: int) -> list[str]:
@@ -246,11 +251,14 @@ def _span_blocks_v2(
     return blocks
 
 
-def _span_manifest_v2(blocks: list[dict[str, Any]]) -> dict[str, Any]:
+def _span_manifest_v2(
+    blocks: list[dict[str, Any]],
+    response_schema_version: str = ELIGIBILITY_RESPONSE_V2,
+) -> dict[str, Any]:
     extraction_sha256 = blocks[0]["extraction_sha256"] if blocks else sha256_bytes(b"")
     return {
         "schema": "eligibility-span-manifest-v1",
-        "response_schema_version": ELIGIBILITY_RESPONSE_V2,
+        "response_schema_version": response_schema_version,
         "extraction_sha256": extraction_sha256,
         "blocks": [
             {
@@ -292,7 +300,10 @@ def _span_manifest_v2(blocks: list[dict[str, Any]]) -> dict[str, Any]:
 def _validation_evidence(
     text: str, extraction_sha256: str, schema: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    if _response_contract_version(schema) == ELIGIBILITY_RESPONSE_V2:
+    if _response_contract_version(schema) in {
+        ELIGIBILITY_RESPONSE_V2,
+        ELIGIBILITY_RESPONSE_V3,
+    }:
         return _span_blocks_v2(text, extraction_sha256)
     return _segments(text)
 
@@ -313,9 +324,12 @@ def _persist_span_manifest_v2(
     extraction_sha256: str,
     schema: dict[str, Any],
 ) -> dict[str, str]:
-    if _response_contract_version(schema) != ELIGIBILITY_RESPONSE_V2:
+    response_version = _response_contract_version(schema)
+    if response_version not in {ELIGIBILITY_RESPONSE_V2, ELIGIBILITY_RESPONSE_V3}:
         return {}
-    manifest = _span_manifest_v2(_span_blocks_v2(text, extraction_sha256))
+    manifest = _span_manifest_v2(
+        _span_blocks_v2(text, extraction_sha256), response_version
+    )
     manifest_sha256 = sha256_bytes(canonical_json(manifest).encode())
     path = run_dir / "span-manifests" / f"{job_key}.json"
     atomic_json(path, manifest, immutable=True)
@@ -438,15 +452,16 @@ def _request_payload(
         "extracted_text_sha256": str(source["extraction_sha256"]),
         "metadata_sha256": sha256_bytes(canonical_json(metadata).encode()),
     }
-    if _response_contract_version(schema) == ELIGIBILITY_RESPONSE_V2:
+    response_version = _response_contract_version(schema)
+    if response_version in {ELIGIBILITY_RESPONSE_V2, ELIGIBILITY_RESPONSE_V3}:
         span_blocks = _span_blocks_v2(text, str(source["extraction_sha256"]))
-        span_manifest = _span_manifest_v2(span_blocks)
+        span_manifest = _span_manifest_v2(span_blocks, response_version)
         hashes["span_manifest_sha256"] = sha256_bytes(
             canonical_json(span_manifest).encode()
         )
         user_text = "\n".join(
             (
-                "<ELIGIBILITY_SCREEN_REQUEST_V2>",
+                f"<ELIGIBILITY_SCREEN_REQUEST_{response_version[-2:].upper()}>",
                 f"request_id: {request_id}",
                 f"status_mapping_version: {ELIGIBILITY_STATUS_MAPPING_VERSION}",
                 f"input_hashes: {canonical_json(hashes)}",
@@ -456,7 +471,7 @@ def _request_payload(
                 "ARTICLE_SPANS_BEGIN",
                 _render_span_blocks_v2(span_blocks),
                 "ARTICLE_SPANS_END",
-                "</ELIGIBILITY_SCREEN_REQUEST_V2>",
+                f"</ELIGIBILITY_SCREEN_REQUEST_{response_version[-2:].upper()}>",
             )
         )
         return (
@@ -1165,7 +1180,9 @@ def _status_mapping_v2(by_id: dict[str, dict[str, Any]]) -> tuple[str, list[str]
 
 
 def _span_catalog_v2(
-    blocks: list[dict[str, Any]], expected_hashes: dict[str, Any]
+    blocks: list[dict[str, Any]],
+    expected_hashes: dict[str, Any],
+    response_schema_version: str = ELIGIBILITY_RESPONSE_V2,
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
     errors: list[str] = []
     catalog: dict[str, dict[str, Any]] = {}
@@ -1273,7 +1290,9 @@ def _span_catalog_v2(
         errors.append("evidence_catalog_changed")
     try:
         manifest_sha256 = sha256_bytes(
-            canonical_json(_span_manifest_v2(blocks)).encode()
+            canonical_json(
+                _span_manifest_v2(blocks, response_schema_version)
+            ).encode()
         )
     except (KeyError, TypeError):
         manifest_sha256 = None
@@ -1283,12 +1302,28 @@ def _span_catalog_v2(
     return catalog, sorted(set(errors))
 
 
-def _validate_response_v2(
+def _resolved_scope_span(span: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "span_id": span["span_id"],
+        "locator": {
+            "source_block_id": span["source_block_id"],
+            "section_id": span["section_id"],
+            "page_id": span["page_id"],
+        },
+        "start_byte": span["start_byte"],
+        "end_byte": span["end_byte"],
+        "quote": span["text"],
+        "source_bytes_sha256": span["span_sha256"],
+    }
+
+
+def _validate_response_span_contract(
     value: Any,
     blocks: list[dict[str, Any]],
     *,
     expected: dict[str, Any],
     response_schema: dict[str, Any],
+    response_schema_version: str,
 ) -> dict[str, Any]:
     errors = _schema_errors(value, response_schema, response_schema)
     required = {
@@ -1300,6 +1335,8 @@ def _validate_response_v2(
         "correction_metadata_used",
         "input_echo",
     }
+    if response_schema_version == ELIGIBILITY_RESPONSE_V3:
+        required.add("eligible_arctic_scope")
     if not isinstance(value, dict) or set(value) != required:
         return {
             "valid": False,
@@ -1310,7 +1347,7 @@ def _validate_response_v2(
             "mapping_version": ELIGIBILITY_STATUS_MAPPING_VERSION,
         }
     if (
-        value.get("schema_version") != ELIGIBILITY_RESPONSE_V2
+        value.get("schema_version") != response_schema_version
         or value.get("request_id") != expected["request_id"]
     ):
         errors.append("response_identity_mismatch")
@@ -1326,7 +1363,9 @@ def _validate_response_v2(
     ) <= set(missing_context):
         errors.append("known_context_gap_hidden")
 
-    catalog, catalog_errors = _span_catalog_v2(blocks, expected["input_echo"])
+    catalog, catalog_errors = _span_catalog_v2(
+        blocks, expected["input_echo"], response_schema_version
+    )
     errors.extend(catalog_errors)
     trusted_catalog = not catalog_errors
     criteria = value.get("criteria") if isinstance(value.get("criteria"), list) else []
@@ -1414,12 +1453,88 @@ def _validate_response_v2(
                 )
     if set(by_id) != set(CRITERIA):
         errors.append("criterion_set_invalid")
+    resolved_scope: dict[str, Any] | None = None
+    if response_schema_version == ELIGIBILITY_RESPONSE_V3:
+        scope = value.get("eligible_arctic_scope")
+        geography = by_id.get("study_geography", {})
+        if not isinstance(scope, dict) or set(scope) != {
+            "component",
+            "activity_span_ids",
+            "finding_span_ids",
+            "question_scope_phrases",
+        }:
+            errors.append("eligible_arctic_scope_invalid")
+        else:
+            component = scope.get("component")
+            activity_ids = scope.get("activity_span_ids")
+            finding_ids = scope.get("finding_span_ids")
+            phrases = scope.get("question_scope_phrases")
+            lists_valid = all(
+                isinstance(values, list)
+                and len(values) == len(set(values))
+                and all(isinstance(item, str) and item for item in values)
+                for values in (activity_ids, finding_ids, phrases)
+            )
+            if not lists_valid:
+                errors.append("eligible_arctic_scope_invalid")
+            elif geography.get("status") == "satisfied":
+                if (
+                    component not in {"whole_study", "separable_arctic_component"}
+                    or not activity_ids
+                    or not finding_ids
+                ):
+                    errors.append("eligible_arctic_scope_missing")
+                unknown = [
+                    span_id
+                    for span_id in [*activity_ids, *finding_ids]
+                    if span_id not in catalog
+                ]
+                geography_ids = {
+                    span_id
+                    for evidence in geography.get("evidence", [])
+                    if isinstance(evidence, dict)
+                    for span_id in evidence.get("span_ids", [])
+                    if isinstance(span_id, str)
+                }
+                if unknown:
+                    errors.append("eligible_arctic_scope_span_unknown")
+                if not set(activity_ids) <= geography_ids:
+                    errors.append("eligible_arctic_scope_activity_unbound")
+                if component == "separable_arctic_component" and not phrases:
+                    errors.append("eligible_arctic_scope_phrase_missing")
+                finding_text = "\n".join(
+                    catalog[span_id]["text"]
+                    for span_id in finding_ids
+                    if span_id in catalog
+                )
+                if any(phrase not in finding_text for phrase in phrases):
+                    errors.append("eligible_arctic_scope_phrase_unbound")
+                if not unknown and trusted_catalog:
+                    resolved_scope = {
+                        "component": component,
+                        "activity_spans": [
+                            _resolved_scope_span(catalog[span_id])
+                            for span_id in activity_ids
+                        ],
+                        "finding_spans": [
+                            _resolved_scope_span(catalog[span_id])
+                            for span_id in finding_ids
+                        ],
+                        "question_scope_phrases": list(phrases),
+                    }
+            elif component != "none" or activity_ids or finding_ids or phrases:
+                errors.append("eligible_arctic_scope_must_be_empty")
     mapped, reason_codes = _status_mapping_v2(by_id)
     unique_errors = sorted(set(errors))
     return {
         "valid": not unique_errors,
         "errors": unique_errors,
         "resolved_evidence": resolved if not catalog_errors else [],
+        **(
+            {"resolved_eligible_arctic_scope": resolved_scope}
+            if response_schema_version == ELIGIBILITY_RESPONSE_V3
+            else {}
+        ),
         "decision": mapped if not unique_errors else "uncertain",
         "overall_reason_codes": reason_codes,
         "mapping_version": ELIGIBILITY_STATUS_MAPPING_VERSION,
@@ -1433,12 +1548,14 @@ def validate_response(
     expected: dict[str, Any],
     response_schema: dict[str, Any],
 ) -> dict[str, Any]:
-    if _response_contract_version(response_schema) == ELIGIBILITY_RESPONSE_V2:
-        return _validate_response_v2(
+    response_version = _response_contract_version(response_schema)
+    if response_version in {ELIGIBILITY_RESPONSE_V2, ELIGIBILITY_RESPONSE_V3}:
+        return _validate_response_span_contract(
             value,
             segments,
             expected=expected,
             response_schema=response_schema,
+            response_schema_version=response_version,
         )
     return _validate_response_v1(
         value,

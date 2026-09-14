@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "status_mapping_version", "request_id", "criteria", "eligible_arctic_scope", "known_missing_context", "correction_metadata_used", "input_echo"],
+  "properties": {
+    "schema_version": {"const": "eligibility-response-v3"},
+    "status_mapping_version": {"const": "eligibility-criterion-status-map-v1"},
+    "request_id": {"type": "string"},
+    "criteria": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": {"$ref": "#/$defs/criterion"}
+    },
+    "eligible_arctic_scope": {"$ref": "#/$defs/arctic_scope"},
+    "known_missing_context": {"type": "array", "items": {"type": "string"}},
+    "correction_metadata_used": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provided", "source", "as_of", "known_status"],
+      "properties": {
+        "provided": {"type": "boolean"},
+        "source": {"type": ["string", "null"]},
+        "as_of": {"type": ["string", "null"]},
+        "known_status": {"enum": ["clear", "correction", "retraction", "unknown"]}
+      }
+    },
+    "input_echo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy_sha256", "source_version_sha256", "extracted_text_sha256", "metadata_sha256", "span_manifest_sha256"],
+      "properties": {
+        "policy_sha256": {"type": "string"},
+        "source_version_sha256": {"type": "string"},
+        "extracted_text_sha256": {"type": "string"},
+        "metadata_sha256": {"type": "string"},
+        "span_manifest_sha256": {"type": "string"}
+      }
+    }
+  },
+  "$defs": {
+    "criterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["criterion_id", "status", "reason_codes", "evidence", "missing_context"],
+      "properties": {
+        "criterion_id": {"enum": ["published_primary_findings", "stable_identity_version", "study_geography", "access_rights_evidence", "correction_retraction_coverage"]},
+        "status": {"enum": ["satisfied", "failed", "uncertain"]},
+        "reason_codes": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "missing_context": {"type": "array", "items": {"type": "string"}},
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["span_ids"],
+            "properties": {
+              "span_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "maxItems": 12
+              }
+            }
+          }
+        }
+      }
+    },
+    "arctic_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["component", "activity_span_ids", "finding_span_ids", "question_scope_phrases"],
+      "properties": {
+        "component": {"enum": ["whole_study", "separable_arctic_component", "none"]},
+        "activity_span_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 24},
+        "finding_span_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 24},
+        "question_scope_phrases": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 12}
+      }
+    }
+  }
+}
