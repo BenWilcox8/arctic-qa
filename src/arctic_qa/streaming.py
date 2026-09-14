@@ -414,7 +414,7 @@ def run_stream(
             (campaign_id, source_id),
         )
         terminal_candidate = db.one(
-            """SELECT item_id,status FROM candidates
+            """SELECT item_id,status,candidate_json FROM candidates
             WHERE run_id=? AND source_id=?
             AND status IN ('rejected','machine_accepted_unverified','incomplete_non_mcq')
             ORDER BY updated_at DESC,item_id DESC LIMIT 1""",
@@ -423,11 +423,7 @@ def run_stream(
         if existing_candidate:
             resumed_papers += 1
         if terminal_candidate:
-            event = db.one(
-                """SELECT label,reason_codes_json FROM validation_events
-                WHERE item_id=? ORDER BY created_at DESC,event_id DESC LIMIT 1""",
-                (terminal_candidate["item_id"],),
-            )
+            event = _validation_event_for_stored_candidate(db, terminal_candidate)
             expected_label = (
                 "rejected"
                 if terminal_candidate["status"] == "rejected"
@@ -435,7 +431,7 @@ def run_stream(
             )
             if event is None or event["label"] != expected_label:
                 raise ValueError(
-                    "a terminal streaming candidate lacks its validation event"
+                    "a terminal streaming candidate lacks a validation event for its payload"
                 )
             reason_codes = json.loads(event["reason_codes_json"])
             if not isinstance(reason_codes, list) or any(
@@ -678,6 +674,19 @@ def run_stream(
     }
     progress.write("completed", "completed", "Streaming pipeline completed.")
     return result
+
+
+def _validation_event_for_stored_candidate(
+    db: Database, candidate: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Return the newest validation result bound to this exact stored payload."""
+    candidate_hash = stable_id("candidate-payload", candidate["candidate_json"])
+    return db.one(
+        """SELECT label,reason_codes_json FROM validation_events
+        WHERE item_id=? AND json_extract(details_json, '$.candidate_hash')=?
+        ORDER BY created_at DESC,event_id DESC LIMIT 1""",
+        (candidate["item_id"], candidate_hash),
+    )
 
 
 def _bind_provider(
