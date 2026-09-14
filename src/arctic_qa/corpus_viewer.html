@@ -370,11 +370,11 @@
 
     <section class="panel method-panel" id="pipeline-method" aria-labelledby="pipeline-method-title">
       <h2 id="pipeline-method-title">Actual dataset-construction method</h2>
-      <p class="method-intro">This diagram shows the current pipeline and a latitude-first correction that is prepared pending activation. A paper can leave at an eligibility, QA, or validation gate. Machine acceptance is a retained engineering label. It is not a scientific truth judgment.</p>
+      <p class="method-intro">This diagram shows the active pipeline. The active latitude-first policy uses actual study sites at or above 66.56° N, on land or sea. A paper can leave at an eligibility, QA, or validation gate. Machine acceptance is a retained engineering label. It is not a scientific truth judgment.</p>
       <div class="activity-wrap" tabindex="0" aria-label="Scrollable vertical pipeline activity diagram">
         <svg class="activity-svg" viewBox="0 0 720 1940" role="img" aria-labelledby="activity-title activity-description">
           <title id="activity-title">Vertical activity diagram of the implemented Arctic QA pipeline</title>
-          <desc id="activity-description">Full text passes through latitude-first eligibility, finding selection, two generation arms, independent answer checks, distractor checks, validation, and immutable export. The prepared correction uses actual study sites at or above 66.56 degrees north, on land or sea. It retains separable Arctic components for scoped QA. It leaves insufficient or inseparable evidence unresolved. Historical decisions remain retained until activation.</desc>
+          <desc id="activity-description">Full text passes through active latitude-first eligibility, finding selection, two generation arms, independent answer checks, distractor checks, validation, and immutable export. The policy uses actual study sites at or above 66.56 degrees north, on land or sea. It retains separable Arctic components for scoped QA. It leaves insufficient or inseparable evidence unresolved. Historical decisions remain retained.</desc>
           <defs>
             <marker id="activity-arrow" markerHeight="8" markerWidth="8" orient="auto" refX="7" refY="4"><path d="M0,0 L8,4 L0,8 z" fill="#78909a"></path></marker>
           </defs>
@@ -392,7 +392,7 @@
           <text class="activity-edge-label" x="112" y="258">excluded</text><text class="activity-edge-label" x="520" y="258">unresolved</text>
           <text class="activity-edge-label" x="112" y="918">QA gate fails</text><text class="activity-edge-label" x="520" y="1458">fewer than 3 pass</text>
           <g class="activity-node" id="activity-start"><title>Start with a retained working full-text source</title><circle cx="360" cy="35" r="20"></circle></g>
-          <g class="activity-node" id="activity-eligibility"><title>The prepared latitude-first correction uses actual study sites at or above 66.56 degrees north, on land or sea. It is not active for historical decisions.</title><rect x="210" y="105" width="300" height="70" rx="10"></rect><text x="360" y="135">Latitude-first eligibility</text><text class="activity-note" x="360" y="156">sites at least 66.56° N, land or sea</text></g>
+          <g class="activity-node" id="activity-eligibility"><title>The active latitude-first policy uses actual study sites at or above 66.56 degrees north, on land or sea. Historical decisions remain retained.</title><rect x="210" y="105" width="300" height="70" rx="10"></rect><text x="360" y="135">Latitude-first eligibility</text><text class="activity-note" x="360" y="156">sites at least 66.56° N, land or sea</text></g>
           <g class="activity-node" id="activity-eligibility-gate"><title>Separable Arctic components remain eligible for scoped QA. Insufficient or inseparable evidence is unresolved.</title><polygon points="360,225 495,270 360,315 225,270"></polygon><text x="360" y="266">Eligible?</text><text class="activity-note" x="360" y="286">scoped Arctic component retained</text></g>
           <g class="activity-node exit" id="activity-excluded"><title>Terminal scientific eligibility exclusion. Historical decisions remain retained.</title><rect x="20" y="365" width="170" height="70" rx="10"></rect><text x="105" y="395">Excluded</text><text class="activity-note" x="105" y="416">historical decision retained</text></g>
           <g class="activity-node exit" id="activity-unresolved"><title>Terminal unresolved scientific eligibility state for insufficient or inseparable evidence. Historical decisions remain retained.</title><rect x="530" y="365" width="170" height="70" rx="10"></rect><text x="615" y="395">Unresolved</text><text class="activity-note" x="615" y="416">insufficient or inseparable</text></g>
@@ -412,7 +412,7 @@
           <g class="activity-node terminal" id="activity-end"><title>End with retained evidence and an explicit terminal state</title><rect x="260" y="1845" width="200" height="65" rx="32"></rect><text x="360" y="1874">Retained result</text><text class="activity-note" x="360" y="1894">no human acceptance implied</text></g>
         </svg>
       </div>
-      <p class="method-limits">The latitude-first correction is prepared pending activation. It uses actual study sites at or above 66.56° N, on land or sea. Separable Arctic components remain for scoped QA. Insufficient or inseparable evidence is unresolved. Historical decisions remain retained and do not claim this correction. Roles: the author model proposes findings, questions, and distractors. The verifier model reconstructs answers and checks exact options. Deterministic code enforces source locators, scope, bindings, and export rules. The read-only viewer never starts a run.</p>
+      <p class="method-limits">The active latitude-first policy is v3. It uses eligibility prompt v5, eligibility schema v3, and generation prompt v14. It uses actual study sites at or above 66.56° N, on land or sea. Separable Arctic components remain for scoped QA. Insufficient or inseparable evidence is unresolved. Historical decisions remain retained. Roles: the author model proposes findings, questions, and distractors. The verifier model reconstructs answers and checks exact options. Deterministic code enforces source locators, scope, bindings, and export rules. The read-only viewer never starts a run.</p>
     </section>
 
     <section class="panel trace-panel" id="pipeline-inspector" aria-labelledby="pipeline-inspector-title">
@@ -1824,8 +1824,27 @@
         const policy = streaming.budget_policy || {};
         const campaign = streaming.production_campaign || {};
         $('streaming-meta').textContent = `Progress record ${streaming.run_id || 'not selected'} | Invocation ${streaming.invocation_run_id || 'not recorded'} | Current stage ${label(streaming.current_stage)} | Updated ${dateText(streaming.updated_at_utc || broker.updated_at_utc)} | Cumulative submissions ${formatNumber(broker.generation_submissions)} | In flight ${formatNumber(broker.inflight)} | Stop reason ${broker.halt_reason || streaming.stop_reason || 'none recorded'}`;
+        const methodology = campaign.methodology || {};
+        const predecessors = Array.isArray(campaign.predecessor_segments) ? campaign.predecessor_segments : [];
+        const methodText = [
+          methodology.eligibility_policy_version && `Policy ${label(methodology.eligibility_policy_version)}`,
+          methodology.eligibility_prompt_version && `Eligibility prompt ${label(methodology.eligibility_prompt_version)}`,
+          methodology.eligibility_schema_version && `Eligibility schema ${label(methodology.eligibility_schema_version)}`,
+          methodology.generation_prompt_version && `Generation prompt ${label(methodology.generation_prompt_version)}`,
+        ].filter(Boolean).join(' | ');
+        const predecessorText = predecessors.length
+          ? `Retains predecessor ${predecessors.map((segment) => `${segment.segment_id}: ${segment.run_id}`).join(', ')}`
+          : '';
         $('campaign-detail').textContent = campaign.campaign_id
-          ? `Current production campaign ${campaign.campaign_id} | Run ${campaign.invocation_run_id || 'not recorded'} | Phase ${label(campaign.phase)} | Actual state ${label(campaign.state)}`
+          ? [
+            `Current production campaign ${campaign.campaign_id}`,
+            `Run ${campaign.invocation_run_id || 'not recorded'}`,
+            campaign.segment_id && `Segment ${campaign.segment_id}`,
+            `Phase ${label(campaign.phase)}`,
+            `Actual state ${label(campaign.state)}`,
+            methodText,
+            predecessorText,
+          ].filter(Boolean).join(' | ')
           : 'No production campaign plan is selected.';
         const streamingOrder = ['full_text_ready', 'eligibility_completed', 'eligible', 'excluded', 'unresolved', 'generation_rejected', 'legacy_rejected_or_unresolved', 'accepted_qa'];
         $('streaming-counts').replaceChildren(...streamingOrder.map((name) => { const box = document.createElement('div'); box.className = 'count'; box.append(text('span', label(name)), text('strong', formatNumber(streaming.counts?.[name]))); return box; }));

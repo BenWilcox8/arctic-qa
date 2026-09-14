@@ -1047,6 +1047,115 @@ def test_production_campaign_and_trial_package_are_explicit_and_allowlisted(
         thread.join(timeout=5)
 
 
+def test_successor_production_plan_binds_active_segment_to_retained_predecessor(
+    tmp_path: Path,
+) -> None:
+    fixture_corpus(tmp_path)
+    progress = tmp_path / "streaming-progress.json"
+    write_json(
+        progress,
+        {
+            "schema": "streaming-dataset-progress-v1",
+            "state": "running",
+            "run_id": "campaign-1",
+            "invocation_run_id": "production-1-geo-v3",
+            "current_stage": "generation",
+            "updated_at_utc": datetime.now(UTC).isoformat(),
+            "counts": {"full_text_ready": 2, "accepted_qa": 0},
+            "recent_papers": [],
+        },
+    )
+    plan = tmp_path / "successor-production-plan.json"
+    plan_payload = {
+        "schema": "arctic-qa-full-run-plan-v2",
+        "future_scientific_run": {
+            "campaign_id": "campaign-1",
+            "run_id": "production-1-geo-v3",
+            "phase": "away_production",
+        },
+        "run_segment_lineage": {
+            "active_segment": {
+                "segment_id": "geography-v3",
+                "campaign_id": "campaign-1",
+                "run_id": "production-1-geo-v3",
+                "execution_gate_sha256": "b" * 64,
+            },
+            "predecessor_segments": [
+                {
+                    "segment_id": "initial-v2",
+                    "campaign_id": "campaign-1",
+                    "run_id": "production-1",
+                    "run_manifest_sha256": "a" * 64,
+                }
+            ],
+        },
+        "methodology": {
+            "eligibility_policy_version": "arctic-eligibility-policy-v3",
+            "eligibility_prompt_version": "gemini-eligibility-prompt-v5",
+            "eligibility_schema_version": "gemini-eligibility-v3",
+            "generation_prompt_version": "arctic-qa-generation-v14",
+        },
+        "budget_and_ledger": {
+            "remaining_to_planning_cap_usd": "50.000000",
+            "spent_usd": "11.614496",
+            "planning_cumulative_cap_usd": "61.614496",
+        },
+        "generation_configuration": {"budget_policy": {}},
+    }
+    write_json(plan, plan_payload)
+    artifacts = CorpusArtifacts(
+        tmp_path,
+        "test-run",
+        tmp_path / "runtime",
+        streaming_progress_file=progress,
+        production_plan_file=plan,
+    )
+    campaign = artifacts.state()["streaming_pipeline"]["production_campaign"]
+    assert campaign["state"] == "running"
+    assert campaign["segment_id"] == "geography-v3"
+    assert campaign["predecessor_segments"] == [
+        {"segment_id": "initial-v2", "run_id": "production-1"}
+    ]
+    assert campaign["methodology"]["generation_prompt_version"] == (
+        "arctic-qa-generation-v14"
+    )
+
+    plan_payload["run_segment_lineage"]["active_segment"]["run_id"] = "unrelated-run"
+    write_json(plan, plan_payload)
+    invalid = CorpusArtifacts(
+        tmp_path,
+        "test-run",
+        tmp_path / "invalid-runtime",
+        streaming_progress_file=progress,
+        production_plan_file=plan,
+    ).state()["streaming_pipeline"]
+    assert invalid["telemetry"] == "invalid"
+    assert invalid["state"] == "error"
+    assert invalid["message"] == (
+        "Streaming-pipeline record error: the production plan lineage is invalid"
+    )
+
+    plan_payload["run_segment_lineage"]["active_segment"]["run_id"] = (
+        "production-1-geo-v3"
+    )
+    write_json(plan, plan_payload)
+    progress_payload = json.loads(progress.read_text(encoding="utf-8"))
+    progress_payload["invocation_run_id"] = "unrelated-run"
+    write_json(progress, progress_payload)
+    mismatch = CorpusArtifacts(
+        tmp_path,
+        "test-run",
+        tmp_path / "mismatch-runtime",
+        streaming_progress_file=progress,
+        production_plan_file=plan,
+    ).state()["streaming_pipeline"]
+    assert mismatch["telemetry"] == "invalid"
+    assert mismatch["state"] == "error"
+    assert mismatch["message"] == (
+        "Streaming-pipeline record error: the production plan and progress run do not match"
+    )
+
+
 class FakePipelineTraceStore:
     def __init__(self) -> None:
         self.state = "rejected"

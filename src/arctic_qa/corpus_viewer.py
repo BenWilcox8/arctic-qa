@@ -872,13 +872,78 @@ class CorpusArtifacts:
                 policy_ref = (plan.get("generation_configuration") or {}).get(
                     "budget_policy"
                 ) or {}
+                plan_schema = plan.get("schema")
                 if (
-                    plan.get("schema") != "arctic-qa-full-run-plan-v1"
+                    plan_schema
+                    not in {
+                        "arctic-qa-full-run-plan-v1",
+                        "arctic-qa-full-run-plan-v2",
+                    }
                     or not isinstance(future_run, dict)
                     or not isinstance(plan_budget, dict)
                     or not isinstance(policy_ref, dict)
                 ):
                     raise ValueError("the production plan is invalid")
+                active_segment: dict[str, Any] = {}
+                predecessor_segments: list[dict[str, str]] = []
+                methodology: dict[str, str] = {}
+                if plan_schema == "arctic-qa-full-run-plan-v2":
+                    lineage = plan.get("run_segment_lineage")
+                    if not isinstance(lineage, dict):
+                        raise ValueError("the production plan lineage is invalid")
+                    active_segment = lineage.get("active_segment") or {}
+                    predecessor_values = lineage.get("predecessor_segments")
+                    methodology = plan.get("methodology") or {}
+                    if (
+                        not isinstance(active_segment, dict)
+                        or not isinstance(predecessor_values, list)
+                        or not predecessor_values
+                        or not isinstance(methodology, dict)
+                        or active_segment.get("campaign_id")
+                        != future_run.get("campaign_id")
+                        or active_segment.get("run_id") != future_run.get("run_id")
+                        or not isinstance(active_segment.get("segment_id"), str)
+                        or not active_segment["segment_id"]
+                        or not isinstance(
+                            active_segment.get("execution_gate_sha256"), str
+                        )
+                        or not re.fullmatch(
+                            r"[0-9a-f]{64}", active_segment["execution_gate_sha256"]
+                        )
+                        or any(
+                            not isinstance(methodology.get(key), str)
+                            or not methodology[key]
+                            for key in (
+                                "eligibility_policy_version",
+                                "eligibility_prompt_version",
+                                "eligibility_schema_version",
+                                "generation_prompt_version",
+                            )
+                        )
+                    ):
+                        raise ValueError("the production plan lineage is invalid")
+                    for predecessor in predecessor_values:
+                        if (
+                            not isinstance(predecessor, dict)
+                            or predecessor.get("campaign_id")
+                            != future_run.get("campaign_id")
+                            or not isinstance(predecessor.get("segment_id"), str)
+                            or not predecessor["segment_id"]
+                            or not isinstance(predecessor.get("run_id"), str)
+                            or not predecessor["run_id"]
+                            or predecessor["run_id"] == future_run.get("run_id")
+                            or not isinstance(predecessor.get("run_manifest_sha256"), str)
+                            or not re.fullmatch(
+                                r"[0-9a-f]{64}", predecessor["run_manifest_sha256"]
+                            )
+                        ):
+                            raise ValueError("the production plan lineage is invalid")
+                        predecessor_segments.append(
+                            {
+                                "segment_id": predecessor["segment_id"],
+                                "run_id": predecessor["run_id"],
+                            }
+                        )
                 if policy is not None and policy_ref.get("sha256") != sha256_file(
                     self.streaming_budget_policy_file
                 ):
@@ -916,6 +981,15 @@ class CorpusArtifacts:
                     "prior_test_spend_usd": plan_budget.get("spent_usd"),
                     "cumulative_ceiling_usd": plan_budget.get(
                         "planning_cumulative_cap_usd"
+                    ),
+                    **(
+                        {
+                            "segment_id": active_segment["segment_id"],
+                            "predecessor_segments": predecessor_segments,
+                            "methodology": methodology,
+                        }
+                        if plan_schema == "arctic-qa-full-run-plan-v2"
+                        else {}
                     ),
                 }
             return result
