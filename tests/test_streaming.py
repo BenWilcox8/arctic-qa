@@ -152,7 +152,7 @@ def test_compound_unit_rule_without_source_tolerance_remains_rejected() -> None:
 def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
     properties = generation_module.NUMERIC_RULE_SCHEMA["properties"]
 
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v12"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v13"
     assert (
         generation_module.NUMERIC_RULE_CONTRACT_VERSION
         == "numeric-rule-source-support-v2"
@@ -185,8 +185,28 @@ def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
     assert "Do not invent" in properties["rounding_rule"]["description"]
 
 
+def test_generation_prompt_requires_atomic_answers_and_aligned_questions() -> None:
+    answer_instructions = generation_module.ANSWER_FORMAT_INSTRUCTIONS
+    question_instructions = generation_module.QUESTION_ALIGNMENT_INSTRUCTIONS
+    answer_text_schema = generation_module.ANSWER_SCHEMA["properties"]["text"]
+
+    assert generation_module.FINDING_POLICY_VERSION.endswith("-v5")
+    assert "only the concise answer" in answer_instructions
+    assert "Do not restate the question" in answer_instructions
+    assert "unrelated values" in answer_instructions
+    assert "12 cases" in answer_instructions
+    assert "higher at Site A" in answer_instructions
+    assert "necessary unit" in answer_instructions
+    assert "matching numeric metadata" in answer_instructions
+    assert "exactly the content of answer.text" in question_instructions
+    assert "one component of a multi-value answer" in question_instructions
+    assert "multiple values" in question_instructions
+    assert "concise answer" in answer_text_schema["description"]
+    assert "necessary units" in answer_text_schema["description"]
+
+
 def test_generation_schemas_require_concise_review_justifications() -> None:
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v12"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v13"
     assert (
         generation_module.MODEL_JUSTIFICATION_CONTRACT_VERSION
         == "model-justification-v1"

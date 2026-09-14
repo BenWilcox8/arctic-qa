@@ -271,6 +271,16 @@ It does not prove that the selected span entails the answer.
 The reconstructor, answer verifier, distractor writer, and option verifier also select source span IDs.
 The program copies stored text and offsets into each downstream record.
 Each role gets a distinct rejection code for an unknown span ID.
+
+Generation prompt version 12 keeps model justifications in separate rationale fields.
+These fields preserve the selection and verification records without adding rationale text to the answer.
+Generation prompt version 13 requires one concise answer for one focused question.
+Finding policy version 5 applies this answer selection rule to new findings.
+It keeps necessary units, entities, relations, and qualifiers in the answer.
+It permits multiple values only when the question requests all of them.
+The question writer must request exactly the content of `answer.text`.
+Version 13 does not change the blind reconstruction input or the acceptance gates.
+Existing records and receipts keep their original prompt versions and decisions.
 See [the shared model broker guide](SHARED_MODEL_BROKER.md) for the exact command and rules.
 An immutable-event failure republishes broker status with `halted` set to `true` and `integrity_valid` set to `false`.
 The broker observer updates streaming progress to bind that halted status.
