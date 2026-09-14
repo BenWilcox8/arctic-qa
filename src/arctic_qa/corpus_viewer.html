@@ -501,12 +501,18 @@
       </div>
       <div class="source-counts" id="streaming-counts" aria-label="Streaming pipeline counts"></div>
       <p class="meta" id="streaming-count-scope">Pipeline counts describe the current incremental invocation. They are not cumulative scientific totals. Shared ledger counts and costs are cumulative.</p>
+      <p class="meta" id="campaign-detail"></p>
       <div class="source-counts" id="budget-counts" aria-label="Shared budget counts"></div>
       <div class="telemetry-grid">
         <div><h3>Actual cost by model stage</h3><div class="compact-table" id="stage-costs"><div class="loading">No shared ledger selected.</div></div></div>
         <div><h3>Recent paper pathways</h3><div class="compact-table" id="paper-costs"><div class="loading">No paper activity recorded.</div></div></div>
       </div>
       <p><a class="download-link" id="dataset-download" href="/downloads/dataset-metadata.json" hidden>Download validated dataset metadata</a></p>
+      <div id="trial-package" hidden>
+        <h3>Trial publication example</h3>
+        <p class="meta" id="trial-package-detail"></p>
+        <p id="trial-package-downloads"></p>
+      </div>
     </section>
 
     <div class="grid">
@@ -1625,7 +1631,11 @@
         $('streaming-detail').textContent = streaming.message || 'No integrated pipeline progress is available.';
         const broker = streaming.broker || {};
         const policy = streaming.budget_policy || {};
+        const campaign = streaming.production_campaign || {};
         $('streaming-meta').textContent = `Progress record ${streaming.run_id || 'not selected'} | Invocation ${streaming.invocation_run_id || 'not recorded'} | Current stage ${label(streaming.current_stage)} | Updated ${dateText(streaming.updated_at_utc || broker.updated_at_utc)} | Cumulative submissions ${formatNumber(broker.generation_submissions)} | In flight ${formatNumber(broker.inflight)} | Stop reason ${broker.halt_reason || streaming.stop_reason || 'none recorded'}`;
+        $('campaign-detail').textContent = campaign.campaign_id
+          ? `Current production campaign ${campaign.campaign_id} | Run ${campaign.invocation_run_id || 'not recorded'} | Phase ${label(campaign.phase)} | Actual state ${label(campaign.state)}`
+          : 'No production campaign plan is selected.';
         const streamingOrder = ['full_text_ready', 'eligibility_completed', 'eligible', 'excluded', 'unresolved', 'generation_rejected', 'legacy_rejected_or_unresolved', 'accepted_qa'];
         $('streaming-counts').replaceChildren(...streamingOrder.map((name) => { const box = document.createElement('div'); box.className = 'count'; box.append(text('span', label(name)), text('strong', formatNumber(streaming.counts?.[name]))); return box; }));
         const usage = broker.usage || {};
@@ -1641,9 +1651,10 @@
           ['project lifetime', capLine(policy.project_lifetime_ceiling_usd, usage.project_lifetime_usd, remaining.project_lifetime_usd)],
           ['evaluation reserve', capLine(policy.reserved_for_benchmark_evaluation_usd, usage.benchmark_evaluation_usd, remaining.benchmark_evaluation_usd)],
           ['construction allocation', capLine(policy.dataset_construction_allocation_usd, usage.dataset_construction_usd, remaining.dataset_construction_usd)],
-          ['review checkpoint', capLine(policy.construction_review_checkpoint_usd, usage.construction_checkpoint_usd, remaining.construction_checkpoint_usd)],
-          ['away session', capLine(policy.away_session_total_ceiling_usd, usage.away_session_usd, remaining.away_session_usd)],
-          ['live test', capLine(policy.live_test_suballocation_usd, usage.live_test_usd, remaining.live_test_usd)],
+          ['overall generation review ceiling', capLine(policy.construction_review_checkpoint_usd, usage.construction_checkpoint_usd, remaining.construction_checkpoint_usd)],
+          ['new production campaign', capLine(campaign.incremental_ceiling_usd, Math.max(0, Number(usage.away_session_usd || 0) - Number(campaign.prior_test_spend_usd || 0)).toFixed(6), remaining.away_session_usd)],
+          ['shared cumulative campaign', capLine(campaign.cumulative_ceiling_usd || policy.away_session_total_ceiling_usd, usage.away_session_usd, remaining.away_session_usd)],
+          ['prior tests', `Settled ${money(campaign.prior_test_spend_usd || usage.live_test_usd)} | Included in the shared cumulative campaign`],
           ['accepted questions', capLine(policy.accepted_question_target, usage.accepted_questions, remaining.accepted_questions, 'count')],
           ['live-test papers', capLine(policy.live_test_maximum_papers, usage.live_test_papers, remaining.live_test_papers, 'count', true)],
           ['live-test submissions', capLine(policy.live_test_maximum_generation_submissions, usage.live_test_generation_submissions, remaining.live_test_generation_submissions, 'count', true)],
@@ -1665,6 +1676,20 @@
           return { name: `${title} - ${pathway}`, ...row };
         }), 'Paper', true);
         $('dataset-download').hidden = !streaming.dataset_metadata_available;
+        const publication = data.publication_package || {};
+        $('trial-package').hidden = publication.state !== 'available';
+        $('trial-package-detail').textContent = publication.message || 'No trial publication package is available.';
+        $('trial-package-downloads').replaceChildren(...(publication.files || []).map((file, index) => {
+          const link = document.createElement('a');
+          link.className = 'download-link';
+          link.href = `/downloads/trial-publication/${encodeURIComponent(file.key)}`;
+          link.download = file.filename;
+          link.textContent = `${label(file.label)} (${formatNumber(file.size_bytes)} bytes)`;
+          const fragment = document.createDocumentFragment();
+          if (index) fragment.append(document.createTextNode(' | '));
+          fragment.append(link);
+          return fragment;
+        }));
         setBadge($('discovery-verdict'), data.readiness.metadata_discovery.verdict);
         $('discovery-condition').textContent = data.readiness.metadata_discovery.completion_condition;
         setBadge($('prefilter-verdict'), data.readiness.metadata_prefilter.verdict);

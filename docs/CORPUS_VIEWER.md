@@ -34,7 +34,7 @@ PYTHONPATH=src python -m arctic_qa corpus-view \
 
 Stop the foreground process with `Ctrl-C`.
 
-The server exposes only `/`, `/api/state`, `/api/candidates`, `/api/pipeline-trace`, `/api/pipeline-trace/paper`, `/api/pipeline-trace/stage`, `/healthz`, and one fixed metadata download route.
+The server exposes only `/`, `/api/state`, `/api/candidates`, `/api/pipeline-trace`, `/api/pipeline-trace/paper`, `/api/pipeline-trace/stage`, `/healthz`, and fixed download routes.
 It does not expose source files, PDFs, credentials, directories, or arbitrary paths.
 
 ## Per-paper pipeline inspector
@@ -77,6 +77,8 @@ For the integrated streaming view, also pass these optional files:
 - `--streaming-budget-policy-file` selects the frozen budget grant.
 - `--streaming-progress-file` selects a small `streaming-dataset-progress-v1` record.
 - `--dataset-metadata-file` selects a validated export manifest for download.
+- `--production-plan-file` selects the exact plan for the current production campaign.
+- `--publication-package-dir` selects one manifest-backed trial publication package.
 - `--project-overview-file` selects the maintained editorial project status.
 
 The streaming progress record can contain at most 100 recent paper rows.
@@ -113,6 +115,16 @@ It also shows per-paper remaining cost in the paper table.
 An absent or inconsistent custody record appears as an error.
 
 It never serves provider receipts, source text, PDFs, or credentials.
+
+The production plan adds the campaign ID, invocation run ID, phase, and budget scopes.
+The viewer labels the current invocation state from the canonical progress record.
+It does not treat a planning record as proof that a campaign started.
+
+The optional publication package is a trial example, not a production result.
+Its manifest must describe one question with two variants.
+The viewer verifies every exposed file hash before it shows download links.
+It exposes only the manifest, six data files, and two historical renderer companions.
+It does not expose source custody copies or other package paths.
 
 ## Project progress overview
 

@@ -926,6 +926,127 @@ def test_http_surface_is_read_only_and_restricted(tmp_path: Path) -> None:
         thread.join(timeout=5)
 
 
+def test_production_campaign_and_trial_package_are_explicit_and_allowlisted(
+    tmp_path: Path,
+) -> None:
+    fixture_corpus(tmp_path)
+    progress = tmp_path / "streaming-progress.json"
+    write_json(
+        progress,
+        {
+            "schema": "streaming-dataset-progress-v1",
+            "state": "running",
+            "run_id": "campaign-1",
+            "invocation_run_id": "production-1",
+            "current_stage": "generation",
+            "updated_at_utc": datetime.now(UTC).isoformat(),
+            "counts": {"full_text_ready": 2, "accepted_qa": 0},
+            "recent_papers": [],
+        },
+    )
+    plan = tmp_path / "production-plan.json"
+    write_json(
+        plan,
+        {
+            "schema": "arctic-qa-full-run-plan-v1",
+            "future_scientific_run": {
+                "campaign_id": "campaign-1",
+                "run_id": "production-1",
+                "phase": "away_production",
+            },
+            "budget_and_ledger": {
+                "remaining_to_planning_cap_usd": "50.000000",
+                "spent_usd": "11.614496",
+                "planning_cumulative_cap_usd": "61.614496",
+            },
+            "generation_configuration": {"budget_policy": {}},
+        },
+    )
+    package = tmp_path / "trial-package"
+    data_names = {
+        "benchmark_csv": "benchmark-inputs.csv",
+        "benchmark_jsonl": "benchmark-inputs.jsonl",
+        "reviewer_csv": "reviewer-items.csv",
+        "reviewer_jsonl": "reviewer-items.jsonl",
+        "scoring_csv": "scoring-labels.csv",
+        "scoring_jsonl": "scoring-labels.jsonl",
+    }
+    file_records = {}
+    for key, name in data_names.items():
+        path = package / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{key}\n", encoding="utf-8")
+        file_records[key] = {"path": name, "sha256": sha256_file(path)}
+    templates = []
+    for role in ("generation", "validation"):
+        path = package / "historical-prompt-bundle" / f"{role}-v10-fixture.py"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# {role}\n", encoding="utf-8")
+        templates.append(
+            {
+                "historical": True,
+                "kind": "renderer",
+                "path": str(path.relative_to(package)),
+                "sha256": sha256_file(path),
+            }
+        )
+    write_json(
+        package / "manifest.json",
+        {
+            "schema_version": "arctic-qa-publication-review-v1",
+            "benchmark_item_count": 2,
+            "reviewer_item_count": 2,
+            "files": file_records,
+            "historical_prompt_templates": templates,
+        },
+    )
+    artifacts = CorpusArtifacts(
+        tmp_path,
+        "test-run",
+        tmp_path / "runtime",
+        streaming_progress_file=progress,
+        production_plan_file=plan,
+        publication_package_dir=package,
+    )
+    state = artifacts.state()
+    campaign = state["streaming_pipeline"]["production_campaign"]
+    assert campaign == {
+        "campaign_id": "campaign-1",
+        "invocation_run_id": "production-1",
+        "phase": "away_production",
+        "state": "running",
+        "incremental_ceiling_usd": "50.000000",
+        "prior_test_spend_usd": "11.614496",
+        "cumulative_ceiling_usd": "61.614496",
+    }
+    publication = state["publication_package"]
+    assert publication["trial_example"] is True
+    assert len(publication["files"]) == 9
+    assert "path" not in publication["files"][0]
+
+    server = CorpusServer(("127.0.0.1", 0), artifacts)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with urllib.request.urlopen(
+            f"{base}/downloads/trial-publication/benchmark_csv"
+        ) as response:
+            assert response.read() == b"benchmark_csv\n"
+            assert response.headers["Content-Type"].startswith("text/csv")
+        with urllib.request.urlopen(
+            f"{base}/downloads/trial-publication/manifest"
+        ) as response:
+            assert json.loads(response.read())["benchmark_item_count"] == 2
+        with pytest.raises(urllib.error.HTTPError) as arbitrary:
+            urllib.request.urlopen(f"{base}/downloads/trial-publication/source_custody")
+        assert arbitrary.value.code == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 class FakePipelineTraceStore:
     def __init__(self) -> None:
         self.state = "rejected"

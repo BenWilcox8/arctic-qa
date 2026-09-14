@@ -84,6 +84,8 @@ def parser() -> argparse.ArgumentParser:
     viewer.add_argument("--streaming-budget-policy-file", type=Path)
     viewer.add_argument("--streaming-progress-file", type=Path)
     viewer.add_argument("--dataset-metadata-file", type=Path)
+    viewer.add_argument("--production-plan-file", type=Path)
+    viewer.add_argument("--publication-package-dir", type=Path)
     viewer.add_argument("--project-overview-file", type=Path)
     viewer.add_argument("--research-timeline-file", type=Path)
     viewer.add_argument("--pipeline-namespace", type=Path)
@@ -439,6 +441,8 @@ def main(argv: list[str] | None = None) -> int:
                 streaming_budget_policy_file=args.streaming_budget_policy_file,
                 streaming_progress_file=args.streaming_progress_file,
                 dataset_metadata_file=args.dataset_metadata_file,
+                production_plan_file=args.production_plan_file,
+                publication_package_dir=args.publication_package_dir,
                 project_overview_file=args.project_overview_file,
                 research_timeline_file=args.research_timeline_file,
                 pipeline_namespace=args.pipeline_namespace,

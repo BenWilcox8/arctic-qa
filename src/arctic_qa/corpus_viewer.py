@@ -59,6 +59,16 @@ PROJECT_PROGRESS_SCHEMA = "project-progress-overview-v1"
 PROJECT_PROGRESS_MAX_BYTES = 131_072
 RESEARCH_TIMELINE_SCHEMA = "research-fleet-timeline-v1"
 RESEARCH_TIMELINE_MAX_BYTES = 262_144
+PUBLICATION_MANIFEST_MAX_BYTES = 131_072
+PUBLICATION_FILE_MAX_BYTES = 2_000_000
+PUBLICATION_DATA_FILES = {
+    "benchmark_csv": "text/csv; charset=utf-8",
+    "benchmark_jsonl": "application/x-ndjson; charset=utf-8",
+    "reviewer_csv": "text/csv; charset=utf-8",
+    "reviewer_jsonl": "application/x-ndjson; charset=utf-8",
+    "scoring_csv": "text/csv; charset=utf-8",
+    "scoring_jsonl": "application/x-ndjson; charset=utf-8",
+}
 RESEARCH_TIMELINE_KINDS = {
     "code_change",
     "review",
@@ -226,6 +236,8 @@ class CorpusArtifacts:
         streaming_budget_policy_file: Path | None = None,
         streaming_progress_file: Path | None = None,
         dataset_metadata_file: Path | None = None,
+        production_plan_file: Path | None = None,
+        publication_package_dir: Path | None = None,
         project_overview_file: Path | None = None,
         research_timeline_file: Path | None = None,
         pipeline_trace_store: Any | None = None,
@@ -266,6 +278,12 @@ class CorpusArtifacts:
         )
         self.dataset_metadata_file = (
             dataset_metadata_file.resolve() if dataset_metadata_file else None
+        )
+        self.production_plan_file = (
+            production_plan_file.resolve() if production_plan_file else None
+        )
+        self.publication_package_dir = (
+            publication_package_dir.resolve() if publication_package_dir else None
         )
         self.project_overview_file = (
             project_overview_file.resolve() if project_overview_file else None
@@ -365,6 +383,12 @@ class CorpusArtifacts:
             _file_fingerprint(self.streaming_budget_policy_file),
             _file_fingerprint(self.streaming_progress_file),
             _file_fingerprint(self.dataset_metadata_file),
+            _file_fingerprint(self.production_plan_file),
+            _file_fingerprint(
+                self.publication_package_dir / "manifest.json"
+                if self.publication_package_dir
+                else None
+            ),
             _file_fingerprint(self.project_overview_file),
             _file_fingerprint(self.research_timeline_file),
         ]
@@ -841,6 +865,59 @@ class CorpusArtifacts:
                         "the streaming progress and dataset metadata do not match"
                     )
             result["dataset_metadata_available"] = dataset_available
+            if self.production_plan_file and self.production_plan_file.is_file():
+                plan = _read_json(self.production_plan_file)
+                future_run = plan.get("future_scientific_run") or {}
+                plan_budget = plan.get("budget_and_ledger") or {}
+                policy_ref = (plan.get("generation_configuration") or {}).get(
+                    "budget_policy"
+                ) or {}
+                if (
+                    plan.get("schema") != "arctic-qa-full-run-plan-v1"
+                    or not isinstance(future_run, dict)
+                    or not isinstance(plan_budget, dict)
+                    or not isinstance(policy_ref, dict)
+                ):
+                    raise ValueError("the production plan is invalid")
+                if policy is not None and policy_ref.get("sha256") != sha256_file(
+                    self.streaming_budget_policy_file
+                ):
+                    raise ValueError(
+                        "the production plan and budget policy do not match"
+                    )
+                campaign_matches = bool(
+                    progress
+                    and progress.get("run_id") == future_run.get("campaign_id")
+                    and progress.get("invocation_run_id") == future_run.get("run_id")
+                )
+                if (
+                    progress
+                    and progress.get("state")
+                    in {
+                        "running",
+                        "paused",
+                        "completed",
+                    }
+                    and not campaign_matches
+                ):
+                    raise ValueError(
+                        "the production plan and progress run do not match"
+                    )
+                result["production_campaign"] = {
+                    "campaign_id": future_run.get("campaign_id"),
+                    "invocation_run_id": future_run.get("run_id"),
+                    "phase": future_run.get("phase"),
+                    "state": progress.get("state")
+                    if campaign_matches
+                    else "not_observed",
+                    "incremental_ceiling_usd": plan_budget.get(
+                        "remaining_to_planning_cap_usd"
+                    ),
+                    "prior_test_spend_usd": plan_budget.get("spent_usd"),
+                    "cumulative_ceiling_usd": plan_budget.get(
+                        "planning_cumulative_cap_usd"
+                    ),
+                }
             return result
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
             return {
@@ -863,6 +940,124 @@ class CorpusArtifacts:
         } <= set(value):
             raise RuntimeError("validated dataset metadata has an unsupported shape")
         return _safe_json_bytes(value)
+
+    def _publication_package(self, *, include_paths: bool = False) -> dict[str, Any]:
+        root = self.publication_package_dir
+        if root is None:
+            return {
+                "state": "not_selected",
+                "trial_example": True,
+                "message": "No trial publication package is selected.",
+                "files": [],
+            }
+        manifest_path = root / "manifest.json"
+        if not manifest_path.is_file():
+            raise RuntimeError("the trial publication manifest is unavailable")
+        if manifest_path.stat().st_size > PUBLICATION_MANIFEST_MAX_BYTES:
+            raise RuntimeError("the trial publication manifest is too large")
+        manifest = _read_json(manifest_path)
+        if (
+            manifest.get("schema_version") != "arctic-qa-publication-review-v1"
+            or manifest.get("benchmark_item_count") != 2
+            or manifest.get("reviewer_item_count") != 2
+        ):
+            raise RuntimeError("the trial publication manifest is invalid")
+
+        files: list[dict[str, Any]] = []
+
+        def add_file(
+            key: str, label: str, relative: Any, expected_hash: Any, content_type: str
+        ) -> None:
+            if not isinstance(relative, str) or not isinstance(expected_hash, str):
+                raise RuntimeError("the trial publication file record is invalid")
+            path = (root / relative).resolve()
+            try:
+                path.relative_to(root)
+            except ValueError as error:
+                raise RuntimeError(
+                    "the trial publication path is outside its package"
+                ) from error
+            if not path.is_file() or path.stat().st_size > PUBLICATION_FILE_MAX_BYTES:
+                raise RuntimeError(
+                    "a trial publication file is unavailable or too large"
+                )
+            if sha256_file(path) != expected_hash:
+                raise RuntimeError("a trial publication file hash does not match")
+            files.append(
+                {
+                    "key": key,
+                    "label": label,
+                    "filename": path.name,
+                    "size_bytes": path.stat().st_size,
+                    "content_type": content_type,
+                    "path": path,
+                }
+            )
+
+        manifest_files = manifest.get("files")
+        if not isinstance(manifest_files, dict):
+            raise RuntimeError("the trial publication file list is invalid")
+        for key, content_type in PUBLICATION_DATA_FILES.items():
+            record = manifest_files.get(key)
+            if not isinstance(record, dict):
+                raise RuntimeError("the trial publication data files are incomplete")
+            add_file(
+                key,
+                key.replace("_", " "),
+                record.get("path"),
+                record.get("sha256"),
+                content_type,
+            )
+
+        templates = manifest.get("historical_prompt_templates")
+        if not isinstance(templates, list) or len(templates) != 2:
+            raise RuntimeError("the historical prompt companions are incomplete")
+        for record in templates:
+            if not isinstance(record, dict) or record.get("historical") is not True:
+                raise RuntimeError("a historical prompt companion is invalid")
+            relative = record.get("path")
+            name = Path(relative).name if isinstance(relative, str) else ""
+            if not re.fullmatch(r"(generation|validation)-v10-[A-Za-z0-9]+\.py", name):
+                raise RuntimeError("a historical prompt companion name is invalid")
+            role = name.split("-", 1)[0]
+            add_file(
+                f"historical_{role}_renderer",
+                f"historical {role} renderer",
+                relative,
+                record.get("sha256"),
+                "text/x-python; charset=utf-8",
+            )
+        files.insert(
+            0,
+            {
+                "key": "manifest",
+                "label": "package manifest",
+                "filename": manifest_path.name,
+                "size_bytes": manifest_path.stat().st_size,
+                "content_type": "application/json; charset=utf-8",
+                "path": manifest_path,
+            },
+        )
+        return {
+            "state": "available",
+            "trial_example": True,
+            "message": "Trial example only: one question with two variants. These are not production results.",
+            "benchmark_item_count": 2,
+            "reviewer_item_count": 2,
+            "files": files
+            if include_paths
+            else [
+                {key: value for key, value in row.items() if key != "path"}
+                for row in files
+            ],
+        }
+
+    def publication_download(self, key: str) -> tuple[bytes, str]:
+        package = self._publication_package(include_paths=True)
+        allowed = {row["key"]: row for row in package.get("files", [])}
+        if key not in allowed:
+            raise KeyError("unknown trial publication download")
+        return allowed[key]["path"].read_bytes(), allowed[key]["content_type"]
 
     @staticmethod
     def _trace_parameter(
@@ -1635,6 +1830,13 @@ class CorpusArtifacts:
             ("Streaming budget policy", self.streaming_budget_policy_file),
             ("Streaming progress", self.streaming_progress_file),
             ("Validated dataset metadata", self.dataset_metadata_file),
+            ("Production campaign plan", self.production_plan_file),
+            (
+                "Trial publication package",
+                self.publication_package_dir / "manifest.json"
+                if self.publication_package_dir
+                else None,
+            ),
             ("Project progress overview", self.project_overview_file),
             ("Research fleet timeline", self.research_timeline_file),
         ]
@@ -1921,6 +2123,15 @@ class CorpusArtifacts:
         else:
             age = None
             freshness = "unavailable"
+        try:
+            publication_package = self._publication_package()
+        except RuntimeError as error:
+            publication_package = {
+                "state": "invalid",
+                "trial_example": True,
+                "message": f"Trial publication package error: {error}",
+                "files": [],
+            }
         payload: dict[str, Any] = {
             "generated_at_utc": _utc_now(),
             "selected_run": self.run_id,
@@ -1938,6 +2149,7 @@ class CorpusArtifacts:
             "access_readiness": access,
             "gemini_screening": gemini,
             "streaming_pipeline": streaming,
+            "publication_package": publication_package,
             "project_overview": project_overview,
             "research_timeline": research_timeline,
             "artifacts": artifacts,
@@ -2271,6 +2483,12 @@ class CorpusRequestHandler(BaseHTTPRequestHandler):
                     self.artifacts.dataset_metadata(),
                     "application/json; charset=utf-8",
                 )
+            elif parsed.path.startswith("/downloads/trial-publication/"):
+                key = parsed.path.removeprefix("/downloads/trial-publication/")
+                if not re.fullmatch(r"[a-z_]{3,60}", key):
+                    raise KeyError("unknown trial publication download")
+                body, content_type = self.artifacts.publication_download(key)
+                self._send(HTTPStatus.OK, body, content_type)
             elif parsed.path == "/healthz":
                 state = self.artifacts.state()
                 status = (
@@ -2322,6 +2540,8 @@ def serve_corpus_viewer(
     streaming_budget_policy_file: Path | None,
     streaming_progress_file: Path | None,
     dataset_metadata_file: Path | None,
+    production_plan_file: Path | None,
+    publication_package_dir: Path | None,
     project_overview_file: Path | None,
     research_timeline_file: Path | None,
     host: str,
@@ -2361,6 +2581,8 @@ def serve_corpus_viewer(
         streaming_budget_policy_file=streaming_budget_policy_file,
         streaming_progress_file=streaming_progress_file,
         dataset_metadata_file=dataset_metadata_file,
+        production_plan_file=production_plan_file,
+        publication_package_dir=publication_package_dir,
         project_overview_file=project_overview_file,
         research_timeline_file=research_timeline_file,
         pipeline_trace_store=pipeline_trace_store,
@@ -2396,6 +2618,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--streaming-budget-policy-file", type=Path)
     parser.add_argument("--streaming-progress-file", type=Path)
     parser.add_argument("--dataset-metadata-file", type=Path)
+    parser.add_argument("--production-plan-file", type=Path)
+    parser.add_argument("--publication-package-dir", type=Path)
     parser.add_argument("--project-overview-file", type=Path)
     parser.add_argument("--research-timeline-file", type=Path)
     parser.add_argument("--pipeline-namespace", type=Path)
@@ -2424,6 +2648,8 @@ def main(argv: list[str] | None = None) -> int:
         streaming_budget_policy_file=args.streaming_budget_policy_file,
         streaming_progress_file=args.streaming_progress_file,
         dataset_metadata_file=args.dataset_metadata_file,
+        production_plan_file=args.production_plan_file,
+        publication_package_dir=args.publication_package_dir,
         project_overview_file=args.project_overview_file,
         research_timeline_file=args.research_timeline_file,
         pipeline_namespace=args.pipeline_namespace,
