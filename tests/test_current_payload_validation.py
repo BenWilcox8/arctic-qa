@@ -106,7 +106,9 @@ def test_does_not_apply_an_old_rejection_to_a_newer_payload(tmp_path: Path) -> N
     assert event is None
 
 
-def test_keeps_immutable_legacy_validation_events_without_a_hash(tmp_path: Path) -> None:
+def test_keeps_immutable_legacy_validation_events_without_a_hash(
+    tmp_path: Path,
+) -> None:
     db = _database(tmp_path)
     current = _candidate("item-legacy", "current")
     _insert_candidate(db, current)

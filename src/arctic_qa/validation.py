@@ -51,6 +51,7 @@ CANDIDATE_CONTRACTS = {
     "2.2.0": {
         "prompt_version": GENERATION_PROMPT_VERSION,
         "numeric_rule_contract_version": NUMERIC_RULE_CONTRACT_VERSION,
+        "direct_value_contract_version": DIRECT_SOURCE_VALUE_CONTRACT_VERSION,
         "scope_contract_version": SCOPE_CONTRACT_VERSION,
         "scope_role_semantics_version": "scope-role-semantics-v2",
         "scope_role_binding_contract_version": (
@@ -770,7 +771,7 @@ def _source_bound_directional_answer_matches(
 def _single_canonical_direction(value: str) -> str | None:
     directions = {
         DIRECTIONAL_CANONICAL_FORMS[token]
-        for token in normalize_text(value).split()
+        for token in _answer_match_text(value).split()
         if token in DIRECTIONAL_CANONICAL_FORMS
     }
     if len(directions) != 1:
@@ -788,7 +789,7 @@ def _contains_negation(value: str) -> bool:
 def _contains_canonical_direction(value: str, expected: str) -> bool:
     return any(
         DIRECTIONAL_CANONICAL_FORMS.get(token) == expected
-        for token in normalize_text(value).split()
+        for token in _answer_match_text(value).split()
     )
 
 
@@ -860,6 +861,10 @@ def _reconstruction_numeric_matches(
     except (KeyError, InvalidOperation, ValueError):
         return False
     rebuilt_unit = str(rebuilt.get("unit", ""))
+    if not _text_matches_typed_numeric(
+        str(reconstruction.get("answer", "")), rebuilt, rebuilt_value, rebuilt_unit
+    ):
+        return False
     if not _typed_numeric_scope_is_complete(answer, reconstruction):
         return False
     if not isinstance(rule, dict):
@@ -875,9 +880,34 @@ def _reconstruction_numeric_matches(
         return False
     return bool(
         value == rebuilt_value
-        and _units_are_safe_equivalents(
-            str(rule.get("unit", "")), rebuilt_unit
-        )
+        and _units_are_safe_equivalents(str(rule.get("unit", "")), rebuilt_unit)
+    )
+
+
+def _text_matches_typed_numeric(
+    text: str,
+    typed: dict[str, Any],
+    expected_value: Decimal,
+    expected_unit: str,
+) -> bool:
+    quantities = []
+    for match in NUMERIC_LITERAL_PATTERN.finditer(text):
+        unit_match = re.match(r"\s*(%|°?[A-Za-z]+)(?!\w)", text[match.end() :])
+        if unit_match and normalize_text(unit_match.group(1)) in SAFE_UNIT_SPELLINGS:
+            quantities.append((match.group("value"), unit_match.group(1)))
+    if len(quantities) != 1:
+        return False
+    literal, literal_unit = quantities[0]
+    canonical = str(typed.get("canonical_value", ""))
+    try:
+        literal_value = Decimal(literal.replace(",", "").replace("−", "-"))
+    except (InvalidOperation, ValueError):
+        return False
+    return bool(
+        literal_value == expected_value
+        and literal.replace(",", "").replace("−", "-")
+        == canonical.replace(",", "").replace("−", "-")
+        and _units_are_safe_equivalents(literal_unit, expected_unit)
     )
 
 
@@ -929,9 +959,10 @@ def _has_unrepresented_multiple_numeric_values(answer: dict[str, Any]) -> bool:
     except (KeyError, InvalidOperation, ValueError):
         return True
     return len(structured) != len(quantities) or any(
-        value != expected_value
-        or not _units_are_safe_equivalents(unit, expected_unit)
-        for (value, unit), (expected_value, expected_unit) in zip(structured, quantities)
+        value != expected_value or not _units_are_safe_equivalents(unit, expected_unit)
+        for (value, unit), (expected_value, expected_unit) in zip(
+            structured, quantities
+        )
     )
 
 
@@ -959,8 +990,7 @@ def _bounded_text_match(left: str, right: str) -> bool:
     negations = {"no", "not", "never", "neither", "nor", "without"}
     if bool(set(left.split()) & negations) != bool(set(right.split()) & negations):
         return False
-    shorter, longer = sorted((left, right), key=len)
-    return len(shorter) >= 4 and len(shorter.split()) >= 2 and shorter in longer
+    return len(left) >= 4 and len(left.split()) >= 2 and left in right
 
 
 def reconstruction_has_competing_alternatives(
@@ -1496,10 +1526,9 @@ def _is_direct_exact_source_literal_rule(
     conversion_rule = normalize_text(str(rule.get("conversion_rule", "")))
     literal = str(rule["canonical_value"]).replace(",", "")
     return bool(
-        _direct_source_value_request_is_bound(rule, provenance)
+        _direct_source_value_request_is_bound(provenance)
         and tolerance == 0
-        and _numeric_equivalence_text(tolerance_basis)
-        == _numeric_equivalence_text(f"{literal}{unit}")
+        and _text_matches_typed_numeric(tolerance_basis, rule, value, unit)
         and _contains_quantity_literal(evidence, value, unit)
         and _contains_quantity_literal(displayed, value, unit)
         and _reported_precision_matches_literal(reported_precision, literal)
@@ -1511,7 +1540,7 @@ def _is_direct_exact_source_literal_rule(
 
 
 def _direct_source_value_request_is_bound(
-    rule: dict[str, Any], provenance: dict[str, Any] | None
+    provenance: dict[str, Any] | None,
 ) -> bool:
     if not isinstance(provenance, dict):
         return False

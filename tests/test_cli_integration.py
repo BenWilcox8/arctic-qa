@@ -1338,6 +1338,149 @@ def test_generation_runs_qa_gates_before_exact_option_verification(
     assert receipt["validation"]["labels"]["mcq_eligible"] is True
 
 
+def test_generation_binds_a_direct_value_to_verifier_provenance(
+    tmp_path: Path,
+) -> None:
+    receipt = smoke(tmp_path, "direct-value-setup")
+    events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-author.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    events[0]["response"]["answer"]["numeric_rule"] = {
+        "canonical_value": "2.0",
+        "unit": "m",
+        "tolerance": "0",
+        "tolerance_basis": "2.0 m",
+        "reported_precision": "0.1",
+        "rounding_rule": "direct reporting without additional rounding",
+        "conversion_rule": "direct source reporting with no conversion",
+    }
+    author = tmp_path / "direct-value-author.jsonl"
+    author.write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n",
+        encoding="utf-8",
+    )
+
+    generated = json.loads(
+        cli(
+            tmp_path,
+            *generate_command(
+                receipt["screen"]["source_id"], "direct-value-run", author
+            ),
+        ).stdout
+    )
+
+    provenance = generated["provenance"]
+    assert generated["qa_gate_reasons"] == []
+    assert provenance["direct_value_contract_version"] == "direct-source-value-v1"
+    assert (
+        provenance["direct_value_request_id"]
+        == provenance["verification_calls"]["answer_verifier"]["request_id"]
+    )
+    assert "direct_value_contract_version" not in generated["answer"]["numeric_rule"]
+    path = write_candidate(tmp_path, generated, "direct-value-candidate.json")
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+    assert result["final_label"] == "machine_accepted_unverified"
+
+
+def test_full_validator_accepts_a_typed_directional_short_form(
+    tmp_path: Path,
+) -> None:
+    smoke(tmp_path, "typed-directional-full-path")
+    item = candidate(tmp_path)
+    quote = "The reported trend increased."
+    locator = source_locator_for_quote(tmp_path, item["source"]["source_id"], quote)
+    scope = {
+        "geography": None,
+        "population": None,
+        "period": None,
+        "method": "reported trend",
+        "comparison": None,
+        "uncertainty": None,
+    }
+    item["question"] = "How did the reported trend change?"
+    item["answer"].update(
+        {
+            "text": "The reported trend increased.",
+            "variants": [],
+            "scope": scope,
+            "required_question_phrases": ["reported trend"],
+            "deterministic_rule": {
+                "kind": "directional_relation",
+                "source_value": "trend increased",
+            },
+        }
+    )
+    item["answer"].pop("numeric_rule", None)
+    bind_source_span(item["answer"], quote, locator)
+    item["reconstruction"] = {
+        "answer": "increased",
+        "scope": scope,
+        "question_claim_type": item["answer"]["claim_type"],
+        "ambiguity_label": "one_answer",
+        "alternatives": [],
+    }
+    bind_source_span(item["reconstruction"], quote, locator)
+    item["answer_verification"].update(
+        {
+            "scope": scope,
+            "question_claim_type": item["answer"]["claim_type"],
+        }
+    )
+    bind_source_span(item["answer_verification"], quote, locator)
+    bind_qa_verification_receipts(tmp_path, item)
+    item["distractors"] = []
+    item["option_verdicts"] = []
+    path = write_candidate(tmp_path, item, "typed-directional-candidate.json")
+
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+
+    assert result["final_label"] == "machine_accepted_unverified"
+    assert result["labels"]["reconstruction_agreement"] is True
+
+
+def test_full_validator_accepts_typed_numeric_text_with_complete_scope(
+    tmp_path: Path,
+) -> None:
+    smoke(tmp_path, "typed-numeric-full-path")
+    item = candidate(tmp_path)
+    quote = (
+        "The reported water depth was 2.0 m with a source-grounded tolerance of 0.1 m."
+    )
+    locator = source_locator_for_quote(tmp_path, item["source"]["source_id"], quote)
+    scope = item["answer"]["scope"]
+    item["answer"]["text"] = "The reported water depth was 2.0 m."
+    item["answer"]["variants"] = []
+    bind_source_span(item["answer"], quote, locator)
+    item["reconstruction"] = {
+        "answer": "2.0 metres",
+        "numeric": {"canonical_value": "2.0", "unit": "m"},
+        "scope": scope,
+        "question_claim_type": item["answer"]["claim_type"],
+        "ambiguity_label": "one_answer",
+        "alternatives": ["2.0 m"],
+    }
+    bind_source_span(item["reconstruction"], quote, locator)
+    item["answer_verification"].update(
+        {
+            "scope": scope,
+            "question_claim_type": item["answer"]["claim_type"],
+        }
+    )
+    bind_source_span(item["answer_verification"], quote, locator)
+    bind_qa_verification_receipts(tmp_path, item)
+    item["distractors"] = []
+    item["option_verdicts"] = []
+    path = write_candidate(tmp_path, item, "typed-numeric-candidate.json")
+
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+
+    assert result["final_label"] == "machine_accepted_unverified"
+    assert result["labels"]["reconstruction_agreement"] is True
+
+
 def test_validation_keeps_current_legacy_candidate_contract_readable(
     tmp_path: Path,
 ) -> None:

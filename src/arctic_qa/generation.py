@@ -18,6 +18,7 @@ from .providers import (
 )
 from .util import canonical_json, normalize_text, sha256_bytes, stable_id
 from .validation import (
+    DIRECT_SOURCE_VALUE_CONTRACT_VERSION,
     GENERATION_PROMPT_VERSION,
     NUMERIC_RULE_CONTRACT_VERSION,
     SCOPE_CONTRACT_VERSION,
@@ -224,7 +225,10 @@ NUMERIC_RULE_SCHEMA = {
         "tolerance": {
             "type": "string",
             "minLength": 1,
-            "description": "A nonnegative decimal tolerance explicitly supported by the selected source span.",
+            "description": (
+                "A nonnegative decimal tolerance supported by the selected source span. "
+                "Use zero only for an exact count or a directly published exact scalar."
+            ),
         },
         "tolerance_basis": {
             "type": "string",
@@ -234,7 +238,10 @@ NUMERIC_RULE_SCHEMA = {
         "reported_precision": {
             "type": "string",
             "minLength": 1,
-            "description": "Source-supported reporting precision. Do not infer missing precision.",
+            "description": (
+                "Source-supported reporting precision. For a directly published exact "
+                "scalar, use the decimal increment of its literal display."
+            ),
         },
         "rounding_rule": {
             "type": "string",
@@ -669,7 +676,13 @@ def generate_candidate(
             "when the answer contains multiple values. The only zero-tolerance "
             "exception is a literal exact integer count: use tolerance_basis "
             "'count', reported_precision 'exact integer', rounding_rule 'none', "
-            "and a conversion_rule that starts with 'direct count'. "
+            "and a conversion_rule that starts with 'direct count'. A directly "
+            "published exact scalar can also use zero tolerance. For that scalar, "
+            "copy its displayed quantity into tolerance_basis. Set reported_precision "
+            "to the decimal increment of the literal value. Set rounding_rule to "
+            "'direct reporting without additional rounding'. Set conversion_rule to "
+            "'direct source reporting with no conversion'. The pipeline binds this "
+            "rule to the answer-verifier request in candidate provenance. "
             + ANSWER_FORMAT_INSTRUCTIONS
             + " Set selection_rationale to a concise evidence-grounded justification "
             "for selecting this finding. Do not provide hidden reasoning.",
@@ -913,6 +926,27 @@ def generate_candidate(
         context_spans,
         reason_code="answer_verifier_evidence_span_not_found",
     )
+    verification_calls = {
+        "reconstructor": _call_provenance(
+            verifier,
+            reconstruction_result,
+            "reconstructor",
+            reconstruction_prompt,
+            parameters,
+        ),
+        "answer_verifier": _call_provenance(
+            verifier,
+            answer_verification_result,
+            "answer_verifier",
+            answer_verification_prompt,
+            parameters,
+        ),
+    }
+    direct_value_provenance = {
+        "direct_value_contract_version": DIRECT_SOURCE_VALUE_CONTRACT_VERSION,
+        "direct_value_request_id": answer_verification_result.request_id,
+        "verification_calls": verification_calls,
+    }
     decision_evidence = _decision_evidence(
         {
             "answer": answer,
@@ -928,6 +962,7 @@ def generate_candidate(
         reconstruction,
         answer_verification,
         question_context,
+        direct_value_provenance,
     )
     if canonical_json(arm_answer_proposal) != canonical_json(answer):
         qa_gate_reasons.append("generation_arm_finding_mismatch")
@@ -963,6 +998,7 @@ def generate_candidate(
         CANDIDATE_SCHEMA_VERSION,
         PROMPT_VERSION,
         NUMERIC_RULE_CONTRACT_VERSION,
+        DIRECT_SOURCE_VALUE_CONTRACT_VERSION,
         SCOPE_CONTRACT_VERSION,
         SCOPE_ROLE_SEMANTICS_VERSION,
         SCOPE_ROLE_BINDING_CONTRACT_VERSION,
@@ -1005,6 +1041,8 @@ def generate_candidate(
             "generation_arm": arm,
             "prompt_version": PROMPT_VERSION,
             "numeric_rule_contract_version": NUMERIC_RULE_CONTRACT_VERSION,
+            "direct_value_contract_version": DIRECT_SOURCE_VALUE_CONTRACT_VERSION,
+            "direct_value_request_id": answer_verification_result.request_id,
             "scope_contract_version": SCOPE_CONTRACT_VERSION,
             "scope_role_semantics_version": SCOPE_ROLE_SEMANTICS_VERSION,
             "scope_role_binding_contract_version": (
@@ -1029,22 +1067,7 @@ def generate_candidate(
             "author_model": author.model,
             "verifier_provider": verifier.name,
             "verifier_model": verifier.model,
-            "verification_calls": {
-                "reconstructor": _call_provenance(
-                    verifier,
-                    reconstruction_result,
-                    "reconstructor",
-                    reconstruction_prompt,
-                    parameters,
-                ),
-                "answer_verifier": _call_provenance(
-                    verifier,
-                    answer_verification_result,
-                    "answer_verifier",
-                    answer_verification_prompt,
-                    parameters,
-                ),
-            },
+            "verification_calls": verification_calls,
             "family_overlap_disclosure": (
                 "All construction roles use one configured provider model in separate "
                 "blinded calls. Role separation does not establish independent error "
@@ -1248,6 +1271,7 @@ def resume_candidate_distractors(
         base["reconstruction"],
         base["answer_verification"],
         base.get("question_context", ""),
+        base.get("provenance"),
     )
     if qa_reasons:
         raise ValueError("the targeted candidate no longer passes its QA gate")
@@ -1497,6 +1521,7 @@ def _qa_gate_reasons(
     reconstruction: dict[str, Any],
     verification: dict[str, Any],
     question_context: str = "",
+    provenance: dict[str, Any] | None = None,
 ) -> list[str]:
     reasons: list[str] = []
     if not _record_resolves(answer, chunk):
@@ -1509,7 +1534,9 @@ def _qa_gate_reasons(
         reasons.append("answer_ambiguous")
     if not reconstruction_matches(answer, reconstruction):
         reasons.append("reconstruction_disagreement")
-    if answer.get("numeric_rule") and not numeric_rule_is_source_bound(answer):
+    if answer.get("numeric_rule") and not numeric_rule_is_source_bound(
+        answer, provenance
+    ):
         reasons.append("source_bound_numeric_rule_missing")
     if not scope_is_evidence_bound(answer.get("scope"), answer):
         reasons.append("answer_scope_not_source_bound")

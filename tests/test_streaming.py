@@ -302,7 +302,7 @@ def test_reconstruction_match_accepts_bounded_semantic_form() -> None:
             "to the conserved motif.",
         },
     )
-    assert validation_module.reconstruction_matches(
+    assert not validation_module.reconstruction_matches(
         {"text": "The organic mass component was 24 % over February-May."},
         {"answer": "24 %"},
     )

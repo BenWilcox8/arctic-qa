@@ -728,8 +728,7 @@ def _load_eligibility_jobs(
     for path in sorted((run_dir / "jobs").glob("*.json")):
         item = _read(path)
         if expected_hashes is not None and any(
-            item.get(field) != expected
-            for field, expected in expected_hashes.items()
+            item.get(field) != expected for field, expected in expected_hashes.items()
         ):
             continue
         key = str(item["candidate_key"])
@@ -1139,8 +1138,8 @@ def _validate_brokered_eligibility(
         request_id=expected_job_key,
         policy_sha256=sha256_file(policy_file),
     )
-    response_version = schema.get("properties", {}).get("schema_version", {}).get(
-        "const"
+    response_version = (
+        schema.get("properties", {}).get("schema_version", {}).get("const")
     )
     if response_version in {ELIGIBILITY_RESPONSE_V2, ELIGIBILITY_RESPONSE_V3}:
         manifest_path = Path(str(eligibility.get("span_manifest_path") or ""))

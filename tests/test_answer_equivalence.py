@@ -253,6 +253,33 @@ def test_retained_percentage_uses_typed_value_and_scope() -> None:
     )
 
 
+@pytest.mark.parametrize("alternative", ["25 percent", "24.0 percent"])
+def test_typed_percentage_rejects_changed_alternative_value_or_precision(
+    alternative: str,
+) -> None:
+    answer, reconstruction = _retained_percentage_record()
+    reconstruction["alternatives"] = [alternative]
+
+    assert validation.reconstruction_has_competing_alternatives(answer, reconstruction)
+
+
+@pytest.mark.parametrize(
+    "numeric",
+    [
+        {"canonical_value": "-24", "unit": "%"},
+        {"canonical_value": "24.0", "unit": "%"},
+        {"canonical_value": "24", "unit": "m"},
+    ],
+)
+def test_typed_percentage_rejects_changed_sign_precision_or_unit(
+    numeric: dict[str, str],
+) -> None:
+    answer, reconstruction = _retained_percentage_record()
+    reconstruction["numeric"] = numeric
+
+    assert not validation.reconstruction_matches(answer, reconstruction)
+
+
 @pytest.mark.parametrize("missing_scope", ["period", "population", "geography"])
 def test_typed_percentage_rejects_a_short_answer_without_a_required_condition(
     missing_scope: str,
@@ -268,6 +295,47 @@ def test_retained_approximate_range_stays_rejected_without_typed_condition() -> 
     answer, reconstruction = _retained_approximate_range_record()
 
     assert not validation.reconstruction_matches(answer, reconstruction)
+
+
+@pytest.mark.parametrize(
+    "rebuilt",
+    [
+        "0.5 to 0.8 m beneath the ice bottom",
+        "approximately 0.5 to 0.9 m beneath the ice bottom",
+        "approximately 0.5 to 0.8 cm beneath the ice bottom",
+        "approximately 0.5 to 0.8 m beneath the snow bottom",
+    ],
+)
+def test_complete_range_rejects_changed_qualifier_endpoint_unit_or_condition(
+    rebuilt: str,
+) -> None:
+    answer = {
+        "text": "approximately 0.5 to 0.8 m beneath the ice bottom",
+        "evidence_quote": (
+            "The transducer was approximately 0.5 to 0.8 m beneath the ice bottom."
+        ),
+    }
+
+    assert not validation.reconstruction_matches(answer, {"answer": rebuilt})
+
+
+def test_complete_range_accepts_safe_spelling_changes() -> None:
+    answer = {
+        "text": "approximately 0.5 to 0.8 m beneath the ice bottom",
+        "evidence_quote": (
+            "The transducer was approximately 0.5 to 0.8 m beneath the ice bottom."
+        ),
+    }
+
+    assert validation.reconstruction_matches(
+        answer, {"answer": "about 0.5-0.8 metres beneath the ice bottom"}
+    )
+
+
+def test_partial_text_reconstruction_cannot_satisfy_a_multi_part_answer() -> None:
+    answer = {"text": "higher in winter and lower in summer", "variants": []}
+
+    assert not validation.reconstruction_matches(answer, {"answer": "higher in winter"})
 
 
 def test_retained_three_threshold_record_stays_rejected_without_structure() -> None:
@@ -326,7 +394,11 @@ def test_bound_direct_value_contract_accepts_the_retained_source_value() -> None
 @pytest.mark.parametrize(
     "target,field,value",
     [
-        ("provenance", "direct_value_contract_version", "numeric-rule-source-support-v2"),
+        (
+            "provenance",
+            "direct_value_contract_version",
+            "numeric-rule-source-support-v2",
+        ),
         ("provenance", "direct_value_request_id", "other-request"),
         ("numeric_rule", "tolerance", "0.1"),
         ("numeric_rule", "reported_precision", "0.01"),
