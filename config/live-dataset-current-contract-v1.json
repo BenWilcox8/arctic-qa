@@ -1,0 +1,6 @@
+{
+  "candidate_schema_version": "2.2.0",
+  "generation_prompt_version": "arctic-qa-generation-v16",
+  "schema": "arctic-qa-live-dataset-selection-v1",
+  "scope_contract_version": "selected-evidence-literal-scope-v4"
+}

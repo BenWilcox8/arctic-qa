@@ -10,10 +10,260 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
-from arctic_qa.publication_export import export_publication_package  # noqa: E402
+from arctic_qa.publication_export import (  # noqa: E402
+    export_publication_package,
+    refresh_live_publication_snapshot,
+)
+from arctic_qa.util import canonical_json, stable_id  # noqa: E402
 
 
-def test_reviewer_preserves_verdict_rationale_while_benchmark_hides_labels(tmp_path: Path) -> None:
+def _live_candidate(item_id: str, question: str, *, prompt: str) -> dict:
+    distractors = [
+        {
+            "text": f"Wrong {letter}",
+            "evidence_quote": f"Evidence against {letter}",
+            "locator": {"page": index},
+            "generation_rationale": f"Rationale {letter}",
+        }
+        for index, letter in enumerate("ABC", start=2)
+    ]
+    return {
+        "schema_version": "2.2.0",
+        "item_id": item_id,
+        "question": question,
+        "question_context": "Annual mean.",
+        "question_rationale": "The finding supports this question.",
+        "answer": {
+            "text": "Correct",
+            "evidence_quote": "The value increased.",
+            "locator": {"page": 1},
+            "rationale": "The source gives the answer.",
+            "selection_rationale": "This is a focused result.",
+        },
+        "distractors": distractors,
+        "option_verdicts": [
+            {
+                "option_text": item["text"],
+                "rationale": "The source contradicts this option.",
+                "contradiction_established": True,
+                "request_id": "private-request",
+                "actual_cost_usd": "1.00",
+            }
+            for item in distractors
+        ],
+        "reconstruction": {
+            "answer": "Correct",
+            "reconstruction_rationale": "The question has one answer.",
+        },
+        "answer_verification": {
+            "source_entailment_model_verified": True,
+            "verification_rationale": "The evidence entails the answer.",
+        },
+        "provenance": {
+            "prompt_version": prompt,
+            "scope_contract_version": "selected-evidence-literal-scope-v4",
+            "author_model": "gemini-current",
+            "verifier_model": "gemini-current",
+            "run_id": "private-run",
+        },
+    }
+
+
+def _insert_live_candidate(
+    connection: sqlite3.Connection,
+    candidate: dict,
+    *,
+    family: str,
+    status: str = "machine_accepted_unverified",
+    updated_at: str = "2026-09-14T00:00:00Z",
+    bind_validation: bool = True,
+) -> None:
+    stored = canonical_json(candidate)
+    connection.execute(
+        "INSERT INTO candidates VALUES (?,?,?,?,?,?,?)",
+        (
+            candidate["item_id"],
+            family,
+            "source-1",
+            status,
+            stored,
+            updated_at,
+            "private-run",
+        ),
+    )
+    details = {
+        "candidate_hash": (
+            stable_id("candidate-payload", stored) if bind_validation else "wrong"
+        ),
+        "labels": {
+            "mcq_eligible": True,
+            "machine_accepted_unverified": True,
+            "schema_valid": True,
+        },
+        "distractors": [
+            {"text": item["text"], "accepted": True, "deterministic": True}
+            for item in candidate["distractors"]
+        ],
+        "run_id": "private-run",
+        "updated_at_utc": "2026-09-14T00:00:00Z",
+    }
+    connection.execute(
+        "INSERT INTO validation_events VALUES (?,?,?,?,?,?)",
+        (
+            candidate["item_id"],
+            "automated_acceptance",
+            "machine_accepted_unverified",
+            "[]",
+            canonical_json(details),
+            updated_at,
+        ),
+    )
+
+
+def test_live_snapshot_updates_atomically_and_excludes_stale_rows(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "state.sqlite3"
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        """
+        CREATE TABLE sources (source_id TEXT,doi TEXT,title TEXT);
+        CREATE TABLE candidates (
+            item_id TEXT,paper_family_id TEXT,source_id TEXT,status TEXT,
+            candidate_json TEXT,updated_at TEXT,run_id TEXT
+        );
+        CREATE TABLE validation_events (
+            item_id TEXT,stage TEXT,label TEXT,reason_codes_json TEXT,
+            details_json TEXT,created_at TEXT
+        );
+        """
+    )
+    connection.execute(
+        "INSERT INTO sources VALUES (?,?,?)",
+        ("source-1", "10.1/current", "Current paper"),
+    )
+    _insert_live_candidate(
+        connection,
+        _live_candidate(
+            "old-contract", "Old question?", prompt="arctic-qa-generation-v15"
+        ),
+        family="old-family",
+    )
+    _insert_live_candidate(
+        connection,
+        _live_candidate(
+            "rejected", "Rejected question?", prompt="arctic-qa-generation-v16"
+        ),
+        family="rejected-family",
+        status="rejected",
+    )
+    _insert_live_candidate(
+        connection,
+        _live_candidate(
+            "unbound", "Unbound question?", prompt="arctic-qa-generation-v16"
+        ),
+        family="unbound-family",
+        bind_validation=False,
+    )
+    _insert_live_candidate(
+        connection,
+        _live_candidate(
+            "current-old",
+            "Earlier current question?",
+            prompt="arctic-qa-generation-v16",
+        ),
+        family="current-family",
+        updated_at="2026-09-14T00:00:00Z",
+    )
+    _insert_live_candidate(
+        connection,
+        _live_candidate(
+            "current-new", "Newest current question?", prompt="arctic-qa-generation-v16"
+        ),
+        family="current-family",
+        updated_at="2026-09-14T00:01:00Z",
+    )
+    connection.commit()
+    selection = REPO / "config/live-dataset-current-contract-v1.json"
+    output = tmp_path / "live"
+
+    first = refresh_live_publication_snapshot(
+        database,
+        output,
+        selection_file=selection,
+        seed="fixed",
+        prompt_files=[REPO / "config/gemini-eligibility-prompt-v6.txt"],
+    )
+    pointer_before = (output / "current.json").read_bytes()
+    repeated = refresh_live_publication_snapshot(
+        database,
+        output,
+        selection_file=selection,
+        seed="fixed",
+        prompt_files=[REPO / "config/gemini-eligibility-prompt-v6.txt"],
+    )
+
+    assert repeated == first
+    assert (output / "current.json").read_bytes() == pointer_before
+    assert len(list((output / "snapshots").iterdir())) == 1
+    assert first["item_count"] == 1
+    assert first["excluded_counts"] == {
+        "incomplete_or_rejected": 1,
+        "superseded_contract": 1,
+        "invalid_or_unbound_validation": 1,
+        "duplicate_current_family": 1,
+    }
+    snapshot = output / "snapshots" / first["snapshot_id"]
+    benchmark = json.loads((snapshot / "accepted-benchmark.jsonl").read_text())
+    reviewer = json.loads((snapshot / "accepted-reviewer.jsonl").read_text())
+    assert benchmark["item_id"] == reviewer["item_id"]
+    assert reviewer["question"] == "Newest current question?"
+    assert reviewer["paper"] == {
+        "doi": "10.1/current",
+        "title": "Current paper",
+    }
+    assert reviewer["model_trace"]
+    assert reviewer["answer_evidence"]["excerpt"] == "The value increased."
+    assert all(option.get("evidence") for option in reviewer["options"])
+    assert "candidate_hash" in reviewer["validation"][0]["details"]
+    encoded_reviewer = canonical_json(reviewer)
+    for excluded in (
+        "private-run",
+        "private-request",
+        "actual_cost_usd",
+        "updated_at_utc",
+        "machine_accepted_unverified",
+    ):
+        assert excluded not in encoded_reviewer
+    assert "is_correct" not in canonical_json(benchmark)
+    assert len(list((output / "prompts").iterdir())) == 1
+
+    _insert_live_candidate(
+        connection,
+        _live_candidate(
+            "second-family", "Second question?", prompt="arctic-qa-generation-v16"
+        ),
+        family="second-family",
+        updated_at="2026-09-14T00:02:00Z",
+    )
+    connection.commit()
+    second = refresh_live_publication_snapshot(
+        database,
+        output,
+        selection_file=selection,
+        seed="fixed",
+        prompt_files=[REPO / "config/gemini-eligibility-prompt-v6.txt"],
+    )
+    connection.close()
+
+    assert second["item_count"] == 2
+    assert second["snapshot_id"] != first["snapshot_id"]
+    assert len(list((output / "snapshots").iterdir())) == 2
+
+
+def test_reviewer_preserves_verdict_rationale_while_benchmark_hides_labels(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "state.sqlite3"
     connection = sqlite3.connect(db_path)
     connection.executescript("""
@@ -22,30 +272,89 @@ def test_reviewer_preserves_verdict_rationale_while_benchmark_hides_labels(tmp_p
         CREATE TABLE validation_events (item_id TEXT,label TEXT,reason_codes_json TEXT,details_json TEXT,created_at TEXT);
         CREATE TABLE calls (call_id TEXT,role TEXT,request_id TEXT,returned_model TEXT,response_json TEXT,attempt INTEGER);
     """)
-    source = ("source-1", "paper-1", "10.1/example", "Example paper", 2026, "hash-1", "family-1", "selected", json.dumps({"selection": {"position": 4, "reason_codes": ["arctic"]}}))
-    candidate = {"item_id": "qa-1", "question": "Which value?", "question_context": "The measurement describes the yearly mean.", "answer": {"text": "Correct", "evidence_quote": "short evidence", "locator": {"page": 2}}, "distractors": [{"text": text, "type": "wrong", "evidence_quote": "evidence"} for text in ("Wrong A", "Wrong B", "Wrong C")], "option_verdicts": [{"option_text": text, "rationale": f"why {text} is wrong", "provenance": {"request_id": f"request-{index}"}} for index, text in enumerate(("Wrong A", "Wrong B", "Wrong C"))], "provenance": {"run_id": "trial-r1", "verification_calls": {}}}
-    details = {"distractors": [{"text": text, "accepted": True, "deterministic": True} for text in ("Wrong A", "Wrong B", "Wrong C")]}
+    source = (
+        "source-1",
+        "paper-1",
+        "10.1/example",
+        "Example paper",
+        2026,
+        "hash-1",
+        "family-1",
+        "selected",
+        json.dumps({"selection": {"position": 4, "reason_codes": ["arctic"]}}),
+    )
+    candidate = {
+        "item_id": "qa-1",
+        "question": "Which value?",
+        "question_context": "The measurement describes the yearly mean.",
+        "answer": {
+            "text": "Correct",
+            "evidence_quote": "short evidence",
+            "locator": {"page": 2},
+        },
+        "distractors": [
+            {"text": text, "type": "wrong", "evidence_quote": "evidence"}
+            for text in ("Wrong A", "Wrong B", "Wrong C")
+        ],
+        "option_verdicts": [
+            {
+                "option_text": text,
+                "rationale": f"why {text} is wrong",
+                "provenance": {"request_id": f"request-{index}"},
+            }
+            for index, text in enumerate(("Wrong A", "Wrong B", "Wrong C"))
+        ],
+        "provenance": {"run_id": "trial-r1", "verification_calls": {}},
+    }
+    details = {
+        "distractors": [
+            {"text": text, "accepted": True, "deterministic": True}
+            for text in ("Wrong A", "Wrong B", "Wrong C")
+        ]
+    }
     connection.execute("INSERT INTO sources VALUES (?,?,?,?,?,?,?,?,?)", source)
-    connection.execute("INSERT INTO candidates VALUES (?,?,?,?,?)", ("qa-1", "trial-r1", "source-1", "machine_accepted_unverified", json.dumps(candidate)))
-    connection.execute("INSERT INTO validation_events VALUES (?,?,?,?,?)", ("qa-1", "machine_accepted_unverified", "[]", json.dumps(details), "now"))
+    connection.execute(
+        "INSERT INTO candidates VALUES (?,?,?,?,?)",
+        (
+            "qa-1",
+            "trial-r1",
+            "source-1",
+            "machine_accepted_unverified",
+            json.dumps(candidate),
+        ),
+    )
+    connection.execute(
+        "INSERT INTO validation_events VALUES (?,?,?,?,?)",
+        ("qa-1", "machine_accepted_unverified", "[]", json.dumps(details), "now"),
+    )
     connection.commit()
     connection.close()
-    manifest = export_publication_package(db_path, tmp_path / "package", run_id="trial-r1", seed="fixed")
+    manifest = export_publication_package(
+        db_path, tmp_path / "package", run_id="trial-r1", seed="fixed"
+    )
     assert manifest["reviewer_item_count"] == 1
     reviewer = json.loads((tmp_path / "package" / "reviewer-items.jsonl").read_text())
-    benchmark = json.loads((tmp_path / "package" / "benchmark-inputs.jsonl").read_text())
+    benchmark = json.loads(
+        (tmp_path / "package" / "benchmark-inputs.jsonl").read_text()
+    )
     assert reviewer["paper"]["doi"] == "10.1/example"
     assert reviewer["question_context"] == "The measurement describes the yearly mean."
     assert benchmark["question_context"] == reviewer["question_context"]
     assert any(option.get("verdict") for option in reviewer["options"])
     assert "is_correct" not in benchmark["options"][0]
-    assert "rationale" not in (tmp_path / "package" / "benchmark-inputs.jsonl").read_text()
-    with (tmp_path / "package" / "reviewer-items.csv").open(newline="", encoding="utf-8") as handle:
+    assert (
+        "rationale" not in (tmp_path / "package" / "benchmark-inputs.jsonl").read_text()
+    )
+    with (tmp_path / "package" / "reviewer-items.csv").open(
+        newline="", encoding="utf-8"
+    ) as handle:
         csv_row = next(csv.DictReader(handle))
     assert csv_row["reference_answer"] == "Correct"
     assert csv_row["option_a_verdict"] or csv_row["option_b_verdict"]
     assert csv_row["question_context"] == reviewer["question_context"]
-    with (tmp_path / "package" / "benchmark-inputs.csv").open(newline="", encoding="utf-8") as handle:
+    with (tmp_path / "package" / "benchmark-inputs.csv").open(
+        newline="", encoding="utf-8"
+    ) as handle:
         benchmark_csv = next(csv.DictReader(handle))
     assert benchmark_csv["question_context"] == benchmark["question_context"]
 
@@ -61,10 +370,17 @@ def test_manifest_selected_variants_keep_their_exact_options(tmp_path: Path) -> 
             "question": "What changed?",
             "release_label": "machine_accepted_unverified",
             "source": {"source_id": "source-1", "content_hash": "source-hash"},
-            "answer_evidence": {"quote": "The measured value increased.", "locator": {"page": 2}},
+            "answer_evidence": {
+                "quote": "The measured value increased.",
+                "locator": {"page": 2},
+            },
             "options": [
                 {"text": "It increased", "is_correct": True},
-                {"text": "It decreased", "is_correct": False, "verification_label": "model-verified"},
+                {
+                    "text": "It decreased",
+                    "is_correct": False,
+                    "verification_label": "model-verified",
+                },
             ],
         },
         {
@@ -81,11 +397,24 @@ def test_manifest_selected_variants_keep_their_exact_options(tmp_path: Path) -> 
             ],
         },
     ]
-    (export_dir / "mcq.jsonl").write_text("".join(json.dumps(row) + "\n" for row in variants), encoding="utf-8")
+    (export_dir / "mcq.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in variants), encoding="utf-8"
+    )
     manifest_path = export_dir / "manifest.json"
-    manifest_path.write_text(json.dumps({"export_id": "trial", "files": {"mcq": "exports/trial/mcq.jsonl"}, "file_sha256": {"mcq": "fixture-hash"}}), encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "export_id": "trial",
+                "files": {"mcq": "exports/trial/mcq.jsonl"},
+                "file_sha256": {"mcq": "fixture-hash"},
+            }
+        ),
+        encoding="utf-8",
+    )
     renderer = tmp_path / "generation-v10.py"
-    renderer.write_text("PROMPT_VERSION = 'arctic-qa-generation-v10'\n", encoding="utf-8")
+    renderer.write_text(
+        "PROMPT_VERSION = 'arctic-qa-generation-v10'\n", encoding="utf-8"
+    )
     db_path = tmp_path / "state.sqlite3"
     connection = sqlite3.connect(db_path)
     connection.executescript("""
@@ -93,7 +422,19 @@ def test_manifest_selected_variants_keep_their_exact_options(tmp_path: Path) -> 
         CREATE TABLE candidates (item_id TEXT,source_id TEXT,candidate_json TEXT);
         CREATE TABLE validation_events (item_id TEXT,stage TEXT,label TEXT,reason_codes_json TEXT,details_json TEXT);
     """)
-    connection.execute("INSERT INTO sources VALUES (?,?,?,?,?,?,?,?)", ("source-1", "paper-1", "10.1/example", "Example paper", 2026, "source-hash", "{}", "selected"))
+    connection.execute(
+        "INSERT INTO sources VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "source-1",
+            "paper-1",
+            "10.1/example",
+            "Example paper",
+            2026,
+            "source-hash",
+            "{}",
+            "selected",
+        ),
+    )
     candidate = {
         "question": "What changed?",
         "question_rationale": "The selected finding states the change.",
@@ -106,7 +447,12 @@ def test_manifest_selected_variants_keep_their_exact_options(tmp_path: Path) -> 
             "evidence_quote": "The measured value increased.",
             "locator": {"page": 2},
         },
-        "distractors": [{"text": "It decreased", "generation_rationale": "This reverses the reported direction."}],
+        "distractors": [
+            {
+                "text": "It decreased",
+                "generation_rationale": "This reverses the reported direction.",
+            }
+        ],
         "reconstruction": {
             "alternatives": [],
             "ambiguity_label": "one_answer",
@@ -146,27 +492,76 @@ def test_manifest_selected_variants_keep_their_exact_options(tmp_path: Path) -> 
             }
         ],
     }
-    connection.execute("INSERT INTO candidates VALUES (?,?,?)", ("question-1", "source-1", json.dumps(candidate)))
-    decoy = {"question": "What changed?", "answer": {"text": "It decreased", "evidence_quote": "Wrong attempt", "locator": {"page": 3}}}
-    connection.execute("INSERT INTO candidates VALUES (?,?,?)", ("question-9", "source-1", json.dumps(decoy)))
-    connection.execute("INSERT INTO validation_events VALUES (?,?,?,?,?)", ("question-1", "automated_acceptance", "machine_accepted_unverified", "[\"model_only_distractor_verification\"]", "{\"labels\": {\"machine_accepted_unverified\": true, \"schema_valid\": true}}"))
+    connection.execute(
+        "INSERT INTO candidates VALUES (?,?,?)",
+        ("question-1", "source-1", json.dumps(candidate)),
+    )
+    decoy = {
+        "question": "What changed?",
+        "answer": {
+            "text": "It decreased",
+            "evidence_quote": "Wrong attempt",
+            "locator": {"page": 3},
+        },
+    }
+    connection.execute(
+        "INSERT INTO candidates VALUES (?,?,?)",
+        ("question-9", "source-1", json.dumps(decoy)),
+    )
+    connection.execute(
+        "INSERT INTO validation_events VALUES (?,?,?,?,?)",
+        (
+            "question-1",
+            "automated_acceptance",
+            "machine_accepted_unverified",
+            '["model_only_distractor_verification"]',
+            '{"labels": {"machine_accepted_unverified": true, "schema_valid": true}}',
+        ),
+    )
     connection.commit()
     connection.close()
 
-    manifest = export_publication_package(db_path, tmp_path / "package", seed="fixed", export_manifest=manifest_path, historical_renderers=[renderer])
+    manifest = export_publication_package(
+        db_path,
+        tmp_path / "package",
+        seed="fixed",
+        export_manifest=manifest_path,
+        historical_renderers=[renderer],
+    )
 
     assert manifest["reviewer_item_count"] == 2
-    reviewer = [json.loads(line) for line in (tmp_path / "package" / "reviewer-items.jsonl").read_text().splitlines()]
-    benchmark = [json.loads(line) for line in (tmp_path / "package" / "benchmark-inputs.jsonl").read_text().splitlines()]
-    scoring = [json.loads(line) for line in (tmp_path / "package" / "scoring-labels.jsonl").read_text().splitlines()]
+    reviewer = [
+        json.loads(line)
+        for line in (tmp_path / "package" / "reviewer-items.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    benchmark = [
+        json.loads(line)
+        for line in (tmp_path / "package" / "benchmark-inputs.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    scoring = [
+        json.loads(line)
+        for line in (tmp_path / "package" / "scoring-labels.jsonl")
+        .read_text()
+        .splitlines()
+    ]
     assert [row["item_id"] for row in reviewer] == ["mcq-present", "mcq-absent"]
-    assert [option["text"] for option in reviewer[0]["options"]] == ["It increased", "It decreased"]
+    assert [option["text"] for option in reviewer[0]["options"]] == [
+        "It increased",
+        "It decreased",
+    ]
     assert reviewer[0]["options"][0]["is_correct"] is True
     assert "release_label" not in json.dumps(reviewer[0])
     assert reviewer[1]["reference_answer"]["text"] == "It increased"
     assert reviewer[1]["answer_evidence"]["excerpt"] == "The measured value increased."
     assert reviewer[0]["reference_answer"]["numeric_rule"]["unit"] == "percent"
-    assert reviewer[0]["options"][1]["generation_rationale"] == "This reverses the reported direction."
+    assert (
+        reviewer[0]["options"][1]["generation_rationale"]
+        == "This reverses the reported direction."
+    )
     assert reviewer[0]["rationales"] == {
         "question": "The selected finding states the change.",
         "answer_selection": "This answer uses the stated increase.",
@@ -174,39 +569,67 @@ def test_manifest_selected_variants_keep_their_exact_options(tmp_path: Path) -> 
         "reconstruction": "The source supports one answer.",
         "answer_verification": "The answer matches the source.",
     }
-    assert reviewer[0]["stage_results"]["reconstruction"]["ambiguity_label"] == "one_answer"
-    assert reviewer[0]["stage_results"]["reconstruction"]["evidence"]["locator"] == {"page": 2}
-    assert reviewer[0]["stage_results"]["answer_verification"]["source_entailment_model_verified"] is True
+    assert (
+        reviewer[0]["stage_results"]["reconstruction"]["ambiguity_label"]
+        == "one_answer"
+    )
+    assert reviewer[0]["stage_results"]["reconstruction"]["evidence"]["locator"] == {
+        "page": 2
+    }
+    assert (
+        reviewer[0]["stage_results"]["answer_verification"][
+            "source_entailment_model_verified"
+        ]
+        is True
+    )
     assert reviewer[0]["decision_evidence"][0]["roles"] == [
         "answer",
         "reconstruction",
     ]
-    assert reviewer[0]["decision_evidence"][0]["role_evidence"][0]["role"] == (
-        "answer"
-    )
-    assert reviewer[0]["validation"] == [{"stage": "automated_acceptance", "reason_codes": ["model_only_distractor_verification"], "checks": {"schema_valid": True}}]
+    assert reviewer[0]["decision_evidence"][0]["role_evidence"][0]["role"] == ("answer")
+    assert reviewer[0]["validation"] == [
+        {
+            "stage": "automated_acceptance",
+            "reason_codes": ["model_only_distractor_verification"],
+            "checks": {"schema_valid": True},
+        }
+    ]
     assert "machine_accepted_unverified" not in json.dumps(reviewer[0])
     assert "is_correct" not in json.dumps(benchmark[0])
     assert "rationale" not in json.dumps(benchmark[0])
     assert "decision_evidence" not in benchmark[0]
     assert scoring[0]["correct_option_id"] is not None
     assert scoring[1]["correct_option_id"] is None
-    with (tmp_path / "package" / "reviewer-items.csv").open(encoding="utf-8", newline="") as handle:
+    with (tmp_path / "package" / "reviewer-items.csv").open(
+        encoding="utf-8", newline=""
+    ) as handle:
         csv_row = next(csv.DictReader(handle))
     assert csv_row["doi"] == "10.1/example"
     assert csv_row["reference_answer"] == "It increased"
-    assert csv_row["option_b_generation_rationale"] == "This reverses the reported direction."
+    assert (
+        csv_row["option_b_generation_rationale"]
+        == "This reverses the reported direction."
+    )
     assert csv_row["reconstruction_rationale"] == "The source supports one answer."
     assert json.loads(csv_row["decision_evidence_json"])[0]["roles"] == [
         "answer",
         "reconstruction",
     ]
-    assert json.loads(csv_row["stage_results_json"])["answer_verification"]["source_entailment_model_verified"] is True
+    assert (
+        json.loads(csv_row["stage_results_json"])["answer_verification"][
+            "source_entailment_model_verified"
+        ]
+        is True
+    )
     assert manifest["historical_prompt_templates"][0]["kind"] == "renderer"
-    assert (tmp_path / "package" / "historical-prompt-bundle" / "generation-v10.py").read_text() == renderer.read_text()
+    assert (
+        tmp_path / "package" / "historical-prompt-bundle" / "generation-v10.py"
+    ).read_text() == renderer.read_text()
 
 
-def test_manifest_package_exports_question_context_without_benchmark_leakage(tmp_path: Path) -> None:
+def test_manifest_package_exports_question_context_without_benchmark_leakage(
+    tmp_path: Path,
+) -> None:
     export_dir = tmp_path / "exports" / "trial"
     export_dir.mkdir(parents=True)
     present_context = "The measurement is for sea ice extent."
@@ -238,9 +661,13 @@ def test_manifest_package_exports_question_context_without_benchmark_leakage(tmp
             "options": [{"text": "Satellite", "is_correct": True}],
         },
     ]
-    (export_dir / "mcq.jsonl").write_text("".join(json.dumps(row) + "\n" for row in variants), encoding="utf-8")
+    (export_dir / "mcq.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in variants), encoding="utf-8"
+    )
     manifest_path = export_dir / "manifest.json"
-    manifest_path.write_text(json.dumps({"files": {"mcq": "exports/trial/mcq.jsonl"}}), encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps({"files": {"mcq": "exports/trial/mcq.jsonl"}}), encoding="utf-8"
+    )
     db_path = tmp_path / "state.sqlite3"
     connection = sqlite3.connect(db_path)
     connection.executescript("""
@@ -248,32 +675,117 @@ def test_manifest_package_exports_question_context_without_benchmark_leakage(tmp
         CREATE TABLE candidates (item_id TEXT,source_id TEXT,candidate_json TEXT);
         CREATE TABLE validation_events (item_id TEXT,stage TEXT,label TEXT,reason_codes_json TEXT,details_json TEXT);
     """)
-    connection.execute("INSERT INTO sources VALUES (?,?,?,?,?,?,?,?)", ("source-1", "paper-1", "10.1/example", "Example paper", 2026, "source-hash", "{}", "selected"))
+    connection.execute(
+        "INSERT INTO sources VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "source-1",
+            "paper-1",
+            "10.1/example",
+            "Example paper",
+            2026,
+            "source-hash",
+            "{}",
+            "selected",
+        ),
+    )
     candidates = [
-        ("question-context", {"question": "What changed?", "question_context": present_context, "answer": {"text": "Correct context match"}}),
-        ("question-decoy", {"question": "What changed?", "question_context": "The measurement is for sea ice concentration.", "answer": {"text": "Wrong context match"}}),
-        ("question-empty", {"question": "Which season?", "question_context": "", "answer": {"text": "Winter"}}),
-        ("question-legacy", {"question": "Which instrument?", "answer": {"text": "Satellite"}}),
+        (
+            "question-context",
+            {
+                "question": "What changed?",
+                "question_context": present_context,
+                "answer": {"text": "Correct context match"},
+            },
+        ),
+        (
+            "question-decoy",
+            {
+                "question": "What changed?",
+                "question_context": "The measurement is for sea ice concentration.",
+                "answer": {"text": "Wrong context match"},
+            },
+        ),
+        (
+            "question-empty",
+            {
+                "question": "Which season?",
+                "question_context": "",
+                "answer": {"text": "Winter"},
+            },
+        ),
+        (
+            "question-legacy",
+            {"question": "Which instrument?", "answer": {"text": "Satellite"}},
+        ),
     ]
-    connection.executemany("INSERT INTO candidates VALUES (?,?,?)", [(item_id, "source-1", json.dumps(candidate)) for item_id, candidate in candidates])
+    connection.executemany(
+        "INSERT INTO candidates VALUES (?,?,?)",
+        [
+            (item_id, "source-1", json.dumps(candidate))
+            for item_id, candidate in candidates
+        ],
+    )
     connection.commit()
     connection.close()
 
-    export_publication_package(db_path, tmp_path / "package", seed="fixed", export_manifest=manifest_path)
+    export_publication_package(
+        db_path, tmp_path / "package", seed="fixed", export_manifest=manifest_path
+    )
 
-    reviewer = [json.loads(line) for line in (tmp_path / "package" / "reviewer-items.jsonl").read_text().splitlines()]
-    benchmark = [json.loads(line) for line in (tmp_path / "package" / "benchmark-inputs.jsonl").read_text().splitlines()]
-    with (tmp_path / "package" / "reviewer-items.csv").open(encoding="utf-8", newline="") as handle:
+    reviewer = [
+        json.loads(line)
+        for line in (tmp_path / "package" / "reviewer-items.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    benchmark = [
+        json.loads(line)
+        for line in (tmp_path / "package" / "benchmark-inputs.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    with (tmp_path / "package" / "reviewer-items.csv").open(
+        encoding="utf-8", newline=""
+    ) as handle:
         reviewer_csv = list(csv.DictReader(handle))
-    with (tmp_path / "package" / "benchmark-inputs.csv").open(encoding="utf-8", newline="") as handle:
+    with (tmp_path / "package" / "benchmark-inputs.csv").open(
+        encoding="utf-8", newline=""
+    ) as handle:
         benchmark_reader = csv.DictReader(handle)
         benchmark_csv = list(benchmark_reader)
-        assert benchmark_reader.fieldnames[benchmark_reader.fieldnames.index("question") + 1] == "question_context"
+        assert (
+            benchmark_reader.fieldnames[
+                benchmark_reader.fieldnames.index("question") + 1
+            ]
+            == "question_context"
+        )
 
     assert [row["question_context"] for row in reviewer] == [present_context, "", ""]
     assert [row["question_context"] for row in benchmark] == [present_context, "", ""]
-    assert [row["question_context"] for row in reviewer_csv] == [present_context, "", ""]
-    assert [row["question_context"] for row in benchmark_csv] == [present_context, "", ""]
+    assert [row["question_context"] for row in reviewer_csv] == [
+        present_context,
+        "",
+        "",
+    ]
+    assert [row["question_context"] for row in benchmark_csv] == [
+        present_context,
+        "",
+        "",
+    ]
     assert reviewer[0]["reference_answer"]["text"] == "Correct context match"
-    assert set(benchmark[0]) == {"item_id", "question_id", "variant_id", "question", "question_context", "options"}
-    assert not {"reference_answer", "answer_evidence", "rationales", "validation", "provenance", "selection"} & set(benchmark[0])
+    assert set(benchmark[0]) == {
+        "item_id",
+        "question_id",
+        "variant_id",
+        "question",
+        "question_context",
+        "options",
+    }
+    assert not {
+        "reference_answer",
+        "answer_evidence",
+        "rationales",
+        "validation",
+        "provenance",
+        "selection",
+    } & set(benchmark[0])
