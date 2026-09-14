@@ -1171,7 +1171,11 @@ def validate_distractor(
         return result
     numeric = distractor.get("numeric")
     if not numeric:
-        display_issue = _text_display_issue(str(distractor.get("text", "")))
+        display_issue = _text_display_issue(
+            str(distractor.get("text", "")),
+            answer=answer,
+            distractor=distractor,
+        )
         if display_issue:
             result["reasons"].append(display_issue)
             return result
@@ -1248,6 +1252,7 @@ def validate_distractor(
         "directional_contradiction",
         "scope_excluded",
         "unique_entity",
+        "closed_set",
     }:
         passed = _source_bound_typed_incompatibility(answer, distractor)
         if not passed:
@@ -1449,15 +1454,102 @@ def _response_matches_resolved_record(response: Any, record: Any) -> bool:
     return span_id == stable_id(contract, chunk_id, start, end, text_sha256)
 
 
-def _text_display_issue(text: str) -> str | None:
+def _text_display_issue(
+    text: str,
+    *,
+    answer: dict[str, Any] | None = None,
+    distractor: dict[str, Any] | None = None,
+) -> str | None:
     normalized = normalize_text(text)
     if re.search(r"\b(?:not|no|never|without|except|unless|neither|nor)\b", normalized):
         return "displayed_assertion_negated"
-    if ";" in text or re.search(
+    if ";" in text:
+        return "displayed_assertion_compound"
+    if re.search(
         r"\b(?:or|either|and|but|although|though|while|whereas|if)\b", normalized
     ):
+        if answer is not None and distractor is not None and _closed_set_tuple_contract(
+            answer, distractor
+        ):
+            return None
         return "displayed_assertion_compound"
     return None
+
+
+_TYPED_TUPLE_SCALAR = re.compile(
+    r"^(?P<value>[+\-−]?(?:\d+(?:\.\d+)?))\s*"
+    r"(?P<unit>%|°?[a-z]+)$"
+)
+_TYPED_SOURCE_SCALAR = re.compile(
+    r"^(?P<value>[+\-−]?(?:\d+(?:\.\d+)?))\s*"
+    r"(?P<unit>%|°?[a-z]+)(?:\s*\([^()]*\))?$"
+)
+
+
+def _typed_scalar(
+    value: object, *, source_annotation: bool = False
+) -> tuple[Decimal, str] | None:
+    pattern = _TYPED_SOURCE_SCALAR if source_annotation else _TYPED_TUPLE_SCALAR
+    match = pattern.fullmatch(normalize_text(str(value)).strip())
+    if not match:
+        return None
+    try:
+        number = Decimal(match.group("value").replace("−", "-"))
+    except InvalidOperation:
+        return None
+    return number, match.group("unit")
+
+
+def _typed_tuple(text: object) -> list[tuple[Decimal, str]] | None:
+    normalized = normalize_text(str(text)).strip()
+    normalized = re.sub(r",\s+and\s+", ", ", normalized)
+    parts = re.split(r"\s*,\s*|\s+and\s+", normalized)
+    if len(parts) < 2 or any(not part for part in parts):
+        return None
+    values = [_typed_scalar(part) for part in parts]
+    if any(value is None for value in values):
+        return None
+    typed_values = [value for value in values if value is not None]
+    units = {unit for _, unit in typed_values}
+    if len(units) != 1:
+        return None
+    return typed_values
+
+
+def _closed_set_tuple_contract(
+    answer: dict[str, Any], distractor: dict[str, Any]
+) -> tuple[list[tuple[Decimal, str]], list[tuple[Decimal, str]]] | None:
+    answer_rule = answer.get("deterministic_rule")
+    option_rule = distractor.get("deterministic") or {}
+    if (
+        not isinstance(answer_rule, dict)
+        or answer_rule.get("kind") != "closed_set"
+        or not isinstance(option_rule, dict)
+        or option_rule.get("kind") != "closed_set"
+    ):
+        return None
+    source_values = answer_rule.get("source_values")
+    if not isinstance(source_values, list) or len(source_values) < 2:
+        return None
+    source_tuple = [
+        _typed_scalar(value, source_annotation=True) for value in source_values
+    ]
+    if any(value is None for value in source_tuple):
+        return None
+    answer_tuple = _typed_tuple(answer.get("text", ""))
+    option_tuple = _typed_tuple(distractor.get("text", ""))
+    if answer_tuple is None or option_tuple is None:
+        return None
+    typed_source_values = [value for value in source_tuple if value is not None]
+    if answer_tuple != typed_source_values or len(option_tuple) != len(answer_tuple):
+        return None
+    if {unit for _, unit in option_tuple} != {unit for _, unit in answer_tuple}:
+        return None
+    if normalize_text(str(option_rule.get("candidate_value", ""))) != normalize_text(
+        str(distractor.get("text", ""))
+    ):
+        return None
+    return answer_tuple, option_tuple
 
 
 def _numeric_display_issue(text: str, numeric: dict[str, Any]) -> str | None:
@@ -1519,6 +1611,17 @@ def _source_bound_typed_incompatibility(
             and proposed in option_relations
             and ((correct, proposed) in DIRECTION_PAIRS)
         )
+    if kind == "closed_set":
+        tuple_contract = _closed_set_tuple_contract(answer, distractor)
+        if tuple_contract is None:
+            return False
+        answer_tuple, proposed_tuple = tuple_contract
+        source_values = rule.get("source_values")
+        if not isinstance(source_values, list) or not all(
+            normalize_text(str(value)) in source_text for value in source_values
+        ):
+            return False
+        return answer_tuple != proposed_tuple
     if kind not in {"unique_categorical", "scope_excluded", "unique_entity"}:
         return False
     required_rule_kind = "closed_scope" if kind == "scope_excluded" else "closed_set"
