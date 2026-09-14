@@ -101,12 +101,26 @@ def test_manifest_selected_variants_keep_their_exact_options(tmp_path: Path) -> 
             "locator": {"page": 2},
         },
         "distractors": [{"text": "It decreased", "generation_rationale": "This reverses the reported direction."}],
-        "reconstruction": {"reconstruction_rationale": "The source supports one answer."},
-        "answer_verification": {"verification_rationale": "The answer matches the source."},
+        "reconstruction": {
+            "alternatives": [],
+            "ambiguity_label": "one_answer",
+            "scope": {"geography": "north of 85N"},
+            "evidence_quote": "The measured value increased.",
+            "locator": {"page": 2},
+            "reconstruction_rationale": "The source supports one answer.",
+        },
+        "answer_verification": {
+            "alternative_answer_search_passed": True,
+            "source_entailment_model_verified": True,
+            "evidence_quote": "The measured value increased.",
+            "locator": {"page": 2},
+            "verification_rationale": "The answer matches the source.",
+        },
     }
     connection.execute("INSERT INTO candidates VALUES (?,?,?)", ("question-1", "source-1", json.dumps(candidate)))
     decoy = {"question": "What changed?", "answer": {"text": "It decreased", "evidence_quote": "Wrong attempt", "locator": {"page": 3}}}
     connection.execute("INSERT INTO candidates VALUES (?,?,?)", ("question-9", "source-1", json.dumps(decoy)))
+    connection.execute("INSERT INTO validation_events VALUES (?,?,?,?,?)", ("question-1", "automated_acceptance", "machine_accepted_unverified", "[\"model_only_distractor_verification\"]", "{\"labels\": {\"machine_accepted_unverified\": true, \"schema_valid\": true}}"))
     connection.commit()
     connection.close()
 
@@ -131,6 +145,11 @@ def test_manifest_selected_variants_keep_their_exact_options(tmp_path: Path) -> 
         "reconstruction": "The source supports one answer.",
         "answer_verification": "The answer matches the source.",
     }
+    assert reviewer[0]["stage_results"]["reconstruction"]["ambiguity_label"] == "one_answer"
+    assert reviewer[0]["stage_results"]["reconstruction"]["evidence"]["locator"] == {"page": 2}
+    assert reviewer[0]["stage_results"]["answer_verification"]["source_entailment_model_verified"] is True
+    assert reviewer[0]["validation"] == [{"stage": "automated_acceptance", "reason_codes": ["model_only_distractor_verification"], "checks": {"schema_valid": True}}]
+    assert "machine_accepted_unverified" not in json.dumps(reviewer[0])
     assert "is_correct" not in json.dumps(benchmark[0])
     assert "rationale" not in json.dumps(benchmark[0])
     assert scoring[0]["correct_option_id"] is not None
@@ -141,5 +160,6 @@ def test_manifest_selected_variants_keep_their_exact_options(tmp_path: Path) -> 
     assert csv_row["reference_answer"] == "It increased"
     assert csv_row["option_b_generation_rationale"] == "This reverses the reported direction."
     assert csv_row["reconstruction_rationale"] == "The source supports one answer."
+    assert json.loads(csv_row["stage_results_json"])["answer_verification"]["source_entailment_model_verified"] is True
     assert manifest["historical_prompt_templates"][0]["kind"] == "renderer"
     assert (tmp_path / "package" / "historical-prompt-bundle" / "generation-v10.py").read_text() == renderer.read_text()

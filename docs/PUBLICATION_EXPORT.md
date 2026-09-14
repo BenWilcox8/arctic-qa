@@ -20,6 +20,7 @@ It never selects rows or changes options.
 The reviewer files contain labels, reference answers, validation records, short evidence excerpts, locators, and retained rationales.
 An answer-absent reviewer row retains the paired question reference answer and evidence when state data retains them.
 The reviewer CSV files repeat DOI, title, question, reference answer, options, and rationales in readable columns.
+The reviewer files keep safe reconstruction and answer-verification result objects in `stage_results`.
 The benchmark files contain questions and option text only.
 The scoring files contain the correct option ID or a null value for an answer-absent variant.
 

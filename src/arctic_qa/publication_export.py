@@ -162,6 +162,24 @@ def _short_evidence(value: Any) -> dict[str, Any] | None:
     return result or None
 
 
+def _safe_stage_result(value: dict[str, Any]) -> dict[str, Any]:
+    excluded = {"run_id", "campaign_id", "request_id", "call_id", "status", "release_label", "created_at", "updated_at"}
+    result: dict[str, Any] = {}
+    evidence = _short_evidence(value)
+    if evidence:
+        result["evidence"] = evidence
+    for name, item in value.items():
+        if name in excluded or name in {"evidence_quote", "quote", "locator", "source_span_id", "span_contract_version", "text_sha256", "evidence_text_sha256"}:
+            continue
+        if isinstance(item, dict):
+            result[name] = _safe_stage_result(item)
+        elif isinstance(item, list):
+            result[name] = [_safe_stage_result(entry) if isinstance(entry, dict) else entry for entry in item]
+        else:
+            result[name] = item
+    return result
+
+
 def _public_validation(connection: sqlite3.Connection, candidate_id: str | None) -> list[dict[str, Any]]:
     if not candidate_id:
         return []
@@ -175,18 +193,18 @@ def _public_validation(connection: sqlite3.Connection, candidate_id: str | None)
         labels = details.get("labels", {}) if isinstance(details, dict) else {}
         if not isinstance(labels, dict):
             labels = {}
-        result.append(
-            {
-                "stage": row["stage"],
-                "verdict": row["label"],
-                "reason_codes": _json(row["reason_codes_json"], []),
-                "checks": {
-                    name: value
-                    for name, value in labels.items()
-                    if name not in {"machine_accepted_unverified", "rejected", "mcq_eligible", "unresolved"}
-                },
-            }
-        )
+        event = {
+            "stage": row["stage"],
+            "reason_codes": _json(row["reason_codes_json"], []),
+            "checks": {
+                name: value
+                for name, value in labels.items()
+                if name not in {"machine_accepted_unverified", "rejected", "mcq_eligible", "unresolved"}
+            },
+        }
+        if row["label"] != "machine_accepted_unverified":
+            event["verdict"] = row["label"]
+        result.append(event)
     return result
 
 
@@ -320,6 +338,11 @@ def _manifest_row(connection: sqlite3.Connection | None, item: dict[str, Any]) -
             )
             if value is not None
         },
+        "stage_results": {
+            name: _safe_stage_result(value)
+            for name, value in (("reconstruction", reconstruction), ("answer_verification", answer_verification))
+            if value
+        },
         "model_trace": _model_trace(candidate),
         "interpretation_limit": item.get("interpretation_limit"),
         "evidence_state": item.get("evidence_state"),
@@ -350,6 +373,7 @@ def _reviewer_csv_record(row: dict[str, Any]) -> dict[str, Any]:
         "options_json": canonical_json(row["options"]),
         "validation_json": canonical_json(row["validation"]),
         "rationales_json": canonical_json(row["rationales"]),
+        "stage_results_json": canonical_json(row["stage_results"]),
         "model_trace_json": canonical_json(row["model_trace"]),
         "interpretation_limit": row.get("interpretation_limit"),
         "evidence_state": row.get("evidence_state"),
@@ -396,7 +420,7 @@ def _write_manifest_package(
     scoring_csv = output_dir / "scoring-labels.csv"
     reviewer_csv_rows = [_reviewer_csv_record(row) for row in records]
     for path, rows, fields in (
-        (reviewer_csv, reviewer_csv_rows, ["item_id", "question_id", "variant_id", "doi", "title", "question", "reference_answer", "question_rationale", "answer_selection_rationale", "answer_rationale", "reconstruction_rationale", "verification_rationale", "option_a", "option_a_generation_rationale", "option_a_verification_rationale", "option_b", "option_b_generation_rationale", "option_b_verification_rationale", "option_c", "option_c_generation_rationale", "option_c_verification_rationale", "option_d", "option_d_generation_rationale", "option_d_verification_rationale", "paper_json", "reference_answer_json", "answer_evidence_json", "options_json", "validation_json", "rationales_json", "model_trace_json", "interpretation_limit", "evidence_state"]),
+        (reviewer_csv, reviewer_csv_rows, ["item_id", "question_id", "variant_id", "doi", "title", "question", "reference_answer", "question_rationale", "answer_selection_rationale", "answer_rationale", "reconstruction_rationale", "verification_rationale", "option_a", "option_a_generation_rationale", "option_a_verification_rationale", "option_b", "option_b_generation_rationale", "option_b_verification_rationale", "option_c", "option_c_generation_rationale", "option_c_verification_rationale", "option_d", "option_d_generation_rationale", "option_d_verification_rationale", "paper_json", "reference_answer_json", "answer_evidence_json", "options_json", "validation_json", "rationales_json", "stage_results_json", "model_trace_json", "interpretation_limit", "evidence_state"]),
         (benchmark_csv, benchmark_rows, ["item_id", "question_id", "variant_id", "question", "options_json"]),
         (scoring_csv, scoring_rows, ["item_id", "correct_option_id", "answer_present"]),
     ):
