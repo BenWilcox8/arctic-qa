@@ -62,7 +62,15 @@ def test_plan_is_deterministic_and_never_changes_its_inputs(tmp_path: Path) -> N
     status = ledger.with_name("shared-ledger.status.json")
     _write_json(status, {"state": "ready"})
     config = tmp_path / "config"
-    for name in ("budget", "price", "gate", "prompt", "schema", "policy"):
+    for name in (
+        "budget",
+        "price",
+        "gate",
+        "prompt",
+        "schema",
+        "policy",
+        "transition",
+    ):
         (config / name).parent.mkdir(parents=True, exist_ok=True)
         (config / name).write_text(name, encoding="utf-8")
 
@@ -83,6 +91,7 @@ def test_plan_is_deterministic_and_never_changes_its_inputs(tmp_path: Path) -> N
         "eligibility_prompt_file": config / "prompt",
         "eligibility_schema_file": config / "schema",
         "eligibility_policy_file": config / "policy",
+        "config_transition_file": config / "transition",
         "planning_cumulative_budget_usd": Decimal("20"),
     }
 
@@ -100,6 +109,13 @@ def test_plan_is_deterministic_and_never_changes_its_inputs(tmp_path: Path) -> N
         "doi:two",
     ]
     assert first["stream_command_argv"][0:4] == ["python", "-m", "arctic_qa", "--json"]
+    transition_arg = first["stream_command_argv"].index(
+        "--ledger-config-transition-file"
+    )
+    assert first["stream_command_argv"][transition_arg + 1] == str(
+        (config / "transition").resolve()
+    )
+    assert first["generation_configuration"]["config_transition"]["sha256"]
 
 
 def test_cli_materializes_frozen_jsonl_as_supported_access_run(tmp_path: Path) -> None:

@@ -375,6 +375,7 @@ def build_plan(
     eligibility_schema_file: Path,
     eligibility_policy_file: Path,
     planning_cumulative_budget_usd: Decimal,
+    config_transition_file: Path | None = None,
     max_papers: int | None = None,
     selection_seed: str | None = None,
     phase: str = "away_production",
@@ -439,6 +440,11 @@ def build_plan(
         "eligibility_prompt": _file_identity(eligibility_prompt_file),
         "eligibility_schema": _file_identity(eligibility_schema_file),
         "eligibility_policy": _file_identity(eligibility_policy_file),
+        "config_transition": (
+            _file_identity(config_transition_file)
+            if config_transition_file is not None
+            else None
+        ),
     }
     stream_command = [
         "python",
@@ -481,6 +487,13 @@ def build_plan(
         "--max-papers",
         str(selected_count),
     ]
+    if config_transition_file is not None:
+        stream_command.extend(
+            [
+                "--ledger-config-transition-file",
+                str(config_transition_file.resolve()),
+            ]
+        )
     return {
         "schema": "arctic-qa-full-run-plan-v1",
         "planning_only": True,
@@ -546,6 +559,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--streaming-budget-policy-file", type=Path, required=True)
     result.add_argument("--price-config-file", type=Path, required=True)
     result.add_argument("--execution-gate-file", type=Path, required=True)
+    result.add_argument("--ledger-config-transition-file", type=Path)
     result.add_argument("--eligibility-prompt-file", type=Path, required=True)
     result.add_argument("--eligibility-schema-file", type=Path, required=True)
     result.add_argument("--eligibility-policy-file", type=Path, required=True)
@@ -595,6 +609,7 @@ def main(argv: list[str] | None = None) -> int:
                 eligibility_schema_file=args.eligibility_schema_file,
                 eligibility_policy_file=args.eligibility_policy_file,
                 planning_cumulative_budget_usd=args.planning_cumulative_budget_usd,
+                config_transition_file=args.ledger_config_transition_file,
                 max_papers=args.max_papers,
                 selection_seed=args.selection_seed,
                 phase=args.phase,
@@ -644,6 +659,7 @@ def main(argv: list[str] | None = None) -> int:
             eligibility_schema_file=args.eligibility_schema_file,
             eligibility_policy_file=args.eligibility_policy_file,
             planning_cumulative_budget_usd=args.planning_cumulative_budget_usd,
+            config_transition_file=args.ledger_config_transition_file,
             max_papers=args.max_papers,
             selection_seed=args.selection_seed,
             phase=args.phase,

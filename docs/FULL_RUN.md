@@ -28,6 +28,7 @@ PYTHONPATH=src python -m arctic_qa.full_run_plan \
   --streaming-budget-policy-file config/streaming-dataset-budget-policy-v1.json \
   --price-config-file config/gemini-eligibility-v1.json \
   --execution-gate-file config/streaming-live-execution-gate-v1.json \
+  --ledger-config-transition-file /PRIVATE/DIRECTORY/reviewed-transition.json \
   --eligibility-prompt-file config/gemini-eligibility-prompt-v3.txt \
   --eligibility-schema-file schemas/gemini-eligibility.v1.schema.json \
   --eligibility-policy-file /mnt/crdata/research-abstention/arctic-qa/ELIGIBILITY_POLICY.json \
@@ -37,6 +38,8 @@ PYTHONPATH=src python -m arctic_qa.full_run_plan \
 The `run-id` and `campaign-id` must differ from the article-access run ID.
 The output JSON records both identities and the exact future stream argv array.
 It is not a shell command.
+When a new broker policy is not active yet, the reviewed transition file is required.
+The plan includes that file and its hash in the configuration identity and stream argv.
 
 By default, the plan includes every source in the frozen manifest order.
 It does not select only ready, eligible, or accepted sources.
