@@ -66,17 +66,34 @@ QUESTION_ALIGNMENT_INSTRUCTIONS = (
     "requires multiple values, ask for every value. Do not request an explanation, "
     "evidence, or selection justification as part of the answer."
 )
+BENCHMARK_STANDALONE_INSTRUCTIONS = (
+    "For benchmark-facing text, write for a reader who cannot see the source paper. "
+    "Benchmark-facing text includes question, question_context, answer.text, and each "
+    "displayed distractor. Make the question and question_context identify the actual "
+    "system, location, samples, period, and conditions needed for one interpretation. "
+    "State each detail only when SOURCE_DATA supports it. Do not invent a missing detail "
+    "or broaden a paper-specific observation into a general fact. Do not use source-dependent "
+    "shorthand. This includes 'this study', 'the authors', figure or table citations, and "
+    "'as described above'. Do not use unresolved phrases such as 'the samples' or 'the "
+    "identified OTUs'. Make each answer and displayed distractor understandable with the "
+    "question and question_context alone. A reader can need SOURCE_DATA to determine or "
+    "verify the answer. A reader must not need it to identify a referent or interpret scope. "
+    "These rules do not restrict exact evidence quotes, source locators, or rationale fields."
+)
 QUESTION_CONTEXT_INSTRUCTIONS = (
     "Set question_context to an empty string when the question is self-contained. "
     "Otherwise, add only source-supported information that is necessary to understand "
     "the question. The context can expand an unfamiliar acronym, identify an ambiguous "
-    "referent, or distinguish a study group or measurement meaning. Keep this context "
-    "separate from the question. Do not put the task in the context or hide a second "
-    "question there. Do not include answer-bearing numbers, relationships, results, "
-    "conclusions, answer-choice eliminators, or a paper summary. If an acronym expansion "
-    "answers the question, do not supply that expansion. Do not invent a definition."
+    "referent, or distinguish a sample, location, period, condition, system, or measurement "
+    "meaning. Keep this context separate from the question. Do not put the task in the "
+    "context or hide a second question there. When OTUs need an expansion, write "
+    "'operational taxonomic units (OTUs)'. Include source-supported sample and location "
+    "context when they are needed to interpret OTUs. Do not include answer-bearing numbers, "
+    "taxonomic counts, relationships, results, conclusions, answer-choice eliminators, "
+    "or a paper summary. If an acronym expansion answers the question, do not supply that "
+    "expansion. Do not invent a definition."
 )
-DISTRACTOR_WRITER_INSTRUCTIONS = """Propose 4 to 6 typed distractors so that at least three can survive independent verification. Do not self-verify them. Each option must be a concise positive assertion with one interpretation. Avoid explicit negation and compound assertions. For a numeric option, display exactly one displayed number and unit, and provide numeric canonical_value and unit metadata that match that display. Prefer nonnumeric categorical or directional contradictions when the answer lacks a source-bound numeric tolerance rule. Select source_span_id for each evidence record. For each option, provide a concise generation_rationale that explains why the option is plausible and how it differs from the source-supported answer. This is a model-generated justification, not proof and not hidden reasoning."""
+DISTRACTOR_WRITER_INSTRUCTIONS = """Treat QUESTION and QUESTION_CONTEXT as the complete benchmark task. Do not use SOURCE_DATA to resolve a missing system, location, sample, period, condition, or referent. If the displayed task needs SOURCE_DATA to identify a referent or interpret scope, do not propose distractors. SOURCE_DATA can still determine the answer. Propose 4 to 6 typed distractors so that at least three can survive independent verification. Do not self-verify them. Each option must be a concise positive assertion with one interpretation. Avoid explicit negation and compound assertions. Each option must be understandable with QUESTION and QUESTION_CONTEXT alone. For a numeric option, display exactly one displayed number and unit, and provide numeric canonical_value and unit metadata that match that display. Prefer nonnumeric categorical or directional contradictions when the answer lacks a source-bound numeric tolerance rule. Select source_span_id for each evidence record. For each option, provide a concise generation_rationale that explains why the option is plausible and how it differs from the source-supported answer. This is a model-generated justification, not proof and not hidden reasoning."""
 
 JUSTIFICATION_SCHEMA = {
     "type": "string",
@@ -696,6 +713,8 @@ def generate_candidate(
             + QUESTION_ALIGNMENT_INSTRUCTIONS
             + " "
             + QUESTION_CONTEXT_INSTRUCTIONS
+            + " "
+            + BENCHMARK_STANDALONE_INSTRUCTIONS
             + " Do not provide hidden reasoning.",
             parameters,
             reservation,
@@ -726,6 +745,8 @@ def generate_candidate(
             + QUESTION_ALIGNMENT_INSTRUCTIONS
             + " "
             + QUESTION_CONTEXT_INSTRUCTIONS
+            + " "
+            + BENCHMARK_STANDALONE_INSTRUCTIONS
             + " Do not provide hidden reasoning.",
             parameters,
             reservation,
@@ -745,7 +766,13 @@ def generate_candidate(
         + str(question)
         + "\nQUESTION_CONTEXT\n"
         + question_context
-        + "\nReconstruct the answer. The proposed answer is hidden. "
+        + "\n"
+        + BENCHMARK_STANDALONE_INSTRUCTIONS
+        + " Read QUESTION and QUESTION_CONTEXT alone before you read SOURCE_DATA. "
+        "Do not use SOURCE_DATA to repair a missing system, location, sample, period, "
+        "condition, or referent. If the displayed task is incomplete, report ambiguity "
+        "instead of resolving it from SOURCE_DATA. SOURCE_DATA can still determine the "
+        "answer. Reconstruct the answer. The proposed answer is hidden. "
         "Select one source_span_id for the evidence. A selectable span can be an "
         "exact combined interval from adjacent eligible fragments. Copy each non-null scope "
         "value exactly from its selected SOURCE_DATA span, without aliases or "
@@ -787,7 +814,14 @@ def generate_candidate(
         + canonical_json(answer)
         + "\nRECONSTRUCTION\n"
         + canonical_json(reconstruction)
-        + "\nVerify entailment, relation, scope, ambiguity, alternatives, evidence, and the question claim type. "
+        + "\n"
+        + BENCHMARK_STANDALONE_INSTRUCTIONS
+        + " Read QUESTION and QUESTION_CONTEXT alone before you use SOURCE_DATA, ANSWER_RECORD, "
+        "or RECONSTRUCTION. Do not use those records to repair a missing system, location, "
+        "sample, period, condition, or referent. If the displayed task needs SOURCE_DATA to "
+        "identify a referent or interpret scope, set relation_scope_match to false. SOURCE_DATA "
+        "can still determine or verify the answer. Verify entailment, relation, scope, ambiguity, "
+        "alternatives, evidence, and the question claim type. "
         "Treat QUESTION and QUESTION_CONTEXT as the complete model-facing task. "
         "Set question_context_required to true only when the nonempty context supplies "
         "information necessary to understand the question. Set it to false when the "
@@ -1032,6 +1066,8 @@ def _generate_distractors(
         + canonical_json(answer)
         + attempt_context
         + "\n"
+        + BENCHMARK_STANDALONE_INSTRUCTIONS
+        + " "
         + DISTRACTOR_WRITER_INSTRUCTIONS,
         parameters,
         reservation,
@@ -1071,7 +1107,17 @@ def _generate_distractors(
             + "\nVERIFICATION_BINDING\n"
             + canonical_json(binding)
             + attempt_context
-            + "\nEstablish a unique contradiction for this exact displayed option. Absence of mention is not falsity. Set question_admits_option_as_correct only when a reasonable reading of THIS question admits the option. Truth at another location or time alone does not make a scoped substitution correct."
+            + "\n"
+            + BENCHMARK_STANDALONE_INSTRUCTIONS
+            + " Read QUESTION, QUESTION_CONTEXT, and the displayed option before you use "
+            "SOURCE_DATA or ANSWER_RECORD. Do not use those records to repair a missing "
+            "system, location, sample, period, condition, or referent. If the displayed task "
+            "or option needs SOURCE_DATA to identify a referent or interpret scope, set "
+            "alternative_answer_search_passed to false. SOURCE_DATA can still determine or "
+            "verify the answer. Establish a unique contradiction for this exact displayed option. "
+            "Absence of mention is not falsity. Set question_admits_option_as_correct only when "
+            "a reasonable reading of THIS question admits the option. Truth at another location "
+            "or time alone does not make a scoped substitution correct."
             + " Select one source_span_id for the evidence. Set rationale to a "
             "concise evidence-grounded justification for the verdict fields. "
             "Do not provide hidden reasoning."

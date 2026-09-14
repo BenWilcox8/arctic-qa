@@ -5,10 +5,23 @@ An empty `question_context` means that the question is self-contained.
 An external evaluator must provide both fields to the evaluated model.
 The evaluator must keep the fields separate in the rendered input.
 
-The question contains the complete task.
-The context contains only information that is necessary to understand that task.
-Context can define an unfamiliar acronym, identify a referent, or distinguish a study group or measurement.
-Context does not contain a second task.
+The question and context together contain the complete task.
+They identify the actual system, location, samples, period, and conditions needed for one interpretation.
+They include each detail only when the source supports it.
+They do not invent missing details or broaden a paper-specific observation into a general fact.
+They do not use source-dependent references such as a study, authors, figures, tables, or text above.
+They do not use unresolved phrases such as the samples or the identified OTUs.
+
+The context contains only information that is necessary to understand the task.
+Context can define an unfamiliar acronym, identify a referent, or distinguish a sample, location, period, condition, system, or measurement.
+When needed, context expands OTUs as operational taxonomic units (OTUs).
+Context gives source-supported sample and location information when it is needed for that acronym.
+Context does not contain a second task, taxonomic counts, results, conclusions, answer-bearing numbers, or answer-choice eliminators.
+
+These rules apply to benchmark-facing text only.
+Exact source quotes, evidence, rationales, and reviewer locators can retain source references.
+A benchmark reader can need the source to determine or verify the answer.
+The reader must not need the source to identify a referent or interpret the question scope.
 
 Blinded benchmark input must not contain these records:
 

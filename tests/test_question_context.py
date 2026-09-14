@@ -17,7 +17,7 @@ def _verification(*, required: bool) -> dict[str, bool]:
 
 
 def test_required_acronym_context_passes_context_gates() -> None:
-    context = "SST means sea surface temperature in this study."
+    context = "SST means sea surface temperature in coastal water samples at Site A."
     answer = {"text": "lower during winter"}
 
     assert question_context_verification_reason(
@@ -67,6 +67,24 @@ def test_question_roles_require_separate_context_and_verifier_gates() -> None:
     assert "If an acronym expansion answers the question" in (
         generation.QUESTION_CONTEXT_INSTRUCTIONS
     )
+
+
+def test_standalone_wording_instructions_cover_scope_and_otu_context() -> None:
+    instructions = generation.BENCHMARK_STANDALONE_INSTRUCTIONS
+    context_instructions = generation.QUESTION_CONTEXT_INSTRUCTIONS
+
+    assert "reader who cannot see the source paper" in instructions
+    assert "actual system, location, samples, period, and conditions" in instructions
+    assert "only when SOURCE_DATA supports it" in instructions
+    assert "Do not invent a missing detail" in instructions
+    assert "paper-specific observation" in instructions
+    assert "source-dependent shorthand" in instructions
+    assert "determine or verify the answer" in instructions
+    assert "identify a referent or interpret scope" in instructions
+    assert "exact evidence quotes, source locators, or rationale fields" in instructions
+    assert "operational taxonomic units (OTUs)" in context_instructions
+    assert "source-supported sample and location context" in context_instructions
+    assert "taxonomic counts" in context_instructions
 
 
 def test_exports_default_legacy_context_and_serialize_new_context() -> None:
