@@ -1051,6 +1051,7 @@ class FakePipelineTraceStore:
     def __init__(self) -> None:
         self.state = "rejected"
         self.list_arguments: dict[str, object] = {}
+        self.include_question_context = True
 
     def list_papers(self, **arguments: object) -> dict[str, object]:
         self.list_arguments = arguments
@@ -1083,6 +1084,25 @@ class FakePipelineTraceStore:
     def paper_detail(self, paper_key: str) -> dict[str, object]:
         if paper_key != "paper-safe-key":
             raise KeyError("unknown pipeline paper key")
+        candidate = {
+            "question": "What changed?",
+            "answer": {
+                "text": "The measured value increased.",
+                "evidence_quote": "The value increased during the period.",
+                "locator": {"chunk_id": "chunk-readable"},
+            },
+            "distractors": [
+                {"text": "It decreased.", "type": "contradiction"}
+            ],
+            "options": [
+                {"text": "It increased.", "is_correct": True},
+                {"text": "It decreased.", "is_correct": False},
+            ],
+        }
+        if self.include_question_context:
+            candidate["question_context"] = (
+                "The question compares measurements from two study periods."
+            )
         return {
             "schema": "pipeline-trace-paper-v1",
             "identity": {
@@ -1126,21 +1146,7 @@ class FakePipelineTraceStore:
                 {
                     "item_id": "qa-readable",
                     "status": "machine_accepted_unverified",
-                    "candidate": {
-                        "question": "What changed?",
-                        "answer": {
-                            "text": "The measured value increased.",
-                            "evidence_quote": "The value increased during the period.",
-                            "locator": {"chunk_id": "chunk-readable"},
-                        },
-                        "distractors": [
-                            {"text": "It decreased.", "type": "contradiction"}
-                        ],
-                        "options": [
-                            {"text": "It increased.", "is_correct": True},
-                            {"text": "It decreased.", "is_correct": False},
-                        ],
-                    },
+                    "candidate": candidate,
                 }
             ],
             "validation_events": [],
@@ -1224,11 +1230,12 @@ def test_pipeline_trace_http_routes_escape_payloads_and_reject_paths(
     tmp_path: Path,
 ) -> None:
     fixture_corpus(tmp_path)
+    store = FakePipelineTraceStore()
     artifacts = CorpusArtifacts(
         tmp_path,
         "test-run",
         tmp_path / "runtime",
-        pipeline_trace_store=FakePipelineTraceStore(),
+        pipeline_trace_store=store,
     )
     server = CorpusServer(("127.0.0.1", 0), artifacts)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -1245,6 +1252,20 @@ def test_pipeline_trace_http_routes_escape_payloads_and_reject_paths(
                 assert response.headers["Cache-Control"] == "no-store"
                 assert b"<script>" not in body
                 assert b"<img" not in body
+        with urllib.request.urlopen(
+            f"{base}/api/pipeline-trace/paper?paper_key=paper-safe-key"
+        ) as response:
+            retained = json.loads(response.read())
+        candidate = retained["candidates"][0]["candidate"]
+        assert candidate["question_context"] == (
+            "The question compares measurements from two study periods."
+        )
+        store.include_question_context = False
+        with urllib.request.urlopen(
+            f"{base}/api/pipeline-trace/paper?paper_key=paper-safe-key"
+        ) as response:
+            legacy = json.loads(response.read())
+        assert "question_context" not in legacy["candidates"][0]["candidate"]
         with pytest.raises(urllib.error.HTTPError) as arbitrary:
             urllib.request.urlopen(f"{base}/api/pipeline-trace/paper/paper-safe-key")
         assert arbitrary.value.code == 404
@@ -1296,6 +1317,9 @@ def test_page_contains_readable_trace_views_and_bounded_table_widths() -> None:
     assert "item.reason?.summary" in page
     assert "Complete raw JSON for ${caption}" in page
     assert "appendLabeledReadableText(card, 'Question', record.question" in page
+    assert "Context for benchmark model" in page
+    assert "Legacy record: no question context was retained." in page
+    assert "The benchmark model receives it with the question." in page
     assert "Reference answer" in page
     assert "Answer choices" in page
     assert "Distractors" in page
@@ -1310,6 +1334,9 @@ def test_page_contains_readable_trace_views_and_bounded_table_widths() -> None:
     assert "['Reconstruction rationale', record.reconstruction_rationale]" in page
     assert "Model response text (display formatting)" in page
     assert "keeps the exact retained response" in page
+    assert "prepared pending activation" in page
+    assert "sites at least 66.56° N, land or sea" in page
+    assert "Insufficient or inseparable evidence is unresolved" in page
 
     detail = FakePipelineTraceStore().paper_detail("paper-safe-key")
     candidate = detail["candidates"][0]["candidate"]
