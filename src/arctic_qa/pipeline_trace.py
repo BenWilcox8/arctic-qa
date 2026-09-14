@@ -115,11 +115,18 @@ def _plain_reason(final_reason: str | None, state: str, current_stage: str) -> d
     if reason.endswith("_response_invalid") or any(
         token in reason.casefold() for token in ("malformed", "schema_invalid", "parse_error")
     ):
+        invalid_stage = {
+            "reconstructor": "blinded_reconstruction",
+            "question_writer": "question_generation",
+            "answer_verifier": "answer_verification",
+            "distractor_writer": "distractor_generation",
+            "option_verifier": "option_verification",
+        }.get(reason.removesuffix("_response_invalid"), current_stage)
         return {
             "category": "invalid_model_response",
             "summary": "The paper stayed eligible, but this QA attempt was rejected because the model response was invalid.",
             "explanation": "The response failed the required structured-output contract. The viewer preserves the settled response for inspection.",
-            "failed_stage": current_stage,
+            "failed_stage": invalid_stage,
             "failed_check": reason,
             "reason_code": reason,
         }
@@ -1132,7 +1139,10 @@ class PipelineTraceStore:
                     }
                 )
 
-        if not model_statements and record.get("state") == "error":
+        if not model_statements and reason.get("category") in {
+            "invalid_model_response",
+            "processing_error",
+        }:
             latest = max(
                 record.get("receipts") or [],
                 key=lambda row: str(
