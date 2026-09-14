@@ -121,6 +121,7 @@ USAGE_RECONCILIATION_FIELDS = {
     "review_record_sha256",
     "reconciled_at_utc",
 }
+EXCLUSIVE_BATCH_SCHEMA = "shared-gemini-exclusive-batch-v1"
 
 
 def _now() -> str:
@@ -130,6 +131,67 @@ def _now() -> str:
 def _read(path: Path) -> Any:
     with path.open(encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def exclusive_batch_marker_path(ledger_file: Path) -> Path:
+    return ledger_file.resolve().with_name(f".{ledger_file.name}.exclusive-batch.json")
+
+
+def activate_exclusive_batch_mode(
+    ledger_file: Path,
+    *,
+    batch_identity: str,
+    batch_state_file: Path,
+    expected_ledger_sha256: str,
+) -> dict[str, Any]:
+    ledger_file = ledger_file.resolve()
+    batch_state_file = batch_state_file.resolve()
+    if not re.fullmatch(r"[a-f0-9]{64}", batch_identity):
+        raise ValueError("the exclusive batch identity is invalid")
+    if not batch_state_file.is_file():
+        raise ValueError("the exclusive batch state file is absent")
+    operation_path = ledger_file.with_name(f".{ledger_file.name}.operation.lock")
+    ledger_lock_path = ledger_file.with_name(f".{ledger_file.name}.lock")
+    marker_path = exclusive_batch_marker_path(ledger_file)
+    with operation_path.open("a+") as operation:
+        try:
+            fcntl.flock(operation, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise ValueError("another paid broker operation is active") from error
+        with ledger_lock_path.open("a+") as ledger_lock:
+            fcntl.flock(ledger_lock, fcntl.LOCK_EX)
+            if sha256_file(ledger_file) != expected_ledger_sha256:
+                raise ValueError("the shared paid-call ledger changed before batch activation")
+            ledger = _read(ledger_file)
+            if (
+                ledger.get("schema") != "shared-paid-call-ledger-v1"
+                or ledger.get("halted") is not False
+                or ledger.get("inflight") != 0
+                or _money(ledger.get("reserved_usd"), "reserved") != 0
+                or _money(ledger.get("ambiguous_reserved_usd"), "ambiguous") != 0
+            ):
+                raise ValueError("the shared paid-call ledger is not settled")
+            marker = {
+                "schema": EXCLUSIVE_BATCH_SCHEMA,
+                "batch_identity": batch_identity,
+                "batch_state_file": str(batch_state_file),
+                "batch_state_sha256_at_activation": sha256_file(batch_state_file),
+                "shared_ledger_file": str(ledger_file),
+                "shared_ledger_sha256_at_activation": expected_ledger_sha256,
+                "activated_at_utc": _now(),
+            }
+            if marker_path.is_file():
+                existing = _read(marker_path)
+                comparable = dict(marker)
+                comparable["batch_state_sha256_at_activation"] = existing.get(
+                    "batch_state_sha256_at_activation"
+                )
+                comparable["activated_at_utc"] = existing.get("activated_at_utc")
+                if existing != comparable:
+                    raise ValueError("another exclusive batch mode owns the shared ledger")
+                return existing
+            atomic_json(marker_path, marker, immutable=True)
+            return marker
 
 
 def _normalized_usage(response: Any) -> dict[str, Any]:
@@ -3009,6 +3071,8 @@ class SharedGeminiBroker:
             operation.close()
             raise ValueError("another paid broker operation is active") from error
         try:
+            if exclusive_batch_marker_path(self.ledger_file).exists():
+                raise ValueError("exclusive Gemini batch mode is active")
             self._recover_orphans()
             gate = _validate_gate(self.execution_gate_file, phase)
             self._validate_stream_input_binding(
