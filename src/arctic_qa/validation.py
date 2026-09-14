@@ -1286,9 +1286,13 @@ def _option_verdict_receipt_matches(
     finding_id = candidate.get("finding_id")
     if not all(isinstance(value, str) and value for value in (run_id, arm, finding_id)):
         return False
-    entity_id = stable_id(
-        "option-verdict", stable_id("unit", finding_id, arm), option_hash
+    generation_attempt = candidate_provenance.get("generation_attempt")
+    unit_entity_id = (
+        stable_id("unit", finding_id, arm, generation_attempt.get("attempt_id"))
+        if isinstance(generation_attempt, dict)
+        else stable_id("unit", finding_id, arm)
     )
+    entity_id = stable_id("option-verdict", unit_entity_id, option_hash)
     receipt = db.one(
         """SELECT * FROM calls
         WHERE run_id=? AND entity_id=? AND role='option_verifier'
