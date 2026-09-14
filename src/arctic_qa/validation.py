@@ -34,6 +34,10 @@ SUPPORTED_SOURCE_SPAN_CONTRACTS = {
     LEGACY_SOURCE_SPAN_CONTRACT_VERSION,
     SOURCE_SPAN_CONTRACT_VERSION,
 }
+
+_ALPHABETIC_LINE_BREAK_HYPHEN = re.compile(
+    r"(?<=[^\W\d_])-[^\S\r\n]*(?:\r\n|\r|\n)[^\S\r\n]*(?=[^\W\d_])"
+)
 CANDIDATE_CONTRACTS = {
     "2.0.0": {
         "prompt_version": "arctic-qa-generation-v14",
@@ -212,6 +216,17 @@ class ValidationResult:
         }
 
 
+def _scope_comparison_projection(value: str) -> str:
+    """Normalize only whitespace and alphabetic line-break hyphenation."""
+    return normalize_text(_ALPHABETIC_LINE_BREAK_HYPHEN.sub("", value))
+
+
+def _scope_phrase_in_text(phrase: str, text: str) -> bool:
+    phrase_projection = _scope_comparison_projection(phrase)
+    text_projection = _scope_comparison_projection(text)
+    return bool(phrase_projection and phrase_projection in text_projection)
+
+
 def _eligible_arctic_scope_error(
     candidate: dict[str, Any], source: dict[str, Any]
 ) -> str | None:
@@ -284,7 +299,8 @@ def _eligible_arctic_scope_error(
             ):
                 return "eligible_arctic_finding_out_of_scope"
     if not scope_phrases or not any(
-        isinstance(phrase, str) and phrase in question for phrase in scope_phrases
+        isinstance(phrase, str) and _scope_phrase_in_text(phrase, question)
+        for phrase in scope_phrases
     ):
         return "eligible_arctic_scope_missing_from_question"
     return None
@@ -409,16 +425,17 @@ def validate_candidate(
     ):
         reasons.append("scope_qualifier_missing")
         return _finish(db, candidate, labels, reasons, [], "rejected")
-    answer_evidence = normalize_text(str(candidate["answer"].get("evidence_quote", "")))
+    answer_evidence = str(candidate["answer"].get("evidence_quote", ""))
     if any(
-        normalize_text(phrase) not in answer_evidence for phrase in required_phrases
+        not _scope_phrase_in_text(phrase, answer_evidence)
+        for phrase in required_phrases
     ):
         reasons.append("scope_qualifier_not_source_bound")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     missing_scope = [
         phrase
         for phrase in required_phrases
-        if normalize_text(phrase) not in normalize_text(candidate["question"])
+        if not _scope_phrase_in_text(phrase, str(candidate["question"]))
     ]
     if missing_scope:
         reasons.append("scope_qualifier_missing")
@@ -999,15 +1016,15 @@ def _typed_numeric_scope_is_complete(
     scope = reconstruction.get("scope")
     if not isinstance(required, list) or not isinstance(scope, dict):
         return False
-    scope_text = normalize_text(
-        " ".join(str(value) for value in scope.values() if isinstance(value, str))
+    scope_text = " ".join(
+        str(value) for value in scope.values() if isinstance(value, str)
     )
     return bool(
         scope_text
         and all(
             isinstance(phrase, str)
             and normalize_text(phrase)
-            and normalize_text(phrase) in scope_text
+            and _scope_phrase_in_text(phrase, scope_text)
             for phrase in required
         )
     )
@@ -1771,14 +1788,11 @@ def scope_is_source_bound(
     values = [value for value in scope.values() if value is not None]
     if not values or any(not isinstance(value, str) for value in values):
         return False
-    normalized_values = [normalize_text(value) for value in values]
-    if any(not value for value in normalized_values):
+    if any(not normalize_text(value) for value in values):
         return False
-    source_text = normalize_text(
-        " ".join(str(chunk.get("text", "")) for chunk in chunks)
-    )
+    source_text = " ".join(str(chunk.get("text", "")) for chunk in chunks)
     return bool(
-        source_text and all(value in source_text for value in normalized_values)
+        source_text and all(_scope_phrase_in_text(value, source_text) for value in values)
     )
 
 
