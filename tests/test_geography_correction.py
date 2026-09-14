@@ -244,6 +244,43 @@ def test_scope_finding_span_allows_only_whitespace_equivalent_chunk_text() -> No
     assert spans[0]["eligibility_match_kind"] == "whitespace_equivalent"
 
 
+def test_scope_finding_span_word_difference_is_paper_local_rejection() -> None:
+    eligibility_quote = "At 76.2 N, Arctic station nitrate declined by 15 percent."
+    source = {
+        "scope_rule_version": "gemini-fulltext-arctic-eligibility-v2",
+        "scope_evidence_json": json.dumps(
+            {
+                "eligibility_job_key": "job-v3-word-mismatch",
+                "resolved_eligible_arctic_scope": {
+                    "component": "whole_study",
+                    "finding_spans": [
+                        {
+                            "quote": eligibility_quote,
+                            "source_bytes_sha256": sha256_bytes(
+                                eligibility_quote.encode()
+                            ),
+                        }
+                    ],
+                    "question_scope_phrases": [],
+                },
+            }
+        ),
+    }
+
+    with pytest.raises(CandidateRejectedError) as error:
+        _eligible_generation_scope(
+            source,
+            [
+                {
+                    "chunk_id": "chunk-1",
+                    "text": "At 76.2 N, Arctic station nitrate increased by 15 percent.",
+                }
+            ],
+        )
+
+    assert error.value.reason_code == "eligible_arctic_scope_finding_unbound"
+
+
 @pytest.mark.parametrize(
     "text,geography_status",
     [

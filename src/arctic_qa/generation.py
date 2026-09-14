@@ -1584,7 +1584,10 @@ def _eligible_generation_scope(
             }
             break
         if located is None:
-            raise ValueError("an eligible Arctic finding span is not in source chunks")
+            raise CandidateRejectedError(
+                "eligible_arctic_scope_finding_unbound",
+                "an eligible Arctic finding span is not in source chunks",
+            )
         if located["span_id"] not in {span["span_id"] for span in spans}:
             spans.append(located)
     scope = {
