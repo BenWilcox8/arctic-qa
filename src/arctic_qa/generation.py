@@ -21,6 +21,7 @@ from .validation import (
     DIRECT_SOURCE_VALUE_CONTRACT_VERSION,
     GENERATION_PROMPT_VERSION,
     NUMERIC_RULE_CONTRACT_VERSION,
+    QUESTION_VERIFICATION_CONTRACT_VERSION,
     SCOPE_CONTRACT_VERSION,
     benchmark_context_verification_reason,
     numeric_rule_is_source_bound,
@@ -516,6 +517,10 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
                 "question_context_required",
                 "question_context_source_supported",
                 "question_context_answer_leakage_absent",
+                "question_verification_contract_version",
+                "question_context_referent_resolved",
+                "question_context_missing_detail",
+                "question_answer_leakage_absent",
                 "question_claim_type",
                 "evidence_quote",
                 "locator",
@@ -530,8 +535,17 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
                 "question_context_required": {"type": "boolean"},
                 "question_context_source_supported": {"type": "boolean"},
                 "question_context_answer_leakage_absent": {"type": "boolean"},
+                "question_verification_contract_version": {
+                    "const": QUESTION_VERIFICATION_CONTRACT_VERSION
+                },
                 "question_context_referent_resolved": {"type": "boolean"},
-                "question_context_missing_detail": {"type": "string"},
+                "question_context_missing_detail": {
+                    "type": "string",
+                    "description": (
+                        "Structured detail for a missing subject, place, time, sample, "
+                        "event, or answer-leak defect. Use an empty string when none exists."
+                    ),
+                },
                 "question_answer_leakage_absent": {"type": "boolean"},
                 "question_claim_type": {
                     "enum": ["observation", "association", "causal", "definition"]
@@ -649,6 +663,22 @@ def _validated_generation_attempt(
         if finding_index != 2 or revision_index != 0 or not exclusions:
             raise ValueError("alternative finding state is invalid")
     return json.loads(canonical_json(value))
+
+
+def _question_verification_feedback(verification: dict[str, Any]) -> dict[str, Any]:
+    """Return the bounded semantic review that a question revision can repair."""
+    return {
+        "contract_version": verification.get(
+            "question_verification_contract_version"
+        ),
+        "referent_resolved": verification.get("question_context_referent_resolved"),
+        "missing_detail": verification.get("question_context_missing_detail", ""),
+        "context_answer_leakage_absent": verification.get(
+            "question_context_answer_leakage_absent"
+        ),
+        "answer_leakage_absent": verification.get("question_answer_leakage_absent"),
+        "residual_error": verification.get("residual_error", ""),
+    }
 
 
 def generate_candidate(
@@ -959,6 +989,9 @@ def generate_candidate(
                 "parent_question_context": revision_parent.get(
                     "question_context", ""
                 ),
+                "verifier_question_review": _question_verification_feedback(
+                    revision_parent.get("answer_verification") or {}
+                ),
             }
         )
     revision_instruction = (
@@ -1129,14 +1162,17 @@ def generate_candidate(
         "question_context_answer_leakage_absent to false when the context gives the "
         "answer, a result, a conclusion, a relationship, an answer-bearing number, "
         "or an answer-choice eliminator. "
+        "Set question_verification_contract_version to "
+        f"{QUESTION_VERIFICATION_CONTRACT_VERSION!r}. "
         "Reject study-local definite descriptions or abbreviated species names when "
         "QUESTION and QUESTION_CONTEXT do not identify the subject, place, time, sample, "
         "or event. A latitude alone does not identify a station or event. "
         "Set question_context_referent_resolved to false when QUESTION and "
         "QUESTION_CONTEXT leave a study-local referent or scope unresolved, and set "
         "question_context_missing_detail to name the missing subject, place, time, "
-        "sample, or event. Set it to true and leave the detail empty when the "
-        "benchmark-facing wording is self-contained. "
+        "sample, or event. Name the leaked answer or answer cue when the question "
+        "leakage verdict is false. Leave the detail empty only when both semantic "
+        "verdicts pass. "
         "Set question_answer_leakage_absent to false when QUESTION itself states the "
         "proposed answer or an explicit answer cue such as 'the correct answer is'. "
         "Do not accept an answer merely because QUESTION, QUESTION_CONTEXT, and "
@@ -1211,8 +1247,8 @@ def generate_candidate(
         question_context,
         direct_value_provenance,
     )
-    if finding_quality_reason:
-        qa_gate_reasons = [finding_quality_reason]
+    if finding_quality_reason and finding_quality_reason not in qa_gate_reasons:
+        qa_gate_reasons.insert(0, finding_quality_reason)
     if creation_context_reason and creation_context_reason not in qa_gate_reasons:
         qa_gate_reasons.insert(0, creation_context_reason)
     if canonical_json(arm_answer_proposal) != canonical_json(answer):
@@ -1293,6 +1329,9 @@ def generate_candidate(
             "generation_arm": arm,
             "generation_attempt_contract_version": (
                 GENERATION_ATTEMPT_CONTRACT_VERSION
+            ),
+            "question_verification_contract_version": (
+                QUESTION_VERIFICATION_CONTRACT_VERSION
             ),
             "generation_attempt": attempt,
             "prompt_version": PROMPT_VERSION,

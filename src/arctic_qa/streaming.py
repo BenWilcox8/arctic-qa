@@ -71,6 +71,21 @@ ALTERNATIVE_FINDING_REASONS = frozenset(
 IMMEDIATE_ALTERNATIVE_FINDING_REASONS = frozenset(
     {"finding_answer_phrase_in_required_question_phrases"}
 )
+_DEPENDENT_ROUTING_REASONS = {
+    "question_context_referent_unresolved": frozenset(
+        {"relation_scope_mismatch", "answer_verifier_scope_not_source_bound"}
+    ),
+    "question_context_missing": frozenset(
+        {"relation_scope_mismatch", "answer_verifier_scope_not_source_bound"}
+    ),
+    "finding_answer_phrase_in_required_question_phrases": frozenset(
+        {
+            "question_answer_leakage",
+            "question_context_answer_leakage",
+            "scope_qualifier_missing",
+        }
+    ),
+}
 
 
 def run_stream(
@@ -968,6 +983,8 @@ def _is_current_contract_candidate(candidate: dict[str, Any]) -> bool:
     if (
         candidate.get("schema_version") != generation_contract.CANDIDATE_SCHEMA_VERSION
         or provenance.get("prompt_version") != generation_contract.PROMPT_VERSION
+        or provenance.get("question_verification_contract_version")
+        != generation_contract.QUESTION_VERIFICATION_CONTRACT_VERSION
         or provenance.get("numeric_rule_contract_version")
         != generation_contract.NUMERIC_RULE_CONTRACT_VERSION
         or provenance.get("direct_value_contract_version")
@@ -1216,6 +1233,7 @@ def _next_generation_attempt(
     failed_path: dict[str, Any],
     reason_codes: list[str],
 ) -> dict[str, Any] | None:
+    reason_codes = _routing_reason_codes(reason_codes)
     failed_attempt = failed_path["attempt"]
     finding_index = int(failed_attempt["finding_attempt_index"])
     revision_index = int(failed_attempt["question_revision_index"])
@@ -1281,6 +1299,16 @@ def _next_generation_attempt(
         trigger_reason_code=reason_codes[0] if reason_codes else "generation_rejected",
         excluded_finding_span_ids=excluded,
     )
+
+
+def _routing_reason_codes(reason_codes: list[str]) -> list[str]:
+    """Collapse only documented downstream symptoms for one repair root."""
+    normalized = list(dict.fromkeys(str(reason) for reason in reason_codes))
+    roots = set(normalized).intersection(_DEPENDENT_ROUTING_REASONS)
+    if not roots:
+        return normalized
+    dependent = set().union(*(_DEPENDENT_ROUTING_REASONS[root] for root in roots))
+    return [reason for reason in normalized if reason not in dependent]
 
 
 def _prior_finding_span_ids(paths: dict[tuple[int, int], dict[str, Any]]) -> list[str]:
@@ -1465,7 +1493,7 @@ def _generation_counts(db: Database, run_id: str) -> dict[str, int]:
         ):
             attempt_ids.add(str(attempt["attempt_id"]))
             finding_indexes.add(int(attempt["finding_attempt_index"]))
-            if attempt.get("question_revision_index") == 1:
+            if attempt.get("question_revision_index") in {1, 2}:
                 revision_attempt_ids.add(str(attempt["attempt_id"]))
         else:
             family_id = candidate.get("source", {}).get("paper_family_id")
@@ -1524,7 +1552,7 @@ def _generation_counts(db: Database, run_id: str) -> dict[str, int]:
             continue
         attempt_ids.add(str(attempt["attempt_id"]))
         finding_indexes.add(int(attempt["finding_attempt_index"]))
-        if attempt.get("question_revision_index") == 1:
+        if attempt.get("question_revision_index") in {1, 2}:
             revision_attempt_ids.add(str(attempt["attempt_id"]))
 
     settled_call_count = db.one(

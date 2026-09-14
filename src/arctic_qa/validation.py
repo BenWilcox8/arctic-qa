@@ -22,6 +22,7 @@ UNIT_FACTORS: dict[tuple[str, str], Decimal] = {
 SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v3"
 LEGACY_SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v2"
 GENERATION_PROMPT_VERSION = "arctic-qa-generation-v18"
+QUESTION_VERIFICATION_CONTRACT_VERSION = "question-verification-v1"
 NUMERIC_RULE_CONTRACT_VERSION = "numeric-rule-source-support-v2"
 DIRECT_SOURCE_VALUE_CONTRACT_VERSION = "direct-source-value-v1"
 MULTI_VALUE_NUMERIC_CONTRACT_VERSION = "numeric-rule-multiple-values-v1"
@@ -129,6 +130,9 @@ CANDIDATE_CONTRACTS = {
     "2.3.0": {
         "prompt_version": GENERATION_PROMPT_VERSION,
         "generation_attempt_contract_version": "bounded-paper-progression-v2",
+        "question_verification_contract_version": (
+            QUESTION_VERIFICATION_CONTRACT_VERSION
+        ),
         "numeric_rule_contract_version": NUMERIC_RULE_CONTRACT_VERSION,
         "direct_value_contract_version": DIRECT_SOURCE_VALUE_CONTRACT_VERSION,
         "scope_contract_version": SCOPE_CONTRACT_VERSION,
@@ -811,9 +815,33 @@ def question_context_verification_reason(
     )
     if standalone_reason:
         return standalone_reason
+    if "question_verification_contract_version" not in verification:
+        return "question_context_verification_missing"
+    if (
+        verification.get("question_verification_contract_version")
+        != QUESTION_VERIFICATION_CONTRACT_VERSION
+    ):
+        return "question_context_verification_contract_mismatch"
+    semantic_fields = (
+        "question_context_referent_resolved",
+        "question_context_missing_detail",
+        "question_answer_leakage_absent",
+    )
+    if any(field not in verification for field in semantic_fields):
+        return "question_context_verification_missing"
+    if (
+        type(verification["question_context_referent_resolved"]) is not bool
+        or not isinstance(verification["question_context_missing_detail"], str)
+        or type(verification["question_answer_leakage_absent"]) is not bool
+    ):
+        return "question_context_verification_missing"
     if verification.get("question_context_referent_resolved") is False:
+        if not verification["question_context_missing_detail"].strip():
+            return "question_context_verification_detail_missing"
         return "question_context_referent_unresolved"
     if verification.get("question_answer_leakage_absent") is False:
+        if not verification["question_context_missing_detail"].strip():
+            return "question_context_verification_detail_missing"
         return "question_answer_leakage"
     required = verification.get("question_context_required")
     supported = verification.get("question_context_source_supported")

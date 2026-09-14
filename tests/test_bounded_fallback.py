@@ -41,6 +41,9 @@ def _candidate(
         "option_verdicts": [],
         "provenance": {
             "prompt_version": generation_contract.PROMPT_VERSION,
+            "question_verification_contract_version": (
+                generation_contract.QUESTION_VERIFICATION_CONTRACT_VERSION
+            ),
             "numeric_rule_contract_version": (
                 generation_contract.NUMERIC_RULE_CONTRACT_VERSION
             ),
@@ -80,6 +83,44 @@ def _insert_candidate(
                 now(),
             ),
         )
+
+
+def test_generation_counts_include_both_question_revisions(tmp_path: Path) -> None:
+    database = _database(tmp_path)
+    parent_attempt_id: str | None = None
+    parent_item_id: str | None = None
+    for revision_index in range(3):
+        attempt = streaming_module._generation_attempt(
+            campaign_id="campaign",
+            family_id="family",
+            finding_attempt_index=1,
+            question_revision_index=revision_index,
+            attempt_kind="primary" if revision_index == 0 else "question_revision",
+            parent_attempt_id=parent_attempt_id,
+            parent_item_id=parent_item_id,
+            trigger_reason_code=("question_context_missing" if revision_index else None),
+            excluded_finding_span_ids=[],
+        )
+        item_id = f"item-{revision_index}"
+        candidate = _candidate(
+            attempt=attempt,
+            item_id=item_id,
+            source_id="source",
+            family_id="family",
+        )
+        _insert_candidate(
+            database,
+            candidate,
+            run_id="campaign",
+            family_id="family",
+            status="rejected",
+        )
+        parent_attempt_id = attempt["attempt_id"]
+        parent_item_id = item_id
+
+    metrics = streaming_module._generation_counts(database, "campaign")
+
+    assert metrics["question_revision_count"] == 2
 
 
 def test_fallback_allows_two_revisions_before_an_alternative_finding() -> None:

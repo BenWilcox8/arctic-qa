@@ -215,6 +215,10 @@ def test_matching_answer_can_use_a_different_valid_passage() -> None:
         "question_context_required": False,
         "question_context_source_supported": True,
         "question_context_answer_leakage_absent": True,
+        "question_verification_contract_version": generation.QUESTION_VERIFICATION_CONTRACT_VERSION,
+        "question_context_referent_resolved": True,
+        "question_context_missing_detail": "",
+        "question_answer_leakage_absent": True,
     }
 
     reasons = generation._qa_gate_reasons(
@@ -271,6 +275,10 @@ def test_same_answer_does_not_override_scope_unit_or_negation_guards() -> None:
         "question_context_required": False,
         "question_context_source_supported": True,
         "question_context_answer_leakage_absent": True,
+        "question_verification_contract_version": generation.QUESTION_VERIFICATION_CONTRACT_VERSION,
+        "question_context_referent_resolved": True,
+        "question_context_missing_detail": "",
+        "question_answer_leakage_absent": True,
     }
 
     reasons = generation._qa_gate_reasons(

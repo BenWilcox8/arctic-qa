@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 from arctic_qa import generation
 from arctic_qa.exporting import _absent_mcq, _present_mcq, _short_answer
+from arctic_qa.providers import _validate_schema
 from arctic_qa.validation import (
     benchmark_context_verification_reason,
     option_context_verification_reason,
@@ -12,11 +15,15 @@ from arctic_qa.validation import (
 )
 
 
-def _verification(*, required: bool) -> dict[str, bool]:
+def _verification(*, required: bool) -> dict[str, object]:
     return {
         "question_context_required": required,
         "question_context_source_supported": True,
         "question_context_answer_leakage_absent": True,
+        "question_verification_contract_version": generation.QUESTION_VERIFICATION_CONTRACT_VERSION,
+        "question_context_referent_resolved": True,
+        "question_context_missing_detail": "",
+        "question_answer_leakage_absent": True,
     }
 
 
@@ -191,6 +198,45 @@ def test_question_roles_require_separate_context_and_verifier_gates() -> None:
     assert "If an acronym expansion answers the question" in (
         generation.QUESTION_CONTEXT_INSTRUCTIONS
     )
+
+
+def test_answer_verifier_schema_rejects_omitted_question_verdicts() -> None:
+    schema = generation.ROLE_SCHEMAS["answer_verifier"]
+    response = {
+        "source_entailment_model_verified": True,
+        "relation_scope_match": True,
+        "ambiguity_resolved": True,
+        "alternative_answer_search_passed": True,
+        "question_context_required": False,
+        "question_context_source_supported": True,
+        "question_context_answer_leakage_absent": True,
+        "question_verification_contract_version": generation.QUESTION_VERIFICATION_CONTRACT_VERSION,
+        "question_context_referent_resolved": True,
+        "question_context_missing_detail": "",
+        "question_answer_leakage_absent": True,
+        "question_claim_type": "observation",
+        "scope": {
+            "geography": None,
+            "population": "the result",
+            "period": None,
+            "method": None,
+            "comparison": None,
+            "uncertainty": None,
+        },
+        "verification_rationale": "The question is self-contained and has no answer leak.",
+        "source_span_id": "span-1",
+    }
+
+    for field in (
+        "question_verification_contract_version",
+        "question_context_referent_resolved",
+        "question_context_missing_detail",
+        "question_answer_leakage_absent",
+    ):
+        omitted = dict(response)
+        omitted.pop(field)
+        with pytest.raises(ValueError, match="missing fields"):
+            _validate_schema(omitted, schema)
 
 
 def test_standalone_wording_instructions_cover_scope_and_otu_context() -> None:

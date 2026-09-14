@@ -4,7 +4,7 @@ from copy import deepcopy
 
 import pytest
 
-from arctic_qa import generation
+from arctic_qa import generation, streaming
 
 
 SCOPE_KEYS = (
@@ -54,6 +54,10 @@ def _records(
         "question_context_required": False,
         "question_context_source_supported": True,
         "question_context_answer_leakage_absent": True,
+        "question_verification_contract_version": generation.QUESTION_VERIFICATION_CONTRACT_VERSION,
+        "question_context_referent_resolved": True,
+        "question_context_missing_detail": "",
+        "question_answer_leakage_absent": True,
     }
     return answer, reconstruction, verification
 
@@ -178,3 +182,140 @@ def test_scope_contract_keeps_sample_descriptors_as_population_and_requires_all_
     assert "sample descriptor" in descriptions["population"]["description"]
     assert "Do not use geography" in descriptions["geography"]["description"]
     assert "ask for every value" in generation.QUESTION_ALIGNMENT_INSTRUCTIONS
+
+
+def test_semantic_referent_failure_routes_as_one_revision_root() -> None:
+    evidence = "Arctic samples in the sampled group showed higher abundance."
+    scope = _scope(population="Arctic samples")
+    answer, reconstruction, verification = _records(
+        evidence,
+        "higher abundance",
+        scope,
+    )
+    verification.update(
+        {
+            "relation_scope_match": False,
+            "question_context_required": True,
+            "question_context_referent_resolved": False,
+            "question_context_missing_detail": "the sampled group's identity",
+        }
+    )
+    question = "What was observed in the sampled group of Arctic samples?"
+    reasons = generation._qa_gate_reasons(
+        {"chunk_id": "chunk-1", "text": evidence},
+        question,
+        answer,
+        reconstruction,
+        verification,
+        "Arctic samples were collected during the spring survey.",
+    )
+
+    assert reasons == ["relation_scope_mismatch", "question_context_referent_unresolved"]
+    primary = streaming._generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        finding_attempt_index=1,
+        question_revision_index=0,
+        attempt_kind="primary",
+        parent_attempt_id=None,
+        parent_item_id=None,
+        trigger_reason_code=None,
+        excluded_finding_span_ids=[],
+    )
+    revision = streaming._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths={(1, 0): {"attempt": primary, "candidate": None}},
+        failed_path={"attempt": primary, "candidate": None},
+        reason_codes=reasons,
+    )
+
+    assert revision is not None
+    assert revision["attempt_kind"] == "question_revision"
+    assert revision["question_revision_index"] == 1
+
+
+def test_independent_semantic_and_entailment_failures_stop_routing() -> None:
+    primary = streaming._generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        finding_attempt_index=1,
+        question_revision_index=0,
+        attempt_kind="primary",
+        parent_attempt_id=None,
+        parent_item_id=None,
+        trigger_reason_code=None,
+        excluded_finding_span_ids=[],
+    )
+
+    assert (
+        streaming._next_generation_attempt(
+            campaign_id="campaign",
+            family_id="family",
+            paths={(1, 0): {"attempt": primary, "candidate": None}},
+            failed_path={"attempt": primary, "candidate": None},
+            reason_codes=[
+                "question_context_referent_unresolved",
+                "source_entailment_not_verified",
+            ],
+        )
+        is None
+    )
+
+
+def test_frozen_answer_phrase_routes_alternative_after_raw_leak_reason() -> None:
+    evidence = "Nunavut was recorded."
+    answer, reconstruction, verification = _records(
+        evidence,
+        "Nunavut",
+        _scope(geography="Nunavut"),
+    )
+    question = "Which territory was recorded as Nunavut?"
+    reasons = generation._qa_gate_reasons(
+        {"chunk_id": "chunk-1", "text": evidence},
+        question,
+        answer,
+        reconstruction,
+        verification,
+    )
+
+    assert "question_answer_leakage" in reasons
+    assert "finding_answer_phrase_in_required_question_phrases" in reasons
+    primary = streaming._generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        finding_attempt_index=1,
+        question_revision_index=0,
+        attempt_kind="primary",
+        parent_attempt_id=None,
+        parent_item_id=None,
+        trigger_reason_code=None,
+        excluded_finding_span_ids=[],
+    )
+    alternative = streaming._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths={
+            (1, 0): {
+                "attempt": primary,
+                "candidate": {
+                    "item_id": "item-primary",
+                    "candidate_json": '{"answer":{"source_span_id":"span-primary"}}',
+                },
+            }
+        },
+        failed_path={
+            "attempt": primary,
+            "candidate": {
+                "item_id": "item-primary",
+                "candidate_json": '{"answer":{"source_span_id":"span-primary"}}',
+            },
+        },
+        reason_codes=reasons,
+    )
+
+    assert alternative is not None
+    assert alternative["attempt_kind"] == "alternative_finding"
+    assert alternative["trigger_reason_code"] == (
+        "finding_answer_phrase_in_required_question_phrases"
+    )
