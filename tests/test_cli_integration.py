@@ -880,21 +880,19 @@ def test_source_bound_typed_distractor_controls(
     item["question"] = f"What {scope_phrase} was documented?"
     item["reconstruction"] = {
         "answer": answer_text,
-        "evidence_quote": quote,
-        "locator": locator,
         "scope": item["answer"]["scope"],
         "question_claim_type": item["answer"]["claim_type"],
         "ambiguity_label": "one_answer",
         "alternatives": [],
     }
+    bind_source_span(item["reconstruction"], quote, locator)
     item["answer_verification"].update(
         {
-            "evidence_quote": quote,
-            "locator": locator,
             "scope": item["answer"]["scope"],
             "question_claim_type": item["answer"]["claim_type"],
         }
     )
+    bind_source_span(item["answer_verification"], quote, locator)
     bind_qa_verification_receipts(tmp_path, item)
     item["distractors"] = []
     for option in options:
@@ -1309,7 +1307,7 @@ def test_generation_runs_qa_gates_before_exact_option_verification(
         "distractor_writer",
     ]
     assert roles[5:] == ["option_verifier"] * 4
-    assert item["schema_version"] == "2.1.0"
+    assert item["schema_version"] == "2.2.0"
     assert item["finding_id"]
     assert item["answer"]["selection_rationale"]
     assert item["answer"]["source_span_ids"]
@@ -1319,8 +1317,9 @@ def test_generation_runs_qa_gates_before_exact_option_verification(
         "reconstruction",
         "answer_verification",
     ]
-    assert item["decision_evidence"][0]["evidence_quote"] == (
-        item["answer"]["evidence_quote"]
+    assert (
+        item["decision_evidence"][0]["evidence_quote"]
+        == (item["answer"]["evidence_quote"])
     )
     assert item["question_rationale"]
     assert item["question_context"] == ""
@@ -1346,11 +1345,24 @@ def test_validation_keeps_current_legacy_candidate_contract_readable(
     item = candidate(tmp_path)
     item["schema_version"] = "2.0.0"
     item["provenance"]["prompt_version"] = "arctic-qa-generation-v14"
-    item["provenance"]["scope_contract_version"] = (
-        "selected-evidence-literal-scope-v2"
-    )
+    item["provenance"]["scope_contract_version"] = "selected-evidence-literal-scope-v2"
     item["provenance"].pop("evidence_combination_contract_version")
     path = write_candidate(tmp_path, item, "legacy-evidence-candidate.json")
+
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+
+    assert result["final_label"] == "machine_accepted_unverified"
+
+
+def test_validation_keeps_v15_candidate_contract_readable(tmp_path: Path) -> None:
+    smoke(tmp_path, "legacy-v15-contract")
+    item = candidate(tmp_path)
+    item["schema_version"] = "2.1.0"
+    item["provenance"]["prompt_version"] = "arctic-qa-generation-v15"
+    item["provenance"]["scope_contract_version"] = "selected-evidence-literal-scope-v3"
+    item["provenance"].pop("scope_role_semantics_version")
+    item["provenance"].pop("scope_role_binding_contract_version")
+    path = write_candidate(tmp_path, item, "legacy-v15-candidate.json")
 
     result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
 
@@ -1383,14 +1395,14 @@ def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> No
     command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(verifier)
     generated = json.loads(cli(tmp_path, *command).stdout)
     assert generated["status"] == "qa_gate_failed"
-    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v15"
+    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v16"
     assert (
         generated["provenance"]["numeric_rule_contract_version"]
         == "numeric-rule-source-support-v2"
     )
     assert (
         generated["provenance"]["scope_contract_version"]
-        == "selected-evidence-literal-scope-v3"
+        == "selected-evidence-literal-scope-v4"
     )
     assert generated["distractors"] == []
     assert generated["qa_gate_reasons"] == [

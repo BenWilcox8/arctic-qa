@@ -41,6 +41,9 @@ A context change creates a different generated item and invalidates old option b
 ## Scope roles
 
 Generation roles use `scope-role-semantics-v2`.
+New candidates use generation prompt `arctic-qa-generation-v16`.
+They use scope contract `selected-evidence-literal-scope-v4` and candidate schema `2.2.0`.
+The validator keeps explicit readers for candidate schemas `2.0.0` and `2.1.0`.
 Each scope field identifies an independent qualifier for a result.
 Scope fields do not contain a value that the question asks the model to supply.
 This rule includes seasons, percentages, entities, locations, counts, directions, and relationships.

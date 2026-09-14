@@ -21,9 +21,9 @@ UNIT_FACTORS: dict[tuple[str, str], Decimal] = {
 }
 SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v3"
 LEGACY_SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v2"
-GENERATION_PROMPT_VERSION = "arctic-qa-generation-v15"
+GENERATION_PROMPT_VERSION = "arctic-qa-generation-v16"
 NUMERIC_RULE_CONTRACT_VERSION = "numeric-rule-source-support-v2"
-SCOPE_CONTRACT_VERSION = "selected-evidence-literal-scope-v3"
+SCOPE_CONTRACT_VERSION = "selected-evidence-literal-scope-v4"
 EVIDENCE_COMBINATION_CONTRACT_VERSION = "contiguous-source-evidence-v1"
 MAX_COMBINED_EVIDENCE_CHARS = 3_200
 MAX_COMBINED_EVIDENCE_COMPONENTS = 4
@@ -35,13 +35,25 @@ SUPPORTED_SOURCE_SPAN_CONTRACTS = {
 CANDIDATE_CONTRACTS = {
     "2.0.0": {
         "prompt_version": "arctic-qa-generation-v14",
-        "numeric_rule_contract_version": NUMERIC_RULE_CONTRACT_VERSION,
+        "numeric_rule_contract_version": "numeric-rule-source-support-v2",
         "scope_contract_version": "selected-evidence-literal-scope-v2",
     },
     "2.1.0": {
+        "prompt_version": "arctic-qa-generation-v15",
+        "numeric_rule_contract_version": "numeric-rule-source-support-v2",
+        "scope_contract_version": "selected-evidence-literal-scope-v3",
+        "evidence_combination_contract_version": (
+            EVIDENCE_COMBINATION_CONTRACT_VERSION
+        ),
+    },
+    "2.2.0": {
         "prompt_version": GENERATION_PROMPT_VERSION,
         "numeric_rule_contract_version": NUMERIC_RULE_CONTRACT_VERSION,
         "scope_contract_version": SCOPE_CONTRACT_VERSION,
+        "scope_role_semantics_version": "scope-role-semantics-v2",
+        "scope_role_binding_contract_version": (
+            "scope-role-question-context-binding-v1"
+        ),
         "evidence_combination_contract_version": (
             EVIDENCE_COMBINATION_CONTRACT_VERSION
         ),
@@ -178,15 +190,12 @@ def _eligible_arctic_scope_error(
         return "eligible_arctic_scope_invalid"
     scope = evidence.get("resolved_eligible_arctic_scope")
     provenance = candidate.get("provenance") or {}
-    if (
-        not isinstance(scope, dict)
-        or provenance.get("eligible_arctic_scope") != {
-            "component": scope.get("component"),
-            "question_scope_phrases": scope.get("question_scope_phrases"),
-            "eligibility_job_key": evidence.get("eligibility_job_key"),
-            "finding_spans": scope.get("finding_spans"),
-        }
-    ):
+    if not isinstance(scope, dict) or provenance.get("eligible_arctic_scope") != {
+        "component": scope.get("component"),
+        "question_scope_phrases": scope.get("question_scope_phrases"),
+        "eligibility_job_key": evidence.get("eligibility_job_key"),
+        "finding_spans": scope.get("finding_spans"),
+    }:
         return "eligible_arctic_scope_provenance_mismatch"
     if provenance.get("eligible_arctic_scope_sha256") != sha256_bytes(
         canonical_json(provenance["eligible_arctic_scope"]).encode()
@@ -212,11 +221,9 @@ def _eligible_arctic_scope_error(
             if isinstance(row, dict) and isinstance(row.get("span_id"), str)
         }
         components = (candidate.get("answer") or {}).get("evidence_components")
-        eligibility_ids = (candidate.get("answer") or {}).get(
-            "eligibility_span_ids"
-        )
+        eligibility_ids = (candidate.get("answer") or {}).get("eligibility_span_ids")
         if (
-            candidate.get("schema_version") != "2.1.0"
+            candidate.get("schema_version") not in {"2.1.0", "2.2.0"}
             or not isinstance(components, list)
             or not isinstance(eligibility_ids, list)
             or not eligibility_ids
@@ -234,11 +241,9 @@ def _eligible_arctic_scope_error(
             return "eligible_arctic_finding_out_of_scope"
         ordered = [finding_by_id[span_id] for span_id in eligibility_ids]
         for index, (component, finding) in enumerate(zip(components, ordered)):
-            if (
-                component.get("eligibility_quote_sha256")
-                != finding.get("source_bytes_sha256")
-                or component.get("eligibility_locator") != finding.get("locator")
-            ):
+            if component.get("eligibility_quote_sha256") != finding.get(
+                "source_bytes_sha256"
+            ) or component.get("eligibility_locator") != finding.get("locator"):
                 return "eligible_arctic_finding_out_of_scope"
             if index and (
                 ordered[index - 1].get("locator") != finding.get("locator")
@@ -606,7 +611,9 @@ def source_span_evidence_resolves(
                 return False
         previous_end = max(previous_end or current_end, current_end)
         component_start = (
-            current_start if component_start is None else min(component_start, current_start)
+            current_start
+            if component_start is None
+            else min(component_start, current_start)
         )
         component_end = (
             current_end if component_end is None else max(component_end, current_end)
@@ -1152,9 +1159,10 @@ def _response_matches_resolved_record(response: Any, record: Any) -> bool:
         return True
     if not isinstance(response, dict) or not isinstance(record, dict):
         return False
-    if not set(response) <= set(record) or not (
-        set(record) - set(response)
-    ) <= SPAN_DERIVED_KEYS:
+    if (
+        not set(response) <= set(record)
+        or not (set(record) - set(response)) <= SPAN_DERIVED_KEYS
+    ):
         return False
     if any(record.get(key) != value for key, value in response.items()):
         return False

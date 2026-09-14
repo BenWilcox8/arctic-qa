@@ -29,6 +29,7 @@ from .validation import (
 
 
 PROMPT_VERSION = GENERATION_PROMPT_VERSION
+CANDIDATE_SCHEMA_VERSION = "2.2.0"
 FINDING_POLICY_VERSION = "one-finding-per-paper-full-context-v6"
 SCOPE_ROLE_FINDING_POLICY_VERSION = "one-finding-per-paper-full-context-v7"
 FINDING_SPAN_CONTRACT_VERSION = "finding-evidence-span-v3"
@@ -959,7 +960,12 @@ def generate_candidate(
         source_id,
         source["paper_family_id"],
         arm,
+        CANDIDATE_SCHEMA_VERSION,
+        PROMPT_VERSION,
+        NUMERIC_RULE_CONTRACT_VERSION,
+        SCOPE_CONTRACT_VERSION,
         SCOPE_ROLE_SEMANTICS_VERSION,
+        SCOPE_ROLE_BINDING_CONTRACT_VERSION,
         question,
         question_context,
         answer,
@@ -968,7 +974,7 @@ def generate_candidate(
         author.name == verifier.name and author.model == verifier.model
     )
     candidate = {
-        "schema_version": "2.1.0",
+        "schema_version": CANDIDATE_SCHEMA_VERSION,
         "item_id": item_id,
         "finding_id": finding_id,
         "finding_policy_version": SCOPE_ROLE_FINDING_POLICY_VERSION,
