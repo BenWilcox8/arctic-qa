@@ -1295,13 +1295,20 @@ def test_page_contains_readable_trace_views_and_bounded_table_widths() -> None:
     assert "Source evidence used for this check" in page
     assert "item.reason?.summary" in page
     assert "Complete raw JSON for ${caption}" in page
-    assert "traceValueText(record.question)" in page
+    assert "appendLabeledReadableText(card, 'Question', record.question" in page
     assert "Reference answer" in page
     assert "Answer choices" in page
     assert "Distractors" in page
     assert ".trace-table { table-layout: fixed; }" in page
     assert ".trace-table .trace-paper-column { width: 46%; }" in page
     assert "grid-template-columns: minmax(460px, .95fr) minmax(0, 1.35fr)" in page
+    assert "function displayTextBlocks(value)" in page
+    assert "function combineContiguousEvidence(values)" in page
+    assert (
+        "evidenceOffset(previous, 'end') === evidenceOffset(current, 'start')" in page
+    )
+    assert "Model response text (display formatting)" in page
+    assert "keeps the exact retained response" in page
 
     detail = FakePipelineTraceStore().paper_detail("paper-safe-key")
     candidate = detail["candidates"][0]["candidate"]

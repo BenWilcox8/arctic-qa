@@ -201,7 +201,7 @@
     .trace-kv-item { background: var(--wash); border-radius: 5px; min-width: 0; padding: .55rem .6rem; }
     .trace-kv-item.wide { grid-column: 1 / -1; }
     .trace-kv-label { color: var(--muted); display: block; font-size: .7rem; font-weight: 700; letter-spacing: .04em; margin-bottom: .2rem; text-transform: uppercase; }
-    .trace-kv-value { display: block; line-height: 1.45; overflow-wrap: anywhere; white-space: pre-wrap; }
+    .trace-kv-value { display: block; line-height: 1.45; overflow-wrap: anywhere; }
     .trace-question { border-left: 4px solid var(--navy); font-size: 1.02rem; font-weight: 700; line-height: 1.5; margin: .65rem 0; padding: .65rem .75rem; }
     .trace-answer { background: var(--green-bg); border-left: 4px solid var(--green); line-height: 1.5; margin: .65rem 0; padding: .65rem .75rem; }
     .trace-answer strong, .trace-question strong { display: block; font-size: .72rem; letter-spacing: .04em; margin-bottom: .25rem; text-transform: uppercase; }
@@ -209,8 +209,16 @@
     .trace-option { background: var(--wash); border: 1px solid var(--line); border-radius: 6px; display: grid; gap: .25rem; grid-template-columns: auto minmax(0, 1fr); line-height: 1.45; padding: .55rem .65rem; }
     .trace-option.correct { background: var(--green-bg); border-color: var(--green); }
     .trace-option-marker { font-weight: 800; min-width: 1.6rem; }
-    .trace-evidence { background: #eef4f6; border-left: 4px solid #78909a; line-height: 1.5; margin: .55rem 0; overflow-wrap: anywhere; padding: .65rem .75rem; white-space: pre-wrap; }
+    .trace-evidence { background: #eef4f6; border-left: 4px solid #78909a; line-height: 1.5; margin: .55rem 0; overflow-wrap: anywhere; padding: .65rem .75rem; }
     .trace-evidence strong { display: block; font-size: .72rem; letter-spacing: .04em; margin-bottom: .25rem; text-transform: uppercase; }
+    .trace-prose { min-width: 0; }
+    .trace-prose p { margin: 0 0 .55rem; }
+    .trace-prose p:last-child, .trace-prose ul:last-child { margin-bottom: 0; }
+    .trace-prose ul { margin: .25rem 0 .55rem; padding-left: 1.25rem; }
+    .trace-prose li { margin: .2rem 0; }
+    .trace-prose-label { color: var(--navy); font-size: .78rem; font-weight: 800; letter-spacing: .025em; margin: .6rem 0 .25rem; }
+    .trace-locator { border-top: 1px solid #c8d7dc; color: var(--muted); display: flex; flex-wrap: wrap; font-size: .74rem; gap: .2rem .8rem; margin-top: .55rem; padding-top: .45rem; }
+    .trace-locator span { overflow-wrap: anywhere; }
     .trace-reason { border-left: 5px solid #b85c38; margin-bottom: .85rem; }
     .trace-reason > p { line-height: 1.5; }
     .trace-reason-summary { font-size: 1rem; font-weight: 700; margin: .25rem 0 .5rem; }
@@ -917,7 +925,7 @@
         if (record.evidence_quote) {
           const details = document.createElement('details');
           details.append(text('summary', 'Source passage'));
-          details.append(text('div', record.evidence_quote, 'subtle'));
+          appendReadableText(details, record.evidence_quote, 'subtle');
           evidence.append(details);
         }
         if (record.source_decision_method) evidence.append(text('div', `Method: ${label(record.source_decision_method)}`, 'subtle'));
@@ -1001,7 +1009,79 @@
       if (!hasTraceValue(value)) return 'Not recorded';
       if (typeof value === 'boolean') return value ? 'Yes' : 'No';
       if (Array.isArray(value)) return value.length ? value.map(traceValueText).join(', ') : 'None recorded';
-      return String(value);
+      return normalizeDisplayText(value);
+    }
+    function displayTextBlocks(value) {
+      const lines = String(value ?? '')
+        .replace(/\r\n?/g, '\n')
+        .replace(/\u00a0/g, ' ')
+        .split('\n');
+      const blocks = [];
+      let prose = [];
+      let list = [];
+      function flushProse() {
+        if (prose.length) blocks.push({ type: 'paragraph', text: prose.join(' ') });
+        prose = [];
+      }
+      function flushList() {
+        if (list.length) blocks.push({ type: 'list', items: list });
+        list = [];
+      }
+      lines.forEach((rawLine) => {
+        const line = rawLine.replace(/[\t ]+/g, ' ').trim();
+        if (!line) {
+          flushProse();
+          flushList();
+          return;
+        }
+        const item = line.match(/^(?:[-*•]\s+|\d+[.)]\s+)(.+)$/);
+        if (item) {
+          flushProse();
+          list.push(item[1]);
+          return;
+        }
+        flushList();
+        const isLabel = line.length <= 100 && (
+          /^#{1,6}\s+/.test(line)
+          || /^(?:section|subsection|chapter|figure|table|appendix)\s+[A-Za-z0-9]/i.test(line)
+          || /^(?:references?|methods?|results?|discussion|conclusion|abstract|introduction)\s*:?$/i.test(line)
+          || /^(?:citation|source|page)\s*:/i.test(line)
+        );
+        if (isLabel) {
+          flushProse();
+          blocks.push({ type: 'label', text: line.replace(/^#{1,6}\s+/, '') });
+        } else prose.push(line);
+      });
+      flushProse();
+      flushList();
+      return blocks;
+    }
+    function normalizeDisplayText(value) {
+      return displayTextBlocks(value).map((block) => block.type === 'list' ? block.items.join('; ') : block.text).join('\n\n');
+    }
+    function appendReadableText(target, value, className = '') {
+      const prose = document.createElement('div');
+      prose.className = `trace-prose${className ? ` ${className}` : ''}`;
+      const blocks = displayTextBlocks(value);
+      blocks.forEach((block) => {
+        if (block.type === 'list') {
+          const listNode = document.createElement('ul');
+          block.items.forEach((item) => listNode.append(text('li', item)));
+          prose.append(listNode);
+        } else if (block.type === 'label') prose.append(text('div', block.text, 'trace-prose-label'));
+        else prose.append(text('p', block.text));
+      });
+      if (!blocks.length) prose.append(text('p', 'Not recorded', 'subtle'));
+      target.append(prose);
+      return prose;
+    }
+    function appendLabeledReadableText(target, caption, value, className = '') {
+      const block = document.createElement('div');
+      if (className) block.className = className;
+      block.append(text('strong', caption));
+      appendReadableText(block, value);
+      target.append(block);
+      return block;
     }
     function readableCard(titleValue, stateValue = null) {
       const card = document.createElement('article');
@@ -1035,12 +1115,54 @@
       wrap.append(list);
       return wrap;
     }
-    function locatorText(locator) {
-      if (!locator || typeof locator !== 'object') return hasTraceValue(locator) ? traceValueText(locator) : 'Not recorded';
-      const parts = Object.entries(locator)
-        .filter(([, value]) => hasTraceValue(value) && typeof value !== 'object')
-        .map(([key, value]) => `${label(key)}: ${traceValueText(value)}`);
-      return parts.length ? parts.join(' · ') : 'Not recorded';
+    function evidenceOffset(value, edge) {
+      const direct = value?.[`${edge}_byte`];
+      if (hasTraceValue(direct) && Number.isFinite(Number(direct))) return Number(direct);
+      const nested = value?.locator?.[`${edge}_offset`] ?? value?.locator?.[`${edge}_byte`];
+      return hasTraceValue(nested) && Number.isFinite(Number(nested)) ? Number(nested) : null;
+    }
+    function sameEvidenceContext(left, right) {
+      const keys = ['page_id', 'page', 'section_id', 'source_block_id', 'chunk_id'];
+      const shared = keys.some((key) => hasTraceValue(left?.locator?.[key]) && left.locator[key] === right?.locator?.[key]);
+      return shared && keys.every((key) => (left?.locator?.[key] ?? null) === (right?.locator?.[key] ?? null));
+    }
+    function combineContiguousEvidence(values) {
+      const combined = [];
+      (Array.isArray(values) ? values : []).forEach((value) => {
+        const current = { ...value, locator: value?.locator ? { ...value.locator } : value?.locator };
+        current.display_span_ids = Array.isArray(value?.display_span_ids) ? [...value.display_span_ids] : [value?.span_id].filter(Boolean);
+        const previous = combined[combined.length - 1];
+        const adjacent = previous && evidenceOffset(previous, 'end') !== null && evidenceOffset(previous, 'end') === evidenceOffset(current, 'start');
+        if (adjacent && sameEvidenceContext(previous, current)) {
+          previous.quote = `${previous.quote || ''}${current.quote || ''}`;
+          previous.evidence_quote = `${previous.evidence_quote || ''}${current.evidence_quote || ''}`;
+          previous.text_quote = `${previous.text_quote || ''}${current.text_quote || ''}`;
+          previous.end_byte = current.end_byte ?? previous.end_byte;
+          if (current.locator && previous.locator) {
+            previous.locator.end_offset = current.locator.end_offset ?? previous.locator.end_offset;
+            previous.locator.end_byte = current.locator.end_byte ?? previous.locator.end_byte;
+          }
+          previous.display_span_ids.push(...current.display_span_ids);
+        } else combined.push(current);
+      });
+      return combined;
+    }
+    function appendEvidenceLocator(target, value) {
+      const fields = [];
+      const locator = value?.locator;
+      if (locator && typeof locator === 'object') {
+        Object.entries(locator).filter(([, item]) => hasTraceValue(item) && typeof item !== 'object').forEach(([key, item]) => fields.push([label(key), traceValueText(item)]));
+      } else if (hasTraceValue(locator)) fields.push(['Locator', traceValueText(locator)]);
+      const spanIds = value?.display_span_ids?.length ? value.display_span_ids : [value?.span_id].filter(Boolean);
+      if (spanIds.length) fields.push([spanIds.length > 1 ? 'Spans' : 'Span', spanIds.join(' to ')]);
+      const start = evidenceOffset(value, 'start');
+      const end = evidenceOffset(value, 'end');
+      if (start !== null || end !== null) fields.push(['Offsets', `${start ?? '?'} to ${end ?? '?'}`]);
+      if (!fields.length) return;
+      const locatorNode = document.createElement('div');
+      locatorNode.className = 'trace-locator';
+      fields.forEach(([caption, item]) => locatorNode.append(text('span', `${caption}: ${item}`)));
+      target.append(locatorNode);
     }
     function appendEvidence(target, value, caption = 'Source evidence') {
       if (!value || typeof value !== 'object') return;
@@ -1050,9 +1172,17 @@
       const evidence = document.createElement('div');
       evidence.className = 'trace-evidence';
       evidence.append(text('strong', caption));
-      if (hasTraceValue(quote)) evidence.append(document.createTextNode(traceValueText(quote)));
-      if (hasTraceValue(locator)) evidence.append(text('div', `Locator: ${locatorText(locator)}`, 'subtle'));
+      if (hasTraceValue(quote)) appendReadableText(evidence, quote);
+      appendEvidenceLocator(evidence, value);
       target.append(evidence);
+    }
+    function appendEvidenceList(target, values, options = {}) {
+      combineContiguousEvidence(values).forEach((span) => {
+        const quote = String(span.quote || span.evidence_quote || span.text_quote || '');
+        const shown = options.maxLength && quote.length > options.maxLength ? `${quote.slice(0, options.maxLength).trimEnd()}…` : quote;
+        const key = hasTraceValue(span.quote) ? 'quote' : hasTraceValue(span.evidence_quote) ? 'evidence_quote' : 'text_quote';
+        appendEvidence(target, { ...span, [key]: shown }, options.caption || 'Source evidence');
+      });
     }
     function appendOptions(target, options, caption = 'Answer choices') {
       if (!Array.isArray(options) || !options.length) return;
@@ -1078,13 +1208,16 @@
         return card;
       }
       const primitive = [];
+      const prose = [];
       const nested = [];
       Object.entries(value).forEach(([key, item]) => {
         if (item === null || item === undefined) return;
-        if (typeof item !== 'object' || (Array.isArray(item) && item.every((entry) => typeof entry !== 'object'))) primitive.push([label(key), item, typeof item === 'string' && item.length > 100]);
+        if (typeof item === 'string' && (item.length > 100 || /(?:rationale|explanation|evidence|question|answer|response|reason|text)/i.test(key))) prose.push([label(key), item]);
+        else if (typeof item !== 'object' || (Array.isArray(item) && item.every((entry) => typeof entry !== 'object'))) primitive.push([label(key), item, typeof item === 'string' && item.length > 100]);
         else nested.push([key, item]);
       });
       if (primitive.length) card.append(readableKeyValues(primitive));
+      prose.forEach(([caption, item]) => appendLabeledReadableText(card, caption, item, 'trace-readable-prose'));
       nested.forEach(([key, item]) => {
         if (Array.isArray(item)) {
           card.append(text('strong', `${label(key)} (${formatNumber(item.length)})`));
@@ -1126,15 +1259,11 @@
       const recordState = wrapper?.status || record.status || record.release_label;
       const card = readableCard(itemId ? `QA item ${itemId}` : `QA record ${index + 1}`, recordState);
       if (hasTraceValue(record.question)) {
-        const question = text('div', '', 'trace-question');
-        question.append(text('strong', 'Question'), document.createTextNode(traceValueText(record.question)));
-        card.append(question);
+        appendLabeledReadableText(card, 'Question', record.question, 'trace-question');
       } else card.append(text('p', 'No question is recorded for this item.', 'trace-section-note'));
       const answer = answerText(record);
       if (hasTraceValue(answer)) {
-        const answerNode = text('div', '', 'trace-answer');
-        answerNode.append(text('strong', 'Reference answer'), document.createTextNode(traceValueText(answer)));
-        card.append(answerNode);
+        appendLabeledReadableText(card, 'Reference answer', answer, 'trace-answer');
       }
       const metadata = [
         ['Generation arm', wrapper?.generation_arm || record.generation_arm],
@@ -1191,7 +1320,7 @@
         const resolved = source.scope_evidence?.resolved_evidence || [];
         resolved.forEach((group) => {
           card.append(text('strong', `Evidence for ${label(group.criterion)}`));
-          (group.spans || []).forEach((span) => appendEvidence(card, span));
+          appendEvidenceList(card, group.spans || []);
         });
         if (Array.isArray(source.chunks) && source.chunks.length) {
           card.append(text('strong', `Retained source chunks (${formatNumber(source.chunks.length)})`));
@@ -1203,7 +1332,7 @@
               ['Chunk', chunk.chunk_id], ['Section', chunk.section_id], ['Page', chunk.page],
               ['Offsets', hasTraceValue(chunk.start_offset) || hasTraceValue(chunk.end_offset) ? `${chunk.start_offset ?? '?'} to ${chunk.end_offset ?? '?'}` : null]
             ]));
-            if (hasTraceValue(chunk.text)) details.append(text('div', chunk.text, 'trace-evidence'));
+            if (hasTraceValue(chunk.text)) appendLabeledReadableText(details, 'Source text', chunk.text, 'trace-evidence');
             card.append(details);
           });
         }
@@ -1233,7 +1362,7 @@
         });
         (record.validation?.resolved_evidence || []).forEach((group) => {
           card.append(text('strong', `Located evidence for ${label(group.criterion)}`));
-          (group.spans || []).forEach((span) => appendEvidence(card, span));
+          appendEvidenceList(card, group.spans || []);
         });
         wrap.append(card);
       });
@@ -1245,9 +1374,7 @@
         const answer = record.answer || {};
         const card = readableCard(record.finding_id ? `Finding ${record.finding_id}` : `Frozen finding ${index + 1}`, record.status);
         if (hasTraceValue(answer.text)) {
-          const answerNode = text('div', '', 'trace-answer');
-          answerNode.append(text('strong', 'Frozen answer'), document.createTextNode(answer.text));
-          card.append(answerNode);
+          appendLabeledReadableText(card, 'Frozen answer', answer.text, 'trace-answer');
         }
         card.append(readableKeyValues([
           ['Claim type', answer.claim_type], ['Run', record.run_id], ['Source', record.source_id],
@@ -1301,28 +1428,22 @@
       ]));
       card.append(readableList('Exact reason codes', reason.reason_codes || [reason.reason_code]));
       (reason.model_statements || []).forEach((statement) => {
-        const block = text('div', '', 'trace-evidence');
-        block.append(text('strong', statement.label || 'Model statement'));
-        block.append(document.createTextNode(statement.text || 'No statement was retained.'));
-        card.append(block);
+        appendLabeledReadableText(card, statement.label || 'Model statement', statement.text || 'No statement was retained.', 'trace-evidence');
       });
       (reason.comparisons || []).forEach((comparison) => {
         card.append(text('strong', comparison.label || 'Recorded comparison'));
         const grid = document.createElement('div');
         grid.className = 'trace-comparison';
         const proposed = document.createElement('div');
-        proposed.append(text('strong', 'Proposed answer'), document.createTextNode(comparison.proposed_answer || 'Not retained'));
+        appendLabeledReadableText(proposed, 'Proposed answer', comparison.proposed_answer || 'Not retained');
         const reconstructed = document.createElement('div');
-        reconstructed.append(text('strong', 'Independent reconstruction'), document.createTextNode(comparison.reconstructed_answer || 'Not retained'));
+        appendLabeledReadableText(reconstructed, 'Independent reconstruction', comparison.reconstructed_answer || 'Not retained');
         grid.append(proposed, reconstructed);
         card.append(grid);
       });
       if (reason.evidence?.length) {
         card.append(text('strong', 'Source evidence used for this check'));
-        reason.evidence.forEach((span) => {
-          const quote = String(span.quote || '');
-          appendEvidence(card, { ...span, quote: quote.length > 500 ? `${quote.slice(0, 500).trimEnd()}…` : quote });
-        });
+        appendEvidenceList(card, reason.evidence, { maxLength: 500 });
         card.append(text('p', 'Long quotes are shortened here. The complete retained record remains available in the sections below and in raw JSON.', 'trace-section-note'));
       } else {
         card.append(text('p', reason.evidence_note || 'No source evidence was retained for this failed check.', 'trace-section-note'));
@@ -1505,8 +1626,9 @@
         wrap.append(parsedWrap);
       }
       if (hasTraceValue(response.model_text)) {
-        const modelText = readableCard('Model response text', response.availability);
-        modelText.append(text('div', response.model_text, 'trace-evidence'));
+        const modelText = readableCard('Model response text (display formatting)', response.availability);
+        modelText.append(text('p', 'Whitespace is normalized here. The complete selected-stage JSON below keeps the exact retained response.', 'trace-section-note'));
+        appendReadableText(modelText, response.model_text, 'trace-evidence');
         wrap.append(modelText);
       } else {
         wrap.append(readableObject('Model response', {

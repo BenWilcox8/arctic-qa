@@ -481,7 +481,24 @@ def test_plain_eligibility_statement_does_not_require_decoding_reason_code(
                     ]
                 },
                 "validation": {
-                    "overall_reason_codes": ["criterion_failed:study_geography"]
+                    "overall_reason_codes": ["criterion_failed:study_geography"],
+                    "resolved_evidence": [
+                        {
+                            "criterion": "study_geography",
+                            "spans": [
+                                {
+                                    "span_id": "span-geo-1",
+                                    "quote": "  Arctic study area\n  continued here.",
+                                    "start_byte": 120,
+                                    "end_byte": 158,
+                                    "locator": {
+                                        "section_id": "methods",
+                                        "source_block_id": "block-1",
+                                    },
+                                }
+                            ],
+                        }
+                    ],
                 },
             }
         ],
@@ -494,6 +511,18 @@ def test_plain_eligibility_statement_does_not_require_decoding_reason_code(
     assert "marine mixed setting" in detail["model_statements"][0]["text"]
     assert "marine_mixed_setting" not in detail["model_statements"][0]["text"]
     assert "marine_mixed_setting" in detail["reason_codes"]
+    assert detail["evidence"] == [
+        {
+            "quote": "  Arctic study area\n  continued here.",
+            "locator": {
+                "section_id": "methods",
+                "source_block_id": "block-1",
+            },
+            "span_id": "span-geo-1",
+            "start_byte": 120,
+            "end_byte": 158,
+        }
+    ]
 
 
 def test_stage_payload_is_full_on_demand_and_historical_absence_is_honest(

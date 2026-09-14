@@ -61,6 +61,9 @@ The private inspector can show retained source context that was supplied to a mo
 It removes credentials, authorization headers, provider thought signatures, and private paths.
 The page inserts all source and model text through text-only DOM operations.
 It never interprets retained text as HTML.
+The readable view removes extraction indentation and joins hard-wrapped prose for display.
+The raw JSON controls keep the exact retained text.
+The readable view combines evidence spans only when their source locator matches and their recorded offsets are adjacent.
 
 The selected paper and stage stay in the page URL.
 Open stage panels stay in browser session storage.

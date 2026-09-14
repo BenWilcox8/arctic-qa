@@ -1097,6 +1097,8 @@ class PipelineTraceStore:
                             "quote": span.get("quote"),
                             "locator": span.get("locator"),
                             "span_id": span.get("span_id"),
+                            "start_byte": span.get("start_byte"),
+                            "end_byte": span.get("end_byte"),
                         }
                         for span in group.get("spans") or []
                         if span.get("quote")
