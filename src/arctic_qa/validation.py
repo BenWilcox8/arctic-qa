@@ -19,10 +19,34 @@ UNIT_FACTORS: dict[tuple[str, str], Decimal] = {
     ("kg", "g"): Decimal("1000"),
     ("g", "kg"): Decimal("0.001"),
 }
-SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v2"
-GENERATION_PROMPT_VERSION = "arctic-qa-generation-v14"
+SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v3"
+LEGACY_SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v2"
+GENERATION_PROMPT_VERSION = "arctic-qa-generation-v15"
 NUMERIC_RULE_CONTRACT_VERSION = "numeric-rule-source-support-v2"
-SCOPE_CONTRACT_VERSION = "selected-evidence-literal-scope-v2"
+SCOPE_CONTRACT_VERSION = "selected-evidence-literal-scope-v3"
+EVIDENCE_COMBINATION_CONTRACT_VERSION = "contiguous-source-evidence-v1"
+MAX_COMBINED_EVIDENCE_CHARS = 3_200
+MAX_COMBINED_EVIDENCE_COMPONENTS = 4
+MAX_ADJACENT_WHITESPACE_CHARS = 32
+SUPPORTED_SOURCE_SPAN_CONTRACTS = {
+    LEGACY_SOURCE_SPAN_CONTRACT_VERSION,
+    SOURCE_SPAN_CONTRACT_VERSION,
+}
+CANDIDATE_CONTRACTS = {
+    "2.0.0": {
+        "prompt_version": "arctic-qa-generation-v14",
+        "numeric_rule_contract_version": NUMERIC_RULE_CONTRACT_VERSION,
+        "scope_contract_version": "selected-evidence-literal-scope-v2",
+    },
+    "2.1.0": {
+        "prompt_version": GENERATION_PROMPT_VERSION,
+        "numeric_rule_contract_version": NUMERIC_RULE_CONTRACT_VERSION,
+        "scope_contract_version": SCOPE_CONTRACT_VERSION,
+        "evidence_combination_contract_version": (
+            EVIDENCE_COMBINATION_CONTRACT_VERSION
+        ),
+    },
+}
 
 DIRECTION_PAIRS = {
     ("increased", "decreased"),
@@ -108,6 +132,9 @@ SPAN_DERIVED_KEYS = frozenset(
         "locator",
         "evidence_text_sha256",
         "span_contract_version",
+        "source_span_ids",
+        "evidence_components",
+        "eligibility_span_ids",
     }
 )
 
@@ -166,8 +193,48 @@ def _eligible_arctic_scope_error(
         for row in finding_spans
         if isinstance(row, dict) and isinstance(row.get("quote"), str)
     ]
-    if not finding_quotes or not any(quote == answer_quote for quote in finding_quotes):
+    if not finding_quotes:
         return "eligible_arctic_finding_out_of_scope"
+    if not any(quote == answer_quote for quote in finding_quotes):
+        finding_by_id = {
+            row.get("span_id"): row
+            for row in finding_spans
+            if isinstance(row, dict) and isinstance(row.get("span_id"), str)
+        }
+        components = (candidate.get("answer") or {}).get("evidence_components")
+        eligibility_ids = (candidate.get("answer") or {}).get(
+            "eligibility_span_ids"
+        )
+        if (
+            candidate.get("schema_version") != "2.1.0"
+            or not isinstance(components, list)
+            or not isinstance(eligibility_ids, list)
+            or not eligibility_ids
+            or len(components) != len(eligibility_ids)
+            or len(eligibility_ids) != len(set(eligibility_ids))
+            or any(span_id not in finding_by_id for span_id in eligibility_ids)
+        ):
+            return "eligible_arctic_finding_out_of_scope"
+        component_ids = [
+            row.get("eligibility_span_id")
+            for row in components
+            if isinstance(row, dict) and row.get("eligibility_span_id") is not None
+        ]
+        if component_ids != eligibility_ids:
+            return "eligible_arctic_finding_out_of_scope"
+        ordered = [finding_by_id[span_id] for span_id in eligibility_ids]
+        for index, (component, finding) in enumerate(zip(components, ordered)):
+            if (
+                component.get("eligibility_quote_sha256")
+                != finding.get("source_bytes_sha256")
+                or component.get("eligibility_locator") != finding.get("locator")
+            ):
+                return "eligible_arctic_finding_out_of_scope"
+            if index and (
+                ordered[index - 1].get("locator") != finding.get("locator")
+                or ordered[index - 1].get("end_byte") != finding.get("start_byte")
+            ):
+                return "eligible_arctic_finding_out_of_scope"
     if not scope_phrases or not any(
         isinstance(phrase, str) and phrase in question for phrase in scope_phrases
     ):
@@ -199,7 +266,8 @@ def validate_candidate(
         "unresolved": False,
         "_persist_validation": persist,
     }
-    if candidate.get("schema_version") != "2.0.0":
+    schema_version = candidate.get("schema_version")
+    if schema_version not in CANDIDATE_CONTRACTS:
         reasons.append("unsafe_legacy_candidate_schema")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     if REQUIRED_ITEM_KEYS - candidate.keys() or not isinstance(
@@ -228,10 +296,6 @@ def validate_candidate(
     ):
         reasons.append("source_manifest_mismatch")
         return _finish(db, candidate, labels, reasons, [], "rejected")
-    scope_error = _eligible_arctic_scope_error(candidate, source_record)
-    if scope_error:
-        reasons.append(scope_error)
-        return _finish(db, candidate, labels, reasons, [], "rejected")
     try:
         chunks = {
             row["chunk_id"]: row
@@ -242,6 +306,10 @@ def validate_candidate(
         return _finish(db, candidate, labels, reasons, [], "rejected")
     if not source_span_evidence_resolves(candidate["answer"], chunks):
         reasons.append("answer_evidence_span_invalid")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
+    scope_error = _eligible_arctic_scope_error(candidate, source_record)
+    if scope_error:
+        reasons.append(scope_error)
         return _finish(db, candidate, labels, reasons, [], "rejected")
     qa_gate_reasons = candidate.get("qa_gate_reasons")
     stored_candidate = db.one(
@@ -265,11 +333,7 @@ def validate_candidate(
             "rejected",
         )
     provenance = candidate.get("provenance")
-    expected_contract = {
-        "prompt_version": GENERATION_PROMPT_VERSION,
-        "numeric_rule_contract_version": NUMERIC_RULE_CONTRACT_VERSION,
-        "scope_contract_version": SCOPE_CONTRACT_VERSION,
-    }
+    expected_contract = CANDIDATE_CONTRACTS[str(schema_version)]
     if not isinstance(provenance, dict) or any(
         provenance.get(key) != value for key, value in expected_contract.items()
     ):
@@ -465,7 +529,7 @@ def source_span_evidence_resolves(
         return False
     if text_sha256 != sha256_bytes(quote.encode("utf-8")):
         return False
-    if contract != SOURCE_SPAN_CONTRACT_VERSION:
+    if contract not in SUPPORTED_SOURCE_SPAN_CONTRACTS:
         return False
     try:
         chunk_id = locator["chunk_id"]
@@ -478,9 +542,76 @@ def source_span_evidence_resolves(
         or not chunk_id
         or type(start) is not int
         or type(end) is not int
+        or end - start > MAX_COMBINED_EVIDENCE_CHARS
     ):
         return False
-    return span_id == stable_id(contract, chunk_id, start, end, text_sha256)
+    if span_id != stable_id(contract, chunk_id, start, end, text_sha256):
+        return False
+    if contract == LEGACY_SOURCE_SPAN_CONTRACT_VERSION:
+        return True
+    components = record.get("evidence_components")
+    source_span_ids = record.get("source_span_ids")
+    if (
+        not isinstance(components, list)
+        or not 1 <= len(components) <= MAX_COMBINED_EVIDENCE_COMPONENTS
+        or not isinstance(source_span_ids, list)
+        or source_span_ids
+        != [
+            component.get("source_span_id")
+            for component in components
+            if isinstance(component, dict)
+        ]
+        or len(source_span_ids) != len(set(source_span_ids))
+    ):
+        return False
+    chunk_text = str(chunks[chunk_id]["text"])
+    previous_end: int | None = None
+    component_start: int | None = None
+    component_end: int | None = None
+    eligibility_ids: list[str] = []
+    for component in components:
+        if not isinstance(component, dict):
+            return False
+        component_locator = component.get("locator")
+        if not isinstance(component_locator, dict):
+            return False
+        try:
+            component_chunk = component_locator["chunk_id"]
+            current_start = component_locator["start_offset"]
+            current_end = component_locator["end_offset"]
+        except KeyError:
+            return False
+        if (
+            component_chunk != chunk_id
+            or type(current_start) is not int
+            or type(current_end) is not int
+            or not 0 <= current_start < current_end <= len(chunk_text)
+            or component.get("text_sha256")
+            != sha256_bytes(chunk_text[current_start:current_end].encode("utf-8"))
+        ):
+            return False
+        if previous_end is not None and current_start > previous_end:
+            gap = chunk_text[previous_end:current_start]
+            if len(gap) > MAX_ADJACENT_WHITESPACE_CHARS or not gap.isspace():
+                return False
+        previous_end = max(previous_end or current_end, current_end)
+        component_start = (
+            current_start if component_start is None else min(component_start, current_start)
+        )
+        component_end = (
+            current_end if component_end is None else max(component_end, current_end)
+        )
+        eligibility_span_id = component.get("eligibility_span_id")
+        if isinstance(eligibility_span_id, str):
+            eligibility_ids.append(eligibility_span_id)
+    if component_start != start or component_end != end:
+        return False
+    recorded_eligibility_ids = record.get("eligibility_span_ids")
+    if eligibility_ids and recorded_eligibility_ids != eligibility_ids:
+        return False
+    if recorded_eligibility_ids is not None and not eligibility_ids:
+        return False
+    return True
 
 
 def reconstruction_matches(
@@ -562,6 +693,9 @@ def _bounded_text_match(left: str, right: str) -> bool:
         return False
     if left == right:
         return True
+    negations = {"no", "not", "never", "neither", "nor", "without"}
+    if bool(set(left.split()) & negations) != bool(set(right.split()) & negations):
+        return False
     shorter, longer = sorted((left, right), key=len)
     return len(shorter) >= 4 and len(shorter.split()) >= 2 and shorter in longer
 
@@ -892,7 +1026,9 @@ def _response_matches_resolved_record(response: Any, record: Any) -> bool:
         return True
     if not isinstance(response, dict) or not isinstance(record, dict):
         return False
-    if set(record) != set(response) | SPAN_DERIVED_KEYS:
+    if not set(response) <= set(record) or not (
+        set(record) - set(response)
+    ) <= SPAN_DERIVED_KEYS:
         return False
     if any(record.get(key) != value for key, value in response.items()):
         return False

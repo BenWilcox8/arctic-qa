@@ -1132,15 +1132,29 @@ class PipelineTraceStore:
                         "reconstructed_answer": reconstruction.get("answer"),
                     }
                 )
-            source = answer if answer.get("evidence_quote") else reconstruction
-            if source.get("evidence_quote"):
-                evidence.append(
+            decision_evidence = candidate.get("decision_evidence") or []
+            if decision_evidence:
+                evidence.extend(
                     {
                         "quote": source.get("evidence_quote"),
                         "locator": source.get("locator"),
                         "span_id": source.get("source_span_id"),
+                        "component_span_ids": source.get("source_span_ids"),
+                        "roles": source.get("roles"),
                     }
+                    for source in decision_evidence
+                    if isinstance(source, dict) and source.get("evidence_quote")
                 )
+            else:
+                source = answer if answer.get("evidence_quote") else reconstruction
+                if source.get("evidence_quote"):
+                    evidence.append(
+                        {
+                            "quote": source.get("evidence_quote"),
+                            "locator": source.get("locator"),
+                            "span_id": source.get("source_span_id"),
+                        }
+                    )
 
         if not model_statements and reason.get("category") in {
             "invalid_model_response",

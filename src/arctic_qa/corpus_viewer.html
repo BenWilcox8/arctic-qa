@@ -412,7 +412,7 @@
           <g class="activity-node terminal" id="activity-end"><title>End with retained evidence and an explicit terminal state</title><rect x="260" y="1845" width="200" height="65" rx="32"></rect><text x="360" y="1874">Retained result</text><text class="activity-note" x="360" y="1894">no human acceptance implied</text></g>
         </svg>
       </div>
-      <p class="method-limits">The active latitude-first policy is v3. It uses eligibility prompt v6, eligibility schema v3, and generation prompt v14. It uses actual study sites at or above 66.56° N, on land or sea. Separable Arctic components remain for scoped QA. Insufficient or inseparable evidence is unresolved. Historical decisions remain retained. Roles: the author model proposes findings, questions, and distractors. The verifier model reconstructs answers and checks exact options. Deterministic code enforces source locators, scope, bindings, and export rules. The read-only viewer never starts a run.</p>
+      <p class="method-limits">The active latitude-first policy is v3. It uses eligibility prompt v6, eligibility schema v3, and generation prompt v15. It uses actual study sites at or above 66.56° N, on land or sea. Separable Arctic components remain for scoped QA. Insufficient or inseparable evidence is unresolved. Historical decisions remain retained. Roles: the author model proposes findings, questions, and distractors. The verifier model reconstructs answers and checks exact options. Deterministic code enforces source locators, scope, bindings, and export rules. The read-only viewer never starts a run.</p>
     </section>
 
     <section class="panel trace-panel" id="pipeline-inspector" aria-labelledby="pipeline-inspector-title">
@@ -1304,6 +1304,10 @@
       }
       appendEvidence(card, record.answer);
       appendEvidence(card, record.evidence || record.answer_evidence);
+      if (Array.isArray(record.decision_evidence) && record.decision_evidence.length) {
+        card.append(text('strong', 'Combined decision evidence'));
+        appendEvidenceList(card, record.decision_evidence, { caption: 'Decision excerpt' });
+      }
       if (record.answer?.required_question_phrases) card.append(readableList('Required question phrases', record.answer.required_question_phrases));
       return card;
     }

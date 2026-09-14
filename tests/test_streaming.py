@@ -152,13 +152,13 @@ def test_compound_unit_rule_without_source_tolerance_remains_rejected() -> None:
 def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
     properties = generation_module.NUMERIC_RULE_SCHEMA["properties"]
 
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v14"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v15"
     assert (
         generation_module.NUMERIC_RULE_CONTRACT_VERSION
         == "numeric-rule-source-support-v2"
     )
     assert (
-        generation_module.SCOPE_CONTRACT_VERSION == "selected-evidence-literal-scope-v2"
+        generation_module.SCOPE_CONTRACT_VERSION == "selected-evidence-literal-scope-v3"
     )
     distractor_array = generation_module.ROLE_SCHEMAS["distractor_writer"][
         "properties"
@@ -190,7 +190,7 @@ def test_generation_prompt_requires_atomic_answers_and_aligned_questions() -> No
     question_instructions = generation_module.QUESTION_ALIGNMENT_INSTRUCTIONS
     answer_text_schema = generation_module.ANSWER_SCHEMA["properties"]["text"]
 
-    assert generation_module.FINDING_POLICY_VERSION.endswith("-v5")
+    assert generation_module.FINDING_POLICY_VERSION.endswith("-v6")
     assert "only the concise answer" in answer_instructions
     assert "Do not restate the question" in answer_instructions
     assert "unrelated values" in answer_instructions
@@ -206,7 +206,7 @@ def test_generation_prompt_requires_atomic_answers_and_aligned_questions() -> No
 
 
 def test_generation_schemas_require_concise_review_justifications() -> None:
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v14"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v15"
     assert (
         generation_module.MODEL_JUSTIFICATION_CONTRACT_VERSION
         == "model-justification-v1"
@@ -887,7 +887,8 @@ def test_finding_prompt_requires_one_exact_source_span(
     ]
     author_events[0]["require_prompt_contains"] = [
         "Select one source_span_id.",
-        "Do not combine text from different spans.",
+        "one exact selectable interval",
+        "Do not combine span IDs yourself.",
     ]
     author_script = tmp_path / "exact-finding-prompt-author.jsonl"
     author_script.write_text(
@@ -968,7 +969,7 @@ def test_finding_span_id_resolves_to_exact_source_evidence(tmp_path: Path) -> No
     author_events[0]["require_prompt_contains"] = [
         '"evidence_spans"',
         '"span_id"',
-        '"span_contract_version":"finding-evidence-span-v2"',
+        '"span_contract_version":"finding-evidence-span-v3"',
         '"text_sha256"',
         "Select one source_span_id.",
     ]
@@ -1006,8 +1007,8 @@ def test_finding_span_id_resolves_to_exact_source_evidence(tmp_path: Path) -> No
         record["evidence"]["locator"]["end_offset"]
         > record["evidence"]["locator"]["start_offset"]
     )
-    assert record["evidence"]["span_contract_version"] == "finding-evidence-span-v2"
-    assert record["evidence"]["source_span_id"].startswith("finding-evidence-span-v2-")
+    assert record["evidence"]["span_contract_version"] == "finding-evidence-span-v3"
+    assert record["evidence"]["source_span_id"].startswith("finding-evidence-span-v3-")
     assert len(record["evidence"]["text_sha256"]) == 64
 
 
@@ -1042,7 +1043,7 @@ def test_streaming_resolves_every_role_evidence_from_source_spans(
         distractor.pop("locator", None)
         distractor["source_span_id"] = "{{span_id}}"
     author_events[2]["require_prompt_contains"] = [
-        '"span_contract_version":"finding-evidence-span-v2"',
+        '"span_contract_version":"finding-evidence-span-v3"',
         "Select source_span_id for each evidence record.",
     ]
     verifier_events = [

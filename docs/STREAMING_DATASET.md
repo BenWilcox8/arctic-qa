@@ -10,6 +10,25 @@ It retains the direct-joint code without spending on that arm.
 Automated acceptance does not establish scientific truth.
 The strongest release label is `machine_accepted_unverified`.
 
+## Combined source evidence
+
+Generation prompt v15 uses the `finding-evidence-span-v3` contract.
+The scheduler combines eligible source intervals only when they overlap or have a whitespace-only gap of at most 32 characters.
+One combined excerpt can contain at most four component spans and 3,200 characters.
+The excerpt copies the complete bounded source interval, including all intervening text.
+The scheduler does not merge intervals from different chunks, sources, source versions, or eligibility scopes.
+Nonadjacent intervals remain separate decision evidence.
+
+Each combined record keeps the merged locator and SHA-256 value.
+It also keeps the ordered component span IDs, locators, SHA-256 values, and eligibility locators.
+Each model role keeps its original evidence and rationale.
+The blinded reconstruction prompt still excludes the frozen answer.
+
+Answer agreement does not replace evidence validation.
+Each role's evidence must resolve to the frozen source and support its stated scope.
+The verifier must still accept entailment, relation, scope, ambiguity, and alternative-answer checks.
+These checks reduce accidental agreement and nearby-scope errors, but they do not measure scientific validity.
+
 ## Offline command
 
 Use fake scripts for an offline integration run:

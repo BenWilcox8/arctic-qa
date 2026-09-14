@@ -1309,9 +1309,19 @@ def test_generation_runs_qa_gates_before_exact_option_verification(
         "distractor_writer",
     ]
     assert roles[5:] == ["option_verifier"] * 4
-    assert item["schema_version"] == "2.0.0"
+    assert item["schema_version"] == "2.1.0"
     assert item["finding_id"]
     assert item["answer"]["selection_rationale"]
+    assert item["answer"]["source_span_ids"]
+    assert item["answer"]["evidence_components"]
+    assert item["decision_evidence"][0]["roles"] == [
+        "answer",
+        "reconstruction",
+        "answer_verification",
+    ]
+    assert item["decision_evidence"][0]["evidence_quote"] == (
+        item["answer"]["evidence_quote"]
+    )
     assert item["question_rationale"]
     assert item["question_context"] == ""
     assert item["reconstruction"]["reconstruction_rationale"]
@@ -1327,6 +1337,24 @@ def test_generation_runs_qa_gates_before_exact_option_verification(
         == "model-justification-v1"
     )
     assert receipt["validation"]["labels"]["mcq_eligible"] is True
+
+
+def test_validation_keeps_current_legacy_candidate_contract_readable(
+    tmp_path: Path,
+) -> None:
+    smoke(tmp_path, "legacy-evidence-contract")
+    item = candidate(tmp_path)
+    item["schema_version"] = "2.0.0"
+    item["provenance"]["prompt_version"] = "arctic-qa-generation-v14"
+    item["provenance"]["scope_contract_version"] = (
+        "selected-evidence-literal-scope-v2"
+    )
+    item["provenance"].pop("evidence_combination_contract_version")
+    path = write_candidate(tmp_path, item, "legacy-evidence-candidate.json")
+
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+
+    assert result["final_label"] == "machine_accepted_unverified"
 
 
 def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> None:
@@ -1355,14 +1383,14 @@ def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> No
     command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(verifier)
     generated = json.loads(cli(tmp_path, *command).stdout)
     assert generated["status"] == "qa_gate_failed"
-    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v14"
+    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v15"
     assert (
         generated["provenance"]["numeric_rule_contract_version"]
         == "numeric-rule-source-support-v2"
     )
     assert (
         generated["provenance"]["scope_contract_version"]
-        == "selected-evidence-literal-scope-v2"
+        == "selected-evidence-literal-scope-v3"
     )
     assert generated["distractors"] == []
     assert generated["qa_gate_reasons"] == [

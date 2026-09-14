@@ -122,6 +122,29 @@ def test_manifest_selected_variants_keep_their_exact_options(tmp_path: Path) -> 
             "locator": {"page": 2},
             "verification_rationale": "The answer matches the source.",
         },
+        "decision_evidence": [
+            {
+                "evidence_quote": "The measured value increased.",
+                "locator": {"page": 2},
+                "source_span_id": "combined-span-1",
+                "source_span_ids": ["answer-span-1", "reconstruction-span-1"],
+                "roles": ["answer", "reconstruction"],
+                "role_evidence": [
+                    {
+                        "role": "answer",
+                        "evidence_quote": "The measured value increased.",
+                        "locator": {"page": 2},
+                        "source_span_id": "answer-span-1",
+                    },
+                    {
+                        "role": "reconstruction",
+                        "evidence_quote": "The measured value increased.",
+                        "locator": {"page": 2},
+                        "source_span_id": "reconstruction-span-1",
+                    },
+                ],
+            }
+        ],
     }
     connection.execute("INSERT INTO candidates VALUES (?,?,?)", ("question-1", "source-1", json.dumps(candidate)))
     decoy = {"question": "What changed?", "answer": {"text": "It decreased", "evidence_quote": "Wrong attempt", "locator": {"page": 3}}}
@@ -154,10 +177,18 @@ def test_manifest_selected_variants_keep_their_exact_options(tmp_path: Path) -> 
     assert reviewer[0]["stage_results"]["reconstruction"]["ambiguity_label"] == "one_answer"
     assert reviewer[0]["stage_results"]["reconstruction"]["evidence"]["locator"] == {"page": 2}
     assert reviewer[0]["stage_results"]["answer_verification"]["source_entailment_model_verified"] is True
+    assert reviewer[0]["decision_evidence"][0]["roles"] == [
+        "answer",
+        "reconstruction",
+    ]
+    assert reviewer[0]["decision_evidence"][0]["role_evidence"][0]["role"] == (
+        "answer"
+    )
     assert reviewer[0]["validation"] == [{"stage": "automated_acceptance", "reason_codes": ["model_only_distractor_verification"], "checks": {"schema_valid": True}}]
     assert "machine_accepted_unverified" not in json.dumps(reviewer[0])
     assert "is_correct" not in json.dumps(benchmark[0])
     assert "rationale" not in json.dumps(benchmark[0])
+    assert "decision_evidence" not in benchmark[0]
     assert scoring[0]["correct_option_id"] is not None
     assert scoring[1]["correct_option_id"] is None
     with (tmp_path / "package" / "reviewer-items.csv").open(encoding="utf-8", newline="") as handle:
@@ -166,6 +197,10 @@ def test_manifest_selected_variants_keep_their_exact_options(tmp_path: Path) -> 
     assert csv_row["reference_answer"] == "It increased"
     assert csv_row["option_b_generation_rationale"] == "This reverses the reported direction."
     assert csv_row["reconstruction_rationale"] == "The source supports one answer."
+    assert json.loads(csv_row["decision_evidence_json"])[0]["roles"] == [
+        "answer",
+        "reconstruction",
+    ]
     assert json.loads(csv_row["stage_results_json"])["answer_verification"]["source_entailment_model_verified"] is True
     assert manifest["historical_prompt_templates"][0]["kind"] == "renderer"
     assert (tmp_path / "package" / "historical-prompt-bundle" / "generation-v10.py").read_text() == renderer.read_text()

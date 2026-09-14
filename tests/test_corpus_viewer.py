@@ -1120,7 +1120,7 @@ def test_successor_production_plan_binds_active_segment_to_retained_predecessor(
             "eligibility_policy_version": "arctic-eligibility-policy-v3",
             "eligibility_prompt_version": "gemini-eligibility-prompt-v5",
             "eligibility_schema_version": "gemini-eligibility-v3",
-            "generation_prompt_version": "arctic-qa-generation-v14",
+            "generation_prompt_version": "arctic-qa-generation-v15",
         },
         "budget_and_ledger": {
             "remaining_to_planning_cap_usd": "50.000000",
@@ -1144,7 +1144,7 @@ def test_successor_production_plan_binds_active_segment_to_retained_predecessor(
         {"segment_id": "initial-v2", "run_id": "production-1"}
     ]
     assert campaign["methodology"]["generation_prompt_version"] == (
-        "arctic-qa-generation-v14"
+        "arctic-qa-generation-v15"
     )
 
     plan_payload["run_segment_lineage"]["active_segment"]["run_id"] = "unrelated-run"
