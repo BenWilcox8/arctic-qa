@@ -661,10 +661,21 @@ def role_evidence_resolves(
 def reconstruction_matches(
     answer: dict[str, Any], reconstruction: dict[str, Any]
 ) -> bool:
-    proposed = [answer.get("text", ""), *answer.get("variants", [])]
     rebuilt = reconstruction.get("answer", "")
     if _has_unrepresented_multiple_numeric_values(answer):
-        return False
+        text_matches = _reconstruction_text_matches(answer, str(rebuilt))
+        incomplete_metadata = _reconstruction_numeric_metadata_is_incomplete(
+            reconstruction
+        )
+        if not (
+            answer.get("numeric_rule") is None and text_matches and incomplete_metadata
+        ):
+            return False
+    if _reconstruction_text_matches(answer, str(rebuilt)):
+        if _reconstruction_numeric_metadata_conflicts_with_text(reconstruction):
+            return False
+        if _reconstruction_numeric_metadata_is_incomplete(reconstruction):
+            return True
     if _requires_structured_numeric_match(str(answer.get("text", ""))):
         return _source_bound_numeric_text_matches(answer, str(rebuilt))
     if _source_bound_directional_answer_matches(answer, str(rebuilt)):
@@ -674,11 +685,7 @@ def reconstruction_matches(
             _source_bound_numeric_text_matches(answer, str(rebuilt))
             or _reconstruction_numeric_matches(answer, reconstruction)
         )
-    rebuilt_text = _answer_match_text(str(rebuilt))
-    if any(
-        _bounded_text_match(_answer_match_text(str(value)), rebuilt_text)
-        for value in proposed
-    ):
+    if _reconstruction_text_matches(answer, str(rebuilt)):
         return True
     if _source_bound_numeric_text_matches(answer, str(rebuilt)):
         return True
@@ -743,6 +750,17 @@ def _answer_match_text(value: str) -> str:
     return " ".join(normalized.split())
 
 
+def _reconstruction_text_matches(answer: dict[str, Any], rebuilt: str) -> bool:
+    rebuilt_text = _answer_match_text(rebuilt)
+    if not rebuilt_text:
+        return False
+    return any(
+        _contains_negation(str(value)) == _contains_negation(rebuilt)
+        and _bounded_text_match(_answer_match_text(str(value)), rebuilt_text)
+        for value in [answer.get("text", ""), *answer.get("variants", [])]
+    )
+
+
 def _source_bound_directional_answer_matches(
     answer: dict[str, Any], rebuilt: str
 ) -> bool:
@@ -803,6 +821,55 @@ def _source_bound_numeric_text_matches(answer: dict[str, Any], rebuilt: str) -> 
         and answer_text in source_text
         and _has_numeric_equivalence_marker(answer_text)
     )
+
+
+def _reconstruction_numeric_metadata_is_incomplete(
+    reconstruction: dict[str, Any],
+) -> bool:
+    numeric = reconstruction.get("numeric")
+    if not isinstance(numeric, dict):
+        return True
+    try:
+        canonical_value = str(numeric["canonical_value"])
+        unit = str(numeric["unit"])
+        Decimal(canonical_value)
+    except (KeyError, InvalidOperation, ValueError):
+        return True
+    return not canonical_value.strip() or not unit.strip()
+
+
+def _reconstruction_numeric_metadata_conflicts_with_text(
+    reconstruction: dict[str, Any],
+) -> bool:
+    if _reconstruction_numeric_metadata_is_incomplete(reconstruction):
+        return False
+    numeric = reconstruction["numeric"]
+    rebuilt = str(reconstruction.get("answer", ""))
+    quantities = []
+    for match in NUMERIC_LITERAL_PATTERN.finditer(rebuilt):
+        unit_match = re.match(r"\s*(%|°?[A-Za-z]+)(?!\w)", rebuilt[match.end() :])
+        if unit_match and normalize_text(unit_match.group(1)) in SAFE_UNIT_SPELLINGS:
+            quantities.append(match)
+    if not quantities:
+        return False
+    if len(quantities) != 1:
+        return True
+    try:
+        expected_value = Decimal(str(numeric["canonical_value"]))
+        literal_value = Decimal(
+            quantities[0].group("value").replace(",", "").replace("−", "-")
+        )
+    except (KeyError, InvalidOperation, ValueError):
+        return False
+    expected_unit = str(numeric["unit"])
+    unit_match = re.match(r"\s*(%|°?[A-Za-z]+)(?!\w)", rebuilt[quantities[0].end() :])
+    if not unit_match:
+        return True
+    try:
+        converted = convert(literal_value, unit_match.group(1), expected_unit)
+    except ValueError:
+        return True
+    return converted != expected_value
 
 
 def _numeric_equivalence_text(value: str) -> str:

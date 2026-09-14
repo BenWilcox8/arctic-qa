@@ -228,6 +228,27 @@ def _retained_direct_value_record() -> tuple[dict[str, object], dict[str, object
     return answer, provenance
 
 
+def _audit_text_record(
+    answer_text: str,
+    reconstruction_text: str,
+    numeric: dict[str, str],
+) -> tuple[dict[str, object], dict[str, object]]:
+    evidence = f"The source reports {answer_text}."
+    return (
+        {
+            "text": answer_text,
+            "evidence_quote": evidence,
+            "scope": {"population": "the reported result"},
+            "required_question_phrases": ["reported result"],
+        },
+        {
+            "answer": reconstruction_text,
+            "numeric": numeric,
+            "scope": {"population": "the reported result"},
+        },
+    )
+
+
 def test_retained_directional_phrase_accepts_its_single_direction() -> None:
     answer, reconstruction = _retained_directional_record()
 
@@ -376,6 +397,85 @@ def test_retained_direct_value_requires_a_new_bound_contract() -> None:
     answer, provenance = _retained_direct_value_record()
 
     assert not validation.numeric_rule_is_source_bound(answer, provenance)
+
+
+@pytest.mark.parametrize(
+    "answer_text,reconstruction_text,numeric",
+    [
+        (
+            "5.5 to 6.9 nM",
+            "5.5 to 6.9 nM",
+            {"canonical_value": "5.5 to 6.9", "unit": "nM"},
+        ),
+        (
+            "sustained and statistically significant decline",
+            "A sustained and statistically significant decline",
+            {"canonical_value": "null", "unit": "null"},
+        ),
+    ],
+)
+def test_grounded_text_match_survives_incomplete_optional_numeric_metadata(
+    answer_text: str,
+    reconstruction_text: str,
+    numeric: dict[str, str],
+) -> None:
+    answer, reconstruction = _audit_text_record(
+        answer_text, reconstruction_text, numeric
+    )
+
+    assert validation.reconstruction_matches(answer, reconstruction)
+
+
+@pytest.mark.parametrize(
+    "answer_text,reconstruction_text,numeric",
+    [
+        (
+            "5.5 to 6.9 nM",
+            "5.5 to 6.8 nM",
+            {"canonical_value": "5.5 to 6.9", "unit": "nM"},
+        ),
+        (
+            "5.5 to 6.9 nM",
+            "5.5 to 6.9 pM",
+            {"canonical_value": "5.5 to 6.9", "unit": "nM"},
+        ),
+        (
+            "not a sustained decline",
+            "a sustained decline",
+            {"canonical_value": "null", "unit": "null"},
+        ),
+        (
+            "5.5 to 6.9 nM in selected surface seawater",
+            "5.5 to 6.9 nM in deep seawater",
+            {"canonical_value": "5.5 to 6.9", "unit": "nM"},
+        ),
+        (
+            "5.5 nM",
+            "6.9 nM",
+            {"canonical_value": "5.5", "unit": "nM"},
+        ),
+    ],
+)
+def test_incomplete_numeric_metadata_cannot_hide_changed_reconstruction(
+    answer_text: str,
+    reconstruction_text: str,
+    numeric: dict[str, str],
+) -> None:
+    answer, reconstruction = _audit_text_record(
+        answer_text, reconstruction_text, numeric
+    )
+
+    assert not validation.reconstruction_matches(answer, reconstruction)
+
+
+def test_exact_text_does_not_hide_a_conflicting_supported_unit() -> None:
+    answer, reconstruction = _audit_text_record(
+        "5.5 m",
+        "5.5 m",
+        {"canonical_value": "5.5", "unit": "cm"},
+    )
+
+    assert not validation.reconstruction_matches(answer, reconstruction)
 
 
 def test_bound_direct_value_contract_accepts_the_retained_source_value() -> None:
