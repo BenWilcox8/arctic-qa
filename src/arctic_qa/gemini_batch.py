@@ -4,6 +4,7 @@ import argparse
 import fcntl
 import json
 import re
+import sqlite3
 import sys
 import urllib.error
 import urllib.parse
@@ -62,6 +63,7 @@ TERMINAL_JOB_STATES = {
     "JOB_STATE_CANCELLED",
     "JOB_STATE_EXPIRED",
 }
+CONTINUATION_SCHEMA = "arctic-gemini-batch-continuation-v1"
 
 
 class BatchPendingError(ProviderError):
@@ -438,6 +440,8 @@ class BatchStore:
     def authorize_round(
         self, manifest: dict[str, Any], authorization: dict[str, Any]
     ) -> dict[str, Any]:
+        if manifest.get("run_identity", {}).get("continuation_plan_provisional"):
+            raise ValueError("a provisional continuation plan cannot be submitted")
         round_id = manifest["round_id"]
         state = self.read()
         round_state = state["rounds"].get(round_id)
@@ -769,6 +773,211 @@ def _capture_remaining_options(
         memory.close()
 
 
+def _terminal_dispositions(
+    db_file: Path, campaign_id: str
+) -> dict[str, dict[str, str]]:
+    connection = sqlite3.connect(
+        f"file:{db_file.resolve()}?mode=ro", uri=True, isolation_level=None
+    )
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(
+            """SELECT s.stable_id,s.source_id,c.item_id,c.status
+            FROM candidates c JOIN sources s ON s.source_id=c.source_id
+            WHERE c.run_id=?
+            AND c.status IN ('rejected','machine_accepted_unverified','incomplete_non_mcq')
+            ORDER BY s.stable_id,c.updated_at DESC,c.item_id DESC""",
+            (campaign_id,),
+        ).fetchall()
+    finally:
+        connection.close()
+    dispositions: dict[str, dict[str, str]] = {}
+    for row in rows:
+        dispositions.setdefault(
+            str(row["stable_id"]),
+            {
+                "source_id": str(row["source_id"]),
+                "item_id": str(row["item_id"]),
+                "status": str(row["status"]),
+            },
+        )
+    return dispositions
+
+
+def select_continuation(
+    *,
+    access_run_dir: Path,
+    db_file: Path,
+    campaign_id: str,
+    prior_run_id: str,
+    eligibility_run_dir: Path,
+    shared_ledger_file: Path,
+    production_progress_file: Path,
+    output_file: Path,
+    require_stopped: bool = False,
+) -> dict[str, Any]:
+    manifest_file = access_run_dir / "run-manifest.json"
+    manifest_bytes = manifest_file.read_bytes()
+    manifest = json.loads(manifest_bytes)
+    if not isinstance(manifest, dict):
+        raise ValueError("the ranked access manifest is not an object")
+    selection = manifest.get("selection")
+    if not isinstance(selection, list) or manifest.get("target_total") != len(
+        selection
+    ):
+        raise ValueError("the ranked access selection is invalid")
+    ranked: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(selection, start=1):
+        key = item.get("candidate_key")
+        if (
+            not isinstance(key, str)
+            or key in ranked
+            or item.get("position") != index
+            or not re.fullmatch(r"[a-f0-9]{64}", str(item.get("source_content_hash")))
+        ):
+            raise ValueError("the ranked access order or identity changed")
+        ranked[key] = item
+
+    ledger_bytes = shared_ledger_file.read_bytes()
+    ledger = json.loads(ledger_bytes)
+    if ledger.get("schema") != "shared-paid-call-ledger-v1" or not isinstance(
+        ledger.get("requests"), dict
+    ):
+        raise ValueError("the shared paid-call ledger is invalid")
+    receipts: dict[str, list[dict[str, str]]] = {}
+    for request_key, request in sorted(ledger["requests"].items()):
+        if request.get("run_id") != prior_run_id:
+            continue
+        paper_id = request.get("paper_id")
+        if paper_id not in ranked:
+            raise ValueError("a prior-run receipt is outside the ranked input")
+        if request.get("source_version_id") != ranked[paper_id]["source_content_hash"]:
+            raise ValueError("a prior-run receipt source identity changed")
+        receipts.setdefault(paper_id, []).append(
+            {
+                "request_key": request_key,
+                "stage": str(request.get("stage")),
+                "state": str(request.get("state")),
+            }
+        )
+
+    jobs: dict[str, dict[str, Any]] = {}
+    for path in sorted((eligibility_run_dir / "jobs").glob("*.json")):
+        job = _read(path)
+        key = job.get("candidate_key")
+        if key not in ranked or key in jobs:
+            raise ValueError("an eligibility disposition is outside or repeated")
+        request_key = job.get("broker_request_key")
+        matching = {row["request_key"] for row in receipts.get(str(key), [])}
+        if (
+            job.get("execution_authority") != "shared_gemini_broker"
+            or job.get("state") not in {"completed", "screening_error"}
+            or request_key not in matching
+            or job.get("source_content_hash") != ranked[key]["source_content_hash"]
+        ):
+            raise ValueError("an eligibility disposition lacks receipt custody")
+        validation = job.get("validation") or {}
+        if validation.get("decision") not in {"eligible", "excluded", "uncertain"}:
+            raise ValueError("an eligibility disposition is invalid")
+        jobs[str(key)] = {
+            "decision": validation["decision"],
+            "job_file": str(path.resolve()),
+            "job_file_sha256": sha256_file(path),
+            "broker_request_key": str(request_key),
+            "broker_receipt_sha256": str(job.get("broker_receipt_sha256")),
+        }
+
+    terminal = _terminal_dispositions(db_file, campaign_id)
+    unknown_terminal = sorted(set(terminal) - set(ranked))
+    if unknown_terminal:
+        raise ValueError("a campaign terminal disposition is outside the ranked input")
+    processed = set(receipts) | set(jobs) | set(terminal)
+    excluded: list[dict[str, Any]] = []
+    remaining: list[dict[str, Any]] = []
+    for item in selection:
+        key = item["candidate_key"]
+        identity = {
+            "position": item["position"],
+            "candidate_key": key,
+            "family_key": item.get("family_key"),
+            "source_content_hash": item["source_content_hash"],
+            "extraction_sha256": item.get("extraction_sha256"),
+        }
+        if key not in processed:
+            remaining.append(identity)
+            continue
+        job = jobs.get(key)
+        candidate = terminal.get(key)
+        if candidate:
+            disposition = f"candidate_{candidate['status']}"
+        elif job and job["decision"] in {"excluded", "uncertain"}:
+            disposition = f"eligibility_{job['decision']}"
+        else:
+            disposition = "touched_nonterminal"
+        excluded.append(
+            {
+                **identity,
+                "disposition": disposition,
+                "eligibility": job,
+                "terminal_candidate": candidate,
+                "receipts": receipts.get(key, []),
+            }
+        )
+
+    progress_bytes = production_progress_file.read_bytes()
+    progress = json.loads(progress_bytes)
+    if not isinstance(progress, dict):
+        raise ValueError("the production progress record is not an object")
+    unsettled = sorted(
+        row["request_key"]
+        for rows in receipts.values()
+        for row in rows
+        if row["state"] != "completed"
+    )
+    ledger_settled = (
+        int(ledger.get("inflight", 0)) == 0
+        and _money(ledger.get("reserved_usd"), "reserved") == 0
+        and _money(ledger.get("ambiguous_reserved_usd"), "ambiguous") == 0
+    )
+    provisional = (
+        progress.get("state") == "running" or not ledger_settled or bool(unsettled)
+    )
+    if require_stopped and provisional:
+        raise ValueError("the production campaign has not reached a settled stop")
+    identity = {
+        "source_access_manifest_sha256": sha256_bytes(manifest_bytes),
+        "campaign_id": campaign_id,
+        "prior_run_id": prior_run_id,
+        "production_progress_sha256": sha256_bytes(progress_bytes),
+        "shared_ledger_sha256": sha256_bytes(ledger_bytes),
+        "excluded_processed": excluded,
+        "remaining_selection": remaining,
+    }
+    result = {
+        "schema": CONTINUATION_SCHEMA,
+        "plan_id": stable_id("gemini-batch-continuation", identity, length=32),
+        "provisional": provisional,
+        "production_progress_state": progress.get("state"),
+        "source_access_run_dir": str(access_run_dir.resolve()),
+        "source_access_manifest_sha256": identity["source_access_manifest_sha256"],
+        "campaign_id": campaign_id,
+        "prior_run_id": prior_run_id,
+        "production_progress_file": str(production_progress_file.resolve()),
+        "production_progress_sha256": identity["production_progress_sha256"],
+        "shared_ledger_file": str(shared_ledger_file.resolve()),
+        "shared_ledger_sha256": identity["shared_ledger_sha256"],
+        "eligibility_run_dir": str(eligibility_run_dir.resolve()),
+        "source_count": len(selection),
+        "excluded_processed_count": len(excluded),
+        "remaining_count": len(remaining),
+        "unsettled_request_keys": unsettled,
+        "excluded_processed": excluded,
+        "remaining_selection": remaining,
+    }
+    atomic_json(output_file, result, immutable=True)
+    return {**result, "output_file": str(output_file.resolve())}
+
+
 def prepare_pipeline(
     db: Database,
     namespace: Path,
@@ -782,6 +991,7 @@ def prepare_pipeline(
     eligibility_schema_file: Path,
     eligibility_policy_file: Path,
     max_papers: int | None = None,
+    continuation_plan_file: Path | None = None,
 ) -> dict[str, Any]:
     manifest = _read(access_run_dir / "run-manifest.json")
     selection = manifest.get("selection")
@@ -789,6 +999,39 @@ def prepare_pipeline(
         selection
     ):
         raise ValueError("the ordered access selection is invalid")
+    source_selection_count = len(selection)
+    continuation_plan_sha256 = None
+    continuation_plan_provisional = False
+    if continuation_plan_file is not None:
+        continuation = _read(continuation_plan_file)
+        if continuation.get("schema") != CONTINUATION_SCHEMA or continuation.get(
+            "source_access_manifest_sha256"
+        ) != sha256_file(access_run_dir / "run-manifest.json"):
+            raise ValueError("the batch continuation plan does not match")
+        remaining = continuation.get("remaining_selection")
+        if not isinstance(remaining, list):
+            raise ValueError("the batch continuation selection is invalid")
+        by_key = {item["candidate_key"]: item for item in selection}
+        filtered = []
+        previous_position = 0
+        for identity in remaining:
+            item = by_key.get(identity.get("candidate_key"))
+            expected = {
+                "position": item.get("position") if item else None,
+                "candidate_key": item.get("candidate_key") if item else None,
+                "family_key": item.get("family_key") if item else None,
+                "source_content_hash": item.get("source_content_hash")
+                if item
+                else None,
+                "extraction_sha256": item.get("extraction_sha256") if item else None,
+            }
+            if identity != expected or int(identity["position"]) <= previous_position:
+                raise ValueError("the batch continuation order or identity changed")
+            previous_position = int(identity["position"])
+            filtered.append(item)
+        selection = filtered
+        continuation_plan_sha256 = sha256_file(continuation_plan_file)
+        continuation_plan_provisional = continuation.get("provisional") is True
     limit = len(selection) if max_papers is None else max_papers
     if limit < 1 or limit > len(selection):
         raise ValueError("the batch paper limit is outside the ordered selection")
@@ -823,9 +1066,7 @@ def prepare_pipeline(
         if access is None or access.get("access_state") != "full_text_ready":
             counts["unavailable"] += 1
             continue
-        if selected.get("position") != len(papers) + counts[
-            "unavailable"
-        ] + 1 or access.get("position") != selected.get("position"):
+        if access.get("position") != selected.get("position"):
             raise ValueError("the ordered access selection changed")
         family_id = str(
             access.get("paper_family_id")
@@ -960,6 +1201,9 @@ def prepare_pipeline(
         "campaign_id": campaign_id,
         "access_manifest_sha256": sha256_file(access_run_dir / "run-manifest.json"),
         "selection_count": limit,
+        "source_selection_count": source_selection_count,
+        "continuation_plan_sha256": continuation_plan_sha256,
+        "continuation_plan_provisional": continuation_plan_provisional,
         "model": MODEL,
         "price_config_sha256": sha256_file(store.price_config_file),
     }
@@ -1348,6 +1592,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--eligibility-prompt-file", required=True)
     prepare.add_argument("--eligibility-schema-file", required=True)
     prepare.add_argument("--eligibility-policy-file", required=True)
+    prepare.add_argument("--continuation-plan")
     prepare.add_argument("--max-papers", type=int)
     resume = commands.add_parser("resume", parents=[], add_help=True)
     for action in prepare._actions[1:]:
@@ -1378,6 +1623,16 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--seed", default="streaming-20260912")
     export.add_argument("--publication-output-dir")
     export.add_argument("--prompt-template", action="append", default=[])
+    continuation = commands.add_parser("select-continuation")
+    continuation.add_argument("--access-run-dir", required=True)
+    continuation.add_argument("--db", required=True)
+    continuation.add_argument("--campaign-id", required=True)
+    continuation.add_argument("--prior-run-id", required=True)
+    continuation.add_argument("--eligibility-run-dir", required=True)
+    continuation.add_argument("--shared-ledger-file", required=True)
+    continuation.add_argument("--production-progress-file", required=True)
+    continuation.add_argument("--output-file", required=True)
+    continuation.add_argument("--require-stopped", action="store_true")
     return parser
 
 
@@ -1409,9 +1664,42 @@ def main(argv: list[str] | None = None) -> int:
                     eligibility_schema_file=Path(args.eligibility_schema_file),
                     eligibility_policy_file=Path(args.eligibility_policy_file),
                     max_papers=args.max_papers,
+                    continuation_plan_file=(
+                        Path(args.continuation_plan) if args.continuation_plan else None
+                    ),
                 )
             finally:
                 db.close()
+        elif args.command == "select-continuation":
+            selected = select_continuation(
+                access_run_dir=Path(args.access_run_dir),
+                db_file=Path(args.db),
+                campaign_id=args.campaign_id,
+                prior_run_id=args.prior_run_id,
+                eligibility_run_dir=Path(args.eligibility_run_dir),
+                shared_ledger_file=Path(args.shared_ledger_file),
+                production_progress_file=Path(args.production_progress_file),
+                output_file=Path(args.output_file),
+                require_stopped=args.require_stopped,
+            )
+            result = {
+                "schema": selected["schema"],
+                "plan_id": selected["plan_id"],
+                "provisional": selected["provisional"],
+                "source_count": selected["source_count"],
+                "excluded_processed_count": selected["excluded_processed_count"],
+                "remaining_count": selected["remaining_count"],
+                "first_remaining": (
+                    selected["remaining_selection"][0]
+                    if selected["remaining_selection"]
+                    else None
+                ),
+                "source_access_manifest_sha256": selected[
+                    "source_access_manifest_sha256"
+                ],
+                "shared_ledger_sha256": selected["shared_ledger_sha256"],
+                "output_file": selected["output_file"],
+            }
         elif args.command == "submit":
             store = _store_from_args(args)
             transport = GeminiBatchHTTP(

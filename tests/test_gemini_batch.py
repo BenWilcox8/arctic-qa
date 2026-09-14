@@ -18,6 +18,7 @@ from arctic_qa.gemini_batch import (
     BatchStore,
     ingest_results,
     prepare_pipeline,
+    select_continuation,
     submit_round,
 )
 from arctic_qa.model_broker import SharedGeminiBroker, exclusive_batch_marker_path
@@ -163,6 +164,20 @@ def test_budget_refusal_precedes_transport_and_uncertain_submit_is_not_replayed(
     manifest_path = Path(round_manifest["manifest_path"])
     auth = authorization(manifest_path, ledger, tmp_path / "limited-auth.json")
     transport = FakeBatchTransport()
+
+    provisional_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    provisional_manifest["run_identity"]["continuation_plan_provisional"] = True
+    provisional_path = tmp_path / "provisional-manifest.json"
+    write_json(provisional_path, provisional_manifest)
+    provisional_auth = authorization(
+        provisional_path, ledger, tmp_path / "provisional-auth.json"
+    )
+    with pytest.raises(ValueError, match="provisional continuation"):
+        limited.authorize_round(
+            provisional_manifest,
+            json.loads(provisional_auth.read_text(encoding="utf-8")),
+        )
+    assert transport.calls == []
 
     with pytest.raises(ValueError, match="construction ceiling"):
         submit_round(limited, manifest_path, auth, transport)
@@ -343,6 +358,124 @@ def test_shuffled_partial_results_keep_missing_and_error_liability_after_restart
     assert Decimal(second_preview["batch_unsettled_liability_usd"]) == Decimal(
         second_restart.read()["requests"][keys[0]]["reserved_usd"]
     )
+
+
+def test_continuation_selector_preserves_ranked_order_and_logs_processed_ids(
+    tmp_path: Path,
+) -> None:
+    access = tmp_path / "ranked-access"
+    selection = [
+        {
+            "position": position,
+            "candidate_key": f"paper-{position}",
+            "family_key": f"family-{position}",
+            "source_content_hash": str(position) * 64,
+            "extraction_sha256": chr(96 + position) * 64,
+        }
+        for position in range(1, 4)
+    ]
+    write_json(
+        access / "run-manifest.json",
+        {
+            "schema": "article-access-manifest-v1",
+            "run_id": "ranked-top-three",
+            "target_total": 3,
+            "selection": selection,
+        },
+    )
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+    database.close()
+    _, ledger_path = shared_ledger(tmp_path)
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    request_key = "f" * 64
+    ledger["requests"][request_key] = {
+        "request_key": request_key,
+        "run_id": "first-production",
+        "stage": "eligibility",
+        "paper_id": "paper-2",
+        "family_id": "family-2",
+        "source_version_id": "2" * 64,
+        "state": "completed",
+    }
+    write_json(ledger_path, ledger)
+    eligibility = tmp_path / "eligibility"
+    write_json(
+        eligibility / "jobs" / "paper-2.json",
+        {
+            "candidate_key": "paper-2",
+            "execution_authority": "shared_gemini_broker",
+            "state": "completed",
+            "broker_request_key": request_key,
+            "broker_receipt_sha256": "e" * 64,
+            "source_content_hash": "2" * 64,
+            "validation": {"decision": "excluded"},
+        },
+    )
+    progress = tmp_path / "progress.json"
+    write_json(progress, {"state": "running"})
+
+    provisional = select_continuation(
+        access_run_dir=access,
+        db_file=paths.database,
+        campaign_id="scientific-campaign",
+        prior_run_id="first-production",
+        eligibility_run_dir=eligibility,
+        shared_ledger_file=ledger_path,
+        production_progress_file=progress,
+        output_file=tmp_path / "provisional.json",
+    )
+
+    assert provisional["provisional"] is True
+    assert [row["position"] for row in provisional["remaining_selection"]] == [1, 3]
+    assert provisional["excluded_processed"] == [
+        {
+            **selection[1],
+            "disposition": "eligibility_excluded",
+            "eligibility": {
+                "decision": "excluded",
+                "job_file": str((eligibility / "jobs" / "paper-2.json").resolve()),
+                "job_file_sha256": sha256_file(eligibility / "jobs" / "paper-2.json"),
+                "broker_request_key": request_key,
+                "broker_receipt_sha256": "e" * 64,
+            },
+            "terminal_candidate": None,
+            "receipts": [
+                {
+                    "request_key": request_key,
+                    "stage": "eligibility",
+                    "state": "completed",
+                }
+            ],
+        }
+    ]
+    with pytest.raises(ValueError, match="settled stop"):
+        select_continuation(
+            access_run_dir=access,
+            db_file=paths.database,
+            campaign_id="scientific-campaign",
+            prior_run_id="first-production",
+            eligibility_run_dir=eligibility,
+            shared_ledger_file=ledger_path,
+            production_progress_file=progress,
+            output_file=tmp_path / "must-stop.json",
+            require_stopped=True,
+        )
+
+    write_json(progress, {"state": "error"})
+    final = select_continuation(
+        access_run_dir=access,
+        db_file=paths.database,
+        campaign_id="scientific-campaign",
+        prior_run_id="first-production",
+        eligibility_run_dir=eligibility,
+        shared_ledger_file=ledger_path,
+        production_progress_file=progress,
+        output_file=tmp_path / "final.json",
+        require_stopped=True,
+    )
+    assert final["provisional"] is False
 
 
 def access_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:

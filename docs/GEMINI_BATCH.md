@@ -5,7 +5,9 @@ It reuses the current prompts, schemas, deterministic validators, database, acce
 Preparation makes no network call and does not change the shared paid-call ledger.
 
 Real batch submission is not active.
-The captain must authorize one prepared round before an operator submits it.
+The captain must authorize the campaign scope before an operator submits the first round.
+The full run is paused for geography-policy review.
+Do not submit a batch or resume paid work during this pause.
 
 ## Price and model evidence
 
@@ -39,12 +41,39 @@ The directory contains these files:
 Each request key binds the run, stage, paper, family, source hash, model, and exact request body.
 Each private mapping also records the attempt, prompt hash, configuration hash, and conservative token bounds.
 
+## Select the ranked continuation
+
+Wait for an exact paused or terminal progress record and settled accounting.
+Wait for the geography-policy review to fix the policy scope.
+Then create a final continuation plan from the ranked 800-paper input.
+
+The selector reads the campaign database, eligibility jobs, shared ledger, and progress file.
+It excludes each paper that has a disposition or paid-call receipt.
+It records each excluded paper, its ranked position, disposition, and receipt keys.
+It does not copy source files or change production data.
+
+```bash
+nix develop --offline -c bash -lc '
+PYTHONPATH=src python -m arctic_qa.gemini_batch select-continuation \
+  --access-run-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/production-campaign-r1/quality-order-r1/materialized-top-800 \
+  --db /mnt/crdata/research-abstention/arctic-qa/state.sqlite3 \
+  --campaign-id arctic-qa-production-campaign-001 \
+  --prior-run-id first-production-6fbdf41-r1 \
+  --eligibility-run-dir /mnt/crdata/research-abstention/arctic-qa/gemini-eligibility-r1/first-production-6fbdf41-r1 \
+  --shared-ledger-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
+  --production-progress-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/progress.json \
+  --output-file "$BATCH_STATE/final-continuation-plan.json" \
+  --require-stopped
+'
+```
+
+The selector stops if the campaign is active or the ledger is not settled.
+The remaining selection keeps the original ranked positions and order.
+The remaining count is dynamic and cannot be more than 800.
+
 ## Prepare the first round
 
-Run this command from the repository root.
-This example uses the frozen continuation manifest.
-It contains 4,379 papers in source order after the completed 41-paper campaign prefix.
-It does not select only successful trials.
+Use the final continuation plan from the preceding command.
 
 ```bash
 nix develop --offline -c bash -lc '
@@ -53,9 +82,10 @@ PYTHONPATH=src python -m arctic_qa.gemini_batch prepare \
   --db /mnt/crdata/research-abstention/arctic-qa/state.sqlite3 \
   --namespace /mnt/crdata/research-abstention/arctic-qa \
   --run-id FUTURE_BATCH_INVOCATION_ID \
-  --campaign-id FUTURE_SCIENTIFIC_CAMPAIGN_ID \
-  --access-run-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/trial-inputs/full-manifest-continuation-4420-minus41-r1 \
-  --eligibility-run-dir /mnt/crdata/research-abstention/arctic-qa/gemini-eligibility-r1/FUTURE_SCIENTIFIC_CAMPAIGN_ID \
+  --campaign-id arctic-qa-production-campaign-001 \
+  --access-run-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/production-campaign-r1/quality-order-r1/materialized-top-800 \
+  --continuation-plan "$BATCH_STATE/final-continuation-plan.json" \
+  --eligibility-run-dir "$BATCH_STATE/eligibility" \
   --eligibility-prompt-file config/gemini-eligibility-prompt-v4.txt \
   --eligibility-schema-file schemas/gemini-eligibility.v2.schema.json \
   --eligibility-policy-file /mnt/crdata/research-abstention/arctic-qa/corpus-search-r1/protocol/protocol-v2.json \
@@ -66,8 +96,7 @@ PYTHONPATH=src python -m arctic_qa.gemini_batch prepare \
 ```
 
 Use `--max-papers NUMBER` only for an explicit smaller prefix.
-The manifest records this count and preserves the frozen order.
-The command has no hidden 800-paper limit.
+The manifest records this count and preserves the ranked order.
 
 Read the returned `manifest_path`.
 Review its ordered identities, stage counts, request count, request-file hash, and reserved cost.
@@ -77,35 +106,42 @@ Dependent stages require separate rounds.
 One batch job has a target turnaround of 24 hours.
 Therefore, the complete pipeline has no one-day completion promise.
 
-### Recorded real-data preview
+### Current provisional preview
 
-An offline preview used the frozen continuation manifest and `--max-papers 1`.
-It wrote only to `.pytest_cache/production-batch-preview-v2` in this worktree.
-It did not change the production database, source files, or shared ledger.
+The current preview uses the active ranked 800-paper campaign.
+The selector marked this snapshot as provisional because synchronous production is still active.
 
-The preview prepared paper `10.37482/issn2221-2698.2025.59.44` at position 1.
-The source hash is `eaf5987a8c2fef3f24549b26aba42fcb1543b596fa73c302083af25b801a508e`.
+Snapshot `r2` excludes 78 processed or touched papers and retains 722 untouched papers.
+The first remaining paper is `10.1017/cft.2025.7` at ranked position 79.
+The source hash is `5df97a41ecef9fe773578dd53895d90c68f032a662dc83fec984325b926fdfe2`.
 The eligibility round has these values:
 
-- Round ID: `batch-round-bfea03e79652026e3e16a2cb391c138e`
+- Round ID: `batch-round-fac21313d558314932bc1b88422928eb`
 - Request count: `1`
-- Reserved cost: USD `0.0489105`
-- Shared ledger use at preparation: USD `12.723581`
-- Projected cumulative use: USD `12.7724915`
+- Reserved cost: USD `0.08677125`
+- Shared ledger use at preparation: USD `14.974336`
+- Projected cumulative use: USD `15.06110725`
 - Overall construction ceiling: USD `250`
 - Live call made: `false`
 - Submission enabled: `false`
 
-The round manifest is in `.pytest_cache/production-batch-preview-v2/batch-state/rounds/batch-round-bfea03e79652026e3e16a2cb391c138e/manifest.json`.
-This one-paper prefix is a launch check, not a funded full-run estimate.
-Prepare the complete 4,379-paper round without `--max-papers` before you request authorization.
+The private snapshot is in `streaming-dataset-r1/private/gemini-batch-continuation-r1/provisional-ranked800-snapshot-r2.json`.
+The private round manifest is in `preview-r2-batch-state/rounds/batch-round-fac21313d558314932bc1b88422928eb/manifest.json`.
+
+The preview files are on the mounted data volume.
+They do not change the production database, source files, or shared ledger.
+The provisional marker prevents submission.
+Create a new final plan after the synchronous campaign stops.
+If the geography policy changes, prepare new requests with the approved policy.
+Do not activate this preview automatically.
 
 ## Authorize and submit one round
 
 Wait until the current synchronous campaign is settled.
 Make sure that its ledger has no reservation, ambiguous charge, or in-flight request.
 
-Create one authorization JSON file with this shape:
+After captain approval, create an authorization file for each exact round manifest.
+The operator can create these files within the approved campaign budget, order, and model scope.
 
 ```json
 {
@@ -117,7 +153,8 @@ Create one authorization JSON file with this shape:
 }
 ```
 
-Run this command only after the captain supplies that authorization:
+Run this command only after the captain approves the campaign scope.
+Stop for new approval only if the scope expands or a bound or ambiguity stops the campaign.
 
 ```bash
 nix develop --offline -c bash -lc '
@@ -192,7 +229,7 @@ Cancellation does not release a reservation without final settlement evidence.
 
 Run `resume` with the same arguments as `prepare`.
 The pipeline validates actual upstream results before it prepares the next eligible stage.
-The continuation manifest excludes the completed 41-paper campaign prefix.
+The final continuation plan excludes all processed or touched ranked papers at the checkpoint.
 An exact request key that exists in the shared ledger causes preparation to stop.
 
 ## Export accepted data
@@ -204,7 +241,7 @@ It can also create the reviewer, benchmark, scoring, CSV, and prompt companion p
 PYTHONPATH=src python -m arctic_qa.gemini_batch export \
   --db /mnt/crdata/research-abstention/arctic-qa/state.sqlite3 \
   --namespace /mnt/crdata/research-abstention/arctic-qa \
-  --campaign-id FUTURE_SCIENTIFIC_CAMPAIGN_ID \
+  --campaign-id arctic-qa-production-campaign-001 \
   --publication-output-dir /PRIVATE/PUBLICATION_PACKAGE \
   --prompt-template config/gemini-eligibility-prompt-v4.txt
 ```
