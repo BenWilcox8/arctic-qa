@@ -10,7 +10,9 @@ from typing import Any
 import pytest
 
 from arctic_qa.db import Database
+from arctic_qa.discovery import manual_record
 from arctic_qa.exporting import export_run
+from arctic_qa import generation as generation_contract
 from arctic_qa.gemini_batch import (
     AUTHORIZATION_SCHEMA,
     BatchPendingError,
@@ -20,6 +22,7 @@ from arctic_qa.gemini_batch import (
     prepare_pipeline,
     select_continuation,
     submit_round,
+    _terminal_dispositions,
 )
 from arctic_qa.model_broker import SharedGeminiBroker, exclusive_batch_marker_path
 from arctic_qa.paths import DataPaths
@@ -476,6 +479,79 @@ def test_continuation_selector_preserves_ranked_order_and_logs_processed_ids(
         require_stopped=True,
     )
     assert final["provisional"] is False
+
+
+def test_continuation_ignores_legacy_terminal_candidates(
+    tmp_path: Path,
+) -> None:
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+
+    current_provenance = {
+        "prompt_version": generation_contract.PROMPT_VERSION,
+        "question_verification_contract_version": (
+            generation_contract.QUESTION_VERIFICATION_CONTRACT_VERSION
+        ),
+        "numeric_rule_contract_version": generation_contract.NUMERIC_RULE_CONTRACT_VERSION,
+        "direct_value_contract_version": (
+            generation_contract.DIRECT_SOURCE_VALUE_CONTRACT_VERSION
+        ),
+        "scope_contract_version": generation_contract.SCOPE_CONTRACT_VERSION,
+        "scope_role_semantics_version": generation_contract.SCOPE_ROLE_SEMANTICS_VERSION,
+        "scope_role_binding_contract_version": (
+            generation_contract.SCOPE_ROLE_BINDING_CONTRACT_VERSION
+        ),
+    }
+    for stable_id, candidate in (
+        (
+            "legacy-paper",
+            {"schema_version": "1.0", "provenance": {}},
+        ),
+        (
+            "current-paper",
+            {
+                "schema_version": generation_contract.CANDIDATE_SCHEMA_VERSION,
+                "finding_policy_version": (
+                    generation_contract.SCOPE_ROLE_FINDING_POLICY_VERSION
+                ),
+                "provenance": current_provenance,
+            },
+        ),
+    ):
+        source = manual_record(
+            {
+                "stable_id": stable_id,
+                "title": stable_id,
+                "year": 2026,
+                "discipline": "test",
+                "paper_family_id": stable_id,
+            },
+            "test-only",
+        )
+        database.upsert_source(source)
+        with database.transaction():
+            database.connection.execute(
+                """INSERT INTO candidates
+                (item_id,run_id,source_id,paper_family_id,generation_arm,candidate_json,status,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?)""",
+                (
+                    f"item-{stable_id}",
+                    "scientific-campaign",
+                    source["source_id"],
+                    stable_id,
+                    "answer_first",
+                    canonical_json(candidate),
+                    "rejected",
+                    "2026-09-14T00:00:00+00:00",
+                    "2026-09-14T00:00:00+00:00",
+                ),
+            )
+
+    dispositions = _terminal_dispositions(paths.database, "scientific-campaign")
+    assert set(dispositions) == {"current-paper"}
+    assert dispositions["current-paper"]["status"] == "rejected"
+    database.close()
 
 
 def access_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:

@@ -30,6 +30,7 @@ from .providers import ProviderResult, provider_prompt_hash
 from .publication_export import export_publication_package
 from .streaming import (
     _import_source,
+    _is_current_contract_candidate,
     _progress_generation,
     _run_eligibility,
     _validate_brokered_eligibility,
@@ -800,7 +801,7 @@ def _terminal_dispositions(
     connection.row_factory = sqlite3.Row
     try:
         rows = connection.execute(
-            """SELECT s.stable_id,s.source_id,c.item_id,c.status
+            """SELECT s.stable_id,s.source_id,c.item_id,c.status,c.candidate_json
             FROM candidates c JOIN sources s ON s.source_id=c.source_id
             WHERE c.run_id=?
             AND c.status IN ('rejected','machine_accepted_unverified','incomplete_non_mcq')
@@ -811,6 +812,8 @@ def _terminal_dispositions(
         connection.close()
     dispositions: dict[str, dict[str, str]] = {}
     for row in rows:
+        if not _is_current_contract_candidate(json.loads(row["candidate_json"])):
+            continue
         dispositions.setdefault(
             str(row["stable_id"]),
             {

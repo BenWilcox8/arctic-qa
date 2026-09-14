@@ -59,8 +59,8 @@ PYTHONPATH=src python -m arctic_qa.gemini_batch select-continuation \
   --access-run-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/production-campaign-r1/quality-order-r1/materialized-top-800 \
   --db /mnt/crdata/research-abstention/arctic-qa/state.sqlite3 \
   --campaign-id arctic-qa-production-campaign-001 \
-  --prior-run-id first-production-6fbdf41-r1 \
-  --eligibility-run-dir /mnt/crdata/research-abstention/arctic-qa/gemini-eligibility-r1/first-production-6fbdf41-r1 \
+  --prior-run-id first-production-6dc430d-live-rerun-r8 \
+  --eligibility-run-dir /mnt/crdata/research-abstention/arctic-qa/gemini-eligibility-r1/first-production-6dc430d-live-rerun-r8 \
   --shared-ledger-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
   --production-progress-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/progress.json \
   --output-file "$BATCH_STATE/final-continuation-plan.json" \
@@ -89,7 +89,7 @@ PYTHONPATH=src python -m arctic_qa.gemini_batch prepare \
   --eligibility-run-dir "$BATCH_STATE/eligibility" \
   --eligibility-prompt-file config/gemini-eligibility-prompt-v6.txt \
   --eligibility-schema-file schemas/gemini-eligibility.v3.schema.json \
-  --eligibility-policy-file /mnt/crdata/research-abstention/arctic-qa/corpus-search-r1/protocol/protocol-v2.json \
+  --eligibility-policy-file /mnt/crdata/research-abstention/arctic-qa/corpus-search-r1/protocol/protocol-v3.json \
   --price-config-file config/gemini-eligibility-v1.json \
   --shared-ledger-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
   --batch-allocation-usd 25
@@ -118,6 +118,7 @@ Submission still stops when the shared ledger has an unknown charge, reservation
 The following preview is retained as historical evidence only.
 It is not an active campaign input and cannot be submitted.
 The new USD 25 campaign must use a fresh final continuation plan.
+This archived preview predates the current live r8 invocation.
 The selector marked this snapshot as provisional because synchronous production is still active.
 
 Snapshot `r2` excludes 78 processed or touched papers and retains 722 untouched papers.
