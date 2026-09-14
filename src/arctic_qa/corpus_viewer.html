@@ -198,8 +198,18 @@
     .trace-readable-card { background: var(--paper); border: 1px solid var(--line); border-radius: 7px; min-width: 0; padding: .8rem; }
     .trace-readable-card > :first-child { margin-top: 0; }
     .trace-readable-card > :last-child { margin-bottom: 0; }
-    .trace-readable-title { align-items: flex-start; display: flex; flex-wrap: wrap; gap: .45rem .6rem; justify-content: space-between; margin-bottom: .65rem; }
-    .trace-readable-title h4 { font-size: .95rem; margin: 0; overflow-wrap: anywhere; }
+    .trace-readable-title { align-items: flex-start; display: flex; flex-wrap: wrap; gap: .45rem .6rem; justify-content: space-between; margin-bottom: .65rem; min-width: 0; }
+    .trace-readable-title h4 { font-size: .95rem; margin: 0; min-width: 0; overflow-wrap: anywhere; }
+    .trace-readable-item { background: var(--paper); border: 1px solid var(--line); border-radius: 7px; min-width: 0; overflow: hidden; }
+    .trace-readable-item > summary { align-items: flex-start; display: flex; flex-wrap: wrap; gap: .45rem .6rem; list-style: none; min-width: 0; padding: .7rem .8rem; }
+    .trace-readable-item > summary::-webkit-details-marker { display: none; }
+    .trace-readable-item > summary::before { color: var(--muted); content: "▸"; flex: 0 0 auto; font-size: 1rem; line-height: 1.4; }
+    .trace-readable-item[open] > summary { border-bottom: 1px solid var(--line); }
+    .trace-readable-item[open] > summary::before { content: "▾"; }
+    .trace-readable-item-summary-text { flex: 1 1 18rem; font-weight: 700; line-height: 1.45; min-width: 0; overflow-wrap: anywhere; }
+    .trace-readable-item > summary .badge { flex: 0 1 auto; }
+    .trace-readable-item-body { min-width: 0; padding: .75rem; }
+    .trace-readable-item-card { border: 0; padding: 0; }
     .trace-kv { display: grid; gap: .55rem; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: .55rem 0; }
     .trace-kv-item { background: var(--wash); border-radius: 5px; min-width: 0; padding: .55rem .6rem; }
     .trace-kv-item.wide { grid-column: 1 / -1; }
@@ -208,10 +218,12 @@
     .trace-question { border-left: 4px solid var(--navy); font-size: 1.02rem; font-weight: 700; line-height: 1.5; margin: .65rem 0; padding: .65rem .75rem; }
     .trace-answer { background: var(--green-bg); border-left: 4px solid var(--green); line-height: 1.5; margin: .65rem 0; padding: .65rem .75rem; }
     .trace-answer strong, .trace-question strong { display: block; font-size: .72rem; letter-spacing: .04em; margin-bottom: .25rem; text-transform: uppercase; }
-    .trace-option-list { display: grid; gap: .4rem; list-style: none; margin: .55rem 0; padding: 0; }
-    .trace-option { background: var(--wash); border: 1px solid var(--line); border-radius: 6px; display: grid; gap: .25rem; grid-template-columns: auto minmax(0, 1fr); line-height: 1.45; padding: .55rem .65rem; }
+    .trace-option-list { display: grid; gap: .4rem; list-style: none; margin: .55rem 0; min-width: 0; padding: 0; }
+    .trace-option { background: var(--wash); border: 1px solid var(--line); border-radius: 6px; display: grid; gap: .25rem; grid-template-columns: auto minmax(0, 1fr); line-height: 1.45; min-width: 0; padding: .55rem .65rem; }
     .trace-option.correct { background: var(--green-bg); border-color: var(--green); }
     .trace-option-marker { font-weight: 800; min-width: 1.6rem; }
+    .trace-option > span:not(.trace-option-marker) { min-width: 0; overflow-wrap: anywhere; }
+    .trace-option > .trace-evidence { grid-column: 1 / -1; min-width: 0; }
     .trace-evidence { background: #eef4f6; border-left: 4px solid #78909a; line-height: 1.5; margin: .55rem 0; overflow-wrap: anywhere; padding: .65rem .75rem; }
     .trace-evidence strong { display: block; font-size: .72rem; letter-spacing: .04em; margin-bottom: .25rem; text-transform: uppercase; }
     .trace-prose { min-width: 0; }
@@ -248,8 +260,15 @@
     .dataset-actions a { background: var(--navy); border-radius: 5px; color: #fff; padding: .55rem .7rem; text-decoration: none; }
     .dataset-filters { display: grid; gap: .65rem; grid-template-columns: minmax(220px, 1fr) 150px auto; margin: .8rem 0; }
     .dataset-list { display: grid; gap: .8rem; }
-    .dataset-card { background: var(--paper); border: 1px solid var(--line); border-radius: 7px; padding: .9rem; }
-    .dataset-card h3 { margin: 0 0 .25rem; }
+    .dataset-card { background: var(--paper); border: 1px solid var(--line); border-radius: 7px; min-width: 0; overflow: hidden; }
+    .dataset-card > summary { align-items: flex-start; display: flex; flex-wrap: wrap; gap: .45rem .6rem; list-style: none; min-width: 0; padding: .85rem .9rem; }
+    .dataset-card > summary::-webkit-details-marker { display: none; }
+    .dataset-card > summary::before { color: var(--muted); content: "▸"; flex: 0 0 auto; font-size: 1rem; line-height: 1.4; }
+    .dataset-card[open] > summary { border-bottom: 1px solid var(--line); }
+    .dataset-card[open] > summary::before { content: "▾"; }
+    .dataset-card-question { flex: 1 1 24rem; font-weight: 700; line-height: 1.45; min-width: 0; overflow-wrap: anywhere; }
+    .dataset-card-body { min-width: 0; padding: .9rem; }
+    .dataset-card-body h3 { margin: 0 0 .25rem; }
     .dataset-card .trace-option-list { margin-bottom: .8rem; }
     .dataset-answer { background: var(--green-bg); border-left: 4px solid var(--green); margin: .65rem 0; padding: .65rem .75rem; }
     .stages { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .7rem; margin-top: .8rem; }
@@ -679,15 +698,23 @@
       }
       return link;
     }
-    function renderLiveDatasetCard(record) {
+    function renderLiveDatasetCard(record, index = 0) {
       const benchmark = record.benchmark || {};
       const reviewer = record.reviewer || {};
-      const card = document.createElement('article');
+      const card = document.createElement('details');
       card.className = 'dataset-card';
-      card.append(text('h3', benchmark.question || 'Question not available'));
+      card.open = index === 0;
+      const summary = document.createElement('summary');
+      summary.append(
+        text('span', benchmark.question || 'Question not available', 'dataset-card-question'),
+        text('span', `${formatNumber((benchmark.options || []).length)} options`, 'badge unknown')
+      );
+      const body = document.createElement('div');
+      body.className = 'dataset-card-body';
+      body.append(text('h3', benchmark.question || 'Question not available'));
       const paper = reviewer.paper || {};
-      card.append(text('div', [paper.title, paper.doi].filter(Boolean).join(' | ') || 'Paper identity not available', 'meta'));
-      if (benchmark.question_context) card.append(text('p', `Context: ${benchmark.question_context}`, 'trace-section-note'));
+      body.append(text('div', [paper.title, paper.doi].filter(Boolean).join(' | ') || 'Paper identity not available', 'meta'));
+      if (benchmark.question_context) body.append(text('p', `Context: ${benchmark.question_context}`, 'trace-section-note'));
       const correct = new Map((reviewer.options || []).map((option) => [option.option_id, option.is_correct]));
       const options = document.createElement('ol');
       options.className = 'trace-option-list';
@@ -697,24 +724,25 @@
         item.append(text('span', `${option.position}.`, 'trace-option-marker'), text('span', option.text));
         options.append(item);
       });
-      card.append(options);
+      body.append(options);
       const answer = reviewer.reference_answer || {};
-      card.append(text('p', `Answer: ${answer.text || 'Not available'}`, 'dataset-answer'));
+      body.append(text('p', `Answer: ${answer.text || 'Not available'}`, 'dataset-answer'));
       const evidence = reviewer.answer_evidence || {};
       if (evidence.excerpt) {
         const block = text('p', evidence.excerpt, 'trace-evidence');
         block.prepend(text('strong', 'Answer evidence'));
         if (evidence.locator) block.title = JSON.stringify(evidence.locator);
-        card.append(block);
+        body.append(block);
       }
       const rationales = Object.entries(reviewer.rationales || {}).filter(([, value]) => value);
       if (rationales.length) {
         const rationaleList = document.createElement('ul');
         rationaleList.className = 'trace-readable-list';
         rationales.forEach(([name, value]) => rationaleList.append(text('li', `${label(name)}: ${value}`)));
-        card.append(text('strong', 'Rationales'), rationaleList);
+        body.append(text('strong', 'Rationales'), rationaleList);
       }
-      card.append(rawJsonDetails('Raw benchmark and reviewer JSON', record));
+      body.append(rawJsonDetails('Raw benchmark and reviewer JSON', record));
+      card.append(summary, body);
       return card;
     }
     async function loadLiveDataset() {
@@ -1192,6 +1220,22 @@
       card.append(heading);
       return card;
     }
+    function readableItem(titleValue, stateValue = null, summaryValue = titleValue, open = false) {
+      const details = document.createElement('details');
+      details.className = 'trace-readable-item';
+      details.open = open;
+      const summary = document.createElement('summary');
+      summary.className = 'trace-readable-item-summary';
+      summary.append(text('span', summaryValue || titleValue, 'trace-readable-item-summary-text'));
+      if (stateValue) summary.append(text('span', label(stateValue), `badge ${stateValue}`));
+      const body = document.createElement('div');
+      body.className = 'trace-readable-item-body';
+      const card = readableCard(titleValue, stateValue);
+      card.classList.add('trace-readable-item-card');
+      body.append(card);
+      details.append(summary, body);
+      return { details, card };
+    }
     function readableKeyValues(entries) {
       const grid = document.createElement('div');
       grid.className = 'trace-kv';
@@ -1430,7 +1474,12 @@
       const record = wrapper?.candidate || wrapper?.record || wrapper || {};
       const itemId = wrapper?.item_id || record.item_id;
       const recordState = wrapper?.status || record.status || record.release_label;
-      const card = readableCard(itemId ? `QA item ${itemId}` : `QA record ${index + 1}`, recordState);
+      const title = itemId ? `QA item ${itemId}` : `QA record ${index + 1}`;
+      const reasonSummary = wrapper?.rejection_reasons?.[0]?.plain_reason?.summary
+        || wrapper?.rejection_reasons?.[0]?.reason_code;
+      const summary = [record.question || title, reasonSummary].filter(Boolean).join(' | ');
+      const item = readableItem(title, recordState, summary, index === 0);
+      const card = item.card;
       if (hasTraceValue(record.question)) {
         appendLabeledReadableText(card, 'Question', record.question, 'trace-question');
       } else card.append(text('p', 'No question is recorded for this item.', 'trace-section-note'));
@@ -1475,7 +1524,16 @@
       if (record.answer_verification) card.append(readableObject('Answer checks', record.answer_verification));
       if (Array.isArray(record.option_verdicts) && record.option_verdicts.length) {
         card.append(text('strong', 'Option verdicts'));
-        record.option_verdicts.forEach((verdict, verdictIndex) => card.append(readableObject(`Option ${verdictIndex + 1}`, verdict)));
+        const verdicts = document.createElement('div');
+        verdicts.className = 'trace-readable';
+        record.option_verdicts.forEach((verdict, verdictIndex) => {
+          const title = `Option ${verdictIndex + 1}`;
+          const verdictState = verdict.accepted === true ? 'success' : verdict.accepted === false ? 'rejected' : null;
+          const item = readableItem(title, verdictState, `${title} | ${label(verdict.reason_code || verdictState || 'Recorded')}`);
+          item.card.append(readableObject(title, verdict));
+          verdicts.append(item.details);
+        });
+        card.append(verdicts);
       }
       appendEvidence(card, record.answer, 'Source evidence', resolver);
       appendEvidence(card, record.evidence || record.answer_evidence, 'Source evidence', resolver);
@@ -1484,9 +1542,9 @@
         appendEvidenceList(card, record.decision_evidence, { caption: 'Decision excerpt' }, resolver);
       }
       if (record.answer?.required_question_phrases) card.append(readableList('Required question phrases', record.answer.required_question_phrases));
-      return card;
+      return item.details;
     }
-    function appendRecordedReason(target, reason, caption = 'Recorded rejection reason') {
+    function recordedReasonBlock(reason, caption = 'Recorded rejection reason') {
       const plain = reason?.plain_reason || {};
       const block = document.createElement('div');
       block.className = 'trace-reason';
@@ -1505,7 +1563,10 @@
         detail: reason?.detail
       });
       block.append(raw);
-      target.append(block);
+      return block;
+    }
+    function appendRecordedReason(target, reason, caption = 'Recorded rejection reason') {
+      target.append(recordedReasonBlock(reason, caption));
     }
     function appendCandidateRejectionReasons(target, wrapper) {
       if (wrapper?.status !== 'rejected') return;
@@ -1514,7 +1575,16 @@
         target.append(text('p', 'This rejected QA item has no reason recorded for its current payload.', 'trace-section-note'));
         return;
       }
-      reasons.forEach((reason) => appendRecordedReason(target, reason));
+      const wrap = document.createElement('div');
+      wrap.className = 'trace-readable';
+      reasons.forEach((reason, index) => {
+        const title = label(reason?.reason_code || `Reason ${index + 1}`);
+        const summary = reason?.plain_reason?.summary || title;
+        const item = readableItem(title, 'rejected', `${title} | ${summary}`, index === 0);
+        item.card.append(recordedReasonBlock(reason));
+        wrap.append(item.details);
+      });
+      target.append(wrap);
     }
     function appendRejectedDistractors(target, records) {
       if (!Array.isArray(records) || !records.length) return;
@@ -1522,20 +1592,24 @@
       wrap.className = 'trace-readable';
       wrap.append(text('strong', 'Rejected distractors'));
       records.forEach((record, index) => {
-        const card = readableCard(record.option_text || `Distractor ${index + 1}`, 'rejected');
+        const title = record.option_text || `Distractor ${index + 1}`;
+        const reasonSummary = (record.reason_codes || []).map(label).join(', ') || 'No reason recorded';
+        const item = readableItem(title, 'rejected', `${title} | ${reasonSummary}`);
+        const card = item.card;
         card.append(readableKeyValues([
-          ['Stage', label(record.stage)], ['Type', label(record.option_type)],
-          ['Recorded reasons', (record.reason_codes || []).map(label).join(', ') || 'No reason recorded']
+          ['Stage', label(record.stage)], ['Type', label(record.option_type)], ['Recorded reasons', reasonSummary]
         ]));
         card.append(rawJsonDetails('Raw distractor rejection details', record));
-        wrap.append(card);
+        wrap.append(item.details);
       });
       target.append(wrap);
     }
     function renderRunsReadable(records) {
       const wrap = document.createElement('div'); wrap.className = 'trace-readable';
-      records.forEach((run) => {
-        const card = readableCard(run.run_id || 'Run ID not recorded', run.state);
+      records.forEach((run, index) => {
+        const title = run.run_id || 'Run ID not recorded';
+        const item = readableItem(title, run.state, `${title} | ${label(run.current_stage)}`, index === 0);
+        const card = item.card;
         card.append(readableKeyValues([
           ['Current stage', label(run.current_stage)],
           ['Model calls (retained receipts)', run.model_call_count ?? run.attempt_count],
@@ -1546,14 +1620,16 @@
         if (run.candidate_item_ids?.length) card.append(readableList('QA candidate version IDs', run.candidate_item_ids));
         if (run.finding_ids?.length) card.append(readableList('Finding attempt IDs', run.finding_ids));
         card.append(text('p', `${formatNumber(run.stages?.length || 0)} retained model-call receipts across pipeline stages.`, 'trace-section-note'));
-        wrap.append(card);
+        wrap.append(item.details);
       });
       return wrap;
     }
     function renderSourcesReadable(records, resolver = null) {
       const wrap = document.createElement('div'); wrap.className = 'trace-readable';
-      records.forEach((source) => {
-        const card = readableCard(source.title || source.doi || source.source_id || 'Source record', source.access_state);
+      records.forEach((source, index) => {
+        const title = source.title || source.doi || source.source_id || 'Source record';
+        const item = readableItem(title, source.access_state, `${title} | ${label(source.availability || source.access_state)}`, index === 0);
+        const card = item.card;
         card.append(readableKeyValues([
           ['Source', source.source_id], ['Availability', label(source.availability)],
           ['DOI', source.doi], ['Authors', source.authors], ['Year', source.year],
@@ -1583,15 +1659,17 @@
             card.append(details);
           });
         }
-        wrap.append(card);
+        wrap.append(item.details);
       });
       return wrap;
     }
     function renderEligibilityReadable(records, resolver = null) {
       const wrap = document.createElement('div'); wrap.className = 'trace-readable';
-      records.forEach((record) => {
+      records.forEach((record, index) => {
         const decision = record.validation?.decision || record.decision || record.state;
-        const card = readableCard(`Eligibility decision ${record.candidate_key || record.job_key || ''}`.trim(), decision);
+        const title = `Eligibility decision ${record.candidate_key || record.job_key || ''}`.trim();
+        const item = readableItem(title, decision, `${title} | ${label(decision)}`, index === 0);
+        const card = item.card;
         card.append(readableKeyValues([
           ['Decision', label(decision)], ['Model', record.model_version || record.model],
           ['Completed', dateText(record.completed_at_utc)], ['Cost', money(record.actual_cost_usd)],
@@ -1600,18 +1678,19 @@
         card.append(readableList('Overall reasons', record.validation?.overall_reason_codes || record.overall_reason_codes));
         const criteria = record.parsed_response?.criteria || [];
         criteria.forEach((criterion) => {
-          const criterionCard = readableCard(label(criterion.criterion_id), criterion.status);
+          const criterionItem = readableItem(label(criterion.criterion_id), criterion.status, `${label(criterion.criterion_id)} | ${label(criterion.status)}`);
+          const criterionCard = criterionItem.card;
           criterionCard.append(readableList('Reasons', criterion.reason_codes));
           criterionCard.append(readableList('Missing context', criterion.missing_context));
           const spanIds = (criterion.evidence || []).flatMap((entry) => entry.span_ids || []);
           if (spanIds.length) appendEvidenceList(criterionCard, spanIds.map((span_id) => ({ span_id })), { caption: 'Supporting quotation' }, resolver);
-          card.append(criterionCard);
+          card.append(criterionItem.details);
         });
         (record.validation?.resolved_evidence || []).forEach((group) => {
           card.append(text('strong', `Located evidence for ${label(group.criterion)}`));
           appendEvidenceList(card, group.spans || [], {}, resolver);
         });
-        wrap.append(card);
+        wrap.append(item.details);
       });
       return wrap;
     }
@@ -1619,7 +1698,9 @@
       const wrap = document.createElement('div'); wrap.className = 'trace-readable';
       records.forEach((record, index) => {
         const answer = record.answer || {};
-        const card = readableCard(record.finding_id ? `Finding ${record.finding_id}` : `Frozen finding ${index + 1}`, record.status);
+        const title = record.finding_id ? `Finding ${record.finding_id}` : `Frozen finding ${index + 1}`;
+        const item = readableItem(title, record.status, `${title} | ${answer.text || label(record.status)}`, index === 0);
+        const card = item.card;
         if (hasTraceValue(answer.text)) {
           appendLabeledReadableText(card, 'Frozen answer', answer.text, 'trace-answer');
         }
@@ -1629,7 +1710,7 @@
         ]));
         appendEvidence(card, answer, 'Source evidence', resolver);
         if (answer.required_question_phrases) card.append(readableList('Required question phrases', answer.required_question_phrases));
-        wrap.append(card);
+        wrap.append(item.details);
       });
       return wrap;
     }
@@ -1641,12 +1722,14 @@
     function renderValidationReadable(records, resolver = null) {
       const wrap = document.createElement('div'); wrap.className = 'trace-readable';
       records.forEach((record, index) => {
-        const card = readableCard(`${label(record.stage || 'Validation')} · ${record.item_id || `event ${index + 1}`}`, record.label);
+        const title = `${label(record.stage || 'Validation')} · ${record.item_id || `event ${index + 1}`}`;
+        const item = readableItem(title, record.label, `${title} | ${label(record.label || 'Recorded')}`, index === 0);
+        const card = item.card;
         card.append(readableKeyValues([['Recorded', dateText(record.created_at)], ['Event ID', record.event_id]]));
         card.append(readableList('Reasons', record.reason_codes));
         if (record.details?.labels) card.append(readableObject('Recorded checks', record.details.labels));
         appendOptions(card, record.details?.distractors, 'Checked distractors', resolver);
-        wrap.append(card);
+        wrap.append(item.details);
       });
       return wrap;
     }
@@ -1655,7 +1738,10 @@
       records.forEach((record, index) => {
         const reason = record.reason;
         const state = reason?.plain_reason?.category === 'eligibility_unresolved' || reason?.plain_reason?.category === 'provider_output_unresolved' ? 'unresolved' : 'rejected';
-        const card = readableCard(record.reason_code ? label(record.reason_code) : `Exit ${index + 1}`, state);
+        const title = record.reason_code ? label(record.reason_code) : `Exit ${index + 1}`;
+        const reasonSummary = reason?.plain_reason?.summary || label(record.reason_code || state);
+        const item = readableItem(title, state, `${title} | ${reasonSummary}`, index === 0);
+        const card = item.card;
         card.append(readableKeyValues([
           ['Stage', label(record.stage)], ['Item', record.item_id], ['Source', record.source_id],
           ['Recorded', dateText(record.created_at)], ['Rejection ID', record.rejection_id]
@@ -1663,7 +1749,7 @@
         if (reason) appendRecordedReason(card, reason, state === 'unresolved' ? 'Recorded unresolved exit' : 'Recorded rejection reason');
         else card.append(text('p', 'No reason was recorded for this exit.', 'trace-section-note'));
         if (record.detail && Object.keys(record.detail).length) card.append(rawJsonDetails('Raw exit details', record.detail));
-        wrap.append(card);
+        wrap.append(item.details);
       });
       return wrap;
     }
@@ -1706,16 +1792,18 @@
       records.forEach((entry, index) => {
         const record = entry.record || {};
         if (record.question || record.options || record.reference_answers) {
-          const card = renderQaReadableRecord({ ...entry, ...record, candidate: record }, index, resolver);
-          card.prepend(readableKeyValues([['Export', entry.export_id], ['Form', label(entry.kind)]]));
-          wrap.append(card);
+          const item = renderQaReadableRecord({ ...entry, ...record, candidate: record }, index, resolver);
+          item.querySelector('.trace-readable-item-card')?.prepend(readableKeyValues([['Export', entry.export_id], ['Form', label(entry.kind)]]));
+          wrap.append(item);
         } else {
-          const card = readableCard(`${label(entry.kind || 'Export record')} · ${entry.export_id || index + 1}`, record.release_label || record.state);
+          const title = `${label(entry.kind || 'Export record')} · ${entry.export_id || index + 1}`;
+          const item = readableItem(title, record.release_label || record.state, `${title} | ${label(record.release_label || record.state || 'Recorded')}`, index === 0);
+          const card = item.card;
           card.append(readableKeyValues([
             ['Item', record.item_id], ['Stage', label(record.stage)], ['Reason', label(record.reason_code)],
             ['Source', record.source_id], ['Task type', label(record.task_type)]
           ]));
-          wrap.append(card);
+          wrap.append(item.details);
         }
       });
       return wrap;
