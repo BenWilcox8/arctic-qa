@@ -88,8 +88,25 @@ def test_manifest_selected_variants_keep_their_exact_options(tmp_path: Path) -> 
         CREATE TABLE validation_events (item_id TEXT,stage TEXT,label TEXT,reason_codes_json TEXT,details_json TEXT);
     """)
     connection.execute("INSERT INTO sources VALUES (?,?,?,?,?,?,?,?)", ("source-1", "paper-1", "10.1/example", "Example paper", 2026, "source-hash", "{}", "selected"))
-    candidate = {"question": "What changed?", "answer": {"text": "It increased", "claim_type": "observation", "evidence_quote": "The measured value increased.", "locator": {"page": 2}}}
+    candidate = {
+        "question": "What changed?",
+        "question_rationale": "The selected finding states the change.",
+        "answer": {
+            "text": "It increased",
+            "claim_type": "observation",
+            "numeric_rule": {"unit": "percent", "canonical_value": "4"},
+            "selection_rationale": "This answer uses the stated increase.",
+            "rationale": "The evidence supports the answer.",
+            "evidence_quote": "The measured value increased.",
+            "locator": {"page": 2},
+        },
+        "distractors": [{"text": "It decreased", "generation_rationale": "This reverses the reported direction."}],
+        "reconstruction": {"reconstruction_rationale": "The source supports one answer."},
+        "answer_verification": {"verification_rationale": "The answer matches the source."},
+    }
     connection.execute("INSERT INTO candidates VALUES (?,?,?)", ("question-1", "source-1", json.dumps(candidate)))
+    decoy = {"question": "What changed?", "answer": {"text": "It decreased", "evidence_quote": "Wrong attempt", "locator": {"page": 3}}}
+    connection.execute("INSERT INTO candidates VALUES (?,?,?)", ("question-9", "source-1", json.dumps(decoy)))
     connection.commit()
     connection.close()
 
@@ -105,8 +122,24 @@ def test_manifest_selected_variants_keep_their_exact_options(tmp_path: Path) -> 
     assert "release_label" not in json.dumps(reviewer[0])
     assert reviewer[1]["reference_answer"]["text"] == "It increased"
     assert reviewer[1]["answer_evidence"]["excerpt"] == "The measured value increased."
+    assert reviewer[0]["reference_answer"]["numeric_rule"]["unit"] == "percent"
+    assert reviewer[0]["options"][1]["generation_rationale"] == "This reverses the reported direction."
+    assert reviewer[0]["rationales"] == {
+        "question": "The selected finding states the change.",
+        "answer_selection": "This answer uses the stated increase.",
+        "answer_generation": "The evidence supports the answer.",
+        "reconstruction": "The source supports one answer.",
+        "answer_verification": "The answer matches the source.",
+    }
     assert "is_correct" not in json.dumps(benchmark[0])
+    assert "rationale" not in json.dumps(benchmark[0])
     assert scoring[0]["correct_option_id"] is not None
     assert scoring[1]["correct_option_id"] is None
+    with (tmp_path / "package" / "reviewer-items.csv").open(encoding="utf-8", newline="") as handle:
+        csv_row = next(csv.DictReader(handle))
+    assert csv_row["doi"] == "10.1/example"
+    assert csv_row["reference_answer"] == "It increased"
+    assert csv_row["option_b_generation_rationale"] == "This reverses the reported direction."
+    assert csv_row["reconstruction_rationale"] == "The source supports one answer."
     assert manifest["historical_prompt_templates"][0]["kind"] == "renderer"
     assert (tmp_path / "package" / "historical-prompt-bundle" / "generation-v10.py").read_text() == renderer.read_text()

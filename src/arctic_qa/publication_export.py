@@ -220,16 +220,31 @@ def _matching_candidate(connection: sqlite3.Connection, item: dict[str, Any]) ->
     source = item.get("source") if isinstance(item.get("source"), dict) else {}
     source_id = source.get("source_id")
     question = item.get("question")
+    candidate_id = item.get("paired_item_id") or item.get("item_id")
     if not isinstance(source_id, str) or not isinstance(question, str):
         return None
+    if isinstance(candidate_id, str):
+        row = connection.execute(
+            "SELECT item_id,candidate_json FROM candidates WHERE source_id=? AND item_id=?",
+            (source_id, candidate_id),
+        ).fetchone()
+        if row:
+            candidate = _json(row["candidate_json"], {})
+            if candidate.get("question") == question:
+                candidate["_database_item_id"] = row["item_id"]
+                return candidate
+    matches = []
     for row in connection.execute(
-        "SELECT item_id,candidate_json FROM candidates WHERE source_id=? ORDER BY item_id DESC", (source_id,)
+        "SELECT item_id,candidate_json FROM candidates WHERE source_id=? ORDER BY item_id", (source_id,)
     ):
         candidate = _json(row["candidate_json"], {})
         if candidate.get("question") == question:
-            candidate["_database_item_id"] = row["item_id"]
-            return candidate
-    return None
+            matches.append((row["item_id"], candidate))
+    if len(matches) != 1:
+        return None
+    matched_id, candidate = matches[0]
+    candidate["_database_item_id"] = matched_id
+    return candidate
 
 
 def _manifest_row(connection: sqlite3.Connection | None, item: dict[str, Any]) -> dict[str, Any]:
@@ -254,18 +269,23 @@ def _manifest_row(connection: sqlite3.Connection | None, item: dict[str, Any]) -
         candidate = _matching_candidate(connection, item) or {}
         validations = _public_validation(connection, candidate.get("_database_item_id"))
     verdicts = {row.get("option_text"): row for row in candidate.get("option_verdicts", []) if isinstance(row, dict)}
+    distractors = {row.get("text"): row for row in candidate.get("distractors", []) if isinstance(row, dict)}
     candidate_answer = candidate.get("answer") if isinstance(candidate.get("answer"), dict) else {}
+    reconstruction = candidate.get("reconstruction") if isinstance(candidate.get("reconstruction"), dict) else {}
+    answer_verification = candidate.get("answer_verification") if isinstance(candidate.get("answer_verification"), dict) else {}
     options = []
     for position, option in enumerate(item.get("options", []), start=1):
         if not isinstance(option, dict):
             continue
         verdict = verdicts.get(option.get("text"), {})
+        distractor = distractors.get(option.get("text"), {})
         options.append(
             {
                 "position": position,
                 "option_id": stable_id("publication-option-id", item.get("item_id"), str(position), option.get("text")),
                 "text": option.get("text"),
                 "is_correct": option.get("is_correct"),
+                "generation_rationale": distractor.get("generation_rationale"),
                 "verification": {
                     "label": option.get("verification_label"),
                     "evidence": _short_evidence(option.get("falsity_evidence")),
@@ -283,16 +303,22 @@ def _manifest_row(connection: sqlite3.Connection | None, item: dict[str, Any]) -
         "question": item.get("question"),
         "reference_answer": {
             name: candidate_answer[name]
-            for name in ("text", "claim_type")
+            for name in ("text", "claim_type", "scope", "deterministic_rule", "numeric_rule")
             if candidate_answer.get(name) is not None
         } or None,
         "answer_evidence": _short_evidence(item.get("answer_evidence")) or _short_evidence(candidate_answer),
         "options": options,
         "validation": validations,
         "rationales": {
-            name: candidate.get(name)
-            for name in ("question_rationale", "reconstruction", "answer_verification")
-            if candidate.get(name) is not None
+            name: value
+            for name, value in (
+                ("question", candidate.get("question_rationale")),
+                ("answer_selection", candidate_answer.get("selection_rationale")),
+                ("answer_generation", candidate_answer.get("rationale")),
+                ("reconstruction", reconstruction.get("reconstruction_rationale")),
+                ("answer_verification", answer_verification.get("verification_rationale")),
+            )
+            if value is not None
         },
         "model_trace": _model_trace(candidate),
         "interpretation_limit": item.get("interpretation_limit"),
@@ -302,6 +328,38 @@ def _manifest_row(connection: sqlite3.Connection | None, item: dict[str, Any]) -
             "The source export selects the rows. State data only enriches them.",
         ],
     }
+
+
+def _reviewer_csv_record(row: dict[str, Any]) -> dict[str, Any]:
+    result = {
+        "item_id": row["item_id"],
+        "question_id": row["question_id"],
+        "variant_id": row["variant_id"],
+        "doi": row["paper"].get("doi"),
+        "title": row["paper"].get("title"),
+        "question": row["question"],
+        "reference_answer": (row.get("reference_answer") or {}).get("text"),
+        "question_rationale": row["rationales"].get("question"),
+        "answer_selection_rationale": row["rationales"].get("answer_selection"),
+        "answer_rationale": row["rationales"].get("answer_generation"),
+        "reconstruction_rationale": row["rationales"].get("reconstruction"),
+        "verification_rationale": row["rationales"].get("answer_verification"),
+        "paper_json": canonical_json(row["paper"]),
+        "reference_answer_json": canonical_json(row["reference_answer"]),
+        "answer_evidence_json": canonical_json(row["answer_evidence"]),
+        "options_json": canonical_json(row["options"]),
+        "validation_json": canonical_json(row["validation"]),
+        "rationales_json": canonical_json(row["rationales"]),
+        "model_trace_json": canonical_json(row["model_trace"]),
+        "interpretation_limit": row.get("interpretation_limit"),
+        "evidence_state": row.get("evidence_state"),
+    }
+    for index, letter in enumerate("abcd"):
+        option = row["options"][index] if index < len(row["options"]) else {}
+        result[f"option_{letter}"] = option.get("text")
+        result[f"option_{letter}_generation_rationale"] = option.get("generation_rationale")
+        result[f"option_{letter}_verification_rationale"] = (option.get("verification") or {}).get("rationale")
+    return result
 
 
 def _write_manifest_package(
@@ -336,8 +394,9 @@ def _write_manifest_package(
     reviewer_csv = output_dir / "reviewer-items.csv"
     benchmark_csv = output_dir / "benchmark-inputs.csv"
     scoring_csv = output_dir / "scoring-labels.csv"
+    reviewer_csv_rows = [_reviewer_csv_record(row) for row in records]
     for path, rows, fields in (
-        (reviewer_csv, records, ["item_id", "question_id", "variant_id", "question", "paper_json", "reference_answer_json", "answer_evidence_json", "options_json", "validation_json", "rationales_json", "model_trace_json", "interpretation_limit", "evidence_state"]),
+        (reviewer_csv, reviewer_csv_rows, ["item_id", "question_id", "variant_id", "doi", "title", "question", "reference_answer", "question_rationale", "answer_selection_rationale", "answer_rationale", "reconstruction_rationale", "verification_rationale", "option_a", "option_a_generation_rationale", "option_a_verification_rationale", "option_b", "option_b_generation_rationale", "option_b_verification_rationale", "option_c", "option_c_generation_rationale", "option_c_verification_rationale", "option_d", "option_d_generation_rationale", "option_d_verification_rationale", "paper_json", "reference_answer_json", "answer_evidence_json", "options_json", "validation_json", "rationales_json", "model_trace_json", "interpretation_limit", "evidence_state"]),
         (benchmark_csv, benchmark_rows, ["item_id", "question_id", "variant_id", "question", "options_json"]),
         (scoring_csv, scoring_rows, ["item_id", "correct_option_id", "answer_present"]),
     ):
@@ -345,7 +404,7 @@ def _write_manifest_package(
             writer = csv.DictWriter(handle, fieldnames=fields)
             writer.writeheader()
             for row in rows:
-                writer.writerow({name: canonical_json(row[name.removesuffix("_json")]) if name.endswith("_json") else row.get(name) for name in fields})
+                writer.writerow({name: row.get(name) for name in fields})
     bundle = output_dir / "historical-prompt-bundle"
     templates = []
     for path, kind in [*( (path, "template") for path in prompt_templates or []), *( (path, "renderer") for path in historical_renderers or [])]:
