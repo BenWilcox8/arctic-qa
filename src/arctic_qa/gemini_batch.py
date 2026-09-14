@@ -30,6 +30,7 @@ from .providers import ProviderResult, provider_prompt_hash
 from .publication_export import export_publication_package
 from .streaming import (
     _import_source,
+    _progress_generation,
     _run_eligibility,
     _validate_brokered_eligibility,
     _validate_pair,
@@ -50,6 +51,7 @@ BATCH_SCHEMA = "arctic-gemini-batch-state-v1"
 REQUEST_SCHEMA = "arctic-gemini-batch-request-v1"
 ROUND_SCHEMA = "arctic-gemini-batch-round-v1"
 AUTHORIZATION_SCHEMA = "arctic-gemini-batch-submit-authorization-v1"
+DEFAULT_BATCH_ALLOCATION_USD = Decimal("25")
 MODEL = "gemini-3.8-flash"
 BATCH_INPUT_USD_PER_MILLION = Decimal("0.375")
 BATCH_OUTPUT_USD_PER_MILLION = Decimal("1.875")
@@ -431,9 +433,13 @@ class BatchStore:
             "batch_actual_usd": str(batch_actual),
             "batch_unsettled_liability_usd": str(batch_liability),
             "new_reservation_usd": str(new_reservation),
+            "projected_batch_total_usd": str(
+                batch_actual + batch_liability + new_reservation
+            ),
             "projected_total_usd": str(
                 shared_used + batch_actual + batch_liability + new_reservation
             ),
+            "batch_allocation_usd": str(self.overall_ceiling_usd),
             "overall_ceiling_usd": str(self.overall_ceiling_usd),
         }
 
@@ -471,9 +477,9 @@ class BatchStore:
         ):
             raise ValueError("the shared paid-call ledger is not settled")
         preview = self.budget_preview(manifest["request_keys"])
-        if Decimal(preview["projected_total_usd"]) > self.overall_ceiling_usd:
+        if Decimal(preview["projected_batch_total_usd"]) > self.overall_ceiling_usd:
             raise ValueError(
-                "the batch reservation exceeds the shared construction ceiling"
+                "the batch reservation exceeds the batch allocation construction ceiling"
             )
         paper_costs: dict[str, Decimal] = {}
         for paper in ledger.get("papers", {}).values():
@@ -746,31 +752,43 @@ def _capture_remaining_options(
     source_id: str,
     run_id: str,
     provider: BatchProvider,
+    generation_attempt: dict[str, Any] | None = None,
 ) -> None:
     memory = Database(Path(":memory:"))
     db.connection.backup(memory.connection)
     try:
         capture = replace(provider, capture_option_requests=True)
         try:
-            generate_candidate(
-                memory,
-                namespace,
-                source_id=source_id,
-                run_id=run_id,
-                arm="answer_first",
-                author=capture,
-                verifier=capture,
-                budget_mode="tokens",
-                budget_limit=Decimal("1000000"),
-                reservation=Decimal("100"),
-                timeout=30,
-                retries=0,
-                rate_limit_seconds=0,
-            )
+            arguments = {
+                "source_id": source_id,
+                "run_id": run_id,
+                "arm": "answer_first",
+                "author": capture,
+                "verifier": capture,
+                "budget_mode": "tokens",
+                "budget_limit": Decimal("1000000"),
+                "reservation": Decimal("100"),
+                "timeout": 30,
+                "retries": 0,
+                "rate_limit_seconds": 0,
+            }
+            if generation_attempt is not None:
+                arguments["generation_attempt"] = generation_attempt
+            generate_candidate(memory, namespace, **arguments)
         except BatchPendingError:
             pass
     finally:
         memory.close()
+
+
+class _BatchProgress:
+    """Provide the generation progress callbacks without a live progress file."""
+
+    def paper(self, **_: Any) -> None:
+        return None
+
+    def error(self, *_: Any) -> None:
+        return None
 
 
 def _terminal_dispositions(
@@ -1118,34 +1136,30 @@ def prepare_pipeline(
                 db, namespace, access, selected, eligibility, family_id=family_id
             )
             terminal = _terminal_candidate(db, campaign_id, source_id)
-            if terminal:
-                state = (
-                    "accepted"
-                    if terminal["status"] == "machine_accepted_unverified"
-                    else (
-                        "incomplete"
-                        if terminal["status"] == "incomplete_non_mcq"
-                        else "rejected"
-                    )
-                )
-                counts[state] += 1
-                papers.append({**result, "source_id": source_id, "state": state})
+            if terminal and terminal["status"] == "machine_accepted_unverified":
+                counts["accepted"] += 1
+                papers.append({**result, "source_id": source_id, "state": "accepted"})
                 continue
+            pending_attempt: dict[str, Any] | None = None
+
+            def remember_pending(attempt: dict[str, Any]) -> None:
+                nonlocal pending_attempt
+                pending_attempt = attempt
+
             try:
-                candidate = generate_candidate(
+                generation = _progress_generation(
                     db,
                     namespace,
+                    _BatchProgress(),
+                    campaign_id=campaign_id,
+                    candidate_key=str(candidate_key),
                     source_id=source_id,
-                    run_id=campaign_id,
-                    arm="answer_first",
+                    family_id=family_id,
+                    selected=selected,
+                    title=access.get("title"),
                     author=paper_provider,
                     verifier=paper_provider,
-                    budget_mode="tokens",
-                    budget_limit=Decimal("1000000"),
-                    reservation=Decimal("100"),
-                    timeout=30,
-                    retries=0,
-                    rate_limit_seconds=0,
+                    pending_handler=remember_pending,
                 )
             except BatchPendingError:
                 if any(
@@ -1159,26 +1173,21 @@ def prepare_pipeline(
                         source_id=source_id,
                         run_id=campaign_id,
                         provider=paper_provider,
+                        generation_attempt=pending_attempt,
                     )
                 raise
-            validation = _finish_candidate(db, namespace, candidate)
-            state = (
-                "accepted"
-                if validation["final_label"] == "machine_accepted_unverified"
-                and validation["labels"]["mcq_eligible"]
-                else (
-                    "incomplete"
-                    if validation["final_label"] == "machine_accepted_unverified"
-                    else "rejected"
-                )
-            )
+            state = {
+                "accepted": "accepted",
+                "incomplete_non_mcq": "incomplete",
+                "generation_rejected": "rejected",
+            }[generation["disposition"]]
             counts[state] += 1
             papers.append(
                 {
                     **result,
                     "source_id": source_id,
                     "state": state,
-                    "item_id": candidate["item_id"],
+                    "reason": generation["reason_codes"],
                 }
             )
         except BatchPendingError:
@@ -1571,7 +1580,12 @@ def _add_store_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--state-dir", required=True)
     parser.add_argument("--price-config-file", required=True)
     parser.add_argument("--shared-ledger-file", required=True)
-    parser.add_argument("--overall-ceiling-usd", default="250")
+    parser.add_argument(
+        "--overall-ceiling-usd",
+        "--batch-allocation-usd",
+        dest="overall_ceiling_usd",
+        default=str(DEFAULT_BATCH_ALLOCATION_USD),
+    )
     parser.add_argument("--maximum-request-usd", default="0.25")
     parser.add_argument("--maximum-paper-usd", default="1")
 

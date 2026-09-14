@@ -728,3 +728,147 @@ def test_staged_batch_pipeline_uses_real_prompts_and_exports_accepted_output(
     value = json.loads(candidate["candidate_json"])
     assert value["question_rationale"]
     assert all(item["generation_rationale"] for item in value["distractors"])
+
+
+def test_batch_pipeline_reuses_bounded_question_revision_contract(
+    tmp_path: Path,
+) -> None:
+    access, eligibility, policy = access_fixture(tmp_path)
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+    _, ledger = shared_ledger(tmp_path)
+    store = batch_store(tmp_path, ledger)
+    seen_stage_counts: dict[str, int] = {}
+
+    def revised_response(record: dict[str, Any]) -> dict[str, Any]:
+        payload = scripted_payload(record)
+        prompt = record["request"]["contents"][0]["parts"][0]["text"]
+        if record["role"] == "question_writer" and "QUESTION_REVISION" not in prompt:
+            payload["question"] = (
+                "What reported water depth was documented as 2.0 m?"
+            )
+        return {
+            "responseId": f"batch-{record['request_key'][:12]}",
+            "modelVersion": "gemini-3.8-flash",
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "content": {"parts": [{"text": canonical_json(payload)}]},
+                }
+            ],
+            "usageMetadata": {
+                "promptTokenCount": 100,
+                "candidatesTokenCount": 10,
+                "thoughtsTokenCount": 5,
+                "totalTokenCount": 115,
+            },
+        }
+
+    for _ in range(16):
+        prepared = prepare_pipeline(
+            database,
+            paths.namespace,
+            store=store,
+            run_id="batch-invocation-revision-r1",
+            campaign_id="scientific-campaign-revision-r1",
+            access_run_dir=access,
+            eligibility_run_dir=eligibility,
+            eligibility_prompt_file=REPO
+            / "config"
+            / "gemini-eligibility-prompt-v3.txt",
+            eligibility_schema_file=REPO
+            / "schemas"
+            / "gemini-eligibility.v1.schema.json",
+            eligibility_policy_file=policy,
+        )
+        if prepared["counts"]["accepted"] == 1:
+            break
+        round_manifest = prepared["round"]
+        assert round_manifest is not None
+        request_records = [
+            store.prepared_record(key) for key in round_manifest["request_keys"]
+        ]
+        for record in request_records:
+            seen_stage_counts[record["stage"]] = (
+                seen_stage_counts.get(record["stage"], 0) + 1
+            )
+        results = tmp_path / f"{round_manifest['round_id']}.revision-results.jsonl"
+        results.write_text(
+            "".join(
+                canonical_json(
+                    {"key": record["request_key"], "response": revised_response(record)}
+                )
+                + "\n"
+                for record in reversed(request_records)
+            ),
+            encoding="utf-8",
+        )
+        ingest_results(store, round_manifest["round_id"], results)
+    else:
+        pytest.fail("the batch revision pipeline did not finish")
+
+    assert seen_stage_counts == {
+        "eligibility": 1,
+        "question_generation": 2,
+        "finding_answer_extraction": 1,
+        "blinded_reconstruction": 2,
+        "answer_verification": 2,
+        "distractor_generation": 1,
+        "option_verification": 4,
+    }
+    assert database.one(
+        "SELECT COUNT(*) AS count FROM candidates "
+        "WHERE run_id=? AND status='machine_accepted_unverified'",
+        ("scientific-campaign-revision-r1",),
+    )["count"] == 1
+
+
+def test_batch_allocation_is_separate_from_shared_live_spend(tmp_path: Path) -> None:
+    _, ledger_path = shared_ledger(tmp_path)
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    ledger["prior_construction_spend_usd"] = "24.99"
+    write_json(ledger_path, ledger)
+    store = batch_store(tmp_path, ledger_path, ceiling="25")
+    provider = BatchProvider(
+        store=store,
+        phase="away_production",
+        invocation_run_id="separate-allocation-run",
+    ).bind(
+        paper_id="paper-one",
+        family_id="family-one",
+        source_version_id="a" * 64,
+    )
+    with pytest.raises(BatchPendingError):
+        provider.invoke(
+            "question_writer",
+            "system",
+            "prompt",
+            {"temperature": 0, "max_tokens": 2048, "json_schema": {"type": "object"}},
+            30,
+        )
+    round_manifest = store.make_round(
+        run_identity={"run_id": "separate-allocation-run"},
+        ordered_inputs=[
+            {
+                "position": 1,
+                "paper_id": "paper-one",
+                "family_id": "family-one",
+                "source_version_id": "a" * 64,
+            }
+        ],
+    )
+    assert round_manifest is not None
+    manifest_path = Path(round_manifest["manifest_path"])
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    auth_path = authorization(manifest_path, ledger_path, tmp_path / "auth.json")
+    authorized = store.authorize_round(
+        manifest, json.loads(auth_path.read_text(encoding="utf-8"))
+    )
+    preview = store.budget_preview(manifest["request_keys"])
+    assert Decimal(preview["shared_used_usd"]) == Decimal("24.99")
+    assert Decimal(preview["batch_allocation_usd"]) == Decimal("25")
+    assert Decimal(preview["projected_batch_total_usd"]) == Decimal(
+        manifest["reserved_cost_usd"]
+    )
+    assert authorized["batch_allocation_usd"] == "25"

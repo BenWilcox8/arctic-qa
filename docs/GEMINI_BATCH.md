@@ -4,10 +4,9 @@ This module continues the scientific pipeline with the Gemini Batch API.
 It reuses the current prompts, schemas, deterministic validators, database, accepted export, and publication exporter.
 Preparation makes no network call and does not change the shared paid-call ledger.
 
-Real batch submission is not active.
-The captain must authorize the campaign scope before an operator submits the first round.
-The full run is paused for geography-policy review.
-Do not submit a batch or resume paid work during this pause.
+The batch campaign has a separate USD 25 allocation.
+The first USD 50 live campaign keeps its own cumulative ledger and liabilities.
+The root operator must coordinate the shared ledger before the first submission.
 
 ## Price and model evidence
 
@@ -19,6 +18,8 @@ The [official pricing page](https://ai.google.dev/gemini-api/docs/pricing) gives
 
 - Input tokens cost USD 0.375 per million tokens.
 - Output and thinking tokens cost USD 1.875 per million tokens.
+
+The [thinking documentation](https://ai.google.dev/gemini-api/docs/thinking) states that thinking tokens are billed as output tokens and count toward `max_output_tokens`.
 
 The module accepts no tools, caching, media output, or ancillary service charge.
 It does not assume that ancillary charges use the batch discount.
@@ -44,7 +45,7 @@ Each private mapping also records the attempt, prompt hash, configuration hash, 
 ## Select the ranked continuation
 
 Wait for an exact paused or terminal progress record and settled accounting.
-Wait for the geography-policy review to fix the policy scope.
+Use the currently approved scientific eligibility policy for the new campaign.
 Then create a final continuation plan from the ranked 800-paper input.
 
 The selector reads the campaign database, eligibility jobs, shared ledger, and progress file.
@@ -91,7 +92,7 @@ PYTHONPATH=src python -m arctic_qa.gemini_batch prepare \
   --eligibility-policy-file /mnt/crdata/research-abstention/arctic-qa/corpus-search-r1/protocol/protocol-v2.json \
   --price-config-file config/gemini-eligibility-v1.json \
   --shared-ledger-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
-  --overall-ceiling-usd 250
+  --batch-allocation-usd 25
 '
 ```
 
@@ -106,9 +107,17 @@ Dependent stages require separate rounds.
 One batch job has a target turnaround of 24 hours.
 Therefore, the complete pipeline has no one-day completion promise.
 
-### Current provisional preview
+The batch allocation includes every prepared request in the campaign.
+Each request reserves input tokens plus its maximum output token limit.
+The output limit includes thinking tokens.
+The shared ledger amount appears in each budget preview, but it does not reduce the separate USD 25 batch allocation.
+Submission still stops when the shared ledger has an unknown charge, reservation, or in-flight request.
 
-The current preview uses the active ranked 800-paper campaign.
+### Archived provisional preview
+
+The following preview is retained as historical evidence only.
+It is not an active campaign input and cannot be submitted.
+The new USD 25 campaign must use a fresh final continuation plan.
 The selector marked this snapshot as provisional because synchronous production is still active.
 
 Snapshot `r2` excludes 78 processed or touched papers and retains 722 untouched papers.
@@ -121,7 +130,7 @@ The eligibility round has these values:
 - Reserved cost: USD `0.08677125`
 - Shared ledger use at preparation: USD `14.974336`
 - Projected cumulative use: USD `15.06110725`
-- Overall construction ceiling: USD `250`
+- Batch allocation ceiling: USD `25`
 - Live call made: `false`
 - Submission enabled: `false`
 
@@ -165,7 +174,7 @@ PYTHONPATH=src python -m arctic_qa.gemini_batch submit \
   --credential-file /home/ben/.config/arctic-qa/gemini-api-key \
   --price-config-file config/gemini-eligibility-v1.json \
   --shared-ledger-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
-  --overall-ceiling-usd 250
+  --batch-allocation-usd 25
 '
 ```
 

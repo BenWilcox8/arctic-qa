@@ -4,7 +4,7 @@ import json
 import inspect
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import generation as generation_contract
 from .db import Database, now
@@ -597,6 +597,7 @@ def _progress_generation(
     title: str | None,
     author: Provider,
     verifier: Provider,
+    pending_handler: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     paths = _generation_paths(
         db,
@@ -817,6 +818,10 @@ def _progress_generation(
             progress.error(source_id, title, "generation", error)
             raise
         except Exception as error:
+            if pending_handler is not None and getattr(error, "code", None) == (
+                "BATCH_PENDING"
+            ):
+                pending_handler(next_attempt)
             progress.error(source_id, title, "generation", error)
             raise
 
