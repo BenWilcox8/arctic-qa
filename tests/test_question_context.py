@@ -60,6 +60,35 @@ def test_source_blind_gate_accepts_supported_non_leaking_definition_context() ->
     assert standalone_verification_resolves(candidate, verification)
 
 
+def test_standalone_contract_version_is_controller_owned() -> None:
+    schema = generation.ROLE_SCHEMAS["standalone_verifier"]
+    provider_verdict = {
+        "contract_version": "2024-09-01",
+        "pass": False,
+        "answer_leakage_absent": True,
+        "unresolved_phrases": ["Figure 6"],
+        "missing_detail_types": ["study_local_referent"],
+        "reasons": ["source_dependent_locator"],
+        "review_rationale": "Figure 6 is not available to the reader.",
+    }
+
+    assert "contract_version" not in schema["required"]
+    _validate_schema(provider_verdict, schema)
+    bound = generation._bind_standalone_contract_version(provider_verdict)
+
+    assert bound["contract_version"] == generation.STANDALONE_VERIFICATION_CONTRACT_VERSION
+    assert bound["pass"] is False
+    assert bound["reasons"] == ["source_dependent_locator"]
+    assert provider_verdict["contract_version"] == "2024-09-01"
+
+    omitted_version = dict(provider_verdict)
+    omitted_version.pop("contract_version")
+    _validate_schema(omitted_version, schema)
+    assert generation._bind_standalone_contract_version(omitted_version)[
+        "contract_version"
+    ] == generation.STANDALONE_VERIFICATION_CONTRACT_VERSION
+
+
 def test_self_contained_question_uses_empty_context() -> None:
     assert question_context_verification_reason(
         "", {"text": "gravel"}, _verification(required=False)

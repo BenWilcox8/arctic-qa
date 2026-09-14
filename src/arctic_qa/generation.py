@@ -65,6 +65,7 @@ STANDALONE_SYSTEM = """Judge whether one displayed scientific task is self-conta
 You receive only the question and question_context.
 Assume that the reader cannot see a paper, title, table, figure, evidence, answer, or options.
 Do not judge source support or answer correctness.
+The controller owns the contract version. Do not infer or judge version metadata.
 Return only the requested JSON object."""
 ANSWER_FORMAT_INSTRUCTIONS = (
     "Set answer.text to only the concise answer that one focused question requires. "
@@ -463,7 +464,6 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
     "standalone_verifier": {
         "type": "object",
         "required": [
-            "contract_version",
             "pass",
             "answer_leakage_absent",
             "unresolved_phrases",
@@ -472,7 +472,13 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
             "review_rationale",
         ],
         "properties": {
-            "contract_version": {"const": STANDALONE_VERIFICATION_CONTRACT_VERSION},
+            "contract_version": {
+                "type": "string",
+                "minLength": 1,
+                "description": (
+                    "Optional provider echo. The controller replaces this metadata."
+                ),
+            },
             "pass": {"type": "boolean"},
             "answer_leakage_absent": {"type": "boolean"},
             "unresolved_phrases": {
@@ -671,6 +677,14 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
         "additionalProperties": False,
     },
 }
+
+
+def _bind_standalone_contract_version(payload: dict[str, Any]) -> dict[str, Any]:
+    """Attach controller-owned metadata without changing the provider receipt."""
+    return {
+        **payload,
+        "contract_version": STANDALONE_VERIFICATION_CONTRACT_VERSION,
+    }
 
 
 def _validated_generation_attempt(
@@ -1209,7 +1223,9 @@ def generate_candidate(
         rate_limit_seconds,
         system=STANDALONE_SYSTEM,
     )
-    standalone_verification = standalone_result.payload
+    standalone_verification = _bind_standalone_contract_version(
+        standalone_result.payload
+    )
     reconstruction_prompt = (
         context
         + "\nQUESTION\n"
