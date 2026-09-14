@@ -558,8 +558,15 @@ def streaming_fixture(tmp_path: Path) -> tuple[Path, Path]:
 
 
 class ScriptedBrokerTransport:
-    def __init__(self, *, verifier_script: Path | None = None) -> None:
-        self.author = FakeProvider("gemini-3.8-flash", FIXTURES / "fake-author.jsonl")
+    def __init__(
+        self,
+        *,
+        author_script: Path | None = None,
+        verifier_script: Path | None = None,
+    ) -> None:
+        self.author = FakeProvider(
+            "gemini-3.8-flash", author_script or FIXTURES / "fake-author.jsonl"
+        )
         self.verifier = FakeProvider(
             "gemini-3.8-flash", verifier_script or FIXTURES / "fake-verifier.jsonl"
         )
@@ -2421,6 +2428,158 @@ def test_streaming_records_invalid_finding_and_advances_to_next_paper(
     assert [row["reason_code"] for row in rejections] == [
         "finding_evidence_span_not_found"
     ]
+
+
+def test_live_stream_records_schema_invalid_reconstruction_and_advances(
+    tmp_path: Path,
+) -> None:
+    access, eligibility = streaming_fixture(tmp_path)
+    ready_path = access / "items" / "item-000001.json"
+    ready = json.loads(ready_path.read_text(encoding="utf-8"))
+    ready["position"] = 2
+    write_json(ready_path, ready)
+    invalid_source = access / "originals" / "invalid-reconstruction.html"
+    invalid_source.write_bytes(
+        Path(ready["source_path"]).read_bytes()
+        + b"\n<!-- distinct invalid reconstruction fixture -->\n"
+    )
+    invalid_extraction = access / "extracted" / "invalid-reconstruction.txt"
+    invalid_extraction.write_bytes(
+        Path(ready["extraction_path"]).read_bytes()
+        + b"\nDistinct invalid reconstruction fixture.\n"
+    )
+    invalid = {
+        **ready,
+        "position": 1,
+        "candidate_key": "test-only:invalid-reconstruction-schema",
+        "title": "Synthetic source with invalid reconstruction numeric metadata",
+        "source_path": str(invalid_source),
+        "source_content_hash": sha256(invalid_source.read_bytes()).hexdigest(),
+        "extraction_path": str(invalid_extraction),
+        "extraction_sha256": sha256(invalid_extraction.read_bytes()).hexdigest(),
+        "final_url": "https://example.invalid/invalid-reconstruction.html",
+    }
+    write_json(access / "items" / "item-000000.json", invalid)
+    manifest_path = access / "run-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["target_total"] = 2
+    manifest["selection"] = [
+        {
+            "position": 1,
+            "candidate_key": invalid["candidate_key"],
+            "subgroup": "test_only",
+            "authors": ["Arctic QA test suite"],
+            "year": 2026,
+        },
+        {
+            "position": 2,
+            "candidate_key": ready["candidate_key"],
+            "subgroup": "test_only",
+            "authors": ["Arctic QA test suite"],
+            "year": 2026,
+        },
+    ]
+    write_json(manifest_path, manifest)
+
+    author_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-author.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    verifier_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-verifier.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    invalid_reconstruction = json.loads(json.dumps(verifier_events[0]))
+    invalid_reconstruction["response"]["numeric"] = {
+        "canonical_value": "",
+        "unit": "",
+    }
+    author_script = tmp_path / "schema-invalid-then-valid-author.jsonl"
+    verifier_script = tmp_path / "schema-invalid-then-valid-verifier.jsonl"
+    author_script.write_text(
+        "\n".join(json.dumps(event) for event in [*author_events[:2], *author_events])
+        + "\n",
+        encoding="utf-8",
+    )
+    verifier_script.write_text(
+        "\n".join(
+            json.dumps(event) for event in [invalid_reconstruction, *verifier_events]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+    transport = ScriptedBrokerTransport(
+        author_script=author_script,
+        verifier_script=verifier_script,
+    )
+    broker = shared_broker(tmp_path, transport)
+    provider = BrokerProvider(
+        broker=broker,
+        phase="live_test",
+        invocation_run_id="schema-invalid-reconstruction-r1",
+    )
+
+    result = run_stream(
+        database,
+        paths.namespace,
+        run_id="schema-invalid-reconstruction-r1",
+        campaign_id="streaming-commission",
+        access_run_dir=access,
+        eligibility_run_dir=eligibility,
+        author=provider,
+        verifier=provider,
+        max_papers=2,
+        **broker_eligibility_inputs(tmp_path),
+    )
+
+    assert result["counts"]["processed"] == 2
+    assert result["counts"]["generation_rejected"] == 1
+    assert result["counts"]["accepted_base_questions"] == 1
+    assert result["paper_results"][0]["reason_codes"] == [
+        "reconstructor_response_invalid"
+    ]
+    assert transport.methods.count("generateContent") == 14
+    status = broker.status()
+    assert status["generation_submissions"] == 14
+    assert Decimal(status["reserved_usd"]) == 0
+    assert Decimal(status["ambiguous_reserved_usd"]) == 0
+    invalid_receipts = [
+        row
+        for row in json.loads((tmp_path / "shared-ledger.json").read_text())[
+            "requests"
+        ].values()
+        if row["paper_id"] == invalid["candidate_key"]
+        and row["stage"] == "blinded_reconstruction"
+    ]
+    assert len(invalid_receipts) == 1
+    assert invalid_receipts[0]["state"] == "completed"
+
+    resumed = run_stream(
+        database,
+        paths.namespace,
+        run_id="schema-invalid-reconstruction-r1",
+        campaign_id="streaming-commission",
+        access_run_dir=access,
+        eligibility_run_dir=eligibility,
+        author=provider,
+        verifier=provider,
+        max_papers=2,
+        **broker_eligibility_inputs(tmp_path),
+    )
+
+    assert resumed["counts"]["processed"] == 2
+    assert resumed["counts"]["generation_rejected"] == 1
+    assert resumed["counts"]["accepted_base_questions"] == 1
+    assert transport.methods.count("generateContent") == 14
+    assert broker.status()["generation_submissions"] == 14
 
 
 @pytest.mark.parametrize(

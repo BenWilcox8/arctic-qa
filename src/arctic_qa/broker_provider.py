@@ -6,7 +6,12 @@ from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any
 
-from .errors import AmbiguousChargeError, BudgetError, ProviderError
+from .errors import (
+    AmbiguousChargeError,
+    BudgetError,
+    ProviderError,
+    ProviderResponseError,
+)
 from .model_broker import AUTHORIZED_CAP_REASON, SharedGeminiBroker, broker_request_key
 from .providers import ProviderResult
 from .util import canonical_json, sha256_bytes
@@ -271,13 +276,15 @@ def _provider_result(receipt: dict[str, Any], model: str) -> ProviderResult:
         raise ProviderError("the completed broker receipt lacks a response")
     candidates = response.get("candidates")
     if not isinstance(candidates, list) or len(candidates) != 1:
-        raise ProviderError("the broker response does not contain one candidate")
+        raise ProviderResponseError(
+            "the broker response does not contain one candidate"
+        )
     candidate = candidates[0]
     if not isinstance(candidate, dict) or candidate.get("finishReason") != "STOP":
-        raise ProviderError("the broker response did not finish normally")
+        raise ProviderResponseError("the broker response did not finish normally")
     parts = (candidate.get("content") or {}).get("parts")
     if not isinstance(parts, list) or not parts:
-        raise ProviderError("the broker response contains no JSON text")
+        raise ProviderResponseError("the broker response contains no JSON text")
     text = "".join(
         part.get("text", "") for part in parts if isinstance(part, dict)
     ).strip()
@@ -286,9 +293,11 @@ def _provider_result(receipt: dict[str, Any], model: str) -> ProviderResult:
     try:
         value = json.loads(text)
     except json.JSONDecodeError as error:
-        raise ProviderError("the broker response contains malformed JSON") from error
+        raise ProviderResponseError(
+            "the broker response contains malformed JSON"
+        ) from error
     if not isinstance(value, dict):
-        raise ProviderError("the broker response JSON is not an object")
+        raise ProviderResponseError("the broker response JSON is not an object")
     usage = receipt.get("usage") or {}
     actual = receipt.get("actual_cost_usd")
     return ProviderResult(

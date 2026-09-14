@@ -18,6 +18,7 @@ from .errors import (
     BudgetError,
     BudgetOverageError,
     ProviderError,
+    ProviderResponseError,
 )
 from .util import canonical_json, redact, stable_id
 
@@ -399,7 +400,7 @@ def call_provider(
             if attempt <= retries:
                 continue
             _settle(db, run_id, total_bound, spent)
-            raise ProviderError(
+            raise ProviderResponseError(
                 "The provider returned invalid structured JSON."
             ) from error
         except Exception as error:
@@ -526,7 +527,12 @@ def _call_externally_metered(
             result = resume(role, system, prompt, parameters, timeout)
         else:
             result = provider.invoke(role, system, prompt, parameters, timeout)
-        _validate_schema(result.payload, response_schema)
+        try:
+            _validate_schema(result.payload, response_schema)
+        except ValueError as error:
+            raise ProviderResponseError(
+                "The provider returned invalid structured JSON."
+            ) from error
     except AmbiguousChargeError as error:
         _update_call_error(
             db, call_id, "ambiguous_charge", error.code, redact(str(error))

@@ -7,7 +7,7 @@ from typing import Any
 
 from .db import Database, now
 from .discovery import manual_record
-from .errors import BudgetError, CandidateRejectedError
+from .errors import BudgetError, CandidateRejectedError, ProviderResponseError
 from .exporting import export_run
 from .extraction import extract_source
 from .generation import generate_candidate
@@ -503,7 +503,7 @@ def run_stream(
                 retries=0,
                 rate_limit_seconds=0,
             )
-        except CandidateRejectedError as error:
+        except (CandidateRejectedError, ProviderResponseError) as error:
             reason_code = error.reason_code
             with db.transaction():
                 db.connection.execute(

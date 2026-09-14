@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .db import Database, now
-from .errors import CandidateRejectedError
+from .errors import CandidateRejectedError, ProviderResponseError
 from .extraction import load_chunks
 from .providers import (
     Provider,
@@ -1153,22 +1153,28 @@ def _call_result(
         **parameters,
         "json_schema": ROLE_SCHEMAS[role],
     }
-    return call_provider(
-        db,
-        provider,
-        run_id=run_id,
-        entity_id=entity_id,
-        role=role,
-        system=SYSTEM,
-        prompt=prompt,
-        prompt_version=PROMPT_VERSION,
-        parameters=parameters,
-        response_schema=ROLE_SCHEMAS[role],
-        reservation=reservation,
-        timeout=timeout,
-        retries=retries,
-        rate_limit_seconds=rate_limit_seconds,
-    )
+    try:
+        return call_provider(
+            db,
+            provider,
+            run_id=run_id,
+            entity_id=entity_id,
+            role=role,
+            system=SYSTEM,
+            prompt=prompt,
+            prompt_version=PROMPT_VERSION,
+            parameters=parameters,
+            response_schema=ROLE_SCHEMAS[role],
+            reservation=reservation,
+            timeout=timeout,
+            retries=retries,
+            rate_limit_seconds=rate_limit_seconds,
+        )
+    except ProviderResponseError as error:
+        raise ProviderResponseError(
+            str(error),
+            reason_code=f"{role}_response_invalid",
+        ) from error
 
 
 def _qa_gate_reasons(

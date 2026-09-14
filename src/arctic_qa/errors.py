@@ -32,6 +32,19 @@ class ProviderError(ArcticQAError):
     code = "PROVIDER_ERROR"
 
 
+class ProviderResponseError(ProviderError):
+    """A settled provider response failed its required output contract."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str = "provider_response_invalid",
+    ) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
 class AmbiguousChargeError(ProviderError):
     code = "AMBIGUOUS_CHARGE"
 
