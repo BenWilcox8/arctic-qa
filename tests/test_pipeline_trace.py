@@ -126,7 +126,13 @@ def fixture_namespace(tmp_path: Path) -> tuple[Path, str, str]:
              status,created_at,updated_at)
             VALUES ('aqa-fixture','campaign-fixture',?,?,'answer_first',?,
                     'machine_accepted_unverified',?,?)""",
-            (source_id, family_id, canonical_json(candidate), now(), now()),
+            (
+                source_id,
+                family_id,
+                canonical_json(candidate),
+                "2026-09-13T00:00:06Z",
+                "2026-09-13T00:00:06Z",
+            ),
         )
         database.connection.execute(
             """INSERT INTO validation_events
@@ -324,6 +330,7 @@ def test_trace_list_filters_and_pages_without_exposing_paths(tmp_path: Path) -> 
         query="Arctic fixture", state="machine_accepted_unverified"
     )
     assert searched["items"][0]["doi"] == "10.1234/fixture"
+    assert searched["items"][0]["state_entered_at_utc"] == ("2026-09-13T00:00:06Z")
     assert store.list_papers(stage="option_verification")["items"] == searched["items"]
     with pytest.raises(ValueError, match="cursor"):
         store.list_papers(cursor="../../private")
@@ -355,7 +362,9 @@ def test_detail_exposes_retained_scientific_records_and_separate_attempts(
     assert "thoughtSignature" not in encoded
 
 
-def test_progress_reason_overlays_list_and_builds_plain_evidence(tmp_path: Path) -> None:
+def test_progress_reason_overlays_list_and_builds_plain_evidence(
+    tmp_path: Path,
+) -> None:
     namespace, _, _ = fixture_namespace(tmp_path)
     progress_path = namespace / "streaming-dataset-r1" / "progress.json"
     progress = json.loads(progress_path.read_text(encoding="utf-8"))
@@ -638,6 +647,7 @@ def test_new_submitted_run_does_not_inherit_historical_acceptance(
     assert current["run_ids"] == ["future-run"]
     assert current["current_stage"] == "finding_answer_extraction"
     assert current["attempt_count"] == 1
+    assert current["state_entered_at_utc"] == "2026-09-13T00:00:10Z"
     assert (
         store.list_papers(run_id="future-run", state="machine_accepted_unverified")[
             "items"

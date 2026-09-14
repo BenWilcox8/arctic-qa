@@ -52,7 +52,9 @@ _ROLE_BY_STAGE = {
 }
 
 
-def _plain_reason(final_reason: str | None, state: str, current_stage: str) -> dict[str, Any] | None:
+def _plain_reason(
+    final_reason: str | None, state: str, current_stage: str
+) -> dict[str, Any] | None:
     if not final_reason:
         return None
     reason = str(final_reason)
@@ -76,7 +78,9 @@ def _plain_reason(final_reason: str | None, state: str, current_stage: str) -> d
             "failed_check": check,
             "reason_code": reason,
         }
-    if reason.startswith(("criterion_evidence_missing:", "criterion_missing_context_absent:")):
+    if reason.startswith(
+        ("criterion_evidence_missing:", "criterion_missing_context_absent:")
+    ):
         return {
             "category": "eligibility_unresolved",
             "summary": f"Eligibility is unresolved because evidence for {plain_check} is missing from the retained context.",
@@ -113,7 +117,8 @@ def _plain_reason(final_reason: str | None, state: str, current_stage: str) -> d
             "reason_code": reason,
         }
     if reason.endswith("_response_invalid") or any(
-        token in reason.casefold() for token in ("malformed", "schema_invalid", "parse_error")
+        token in reason.casefold()
+        for token in ("malformed", "schema_invalid", "parse_error")
     ):
         invalid_stage = {
             "reconstructor": "blinded_reconstruction",
@@ -130,7 +135,9 @@ def _plain_reason(final_reason: str | None, state: str, current_stage: str) -> d
             "failed_check": reason,
             "reason_code": reason,
         }
-    if any(token in reason.casefold() for token in ("distractor", "option_verification")):
+    if any(
+        token in reason.casefold() for token in ("distractor", "option_verification")
+    ):
         return {
             "category": "distractor_rejection",
             "summary": "The paper stayed eligible, but the generated distractor set failed validation.",
@@ -139,7 +146,10 @@ def _plain_reason(final_reason: str | None, state: str, current_stage: str) -> d
             "failed_check": reason,
             "reason_code": reason,
         }
-    if any(token in reason.casefold() for token in ("access", "source_unavailable", "source_missing")):
+    if any(
+        token in reason.casefold()
+        for token in ("access", "source_unavailable", "source_missing")
+    ):
         return {
             "category": "source_or_access_problem",
             "summary": "Processing could not continue because the required source or access evidence was unavailable.",
@@ -170,7 +180,9 @@ def _plain_reason(final_reason: str | None, state: str, current_stage: str) -> d
             "reason_code": reason,
         }
     return {
-        "category": "qa_rejection" if state == "generation_rejected" else "recorded_exit",
+        "category": "qa_rejection"
+        if state == "generation_rejected"
+        else "recorded_exit",
         "summary": f"Processing ended with the retained reason: {plain_check}.",
         "explanation": "The exact reason code is preserved below.",
         "failed_stage": current_stage,
@@ -519,6 +531,17 @@ class PipelineTraceStore:
                     {str(value) for value in (*receipt_ids, *source_ids) if value},
                 ),
             )
+            state_entered_at_utc = self._state_entered_at(
+                state,
+                relevant_candidates,
+                family_receipts,
+                {
+                    str(item.get("request_key"))
+                    for item in family_receipts
+                    if item.get("request_key")
+                },
+                {str(value) for value in (*receipt_ids, *source_ids) if value},
+            )
             title = source.get("title")
             if not title:
                 title = next(
@@ -551,6 +574,7 @@ class PipelineTraceStore:
                 "stages": stages,
                 "attempt_count": len(family_receipts),
                 "latest_at_utc": max(latest_values, default=None),
+                "state_entered_at_utc": state_entered_at_utc,
                 "receipts": family_receipts,
                 "candidate_rows": relevant_candidates,
             }
@@ -561,7 +585,16 @@ class PipelineTraceStore:
                     "run_id": progress.get("run_id"),
                     "invocation_run_id": progress.get("invocation_run_id"),
                 }
-                record.update(self._progress_projection(progress_row))
+                projection = self._progress_projection(progress_row)
+                if projection["state"] != record["state"]:
+                    projection["state_entered_at_utc"] = progress_row.get(
+                        "state_changed_at_utc"
+                    )
+                elif progress_row.get("state_changed_at_utc"):
+                    projection["state_entered_at_utc"] = progress_row[
+                        "state_changed_at_utc"
+                    ]
+                record.update(projection)
             groups[key] = record
         return groups
 
@@ -621,6 +654,17 @@ class PipelineTraceStore:
             "stages": stages,
             "attempt_count": len(receipts),
             "latest_at_utc": max(latest_values, default=None),
+            "state_entered_at_utc": self._state_entered_at(
+                self._paper_state(
+                    candidates,
+                    receipts,
+                    self._eligibility_state(request_keys, candidate_ids),
+                ),
+                candidates,
+                receipts,
+                request_keys,
+                candidate_ids,
+            ),
             "receipts": receipts,
             "candidate_rows": candidates,
         }
@@ -630,7 +674,14 @@ class PipelineTraceStore:
             snapshot.get("run_id"),
             snapshot.get("invocation_run_id"),
         }:
-            projected.update(self._progress_projection(progress))
+            projection = self._progress_projection(progress)
+            if projection["state"] != projected["state"]:
+                projection["state_entered_at_utc"] = progress.get(
+                    "state_changed_at_utc"
+                )
+            elif progress.get("state_changed_at_utc"):
+                projection["state_entered_at_utc"] = progress["state_changed_at_utc"]
+            projected.update(projection)
         return projected
 
     def _receipt_events(self) -> list[dict[str, Any]]:
@@ -941,18 +992,9 @@ class PipelineTraceStore:
     def _eligibility_state(
         self, request_keys: set[str], candidate_ids: set[str]
     ) -> str | None:
-        matching = [
-            job
-            for _, job in self._all_eligibility_jobs()
-            if (
-                job.get("broker_request_key") in request_keys
-                if request_keys
-                else str(job.get("candidate_key")) in candidate_ids
-            )
-        ]
-        if not matching:
+        latest = self._latest_eligibility_job(request_keys, candidate_ids)
+        if latest is None:
             return None
-        latest = max(matching, key=lambda job: str(job.get("completed_at_utc") or ""))
         validation = latest.get("validation") or {}
         decision = validation.get("decision")
         if validation.get("valid") is not True and decision != "excluded":
@@ -964,6 +1006,81 @@ class PipelineTraceStore:
         if decision == "eligible":
             return "eligible"
         return "eligibility_completed"
+
+    def _latest_eligibility_job(
+        self, request_keys: set[str], candidate_ids: set[str]
+    ) -> dict[str, Any] | None:
+        matching = [
+            job
+            for _, job in self._all_eligibility_jobs()
+            if (
+                job.get("broker_request_key") in request_keys
+                if request_keys
+                else str(job.get("candidate_key")) in candidate_ids
+            )
+        ]
+        if not matching:
+            return None
+        return max(matching, key=lambda job: str(job.get("completed_at_utc") or ""))
+
+    def _state_entered_at(
+        self,
+        state: str,
+        candidates: list[dict[str, Any]],
+        receipts: list[dict[str, Any]],
+        request_keys: set[str],
+        candidate_ids: set[str],
+    ) -> str | None:
+        candidate_status = {
+            "machine_accepted_unverified": "machine_accepted_unverified",
+            "incomplete_non_mcq": "incomplete_non_mcq",
+            "generation_rejected": "rejected",
+        }.get(state)
+        if candidate_status:
+            return max(
+                (
+                    str(row.get("updated_at"))
+                    for row in candidates
+                    if row.get("status") == candidate_status and row.get("updated_at")
+                ),
+                default=None,
+            )
+        if state == "in_progress":
+            return max(
+                (
+                    str(row.get("submitted_at_utc"))
+                    for row in receipts
+                    if row.get("state") in {"submitted", "response_received"}
+                    and row.get("submitted_at_utc")
+                ),
+                default=None,
+            )
+        if state == "ambiguous_charge":
+            return max(
+                (
+                    str(row.get("completed_at_utc") or row.get("submitted_at_utc"))
+                    for row in receipts
+                    if row.get("state") == "ambiguous_charge"
+                ),
+                default=None,
+            )
+        if state.startswith("eligibility_") or state == "eligible":
+            job = self._latest_eligibility_job(request_keys, candidate_ids)
+            return (
+                str(job.get("completed_at_utc"))
+                if job and job.get("completed_at_utc")
+                else None
+            )
+        if receipts:
+            latest = max(
+                receipts,
+                key=lambda row: str(
+                    row.get("completed_at_utc") or row.get("submitted_at_utc") or ""
+                ),
+            )
+            value = latest.get("completed_at_utc") or latest.get("submitted_at_utc")
+            return str(value) if value else None
+        return None
 
     def _export_rows(
         self, record: dict[str, Any], source_ids: list[str]
@@ -1046,9 +1163,7 @@ class PipelineTraceStore:
         detail = dict(reason)
         codes = [str(reason["reason_code"])]
         codes.extend(
-            str(row.get("reason_code"))
-            for row in rejections
-            if row.get("reason_code")
+            str(row.get("reason_code")) for row in rejections if row.get("reason_code")
         )
         model_statements: list[dict[str, str]] = []
         evidence: list[dict[str, Any]] = []
@@ -1059,8 +1174,7 @@ class PipelineTraceStore:
             validation = job.get("validation") or {}
             if str(reason.get("category", "")).startswith("eligibility_"):
                 codes.extend(
-                    str(value)
-                    for value in validation.get("overall_reason_codes") or []
+                    str(value) for value in validation.get("overall_reason_codes") or []
                 )
             criteria = (job.get("parsed_response") or {}).get("criteria") or []
             for criterion in criteria:
@@ -1082,7 +1196,9 @@ class PipelineTraceStore:
                 model_statements.append(
                     {"label": "Eligibility model result", "text": statement}
                 )
-                missing = [str(value) for value in criterion.get("missing_context") or []]
+                missing = [
+                    str(value) for value in criterion.get("missing_context") or []
+                ]
                 if missing:
                     model_statements.append(
                         {
@@ -1176,7 +1292,10 @@ class PipelineTraceStore:
                 source_span_id = parsed.get("source_span_id")
                 for finding in findings:
                     answer = finding.get("answer") or {}
-                    if source_span_id and answer.get("source_span_id") != source_span_id:
+                    if (
+                        source_span_id
+                        and answer.get("source_span_id") != source_span_id
+                    ):
                         continue
                     if answer.get("evidence_quote"):
                         evidence.append(
@@ -1332,6 +1451,7 @@ class PipelineTraceStore:
                 "current_stage",
                 "attempt_count",
                 "latest_at_utc",
+                "state_entered_at_utc",
                 "final_reason",
                 "reason",
             )
