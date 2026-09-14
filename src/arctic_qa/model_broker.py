@@ -12,7 +12,12 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from .gemini_eligibility import GeminiTransport, _config, _cost
+from .gemini_eligibility import (
+    GeminiTransport,
+    _config,
+    _cost,
+    model_config_for_stage,
+)
 from .pipeline_trace import record_model_request_trace
 from .util import atomic_json, canonical_json, sha256_bytes, sha256_file
 
@@ -22,6 +27,7 @@ STAGES = {
     "finding_answer_extraction",
     "question_generation",
     "blinded_reconstruction",
+    "answer_agreement",
     "answer_verification",
     "distractor_generation",
     "option_verification",
@@ -49,6 +55,12 @@ CONFIG_TRANSITION_V2_FIELDS = CONFIG_TRANSITION_V1_FIELDS | {
     "to_policy_sha256",
     "changed_policy_fields",
     "maximum_authorized_cumulative_tranche_usd",
+}
+CONFIG_TRANSITION_V3_FIELDS = CONFIG_TRANSITION_V1_FIELDS | {
+    "from_config_transition_sha256",
+    "from_policy_file",
+    "from_policy_sha256",
+    "to_policy_sha256",
 }
 UNBOUNDED_COUNT_CHANGE = {
     "live_test_maximum_papers": {"from": 41, "to": None},
@@ -437,6 +449,14 @@ def _validate_payload(payload: dict[str, Any], config: dict[str, Any]) -> None:
         raise ValueError("the broker output-token limit is invalid")
     if output > int(config["maximum_output_tokens"]):
         raise ValueError("the broker output-token limit exceeds the price config")
+    mime_type = generation.get("responseMimeType")
+    if mime_type not in {"application/json", "text/x.enum"}:
+        raise ValueError("the broker response MIME type is unsupported")
+    thinking = generation.get("thinkingConfig")
+    if "thinking_budget" in config and thinking != {
+        "thinkingBudget": config["thinking_budget"]
+    }:
+        raise ValueError("the broker thinking control changed")
     for instruction in (payload.get("systemInstruction"), *payload.get("contents", [])):
         if not isinstance(instruction, dict):
             raise ValueError("the broker request content is invalid")
@@ -508,6 +528,10 @@ class SharedGeminiBroker:
         self._status_observer: Callable[[Path], None] | None = None
         self._stream_input_binding: dict[str, Any] | None = None
         self._initialize()
+
+    def config_for_stage(self, stage: str) -> dict[str, Any]:
+        """Return the registered model and price values for one stage."""
+        return model_config_for_stage(self.config, stage)
 
     @property
     def _lock_file(self) -> Path:
@@ -602,13 +626,18 @@ class SharedGeminiBroker:
             return CONFIG_TRANSITION_V1_FIELDS
         if authorization.get("schema") == "shared-paid-call-config-transition-v2":
             return CONFIG_TRANSITION_V2_FIELDS
+        if authorization.get("schema") == "shared-paid-call-config-transition-v3":
+            return CONFIG_TRANSITION_V3_FIELDS
         return set()
 
     @staticmethod
     def _transition_policy_hashes(
         authorization: dict[str, Any], identity: dict[str, Any]
     ) -> tuple[str, str]:
-        if authorization.get("schema") == "shared-paid-call-config-transition-v2":
+        if authorization.get("schema") in {
+            "shared-paid-call-config-transition-v2",
+            "shared-paid-call-config-transition-v3",
+        }:
             return (
                 str(authorization.get("from_policy_sha256") or ""),
                 str(authorization.get("to_policy_sha256") or ""),
@@ -744,6 +773,27 @@ class SharedGeminiBroker:
         if authorization["schema"] == "shared-paid-call-config-transition-v1":
             if from_pair != initial_pair:
                 raise ValueError("the configuration transition identity changed")
+        elif authorization["schema"] == "shared-paid-call-config-transition-v3":
+            source_policy = Path(authorization["from_policy_file"]).resolve()
+            predecessor = authorization["from_config_transition_sha256"]
+            if (
+                from_pair[0] == to_pair[0]
+                or from_pair[1] != to_pair[1]
+                or not source_policy.is_file()
+                or sha256_file(source_policy) != from_pair[1]
+                or _read(source_policy) != _read(self.policy_file)
+                or not isinstance(predecessor, str)
+            ):
+                raise ValueError("the price configuration transition identity changed")
+            matching_predecessors = []
+            for path in self.receipts_dir.glob("config-transition-*.json"):
+                if sha256_file(path) != predecessor:
+                    continue
+                event = self._read_transition_event(path)
+                if self._transition_pairs(event["authorization"], identity)[1] == from_pair:
+                    matching_predecessors.append(path)
+            if len(matching_predecessors) != 1:
+                raise ValueError("the price configuration predecessor changed")
         else:
             changed_policy_fields = authorization["changed_policy_fields"]
             ceiling_extension = self._is_ceiling_extension(authorization)
@@ -846,13 +896,60 @@ class SharedGeminiBroker:
                         raise ValueError("the policy transition predecessor changed")
         if authorization["expected_ledger_sha256"] != sha256_file(self.ledger_file):
             raise ValueError("the configuration transition ledger hash changed")
-        if (
-            ledger["halted"]
-            or ledger["inflight"] != 0
-            or _money(ledger["reserved_usd"], "reserved") != 0
-            or _money(ledger["ambiguous_reserved_usd"], "ambiguous") != 0
-        ):
+        if ledger["halted"] or ledger["inflight"] != 0:
             raise ValueError("a configuration transition requires a settled ledger")
+        reserved = _money(ledger["reserved_usd"], "reserved")
+        ambiguous = _money(ledger["ambiguous_reserved_usd"], "ambiguous")
+        if reserved != 0 or ambiguous != 0:
+            try:
+                liabilities = self.validate_no_replay_liabilities(
+                    ledger=ledger, receipts_dir=self.receipts_dir
+                )
+                reserved_expected = sum(
+                    (
+                        _money(
+                            request.get("reserved_usd"),
+                            "retained reservation",
+                            positive=True,
+                        )
+                        for request in ledger["requests"].values()
+                        if request.get("state") == "orphaned_no_replay"
+                    ),
+                    Decimal("0"),
+                )
+                ambiguous_expected = sum(
+                    (
+                        _money(
+                            request.get("reserved_usd"),
+                            "ambiguous reservation",
+                            positive=True,
+                        )
+                        for request in ledger["requests"].values()
+                        if request.get("state") == "ambiguous_charge"
+                    ),
+                    Decimal("0"),
+                )
+                uncovered = [
+                    key
+                    for key, request in ledger["requests"].items()
+                    if request.get("state")
+                    in {"orphaned_no_replay", "ambiguous_charge"}
+                    and key not in liabilities
+                ]
+            except (AttributeError, KeyError, TypeError, ValueError) as error:
+                raise ValueError(
+                    "a configuration transition requires a settled ledger or "
+                    "validated no-replay holds"
+                ) from error
+            if (
+                reserved != reserved_expected
+                or ambiguous != ambiguous_expected
+                or uncovered
+            ):
+                raise ValueError(
+                    "a configuration transition requires a settled ledger or "
+                    "validated no-replay holds"
+                )
         if authorization["expected_identity_sha256"] != sha256_file(
             self._identity_file
         ):
@@ -1646,8 +1743,19 @@ class SharedGeminiBroker:
         usage = _normalized_usage({"usageMetadata": event.get("normalized_usage")})
         if usage != event["normalized_usage"] or usage["thoughtsTokenCount"] != 0:
             raise ValueError("a usage reconciliation event changed")
+        matching_receipts = [
+            candidate
+            for candidate in self.receipts_dir.glob(f"{request_key}*.json")
+            if sha256_file(candidate) == event["ambiguous_receipt_sha256"]
+        ]
+        if len(matching_receipts) != 1:
+            raise ValueError("the usage reconciliation request model is unavailable")
+        request_record = _read(matching_receipts[0])
+        request_config = self.config_for_stage(str(request_record.get("stage") or ""))
+        if request_record.get("model") != request_config["model"]:
+            raise ValueError("the usage reconciliation request model changed")
         actual = _cost(
-            self.config,
+            request_config,
             usage["promptTokenCount"],
             usage["candidatesTokenCount"] + usage["thoughtsTokenCount"],
         )
@@ -2757,8 +2865,11 @@ class SharedGeminiBroker:
                         "the saved usage does not omit only the thought-token value"
                     )
                 usage = _normalized_usage(received["response"])
+                request_config = self.config_for_stage(request["stage"])
+                if request.get("model") != request_config["model"]:
+                    raise ValueError("the reconciled request model changed")
                 actual = _cost(
-                    self.config,
+                    request_config,
                     usage["promptTokenCount"],
                     usage["candidatesTokenCount"] + usage["thoughtsTokenCount"],
                 )
@@ -3715,7 +3826,10 @@ class SharedGeminiBroker:
                     "totalTokenCount",
                 )
             ]
-            actual = _cost(self.config, values[0], values[1] + values[2])
+            request_config = self.config_for_stage(str(submitted.get("stage") or ""))
+            if submitted.get("model") != request_config["model"]:
+                raise ValueError("the submitted request model changed")
+            actual = _cost(request_config, values[0], values[1] + values[2])
             if actual > _money(submitted["reserved_usd"], "reservation", positive=True):
                 raise ValueError("provider usage exceeds the reservation")
         except Exception as error:
@@ -3834,9 +3948,10 @@ class SharedGeminiBroker:
             raise ValueError("the paid request identity is incomplete")
         if not re.fullmatch(r"[a-f0-9]{64}", request_key):
             raise ValueError("the paid request key must be a lowercase SHA-256 value")
-        _validate_payload(payload, self.config)
+        request_config = self.config_for_stage(stage)
+        _validate_payload(payload, request_config)
         expected_key = broker_request_key(
-            model=self.config["model"],
+            model=request_config["model"],
             run_id=run_id,
             phase=phase,
             stage=stage,
@@ -3856,7 +3971,7 @@ class SharedGeminiBroker:
             "paper_id": paper_id,
             "family_id": family_id,
             "source_version_id": source_version_id,
-            "model": self.config["model"],
+            "model": request_config["model"],
             "gate_sha256": sha256_file(self.execution_gate_file),
             "price_config_sha256": self.active_price_config_sha256,
             "policy_sha256": sha256_file(self.policy_file),
@@ -3886,11 +4001,11 @@ class SharedGeminiBroker:
                 self._count_event(request_key, base)
                 try:
                     counted = client.post(
-                        self.config["model"],
+                        request_config["model"],
                         "countTokens",
                         {
                             "generateContentRequest": {
-                                "model": f"models/{self.config['model']}",
+                                "model": f"models/{request_config['model']}",
                                 **payload,
                             }
                         },
@@ -3927,7 +4042,7 @@ class SharedGeminiBroker:
                 if resumed
                 else request_key
             )
-            if exact_input > int(self.config["maximum_input_tokens"]):
+            if exact_input > int(request_config["maximum_input_tokens"]):
                 receipt = {
                     **base,
                     "state": "too_large_not_ready",
@@ -3948,7 +4063,7 @@ class SharedGeminiBroker:
                 self._halt("counted request exceeds the model input limit")
                 return receipt
             output_limit = int(payload["generationConfig"]["maxOutputTokens"])
-            reserved = _cost(self.config, exact_input, output_limit)
+            reserved = _cost(request_config, exact_input, output_limit)
             try:
                 self._reserve(
                     request_key=request_key,
@@ -4000,7 +4115,9 @@ class SharedGeminiBroker:
                 # observability failure cannot strand a paid reservation.
                 pass
             try:
-                response = client.post(self.config["model"], "generateContent", payload)
+                response = client.post(
+                    request_config["model"], "generateContent", payload
+                )
             except urllib.error.HTTPError as error:
                 receipt = {
                     **submitted,

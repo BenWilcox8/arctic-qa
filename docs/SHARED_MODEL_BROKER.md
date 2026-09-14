@@ -70,7 +70,14 @@ It must contain these fields:
 
 The broker validates the ledger and all prior receipts before it applies the transition.
 
-The ledger must have no halt, inflight request, reservation, or ambiguous charge when the broker first applies the transition.
+The ledger must have no halt or inflight request when the broker first applies the transition.
+Each remaining reservation must have validated no-replay recovery evidence.
+The transition keeps the full held amount in all budget totals.
+An uncovered reservation or ambiguous charge stops the transition.
+
+Use schema `shared-paid-call-config-transition-v3` after an earlier policy transition.
+Version 3 binds the active predecessor event and keeps the active policy unchanged.
+It changes only the registered price and model configuration.
 
 It also validates the private gate and the exact independent review record.
 
@@ -224,9 +231,15 @@ Use a stable source-version ID from the versioned full-text artifact.
 
 Do not derive this ID from a run name or a display title.
 
-The broker permits only text inputs and structured JSON output.
+The broker permits only text inputs and constrained structured output.
+Most stages use JSON objects.
+The answer-agreement fallback uses the `yes` or `no` enum.
 
-The approved Gemini configuration requires low thinking.
+The base Gemini model uses low thinking.
+The `gemini-2.5-flash-lite` answer judge uses a thinking budget of zero.
+
+The broker selects the registered model and price by stage.
+The answer-agreement stage keeps the same request identity, receipt, resume, and budget controls.
 
 The broker does not increase the fixed output cap to make room for thinking.
 

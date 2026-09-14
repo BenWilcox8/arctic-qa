@@ -10,20 +10,30 @@ The root operator must coordinate the shared ledger before the first submission.
 
 ## Price and model evidence
 
-The configured model is `gemini-3.8-flash`.
+Most requests use `gemini-3.8-flash`.
 Google lists Batch API support on the [model page](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash).
 Google lists the Batch API request format on the [Batch API page](https://ai.google.dev/gemini-api/docs/batch-api).
+
+Only a deterministic answer mismatch prepares an answer-judge request.
+That request uses `gemini-2.5-flash-lite`.
+Google lists its limits and Batch API support on the [Flash-Lite model page](https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-lite).
 
 The [official pricing page](https://ai.google.dev/gemini-api/docs/pricing) gives these rates through December 31, 2026:
 
 - Input tokens cost USD 0.375 per million tokens.
 - Output and thinking tokens cost USD 1.875 per million tokens.
 
-The [thinking documentation](https://ai.google.dev/gemini-api/docs/thinking) states that thinking tokens are billed as output tokens and count toward `max_output_tokens`.
+Flash-Lite judge requests use these batch rates:
+
+- Input tokens cost USD 0.05 per million tokens.
+- Output tokens cost USD 0.20 per million tokens.
+
+The [thinking documentation](https://ai.google.dev/gemini-api/docs/generate-content/thinking) states that Gemini 2.5 Flash-Lite supports a zero thinking budget.
 
 The module accepts no tools, caching, media output, or ancillary service charge.
 It does not assume that ancillary charges use the batch discount.
-It rejects a model other than the configured model.
+Each round contains requests for one registered model.
+The round manifest records that model and its exact batch price.
 
 ## Durable files
 

@@ -59,6 +59,36 @@ class MalformedTransport(Transport):
         return response
 
 
+class JudgeTransport(Transport):
+    def __init__(self) -> None:
+        super().__init__()
+        self.models: list[str] = []
+        self.bodies: list[dict] = []
+
+    def post(self, model: str, method: str, body: dict) -> dict:
+        self.methods.append(method)
+        self.models.append(model)
+        self.bodies.append(body)
+        if method == "countTokens":
+            return {"totalTokens": 100}
+        return {
+            "responseId": "judge-response-1",
+            "modelVersion": "gemini-2.5-flash-lite",
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "content": {"parts": [{"text": "yes"}]},
+                }
+            ],
+            "usageMetadata": {
+                "promptTokenCount": 100,
+                "candidatesTokenCount": 1,
+                "thoughtsTokenCount": 0,
+                "totalTokenCount": 101,
+            },
+        }
+
+
 def broker_fixture(
     tmp_path: Path, transport: Transport, *, phase: str = "live_test"
 ) -> SharedGeminiBroker:
@@ -141,6 +171,50 @@ def test_broker_provider_binds_role_and_reuses_completed_receipt(
     status = broker.status()
     assert status["generation_submissions"] == 1
     assert status["stages"]["question_generation"]["submissions"] == 1
+
+
+def test_answer_judge_uses_flash_lite_and_reuses_immutable_receipt(
+    tmp_path: Path,
+) -> None:
+    transport = JudgeTransport()
+    broker = broker_fixture(tmp_path, transport)
+    provider = BrokerProvider(
+        broker=broker,
+        phase="live_test",
+        invocation_run_id="judge-live-r1",
+    ).bind(
+        paper_id="paper-1",
+        family_id="family-1",
+        source_version_id=SOURCE_VERSION,
+    )
+    schema = {"type": "string", "enum": ["yes", "no"]}
+    parameters = {
+        "temperature": 0,
+        "max_tokens": 4,
+        "response_mime_type": "text/x.enum",
+        "json_schema": schema,
+    }
+
+    first = provider.invoke("answer_judge", "System", "DATA\n{}", parameters, 30)
+    second = provider.invoke("answer_judge", "System", "DATA\n{}", parameters, 30)
+    reference = provider.receipt_reference(
+        "answer_judge", "System", "DATA\n{}", parameters
+    )
+
+    assert first.payload == "yes"
+    assert second == first
+    assert transport.methods == ["countTokens", "generateContent"]
+    assert transport.models == ["gemini-2.5-flash-lite"] * 2
+    generation = transport.bodies[1]["generationConfig"]
+    assert generation["responseMimeType"] == "text/x.enum"
+    assert generation["responseJsonSchema"] == schema
+    assert generation["maxOutputTokens"] == 4
+    assert generation["thinkingConfig"] == {"thinkingBudget": 0}
+    receipt = json.loads(Path(reference["receipt_file"]).read_text(encoding="utf-8"))
+    assert receipt["model"] == "gemini-2.5-flash-lite"
+    assert receipt["stage"] == "answer_agreement"
+    assert receipt["actual_cost_usd"] == "0.000011"
+    assert broker.status()["stages"]["answer_agreement"]["submissions"] == 1
 
 
 def test_new_away_invocation_does_not_reuse_same_campaign_call_journal(

@@ -41,8 +41,12 @@ A context change creates a different generated item and invalidates old option b
 ## Scope roles
 
 Generation roles use `scope-role-semantics-v2`.
-New candidates use generation prompt `arctic-qa-generation-v18`.
-They use scope contract `selected-evidence-literal-scope-v4` and candidate schema `2.3.0`.
+New candidates use generation prompt `arctic-qa-generation-v19`.
+They use scope contract `selected-evidence-literal-scope-v4` and candidate schema `2.4.0`.
+Schema 2.4 records the answer-agreement method and confidence category.
+Deterministic agreement is authoritative and does not call a model.
+Only a deterministic mismatch can use the Gemini answer judge.
+An accepted judge result has the `lower_confidence_llm_equivalent` category.
 Direct scalar values use `direct-source-value-v1` in candidate provenance.
 This contract binds the immutable numeric rule to the answer-verifier request.
 The validator keeps explicit readers for candidate schemas `2.0.0` and `2.1.0`.

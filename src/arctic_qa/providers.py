@@ -25,7 +25,7 @@ from .util import canonical_json, redact, stable_id
 
 @dataclass(frozen=True)
 class ProviderResult:
-    payload: dict[str, Any]
+    payload: Any
     returned_model: str
     request_id: str | None
     input_tokens: int | None
@@ -284,8 +284,9 @@ def call_provider(
     retries: int,
     rate_limit_seconds: float,
 ) -> ProviderResult:
+    requested_model = provider_model(provider, role)
     prompt_hash = provider_prompt_hash(
-        provider, system, prompt, prompt_version, parameters
+        provider, system, prompt, prompt_version, parameters, role=role
     )
     completed = db.one(
         """SELECT * FROM calls WHERE run_id=? AND entity_id=? AND role=? AND prompt_hash=? AND status='completed'
@@ -351,7 +352,7 @@ def call_provider(
                     entity_id,
                     role,
                     provider.name,
-                    provider.model,
+                    requested_model,
                     prompt_version,
                     prompt_hash,
                     canonical_json(parameters),
@@ -456,6 +457,8 @@ def provider_prompt_hash(
     prompt: str,
     prompt_version: str,
     parameters: dict[str, Any],
+    *,
+    role: str | None = None,
 ) -> str:
     identity = getattr(provider, "request_identity", None)
     return stable_id(
@@ -464,10 +467,18 @@ def provider_prompt_hash(
         prompt,
         prompt_version,
         provider.name,
-        provider.model,
+        provider_model(provider, role),
         identity() if callable(identity) else None,
         parameters,
     )
+
+
+def provider_model(provider: Provider, role: str | None = None) -> str:
+    """Return a role-specific requested model when the provider registers one."""
+    selector = getattr(provider, "model_for_role", None)
+    if role is not None and callable(selector):
+        return str(selector(role))
+    return str(provider.model)
 
 
 def _call_externally_metered(
@@ -510,7 +521,7 @@ def _call_externally_metered(
                     entity_id,
                     role,
                     provider.name,
-                    provider.model,
+                    provider_model(provider, role),
                     prompt_version,
                     prompt_hash,
                     canonical_json(parameters),

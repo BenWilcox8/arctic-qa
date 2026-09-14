@@ -14,10 +14,14 @@ from .providers import (
     ProviderResult,
     call_provider,
     ensure_budget,
+    provider_model,
     provider_prompt_hash,
 )
 from .util import canonical_json, normalize_text, sha256_bytes, stable_id
 from .validation import (
+    ANSWER_AGREEMENT_CONTRACT_VERSION,
+    ANSWER_AGREEMENT_PROMPT_VERSION,
+    ANSWER_AGREEMENT_SYSTEM,
     DIRECT_SOURCE_VALUE_CONTRACT_VERSION,
     GENERATION_PROMPT_VERSION,
     NUMERIC_RULE_CONTRACT_VERSION,
@@ -27,14 +31,14 @@ from .validation import (
     numeric_rule_is_source_bound,
     question_answer_leaks_answer,
     question_context_verification_reason,
-    required_question_phrases_contain_answer,
     reconstruction_matches,
+    required_question_phrases_contain_answer,
     scope_is_evidence_bound,
 )
 
 
 PROMPT_VERSION = GENERATION_PROMPT_VERSION
-CANDIDATE_SCHEMA_VERSION = "2.3.0"
+CANDIDATE_SCHEMA_VERSION = "2.4.0"
 FINDING_POLICY_VERSION = "one-finding-per-paper-full-context-v6"
 SCOPE_ROLE_FINDING_POLICY_VERSION = "one-finding-per-paper-full-context-v7"
 GENERATION_ATTEMPT_CONTRACT_VERSION = "bounded-paper-progression-v2"
@@ -430,6 +434,7 @@ DISTRACTOR_SCHEMA = {
 }
 SPAN_DISTRACTOR_SCHEMA = _source_span_selected_schema(DISTRACTOR_SCHEMA)
 ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
+    "answer_judge": {"type": "string", "enum": ["yes", "no"]},
     "extractor": {
         "type": "object",
         "required": ["answer"],
@@ -1209,6 +1214,104 @@ def generate_candidate(
         context_spans,
         reason_code="answer_verifier_evidence_span_not_found",
     )
+    deterministic_match = reconstruction_matches(answer, reconstruction)
+    answer_agreement: dict[str, Any] = {
+        "contract_version": ANSWER_AGREEMENT_CONTRACT_VERSION,
+        "method": "deterministic",
+        "confidence_category": "authoritative_deterministic",
+        "deterministic_match": deterministic_match,
+        "agreement": True,
+        "judge": None,
+    }
+    agreement_call: dict[str, Any] | None = None
+    if not deterministic_match:
+        agreement_input = {
+            "question": str(question),
+            **(
+                {"additional_context": question_context}
+                if question_context
+                else {}
+            ),
+            "proposed_answer": str(answer.get("text", "")),
+            "reconstructed_answer": str(reconstruction.get("answer", "")),
+        }
+        agreement_prompt = "DATA\n" + canonical_json(agreement_input)
+        agreement_parameters = {
+            "temperature": 0,
+            "max_tokens": 4,
+            "response_mime_type": "text/x.enum",
+        }
+        agreement_result = _call_result(
+            db,
+            verifier,
+            run_id,
+            entity_id,
+            "answer_judge",
+            agreement_prompt,
+            agreement_parameters,
+            reservation,
+            timeout,
+            retries,
+            rate_limit_seconds,
+            system=ANSWER_AGREEMENT_SYSTEM,
+            prompt_version=ANSWER_AGREEMENT_PROMPT_VERSION,
+        )
+        verdict = agreement_result.payload
+        answer_agreement = {
+            "contract_version": ANSWER_AGREEMENT_CONTRACT_VERSION,
+            "method": "llm_judge",
+            "confidence_category": (
+                "lower_confidence_llm_equivalent"
+                if verdict == "yes"
+                else "disagreement"
+            ),
+            "deterministic_match": False,
+            "agreement": verdict == "yes",
+            "judge": {
+                "prompt_version": ANSWER_AGREEMENT_PROMPT_VERSION,
+                "system_prompt": ANSWER_AGREEMENT_SYSTEM,
+                "input": agreement_input,
+                "verdict": verdict,
+                "provider": verifier.name,
+                "requested_model": provider_model(verifier, "answer_judge"),
+                "returned_model": agreement_result.returned_model,
+                "request_id": agreement_result.request_id,
+                "prompt_hash": provider_prompt_hash(
+                    verifier,
+                    ANSWER_AGREEMENT_SYSTEM,
+                    agreement_prompt,
+                    ANSWER_AGREEMENT_PROMPT_VERSION,
+                    {
+                        **agreement_parameters,
+                        "json_schema": ROLE_SCHEMAS["answer_judge"],
+                    },
+                    role="answer_judge",
+                ),
+                "receipt": _call_receipt_reference(
+                    db,
+                    verifier,
+                    run_id=run_id,
+                    entity_id=entity_id,
+                    role="answer_judge",
+                    system=ANSWER_AGREEMENT_SYSTEM,
+                    prompt=agreement_prompt,
+                    prompt_version=ANSWER_AGREEMENT_PROMPT_VERSION,
+                    parameters={
+                        **agreement_parameters,
+                        "json_schema": ROLE_SCHEMAS["answer_judge"],
+                    },
+                ),
+            },
+        }
+        agreement_call = _call_provenance(
+            verifier,
+            agreement_result,
+            "answer_judge",
+            agreement_prompt,
+            agreement_parameters,
+            system=ANSWER_AGREEMENT_SYSTEM,
+            prompt_version=ANSWER_AGREEMENT_PROMPT_VERSION,
+        )
     verification_calls = {
         "reconstructor": _call_provenance(
             verifier,
@@ -1225,6 +1328,8 @@ def generate_candidate(
             parameters,
         ),
     }
+    if agreement_call is not None:
+        verification_calls["answer_judge"] = agreement_call
     direct_value_provenance = {
         "direct_value_contract_version": DIRECT_SOURCE_VALUE_CONTRACT_VERSION,
         "direct_value_request_id": answer_verification_result.request_id,
@@ -1235,6 +1340,7 @@ def generate_candidate(
             "answer": answer,
             "reconstruction": reconstruction,
             "answer_verification": answer_verification,
+            "answer_agreement": answer_agreement,
         },
         {chunk["chunk_id"]: chunk},
     )
@@ -1246,6 +1352,7 @@ def generate_candidate(
         answer_verification,
         question_context,
         direct_value_provenance,
+        answer_agreement=answer_agreement,
     )
     if finding_quality_reason and finding_quality_reason not in qa_gate_reasons:
         qa_gate_reasons.insert(0, finding_quality_reason)
@@ -1319,6 +1426,7 @@ def generate_candidate(
         "arm_answer_proposal": arm_answer_proposal,
         "reconstruction": reconstruction,
         "answer_verification": answer_verification,
+        "answer_agreement": answer_agreement,
         "decision_evidence": decision_evidence,
         "qa_gate_reasons": qa_gate_reasons,
         "distractors": distractors,
@@ -1329,6 +1437,9 @@ def generate_candidate(
             "generation_arm": arm,
             "generation_attempt_contract_version": (
                 GENERATION_ATTEMPT_CONTRACT_VERSION
+            ),
+            "answer_agreement_contract_version": (
+                ANSWER_AGREEMENT_CONTRACT_VERSION
             ),
             "question_verification_contract_version": (
                 QUESTION_VERIFICATION_CONTRACT_VERSION
@@ -1570,6 +1681,7 @@ def resume_candidate_distractors(
         base["answer_verification"],
         base.get("question_context", ""),
         base.get("provenance"),
+        answer_agreement=base["answer_agreement"],
     )
     if qa_reasons:
         raise ValueError("the targeted candidate no longer passes its QA gate")
@@ -1673,22 +1785,62 @@ def _call_provenance(
     role: str,
     prompt: str,
     parameters: dict[str, Any],
+    *,
+    system: str = SYSTEM,
+    prompt_version: str = PROMPT_VERSION,
 ) -> dict[str, Any]:
     return {
         "role": role,
         "provider": provider.name,
-        "requested_model": provider.model,
+        "requested_model": provider_model(provider, role),
         "returned_model": result.returned_model,
         "request_id": result.request_id,
-        "prompt_version": PROMPT_VERSION,
+        "prompt_version": prompt_version,
         "prompt_hash": provider_prompt_hash(
             provider,
-            SYSTEM,
+            system,
             prompt,
-            PROMPT_VERSION,
+            prompt_version,
             {**parameters, "json_schema": ROLE_SCHEMAS[role]},
+            role=role,
         ),
     }
+
+
+def _call_receipt_reference(
+    db: Database,
+    provider: Provider,
+    *,
+    run_id: str,
+    entity_id: str,
+    role: str,
+    system: str,
+    prompt: str,
+    prompt_version: str,
+    parameters: dict[str, Any],
+) -> dict[str, Any]:
+    prompt_hash = provider_prompt_hash(
+        provider,
+        system,
+        prompt,
+        prompt_version,
+        parameters,
+        role=role,
+    )
+    call = db.one(
+        """SELECT call_id FROM calls
+        WHERE run_id=? AND entity_id=? AND role=? AND prompt_hash=?
+          AND status='completed'
+        ORDER BY attempt DESC LIMIT 1""",
+        (run_id, entity_id, role, prompt_hash),
+    )
+    if not call:
+        raise ValueError("the answer agreement call receipt is absent")
+    reference: dict[str, Any] = {"call_id": call["call_id"]}
+    external = getattr(provider, "receipt_reference", None)
+    if callable(external):
+        reference["broker"] = external(role, system, prompt, parameters)
+    return reference
 
 
 def apply_one_correction(
@@ -1794,6 +1946,9 @@ def _call_result(
     timeout: float,
     retries: int,
     rate_limit_seconds: float,
+    *,
+    system: str = SYSTEM,
+    prompt_version: str = PROMPT_VERSION,
 ) -> ProviderResult:
     parameters = {
         **parameters,
@@ -1806,9 +1961,9 @@ def _call_result(
             run_id=run_id,
             entity_id=entity_id,
             role=role,
-            system=SYSTEM,
+            system=system,
             prompt=prompt,
-            prompt_version=PROMPT_VERSION,
+            prompt_version=prompt_version,
             parameters=parameters,
             response_schema=ROLE_SCHEMAS[role],
             reservation=reservation,
@@ -1831,6 +1986,8 @@ def _qa_gate_reasons(
     verification: dict[str, Any],
     question_context: str = "",
     provenance: dict[str, Any] | None = None,
+    *,
+    answer_agreement: dict[str, Any] | None = None,
 ) -> list[str]:
     reasons: list[str] = []
     if not _record_resolves(answer, chunk):
@@ -1841,8 +1998,27 @@ def _qa_gate_reasons(
         reasons.append("answer_verifier_evidence_not_located")
     if reconstruction.get("ambiguity_label") != "one_answer":
         reasons.append("answer_ambiguous")
-    if not reconstruction_matches(answer, reconstruction):
+    deterministic_match = reconstruction_matches(answer, reconstruction)
+    if deterministic_match:
+        if answer_agreement is not None and answer_agreement != {
+            "contract_version": ANSWER_AGREEMENT_CONTRACT_VERSION,
+            "method": "deterministic",
+            "confidence_category": "authoritative_deterministic",
+            "deterministic_match": True,
+            "agreement": True,
+            "judge": None,
+        }:
+            reasons.append("answer_agreement_unresolved")
+    elif answer_agreement is None:
         reasons.append("reconstruction_disagreement")
+    elif answer_agreement.get("method") != "llm_judge" or not isinstance(
+        answer_agreement.get("judge"), dict
+    ):
+        reasons.append("answer_agreement_unresolved")
+    elif answer_agreement["judge"].get("verdict") == "no":
+        reasons.append("reconstruction_disagreement")
+    elif answer_agreement["judge"].get("verdict") != "yes":
+        reasons.append("answer_agreement_unresolved")
     if answer.get("numeric_rule") and not numeric_rule_is_source_bound(
         answer, provenance
     ):

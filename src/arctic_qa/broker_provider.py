@@ -14,7 +14,8 @@ from .errors import (
 )
 from .model_broker import AUTHORIZED_CAP_REASON, SharedGeminiBroker, broker_request_key
 from .providers import ProviderResult
-from .util import canonical_json, sha256_bytes
+from .gemini_eligibility import model_config_for_stage
+from .util import canonical_json, sha256_bytes, sha256_file
 
 
 ROLE_STAGES = {
@@ -23,6 +24,7 @@ ROLE_STAGES = {
     "question_writer": "question_generation",
     "direct_joint": "question_generation",
     "reconstructor": "blinded_reconstruction",
+    "answer_judge": "answer_agreement",
     "answer_verifier": "answer_verification",
     "distractor_writer": "distractor_generation",
     "option_verifier": "option_verification",
@@ -47,6 +49,12 @@ class BrokerProvider:
     @property
     def model(self) -> str:
         return str(self.broker.config["model"])
+
+    def model_for_role(self, role: str) -> str:
+        stage = ROLE_STAGES.get(role)
+        if stage is None:
+            return self.model
+        return str(model_config_for_stage(self.broker.config, stage)["model"])
 
     def bind(
         self, *, paper_id: str, family_id: str, source_version_id: str
@@ -98,9 +106,11 @@ class BrokerProvider:
             raise ValueError(
                 f"the generation role has no broker stage: {role}"
             ) from error
-        payload = _request_payload(system, prompt, parameters, self.broker.config)
+        request_config = model_config_for_stage(self.broker.config, stage)
+        payload = _request_payload(system, prompt, parameters, request_config)
+        model = str(request_config["model"])
         request_key = broker_request_key(
-            model=self.model,
+            model=model,
             run_id=self.invocation_run_id,
             phase=self.phase,
             stage=stage,
@@ -132,7 +142,7 @@ class BrokerProvider:
             request_key=request_key,
             payload=payload,
         )
-        return _provider_result(receipt, self.model)
+        return _provider_result(receipt, model, allow_enum=role == "answer_judge")
 
     def read_receipt(
         self,
@@ -163,9 +173,13 @@ class BrokerProvider:
             paper_id=self.paper_id,
             family_id=self.family_id,
             source_version_id=self.source_version_id,
-            model=self.model,
+            model=self.model_for_role(role),
         )
-        return receipt, _provider_result(receipt, self.model)
+        return receipt, _provider_result(
+            receipt,
+            self.model_for_role(role),
+            allow_enum=role == "answer_judge",
+        )
 
     def resume_reconciled(
         self,
@@ -190,9 +204,10 @@ class BrokerProvider:
             raise ValueError(
                 f"the generation role has no broker stage: {role}"
             ) from error
-        payload = _request_payload(system, prompt, parameters, self.broker.config)
+        request_config = model_config_for_stage(self.broker.config, stage)
+        payload = _request_payload(system, prompt, parameters, request_config)
         request_key = broker_request_key(
-            model=self.model,
+            model=str(request_config["model"]),
             run_id=self.invocation_run_id,
             phase=self.phase,
             stage=stage,
@@ -213,6 +228,36 @@ class BrokerProvider:
         )
         return result
 
+    def receipt_reference(
+        self,
+        role: str,
+        system: str,
+        prompt: str,
+        parameters: dict[str, Any],
+    ) -> dict[str, str]:
+        """Return the immutable broker receipt for an exact completed call."""
+        if not all((self.paper_id, self.family_id, self.source_version_id)):
+            raise ValueError("the broker provider is not bound to a paper")
+        stage = ROLE_STAGES[role]
+        request_config = model_config_for_stage(self.broker.config, stage)
+        payload = _request_payload(system, prompt, parameters, request_config)
+        request_key = broker_request_key(
+            model=str(request_config["model"]),
+            run_id=self.invocation_run_id,
+            phase=self.phase,
+            stage=stage,
+            paper_id=str(self.paper_id),
+            family_id=str(self.family_id),
+            source_version_id=str(self.source_version_id),
+            payload=payload,
+        )
+        path = self.broker.effective_receipt_path(request_key)
+        return {
+            "request_key": request_key,
+            "receipt_file": str(path),
+            "receipt_sha256": sha256_file(path),
+        }
+
 
 def _request_payload(
     system: str,
@@ -226,16 +271,24 @@ def _request_payload(
     output = parameters.get("max_tokens")
     if isinstance(output, bool) or not isinstance(output, int) or output < 1:
         raise ValueError("the broker request requires a positive output-token limit")
+    mime_type = parameters.get("response_mime_type", "application/json")
+    if mime_type not in {"application/json", "text/x.enum"}:
+        raise ValueError("the broker response MIME type is unsupported")
+    thinking = (
+        {"thinkingBudget": config["thinking_budget"]}
+        if "thinking_budget" in config
+        else {"thinkingLevel": config["thinking_level"]}
+    )
     return {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
             "candidateCount": 1,
             "temperature": parameters.get("temperature", 0),
-            "responseMimeType": "application/json",
+            "responseMimeType": mime_type,
             "responseJsonSchema": schema,
             "maxOutputTokens": output,
-            "thinkingConfig": {"thinkingLevel": config["thinking_level"]},
+            "thinkingConfig": thinking,
         },
         "store": False,
     }
@@ -267,7 +320,9 @@ def _validate_receipt(
         raise ValueError("the existing broker receipt does not match the request")
 
 
-def _provider_result(receipt: dict[str, Any], model: str) -> ProviderResult:
+def _provider_result(
+    receipt: dict[str, Any], model: str, *, allow_enum: bool = False
+) -> ProviderResult:
     state = receipt.get("state")
     if state == "ambiguous_charge":
         raise AmbiguousChargeError("the broker recorded an ambiguous model charge")
@@ -299,10 +354,15 @@ def _provider_result(receipt: dict[str, Any], model: str) -> ProviderResult:
     try:
         value = json.loads(text)
     except json.JSONDecodeError as error:
-        raise ProviderResponseError(
-            "the broker response contains malformed JSON"
-        ) from error
-    if not isinstance(value, dict):
+        if not allow_enum or text not in {"yes", "no"}:
+            raise ProviderResponseError(
+                "the broker response contains malformed JSON"
+            ) from error
+        value = text
+    if allow_enum:
+        if value not in {"yes", "no"}:
+            raise ProviderResponseError("the broker enum response is invalid")
+    elif not isinstance(value, dict):
         raise ProviderResponseError("the broker response JSON is not an object")
     usage = receipt.get("usage") or {}
     actual = receipt.get("actual_cost_usd")

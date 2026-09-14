@@ -24,6 +24,15 @@ It also keeps the ordered component span IDs, locators, SHA-256 values, and elig
 Each model role keeps its original evidence and rationale.
 The blinded reconstruction prompt still excludes the frozen answer.
 
+Answer agreement first uses the existing deterministic matcher.
+A deterministic match is authoritative and does not make a judge request.
+Only a deterministic mismatch calls the Gemini answer judge.
+The judge receives the question, required context, proposed answer, and reconstructed answer.
+It does not receive full papers or passage lists.
+A `yes` result records `lower_confidence_llm_equivalent` for agreement provenance only.
+A `no` result rejects the candidate for reconstruction disagreement.
+A missing or malformed result is unresolved.
+
 Answer agreement does not replace evidence validation.
 Each role's evidence must resolve to the frozen source and support its stated scope.
 The verifier must still accept entailment, relation, scope, ambiguity, and alternative-answer checks.
@@ -185,9 +194,10 @@ An unknown charge stops all later calls.
 
 ## Successful-path call budget
 
-The current scheduler makes ten calls for one newly ready and accepted paper.
+The current scheduler makes ten calls for a deterministic match on one accepted paper.
 Eligibility is the first call in the same command.
 Nine QA and distractor calls immediately follow an eligible decision.
+An accepted judge fallback adds one call.
 
 | Stage | Calls | Input boundary | Output boundary |
 | --- | ---: | ---: | ---: |
@@ -196,17 +206,21 @@ Nine QA and distractor calls immediately follow an eligible decision.
 | Question generation | 1 | Counted before submission, at most 1,048,576 tokens | At most 2,048 tokens, including thinking |
 | Blinded reconstruction | 1 | Counted before submission, at most 1,048,576 tokens | At most 2,048 tokens, including thinking |
 | Answer verification | 1 | Counted before submission, at most 1,048,576 tokens | At most 2,048 tokens, including thinking |
+| Answer-agreement judge fallback | 0 or 1 | Compact question, required context, and two answers | At most 4 tokens, with thinking disabled |
 | Distractor generation | 1 | Counted before submission, at most 1,048,576 tokens | At most 2,048 tokens, including thinking |
 | Exact-option verification | 4 | Each call is counted before submission, at most 1,048,576 tokens | Each call is at most 2,048 tokens, including thinking |
-| Downstream scheduler total | 9 | Nine separately counted inputs | 18,432 maximum requested output tokens across calls |
-| Full new-paper total | 10 | Ten separately counted inputs | 26,624 maximum requested output tokens across calls |
+| Downstream scheduler total | 9 or 10 | Each input is counted separately | 18,432 or 18,436 maximum requested output tokens across calls |
+| Full new-paper total | 10 or 11 | Each input is counted separately | 26,624 or 26,628 maximum requested output tokens across calls |
 
 The broker reserves each request from its exact counted input and configured output cap.
-The approved provider configuration requires low thinking for all ten structured calls.
+The base model uses low thinking.
+The answer-agreement judge uses a thinking budget of zero.
 The fixed output limits still include both candidate and thinking tokens.
 See [the Gemini structured-output budget correction](GEMINI_STRUCTURED_OUTPUT_BUDGET.md).
 The verified price record uses USD 0.75 per million input tokens.
 It uses USD 3.75 per million output and thinking tokens.
+The judge uses `gemini-2.5-flash-lite` at USD 0.10 per million input tokens.
+Its output costs USD 0.40 per million tokens.
 Each request must reserve no more than USD 0.25.
 Each paper must use no more than USD 1.00.
 

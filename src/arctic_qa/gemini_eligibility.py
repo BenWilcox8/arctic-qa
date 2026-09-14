@@ -54,7 +54,10 @@ def _config(path: Path) -> dict[str, Any]:
     value = _read(path)
     if value.get("schema") != "gemini-eligibility-config-v1":
         raise ValueError("unsupported Gemini eligibility config schema")
-    if value.get("config_id") != "arctic-gemini-eligibility-r1-config-v2":
+    if value.get("config_id") not in {
+        "arctic-gemini-eligibility-r1-config-v2",
+        "arctic-gemini-eligibility-r1-config-v3",
+    }:
         raise ValueError("the Gemini eligibility config revision is not approved")
     if value.get("model") != "gemini-3.8-flash":
         raise ValueError("the Gemini model has no verified price record")
@@ -88,6 +91,15 @@ def _config(path: Path) -> dict[str, Any]:
         raise ValueError("the verified Gemini input limit changed")
     if value["maximum_output_tokens"] != 8192:
         raise ValueError("the configured Gemini output limit must be 8192")
+    stage_models = value.get("stage_models")
+    if value["config_id"] == "arctic-gemini-eligibility-r1-config-v3":
+        if not isinstance(stage_models, dict) or set(stage_models) != {
+            "answer_agreement"
+        }:
+            raise ValueError("the Gemini stage model registry changed")
+        _validate_answer_agreement_config(stage_models["answer_agreement"])
+    elif stage_models is not None:
+        raise ValueError("the legacy Gemini configuration has stage models")
     start = date.fromisoformat(value["price_valid_from"])
     end = date.fromisoformat(value["price_valid_through"])
     if not start <= date.today() <= end:
@@ -95,6 +107,57 @@ def _config(path: Path) -> dict[str, Any]:
     if not str(value.get("price_source", "")).startswith("https://ai.google.dev/"):
         raise ValueError("Gemini price source is not an official Google URL")
     return value
+
+
+def _validate_answer_agreement_config(value: Any) -> None:
+    if not isinstance(value, dict):
+        raise ValueError("the answer agreement price configuration is invalid")
+    exact = {
+        "model": "gemini-2.5-flash-lite",
+        "maximum_input_tokens": 1_048_576,
+        "model_output_token_limit": 65_536,
+        "maximum_output_tokens": 4,
+        "thinking_budget": 0,
+        "input_usd_per_million_tokens": "0.10",
+        "output_usd_per_million_tokens_including_thinking": "0.40",
+        "price_source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "model_source": (
+            "https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-lite"
+        ),
+        "thinking_source": (
+            "https://ai.google.dev/gemini-api/docs/generate-content/thinking"
+        ),
+        "structured_output_source": "https://ai.google.dev/api/generate-content",
+        "authenticated_availability_endpoint": (
+            "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000"
+        ),
+    }
+    if any(value.get(name) != expected for name, expected in exact.items()):
+        raise ValueError("the verified answer agreement model configuration changed")
+    if value.get("authenticated_supported_methods") != [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent",
+    ]:
+        raise ValueError("the authenticated answer agreement methods changed")
+    checked = datetime.fromisoformat(
+        str(value.get("authenticated_availability_checked_at_utc") or "").replace(
+            "Z", "+00:00"
+        )
+    )
+    if checked.tzinfo is None:
+        raise ValueError("the answer agreement availability date is invalid")
+    start = date.fromisoformat(str(value.get("price_valid_from")))
+    end = date.fromisoformat(str(value.get("price_valid_through")))
+    if not start <= date.today() <= end:
+        raise ValueError("answer agreement pricing is not active")
+
+
+def model_config_for_stage(config: dict[str, Any], stage: str) -> dict[str, Any]:
+    """Return the registered model and price values for one broker stage."""
+    override = (config.get("stage_models") or {}).get(stage)
+    return {**config, **override} if isinstance(override, dict) else config
 
 
 def _safety(path: Path) -> dict[str, Any]:

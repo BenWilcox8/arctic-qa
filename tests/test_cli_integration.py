@@ -300,6 +300,43 @@ def generate_command(
     )
 
 
+def agreement_fallback_script(
+    tmp_path: Path,
+    *,
+    verdict: str | None,
+    reconstructed_answer: str = "a depth of two metres",
+) -> Path:
+    events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-verifier.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    events[0]["response"]["answer"] = reconstructed_answer
+    events[0]["response"].pop("numeric")
+    judge = {
+        "role": "answer_judge",
+        "require_prompt_contains": [
+            "DATA",
+            '"proposed_answer":"2.0 m"',
+            f'"reconstructed_answer":"{reconstructed_answer}"',
+        ],
+        "forbid_prompt_contains": ["SOURCE_DATA", "ANSWER_RECORD"],
+        **(
+            {"response": verdict}
+            if verdict is not None
+            else {"kind": "malformed"}
+        ),
+    }
+    events.insert(2, judge)
+    path = tmp_path / f"agreement-{verdict or 'malformed'}.jsonl"
+    path.write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def test_absent_mount_is_rejected(tmp_path: Path) -> None:
     missing = tmp_path / "missing"
     result = cli(missing, "doctor", expected=2)
@@ -1307,7 +1344,16 @@ def test_generation_runs_qa_gates_before_exact_option_verification(
         "distractor_writer",
     ]
     assert roles[5:] == ["option_verifier"] * 4
-    assert item["schema_version"] == "2.3.0"
+    assert item["schema_version"] == "2.4.0"
+    assert item["answer_agreement"] == {
+        "contract_version": "deterministic-first-answer-agreement-v1",
+        "method": "deterministic",
+        "confidence_category": "authoritative_deterministic",
+        "deterministic_match": True,
+        "agreement": True,
+        "judge": None,
+    }
+    assert "answer_judge" not in roles
     assert item["finding_id"]
     assert item["answer"]["selection_rationale"]
     assert item["answer"]["source_span_ids"]
@@ -1336,6 +1382,121 @@ def test_generation_runs_qa_gates_before_exact_option_verification(
         == "model-justification-v1"
     )
     assert receipt["validation"]["labels"]["mcq_eligible"] is True
+
+
+def test_answer_agreement_fallback_accepts_historical_false_disagreement(
+    tmp_path: Path,
+) -> None:
+    receipt = smoke(tmp_path, "agreement-fallback-setup")
+    command = list(
+        generate_command(
+            receipt["screen"]["source_id"],
+            "agreement-fallback-yes",
+            FIXTURES / "fake-author.jsonl",
+        )
+    )
+    command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(
+        agreement_fallback_script(tmp_path, verdict="yes")
+    )
+
+    generated = json.loads(cli(tmp_path, *command).stdout)
+
+    assert generated["qa_gate_reasons"] == []
+    agreement = generated["answer_agreement"]
+    assert agreement["deterministic_match"] is False
+    assert agreement["method"] == "llm_judge"
+    assert agreement["confidence_category"] == "lower_confidence_llm_equivalent"
+    assert agreement["judge"]["verdict"] == "yes"
+    assert agreement["judge"]["input"] == {
+        "question": generated["question"],
+        "proposed_answer": "2.0 m",
+        "reconstructed_answer": "a depth of two metres",
+    }
+    assert agreement["judge"]["receipt"]["call_id"]
+    assert "answer_judge" in generated["provenance"]["verification_calls"]
+    path = write_candidate(tmp_path, generated, "agreement-fallback-yes.json")
+    validation = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+    assert validation["final_label"] == "machine_accepted_unverified"
+
+    missing = json.loads(json.dumps(generated))
+    missing.pop("answer_agreement")
+    missing_path = write_candidate(tmp_path, missing, "agreement-missing.json")
+    unresolved = json.loads(
+        cli(tmp_path, "validate", "--candidate", str(missing_path)).stdout
+    )
+    assert unresolved["final_label"] == "unresolved"
+    assert unresolved["reasons"] == ["answer_agreement_unresolved"]
+
+    failed_source_gate = json.loads(json.dumps(generated))
+    failed_source_gate["answer_verification"][
+        "source_entailment_model_verified"
+    ] = False
+    failed_path = write_candidate(
+        tmp_path, failed_source_gate, "agreement-source-gate.json"
+    )
+    source_result = json.loads(
+        cli(tmp_path, "validate", "--candidate", str(failed_path)).stdout
+    )
+    assert source_result["final_label"] == "unresolved"
+    assert source_result["reasons"] == ["source_entailment_not_verified"]
+
+
+def test_answer_agreement_fallback_no_rejects_clear_contradiction(
+    tmp_path: Path,
+) -> None:
+    receipt = smoke(tmp_path, "agreement-fallback-no-setup")
+    command = list(
+        generate_command(
+            receipt["screen"]["source_id"],
+            "agreement-fallback-no",
+            FIXTURES / "fake-author.jsonl",
+        )
+    )
+    command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(
+        agreement_fallback_script(
+            tmp_path, verdict="no", reconstructed_answer="5.0 m"
+        )
+    )
+
+    generated = json.loads(cli(tmp_path, *command).stdout)
+
+    assert generated["status"] == "qa_gate_failed"
+    assert generated["qa_gate_reasons"] == ["reconstruction_disagreement"]
+    assert generated["answer_agreement"]["confidence_category"] == "disagreement"
+    assert generated["answer_agreement"]["judge"]["verdict"] == "no"
+    path = write_candidate(tmp_path, generated, "agreement-fallback-no.json")
+    validation = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+    assert validation["final_label"] == "rejected"
+    assert validation["reasons"] == ["reconstruction_disagreement"]
+
+
+def test_malformed_answer_agreement_fallback_is_not_a_no(
+    tmp_path: Path,
+) -> None:
+    receipt = smoke(tmp_path, "agreement-fallback-malformed-setup")
+    command = list(
+        generate_command(
+            receipt["screen"]["source_id"],
+            "agreement-fallback-malformed",
+            FIXTURES / "fake-author.jsonl",
+            retries=0,
+        )
+    )
+    command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(
+        agreement_fallback_script(tmp_path, verdict="maybe")
+    )
+
+    result = cli(tmp_path, *command, expected=2)
+
+    error = json.loads(result.stderr)
+    assert error["code"] == "PROVIDER_ERROR"
+    assert error["message"] == "The provider returned invalid structured JSON."
+    with database(tmp_path) as connection:
+        call = connection.execute(
+            "SELECT status,error_code FROM calls WHERE run_id=? AND role='answer_judge'",
+            ("agreement-fallback-malformed",),
+        ).fetchone()
+    assert dict(call) == {"status": "failed", "error_code": "MALFORMED_RESPONSE"}
 
 
 def test_generation_binds_a_direct_value_to_verifier_provenance(
@@ -1538,7 +1699,7 @@ def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> No
     command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(verifier)
     generated = json.loads(cli(tmp_path, *command).stdout)
     assert generated["status"] == "qa_gate_failed"
-    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v18"
+    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v19"
     assert (
         generated["provenance"]["numeric_rule_contract_version"]
         == "numeric-rule-source-support-v2"

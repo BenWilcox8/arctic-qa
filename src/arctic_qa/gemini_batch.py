@@ -20,7 +20,7 @@ from .db import Database, now
 from .errors import CandidateRejectedError, ProviderError
 from .exporting import export_run
 from .generation import generate_candidate
-from .gemini_eligibility import _config, _decimal
+from .gemini_eligibility import _config, _decimal, model_config_for_stage
 from .model_broker import (
     SharedGeminiBroker,
     _normalized_usage,
@@ -110,6 +110,34 @@ def _cost(input_tokens: int, output_tokens: int) -> Decimal:
     return (
         Decimal(input_tokens) * BATCH_INPUT_USD_PER_MILLION
         + Decimal(output_tokens) * BATCH_OUTPUT_USD_PER_MILLION
+    ) / Decimal("1000000")
+
+
+def _batch_pricing(config: dict[str, Any]) -> dict[str, str]:
+    return {
+        "input_usd_per_million_tokens": str(
+            Decimal(config["input_usd_per_million_tokens"]) / 2
+        ),
+        "output_usd_per_million_tokens_including_thinking": str(
+            Decimal(config["output_usd_per_million_tokens_including_thinking"]) / 2
+        ),
+        "valid_through": str(config["price_valid_through"]),
+        "source": str(config["price_source"]),
+    }
+
+
+def _priced_cost(
+    pricing: dict[str, Any], input_tokens: int, output_tokens: int
+) -> Decimal:
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in (input_tokens, output_tokens)
+    ):
+        raise ValueError("batch token counts must be nonnegative integers")
+    return (
+        Decimal(input_tokens) * Decimal(pricing["input_usd_per_million_tokens"])
+        + Decimal(output_tokens)
+        * Decimal(pricing["output_usd_per_million_tokens_including_thinking"])
     ) / Decimal("1000000")
 
 
@@ -224,6 +252,21 @@ class BatchStore:
             raise ValueError(
                 "the standard output price does not match the batch price record"
             )
+        agreement_config = model_config_for_stage(self.config, "answer_agreement")
+        if agreement_config["model"] != "gemini-2.5-flash-lite" or (
+            "batchGenerateContent"
+            not in agreement_config.get("authenticated_supported_methods", [])
+        ):
+            raise ValueError(
+                "the configured answer agreement model lacks batch support evidence"
+            )
+        if _batch_pricing(agreement_config) != {
+            "input_usd_per_million_tokens": "0.05",
+            "output_usd_per_million_tokens_including_thinking": "0.20",
+            "valid_through": agreement_config["price_valid_through"],
+            "source": PRICING_SOURCE,
+        }:
+            raise ValueError("the answer agreement batch price record changed")
         if (
             self.overall_ceiling_usd <= 0
             or self.maximum_request_usd <= 0
@@ -268,6 +311,24 @@ class BatchStore:
                 ),
                 "valid_through": PRICING_VALID_THROUGH,
                 "source": PRICING_SOURCE,
+            },
+            "registered_models": {
+                "default": {
+                    "model": MODEL,
+                    "pricing": _batch_pricing(self.config),
+                    "model_source": self.config["model_source"],
+                },
+                "answer_agreement": {
+                    "model": model_config_for_stage(
+                        self.config, "answer_agreement"
+                    )["model"],
+                    "pricing": _batch_pricing(
+                        model_config_for_stage(self.config, "answer_agreement")
+                    ),
+                    "model_source": model_config_for_stage(
+                        self.config, "answer_agreement"
+                    )["model_source"],
+                },
             },
             "shared_ledger_file": str(self.shared_ledger_file),
             "overall_ceiling_usd": str(self.overall_ceiling_usd),
@@ -318,6 +379,10 @@ class BatchStore:
         pricing = state.get("pricing") or {}
         if pricing != self._initial_state()["pricing"]:
             raise ValueError("the batch pricing record changed")
+        if state.get("registered_models") != self._initial_state()[
+            "registered_models"
+        ]:
+            raise ValueError("the batch model registry changed")
 
     def read(self) -> dict[str, Any]:
         with self.lock_file.open("a+") as lock:
@@ -422,6 +487,12 @@ class BatchStore:
                 key,
             )
         )
+        first_model = self.prepared_record(keys[0])["model"]
+        keys = [
+            key
+            for key in keys
+            if self.prepared_record(key)["model"] == first_model
+        ]
         lines = []
         total = Decimal("0")
         stages: dict[str, int] = {}
@@ -430,6 +501,16 @@ class BatchStore:
             lines.append({"key": key, "request": request["request"]})
             total += Decimal(request["reserved_usd"])
             stages[request["stage"]] = stages.get(request["stage"], 0) + 1
+        pricing_records = {
+            canonical_json(self.prepared_record(key)["batch_pricing"])
+            for key in keys
+        }
+        model_sources = {
+            self.prepared_record(key)["model_source"] for key in keys
+        }
+        if len(pricing_records) != 1 or len(model_sources) != 1:
+            raise ValueError("one batch round must use one model price record")
+        round_pricing = json.loads(next(iter(pricing_records)))
         round_id = stable_id("batch-round", run_identity, keys, length=32)
         directory = self.root / "rounds" / round_id
         requests_file = directory / "requests.jsonl"
@@ -449,10 +530,11 @@ class BatchStore:
             "shared_ledger_sha256_at_prepare": sha256_file(self.shared_ledger_file),
             "requests_file": str(requests_file),
             "requests_file_sha256": sha256_file(requests_file),
-            "model": MODEL,
+            "model": first_model,
+            "pricing": round_pricing,
             "price_config_sha256": sha256_file(self.price_config_file),
             "pricing_source": PRICING_SOURCE,
-            "model_source": MODEL_SOURCE,
+            "model_source": next(iter(model_sources)),
             "batch_source": BATCH_SOURCE,
             "submission_enabled": False,
         }
@@ -646,6 +728,12 @@ class BatchProvider:
     def model(self) -> str:
         return MODEL
 
+    def model_for_role(self, role: str) -> str:
+        stage = ROLE_STAGES.get(role)
+        if stage is None:
+            return self.model
+        return str(model_config_for_stage(self.config, stage)["model"])
+
     @property
     def broker(self) -> BatchProvider:
         return self
@@ -686,9 +774,11 @@ class BatchProvider:
         stage = ROLE_STAGES.get(role)
         if stage is None:
             raise ValueError(f"the generation role has no batch stage: {role}")
-        payload = _request_payload(system, prompt, parameters, self.config)
+        request_config = model_config_for_stage(self.config, stage)
+        model = str(request_config["model"])
+        payload = _request_payload(system, prompt, parameters, request_config)
         key = broker_request_key(
-            model=self.model,
+            model=model,
             run_id=self.invocation_run_id,
             phase=self.phase,
             stage=stage,
@@ -700,7 +790,11 @@ class BatchProvider:
         state = self.store.read()
         summary = state["requests"].get(key)
         if summary and summary["state"] == "completed":
-            return _provider_result(_read(self.store.receipt_path(key)), self.model)
+            return _provider_result(
+                _read(self.store.receipt_path(key)),
+                model,
+                allow_enum=role == "answer_judge",
+            )
         if summary and summary["state"] in {"error_unsettled", "submission_ambiguous"}:
             raise ProviderError(
                 f"batch request {key} has unresolved provider liability"
@@ -713,7 +807,8 @@ class BatchProvider:
                 )
             input_bound = len(canonical_json(payload).encode("utf-8"))
             output_bound = int(payload["generationConfig"]["maxOutputTokens"])
-            reserved = _cost(input_bound, output_bound)
+            batch_pricing = _batch_pricing(request_config)
+            reserved = _priced_cost(batch_pricing, input_bound, output_bound)
             record = {
                 "schema": REQUEST_SCHEMA,
                 "request_key": key,
@@ -728,12 +823,19 @@ class BatchProvider:
                 "attempt": 1,
                 "prompt_sha256": sha256_bytes(prompt.encode()),
                 "prompt_identity": provider_prompt_hash(
-                    self, system, prompt, "arctic-qa-batch-v1", parameters
+                    self,
+                    system,
+                    prompt,
+                    "arctic-qa-batch-v1",
+                    parameters,
+                    role=role,
                 ),
-                "model": self.model,
-                "config_id": self.config["config_id"],
+                "model": model,
+                "model_source": request_config["model_source"],
+                "config_id": request_config["config_id"],
                 "price_config_sha256": sha256_file(self.store.price_config_file),
-                "maximum_input_tokens": self.config["maximum_input_tokens"],
+                "batch_pricing": batch_pricing,
+                "maximum_input_tokens": request_config["maximum_input_tokens"],
                 "maximum_output_tokens_including_thinking": output_bound,
                 "input_token_bound": input_bound,
                 "reserved_usd": str(reserved),
@@ -753,7 +855,7 @@ class BatchProvider:
                     "source_span_id": span_match.group(1),
                     "rationale": "Temporary offline request capture record.",
                 },
-                returned_model=self.model,
+                returned_model=model,
                 request_id=f"capture-{key}",
                 input_tokens=0,
                 output_tokens=0,
@@ -775,9 +877,45 @@ class BatchProvider:
             and receipt.get("request_sha256") != request_sha256
         ):
             raise ValueError("the batch receipt request hash changed")
-        if receipt.get("stage") != ROLE_STAGES[role]:
+        if receipt.get("stage") != ROLE_STAGES[role] or receipt.get(
+            "model"
+        ) != self.model_for_role(role):
             raise ValueError("the batch receipt stage changed")
-        return receipt, _provider_result(receipt, self.model)
+        return receipt, _provider_result(
+            receipt,
+            self.model_for_role(role),
+            allow_enum=role == "answer_judge",
+        )
+
+    def receipt_reference(
+        self,
+        role: str,
+        system: str,
+        prompt: str,
+        parameters: dict[str, Any],
+    ) -> dict[str, str]:
+        """Return the immutable batch receipt for an exact completed call."""
+        if not all((self.paper_id, self.family_id, self.source_version_id)):
+            raise ValueError("the batch provider is not bound to a paper")
+        stage = ROLE_STAGES[role]
+        request_config = model_config_for_stage(self.config, stage)
+        payload = _request_payload(system, prompt, parameters, request_config)
+        key = broker_request_key(
+            model=str(request_config["model"]),
+            run_id=self.invocation_run_id,
+            phase=self.phase,
+            stage=stage,
+            paper_id=str(self.paper_id),
+            family_id=str(self.family_id),
+            source_version_id=str(self.source_version_id),
+            payload=payload,
+        )
+        path = self.effective_receipt_path(key)
+        return {
+            "request_key": key,
+            "receipt_file": str(path),
+            "receipt_sha256": sha256_file(path),
+        }
 
     def effective_receipt_path(self, request_key: str) -> Path:
         path = self.store.receipt_path(request_key)
@@ -1282,7 +1420,16 @@ def prepare_pipeline(
         "source_selection_count": source_selection_count,
         "continuation_plan_sha256": continuation_plan_sha256,
         "continuation_plan_provisional": continuation_plan_provisional,
-        "model": MODEL,
+        "models": sorted(
+            {
+                MODEL,
+                str(
+                    model_config_for_stage(
+                        store.config, "answer_agreement"
+                    )["model"]
+                ),
+            }
+        ),
         "price_config_sha256": sha256_file(store.price_config_file),
     }
     round_manifest = store.make_round(
@@ -1412,7 +1559,9 @@ def submit_round(
             Path(manifest["requests_file"]), f"arctic-{manifest['round_id']}"
         )
         file_name = str(uploaded["file"]["name"])
-        created = transport.create(MODEL, file_name, f"arctic-{manifest['round_id']}")
+        created = transport.create(
+            str(manifest["model"]), file_name, f"arctic-{manifest['round_id']}"
+        )
     except Exception:
         # The job-creation outcome can be unknown. Keep the full reservation.
         raise
@@ -1537,7 +1686,8 @@ def ingest_results(
             raise ValueError("a batch result response is not an object")
         request = store.prepared_record(key)
         usage = _normalized_usage(response)
-        actual = _cost(
+        actual = _priced_cost(
+            request["batch_pricing"],
             usage["promptTokenCount"],
             usage["candidatesTokenCount"] + usage["thoughtsTokenCount"],
         )
@@ -1563,6 +1713,7 @@ def ingest_results(
             "state": "completed",
             "reserved_usd": request["reserved_usd"],
             "actual_cost_usd": str(actual),
+            "batch_pricing": request["batch_pricing"],
             "usage": usage,
             "response": response,
             "raw_results_file": str(raw_path),

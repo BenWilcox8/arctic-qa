@@ -45,6 +45,7 @@ _ROLE_BY_STAGE = {
     "finding_answer_extraction": "extractor",
     "question_generation": "question_writer",
     "blinded_reconstruction": "reconstructor",
+    "answer_agreement": "answer_judge",
     "answer_verification": "answer_verifier",
     "distractor_generation": "distractor_writer",
     "option_verification": "option_verifier",
@@ -1453,6 +1454,7 @@ class PipelineTraceStore:
             answer = candidate.get("answer") or {}
             reconstruction = candidate.get("reconstruction") or {}
             verification = candidate.get("answer_verification") or {}
+            agreement = candidate.get("answer_agreement") or {}
             if verification.get("verification_rationale"):
                 model_statements.append(
                     {
@@ -1468,13 +1470,30 @@ class PipelineTraceStore:
                     }
                 )
             if answer.get("text") or reconstruction.get("answer"):
-                comparisons.append(
-                    {
-                        "label": "Proposed answer compared with independent reconstruction",
-                        "proposed_answer": answer.get("text"),
-                        "reconstructed_answer": reconstruction.get("answer"),
-                    }
-                )
+                comparison = {
+                    "label": "Proposed answer compared with independent reconstruction",
+                    "proposed_answer": answer.get("text"),
+                    "reconstructed_answer": reconstruction.get("answer"),
+                }
+                if agreement:
+                    comparison.update(
+                        {
+                            "agreement_method": agreement.get("method"),
+                            "agreement_confidence_category": agreement.get(
+                                "confidence_category"
+                            ),
+                            "deterministic_match": agreement.get(
+                                "deterministic_match"
+                            ),
+                            "judge_result": (agreement.get("judge") or {}).get(
+                                "verdict"
+                            ),
+                            "judge_model": (agreement.get("judge") or {}).get(
+                                "requested_model"
+                            ),
+                        }
+                    )
+                comparisons.append(comparison)
             decision_evidence = candidate.get("decision_evidence") or []
             if decision_evidence:
                 evidence.extend(

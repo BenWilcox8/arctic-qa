@@ -27,8 +27,9 @@ def _live_candidate(item_id: str, question: str, *, prompt: str) -> dict:
         }
         for index, letter in enumerate("ABC", start=2)
     ]
+    current = prompt == "arctic-qa-generation-v19"
     return {
-        "schema_version": "2.3.0",
+        "schema_version": "2.4.0" if current else "2.3.0",
         "item_id": item_id,
         "question": question,
         "question_context": "Annual mean.",
@@ -59,12 +60,35 @@ def _live_candidate(item_id: str, question: str, *, prompt: str) -> dict:
             "source_entailment_model_verified": True,
             "verification_rationale": "The evidence entails the answer.",
         },
+        **(
+            {
+                "answer_agreement": {
+                    "contract_version": "deterministic-first-answer-agreement-v1",
+                    "method": "deterministic",
+                    "confidence_category": "authoritative_deterministic",
+                    "deterministic_match": True,
+                    "agreement": True,
+                    "judge": None,
+                }
+            }
+            if current
+            else {}
+        ),
         "provenance": {
             "prompt_version": prompt,
             "scope_contract_version": "selected-evidence-literal-scope-v4",
             "author_model": "gemini-current",
             "verifier_model": "gemini-current",
             "run_id": "private-run",
+            **(
+                {
+                    "answer_agreement_contract_version": (
+                        "deterministic-first-answer-agreement-v1"
+                    )
+                }
+                if current
+                else {}
+            ),
         },
     }
 
@@ -121,6 +145,11 @@ def _insert_live_candidate(
         ],
         "run_id": "private-run",
         "updated_at_utc": "2026-09-14T00:00:00Z",
+        **(
+            {"answer_agreement": candidate["answer_agreement"]}
+            if candidate.get("answer_agreement")
+            else {}
+        ),
     }
     connection.execute(
         "INSERT INTO validation_events VALUES (?,?,?,?,?,?)",
@@ -167,7 +196,7 @@ def test_live_snapshot_updates_atomically_and_excludes_stale_rows(
     _insert_live_candidate(
         connection,
         _live_candidate(
-            "rejected", "Rejected question?", prompt="arctic-qa-generation-v18"
+            "rejected", "Rejected question?", prompt="arctic-qa-generation-v19"
         ),
         family="rejected-family",
         status="rejected",
@@ -175,7 +204,7 @@ def test_live_snapshot_updates_atomically_and_excludes_stale_rows(
     _insert_live_candidate(
         connection,
         _live_candidate(
-            "unbound", "Unbound question?", prompt="arctic-qa-generation-v18"
+            "unbound", "Unbound question?", prompt="arctic-qa-generation-v19"
         ),
         family="unbound-family",
         bind_validation=False,
@@ -185,7 +214,7 @@ def test_live_snapshot_updates_atomically_and_excludes_stale_rows(
         _live_candidate(
             "current-old",
             "Earlier current question?",
-            prompt="arctic-qa-generation-v18",
+            prompt="arctic-qa-generation-v19",
         ),
         family="current-family",
         updated_at="2026-09-14T00:00:00Z",
@@ -193,7 +222,7 @@ def test_live_snapshot_updates_atomically_and_excludes_stale_rows(
     _insert_live_candidate(
         connection,
         _live_candidate(
-            "current-new", "Newest current question?", prompt="arctic-qa-generation-v18"
+            "current-new", "Newest current question?", prompt="arctic-qa-generation-v19"
         ),
         family="current-family",
         updated_at="2026-09-14T00:01:00Z",
@@ -238,6 +267,17 @@ def test_live_snapshot_updates_atomically_and_excludes_stale_rows(
         "title": "Current paper",
     }
     assert reviewer["model_trace"]
+    assert reviewer["stage_results"]["answer_agreement"]["method"] == "deterministic"
+    assert (
+        reviewer["stage_results"]["answer_agreement"]["confidence_category"]
+        == "authoritative_deterministic"
+    )
+    assert (
+        reviewer["validation"][0]["details"]["answer_agreement"][
+            "confidence_category"
+        ]
+        == "authoritative_deterministic"
+    )
     assert reviewer["answer_evidence"]["excerpt"] == "The value increased."
     assert all(option.get("evidence") for option in reviewer["options"])
     assert "candidate_hash" in reviewer["validation"][0]["details"]
@@ -256,7 +296,7 @@ def test_live_snapshot_updates_atomically_and_excludes_stale_rows(
     _insert_live_candidate(
         connection,
         _live_candidate(
-            "second-family", "Second question?", prompt="arctic-qa-generation-v18"
+            "second-family", "Second question?", prompt="arctic-qa-generation-v19"
         ),
         family="second-family",
         updated_at="2026-09-14T00:02:00Z",
@@ -299,7 +339,7 @@ def test_live_preview_includes_retained_model_verified_distractors_only(
         ("source-1", "10.1/current", "Current paper"),
     )
     preview = _live_candidate(
-        "preview", "Preview question?", prompt="arctic-qa-generation-v18"
+        "preview", "Preview question?", prompt="arctic-qa-generation-v19"
     )
     preview_distractors = [
         {
@@ -319,7 +359,7 @@ def test_live_preview_includes_retained_model_verified_distractors_only(
         validation_distractors=preview_distractors,
     )
     rejected = _live_candidate(
-        "rejected", "Rejected question?", prompt="arctic-qa-generation-v18"
+        "rejected", "Rejected question?", prompt="arctic-qa-generation-v19"
     )
     _insert_live_candidate(
         connection,
@@ -333,7 +373,7 @@ def test_live_preview_includes_retained_model_verified_distractors_only(
     missing_model_verification = _live_candidate(
         "missing-model-verification",
         "Incomplete question?",
-        prompt="arctic-qa-generation-v18",
+        prompt="arctic-qa-generation-v19",
     )
     _insert_live_candidate(
         connection,

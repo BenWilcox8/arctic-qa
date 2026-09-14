@@ -69,11 +69,15 @@ _LIVE_ROW_EXCLUDED_KEYS = {
     "invocation_run_id",
     "release_label",
     "request_id",
+    "request_key",
+    "receipt_file",
+    "receipt_sha256",
     "reserved_cost_usd",
     "review_group",
     "run_id",
     "started_at",
     "status",
+    "system_prompt",
     "submitted_at_utc",
     "timestamp",
     "updated_at",
@@ -223,6 +227,7 @@ def _live_reviewer_row(
     answer = candidate.get("answer", {})
     reconstruction = candidate.get("reconstruction", {})
     answer_verification = candidate.get("answer_verification", {})
+    answer_agreement = candidate.get("answer_agreement", {})
     return {
         "schema_version": LIVE_REVIEWER_SCHEMA,
         "item_id": item_id,
@@ -275,6 +280,7 @@ def _live_reviewer_row(
             for name, value in (
                 ("reconstruction", reconstruction),
                 ("answer_verification", answer_verification),
+                ("answer_agreement", answer_agreement),
             )
             if value
         },
@@ -800,6 +806,11 @@ def _safe_stage_result(value: dict[str, Any]) -> dict[str, Any]:
         "run_id",
         "campaign_id",
         "request_id",
+        "request_key",
+        "receipt_file",
+        "receipt_sha256",
+        "prompt_hash",
+        "system_prompt",
         "call_id",
         "status",
         "release_label",
@@ -1022,6 +1033,11 @@ def _manifest_row(
         if isinstance(candidate.get("answer_verification"), dict)
         else {}
     )
+    answer_agreement = (
+        candidate.get("answer_agreement")
+        if isinstance(candidate.get("answer_agreement"), dict)
+        else {}
+    )
     options = []
     for position, option in enumerate(item.get("options", []), start=1):
         if not isinstance(option, dict):
@@ -1107,6 +1123,7 @@ def _manifest_row(
             for name, value in (
                 ("reconstruction", reconstruction),
                 ("answer_verification", answer_verification),
+                ("answer_agreement", answer_agreement),
             )
             if value
         },

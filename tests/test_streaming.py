@@ -209,7 +209,7 @@ def test_compound_unit_rule_without_source_tolerance_remains_rejected() -> None:
 def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
     properties = generation_module.NUMERIC_RULE_SCHEMA["properties"]
 
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v18"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v19"
     assert (
         generation_module.NUMERIC_RULE_CONTRACT_VERSION
         == "numeric-rule-source-support-v2"
@@ -264,7 +264,7 @@ def test_generation_prompt_requires_atomic_answers_and_aligned_questions() -> No
 
 
 def test_generation_schemas_require_concise_review_justifications() -> None:
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v18"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v19"
     assert (
         generation_module.MODEL_JUSTIFICATION_CONTRACT_VERSION
         == "model-justification-v1"
@@ -1746,7 +1746,7 @@ def test_same_campaign_regenerates_a_stale_terminal_candidate(
     assert second["counts"]["generation_rejected"] == 1
     assert len(candidates) == 2
     assert {json.loads(row["candidate_json"])["provenance"]["prompt_version"] for row in candidates} == {
-        "arctic-qa-generation-v18",
+        "arctic-qa-generation-v19",
         "arctic-qa-generation-test-next",
     }
 

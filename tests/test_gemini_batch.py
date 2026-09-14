@@ -99,6 +99,7 @@ class FakeBatchTransport:
     def __init__(self, *, fail_create: bool = False) -> None:
         self.fail_create = fail_create
         self.calls: list[str] = []
+        self.created_models: list[str] = []
 
     def upload(self, path: Path, display_name: str) -> dict[str, Any]:
         self.calls.append("upload")
@@ -107,6 +108,7 @@ class FakeBatchTransport:
 
     def create(self, model: str, file_name: str, display_name: str) -> dict[str, Any]:
         self.calls.append("create")
+        self.created_models.append(model)
         if self.fail_create:
             raise TimeoutError("unknown create outcome")
         return {"name": "batches/test-job", "state": "JOB_STATE_PENDING"}
@@ -116,6 +118,60 @@ class FakeBatchTransport:
 
     def download(self, file_name: str) -> bytes:
         return b""
+
+
+def test_batch_answer_judge_uses_flash_lite_price_and_payload(
+    tmp_path: Path,
+) -> None:
+    _, ledger = shared_ledger(tmp_path)
+    store = batch_store(tmp_path, ledger)
+    provider = BatchProvider(
+        store=store,
+        phase="away_production",
+        invocation_run_id="judge-batch-run",
+    ).bind(
+        paper_id="paper-one",
+        family_id="family-one",
+        source_version_id="a" * 64,
+    )
+    parameters = {
+        "temperature": 0,
+        "max_tokens": 4,
+        "response_mime_type": "text/x.enum",
+        "json_schema": {"type": "string", "enum": ["yes", "no"]},
+    }
+
+    with pytest.raises(BatchPendingError):
+        provider.invoke("answer_judge", "System", "DATA\n{}", parameters, 30)
+
+    state = store.read()
+    key = next(iter(state["requests"]))
+    request = store.prepared_record(key)
+    assert request["stage"] == "answer_agreement"
+    assert request["model"] == "gemini-2.5-flash-lite"
+    assert request["batch_pricing"] == {
+        "input_usd_per_million_tokens": "0.05",
+        "output_usd_per_million_tokens_including_thinking": "0.20",
+        "valid_through": "2026-12-31",
+        "source": "https://ai.google.dev/gemini-api/docs/pricing",
+    }
+    generation = request["request"]["generationConfig"]
+    assert generation["responseMimeType"] == "text/x.enum"
+    assert generation["thinkingConfig"] == {"thinkingBudget": 0}
+    manifest = store.make_round(
+        run_identity={"run_id": "judge-batch-run"},
+        ordered_inputs=[
+            {
+                "position": 1,
+                "paper_id": "paper-one",
+                "family_id": "family-one",
+                "source_version_id": "a" * 64,
+            }
+        ],
+    )
+    assert manifest is not None
+    assert manifest["model"] == "gemini-2.5-flash-lite"
+    assert manifest["pricing"] == request["batch_pricing"]
 
 
 class Http500Transport:
