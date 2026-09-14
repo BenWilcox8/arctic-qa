@@ -2958,7 +2958,7 @@ class SharedGeminiBroker:
             usage,
         )
 
-    def _recover_orphans(self) -> None:
+    def _recover_orphans(self, *, active_run_id: str | None = None) -> None:
         with self._lock_file.open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             ledger = self._validated_ledger()
@@ -2976,6 +2976,17 @@ class SharedGeminiBroker:
                     raise error
                 continue
             if request["state"] != "submitted":
+                continue
+            if (
+                active_run_id is not None
+                and request.get("run_id") != active_run_id
+                and not final_path.is_file()
+                and not received_path.is_file()
+            ):
+                # A stopped producer can leave one submitted request without a
+                # durable response. Keep that liability reserved. A different
+                # reviewed run can use the second concurrency slot without
+                # replaying or settling the old request.
                 continue
             if final_path.is_file():
                 receipt = _read(final_path)
@@ -3073,7 +3084,7 @@ class SharedGeminiBroker:
         try:
             if exclusive_batch_marker_path(self.ledger_file).exists():
                 raise ValueError("exclusive Gemini batch mode is active")
-            self._recover_orphans()
+            self._recover_orphans(active_run_id=run_id)
             gate = _validate_gate(self.execution_gate_file, phase)
             self._validate_stream_input_binding(
                 gate, self._stream_input_binding, request_run_id=run_id

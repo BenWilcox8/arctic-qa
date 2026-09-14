@@ -987,6 +987,50 @@ def test_received_response_is_recovered_after_final_receipt_write_crash(
     assert transport.methods == ["countTokens", "generateContent"]
 
 
+def test_new_run_preserves_foreign_submitted_liability_and_uses_free_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transport = Transport()
+    values = fixture(tmp_path, transport=transport)
+    broker = values["broker"]
+    original_reserve = broker._reserve
+
+    def interrupted_after_reserve(**kwargs: object) -> None:
+        original_reserve(**kwargs)
+        raise OSError("simulated stop after reservation")
+
+    monkeypatch.setattr(broker, "_reserve", interrupted_after_reserve)
+    with pytest.raises(OSError, match="simulated stop"):
+        execute(broker, run_id="stopped-run", paper="old-paper", family="old-family")
+
+    before = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    old_key, old_request = next(iter(before["requests"].items()))
+    assert old_request["state"] == "submitted"
+    assert before["inflight"] == 1
+    assert Decimal(before["reserved_usd"]) > 0
+
+    resumed = fixture(tmp_path, transport=transport)["broker"]
+    fresh = execute(
+        resumed,
+        run_id="new-reviewed-run",
+        paper="new-paper",
+        family="new-family",
+    )
+
+    assert fresh["state"] == "completed"
+    after = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    assert after["requests"][old_key] == old_request
+    assert after["inflight"] == 1
+    assert after["reserved_usd"] == before["reserved_usd"]
+    assert after["ambiguous_reserved_usd"] == "0"
+    assert after["halted"] is False
+    assert transport.methods == [
+        "countTokens",
+        "countTokens",
+        "generateContent",
+    ]
+
+
 def test_pretransport_settlement_recovers_only_a_reviewed_interrupted_reservation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
