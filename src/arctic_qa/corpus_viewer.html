@@ -1276,6 +1276,19 @@
       appendOptions(card, record.options);
       appendOptions(card, record.distractors, 'Distractors');
       const reconstruction = record.reconstruction || record.blinded_reconstruction;
+      const narrativeFields = [
+        ['Rationale', record.rationale],
+        ['Question rationale', record.question_rationale],
+        ['Answer rationale', record.answer_rationale || record.answer?.rationale],
+        ['Reconstruction rationale', record.reconstruction_rationale],
+        ['Verification rationale', record.verification_rationale]
+      ];
+      const shownNarratives = new Set();
+      narrativeFields.forEach(([caption, value]) => {
+        if (!hasTraceValue(value) || shownNarratives.has(String(value))) return;
+        shownNarratives.add(String(value));
+        appendLabeledReadableText(card, caption, value, 'trace-readable-prose');
+      });
       if (reconstruction) card.append(readableObject('Blinded reconstruction', reconstruction));
       if (record.answer_verification) card.append(readableObject('Answer checks', record.answer_verification));
       if (Array.isArray(record.option_verdicts) && record.option_verdicts.length) {

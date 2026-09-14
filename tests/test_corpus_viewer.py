@@ -1307,6 +1307,7 @@ def test_page_contains_readable_trace_views_and_bounded_table_widths() -> None:
     assert (
         "evidenceOffset(previous, 'end') === evidenceOffset(current, 'start')" in page
     )
+    assert "['Reconstruction rationale', record.reconstruction_rationale]" in page
     assert "Model response text (display formatting)" in page
     assert "keeps the exact retained response" in page
 
