@@ -83,12 +83,12 @@ PYTHONPATH=src python -m arctic_qa.gemini_batch prepare \
   --db /mnt/crdata/research-abstention/arctic-qa/state.sqlite3 \
   --namespace /mnt/crdata/research-abstention/arctic-qa \
   --run-id FUTURE_BATCH_INVOCATION_ID \
-  --campaign-id arctic-qa-production-campaign-001 \
+  --campaign-id FUTURE_BATCH_CAMPAIGN_ID \
   --access-run-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/production-campaign-r1/quality-order-r1/materialized-top-800 \
   --continuation-plan "$BATCH_STATE/final-continuation-plan.json" \
   --eligibility-run-dir "$BATCH_STATE/eligibility" \
-  --eligibility-prompt-file config/gemini-eligibility-prompt-v4.txt \
-  --eligibility-schema-file schemas/gemini-eligibility.v2.schema.json \
+  --eligibility-prompt-file config/gemini-eligibility-prompt-v6.txt \
+  --eligibility-schema-file schemas/gemini-eligibility.v3.schema.json \
   --eligibility-policy-file /mnt/crdata/research-abstention/arctic-qa/corpus-search-r1/protocol/protocol-v2.json \
   --price-config-file config/gemini-eligibility-v1.json \
   --shared-ledger-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
@@ -250,9 +250,9 @@ It can also create the reviewer, benchmark, scoring, CSV, and prompt companion p
 PYTHONPATH=src python -m arctic_qa.gemini_batch export \
   --db /mnt/crdata/research-abstention/arctic-qa/state.sqlite3 \
   --namespace /mnt/crdata/research-abstention/arctic-qa \
-  --campaign-id arctic-qa-production-campaign-001 \
+  --campaign-id FUTURE_BATCH_CAMPAIGN_ID \
   --publication-output-dir /PRIVATE/PUBLICATION_PACKAGE \
-  --prompt-template config/gemini-eligibility-prompt-v4.txt
+  --prompt-template config/gemini-eligibility-prompt-v6.txt
 ```
 
 An empty accepted export is an honest result.
