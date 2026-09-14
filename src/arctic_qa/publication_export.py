@@ -117,7 +117,7 @@ def _row(connection: sqlite3.Connection, candidate: dict[str, Any], source: sqli
         },
         "options": review_options,
         "validation": validation,
-        "provenance": {key: value for key, value in (candidate.get("provenance") or {}).items() if key != "run_id"},
+        "provenance": {key: value for key, value in (candidate.get("provenance") or {}).items() if key not in {"run_id", "family_overlap_disclosure", "policy_ablation_metadata", "method_status", "construction_role_policy"}},
         "receipt_derived_verification": _receipt_trace(connection, candidate),
         "rationale_availability": {
             "question": bool(candidate.get("question_rationale")),
