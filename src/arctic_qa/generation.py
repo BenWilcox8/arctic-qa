@@ -22,7 +22,6 @@ from .validation import (
     NUMERIC_RULE_CONTRACT_VERSION,
     SCOPE_CONTRACT_VERSION,
     numeric_rule_is_source_bound,
-    question_context_leaks_answer,
     question_context_verification_reason,
     reconstruction_matches,
     scope_is_evidence_bound,
@@ -544,8 +543,8 @@ def generate_candidate(
             context
             + scope_instruction
             + "\nExtract one bounded answer record. Select one source_span_id. "
-            "Select a complete prose finding sentence in the results or discussion. "
-            "Select one atomic claim from that sentence. Do not select a title, heading, figure or table caption, "
+            "Select a complete prose finding sentence. Select one atomic claim from a complete prose finding sentence "
+            "in the results or discussion. Do not select a title, heading, figure or table caption, "
             "legend, axis label, methods-only description, or sentence fragment. "
             "The selected span must contain exact, sufficient evidence for the "
             "entire answer and every required question phrase. Evidence spans are "

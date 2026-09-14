@@ -2,10 +2,8 @@
 
 ## Current checkpoint
 
-The correction is implemented locally. No focused check is failing.
-The next step is to commit this work, then integrate the reviewed question-context
-commit `207d8b5453dcebd2a4907238e2432341ef2ba9a1`. The final integration must retain
-generation prompt version 14 and pass the combined focused tests.
+The correction and question-context integration are committed locally. No focused
+check is failing. The final generation prompt version is 14.
 
 ## Implemented correction
 
@@ -37,6 +35,17 @@ extraction hashes. It also records the reviewed source locator, proposed action,
 decision source, and decision time. It states that it is a correction proposal,
 not a new model decision.
 
+The captured overlay is
+`data/arctic-geography-fix-r1/correction-overlay/geography-correction-overlay.ndjson`.
+Its SHA-256 is
+`1ecefe47cf7cbe66cf430a9fcc08f6ae089132f620ad6cf988ac578ec1563467`.
+The manifest records historical policy SHA-256
+`be2ace915d377f0f5448371de1556d9f713cde170f6ed54975fcffe5bd0c74bb` and
+new policy SHA-256
+`64bd4d99527b96c1b52e1dbc91c3b02a3c7c58610e07770ea40fa8f90f65a773`.
+The 12 retention candidates and four resolution candidates must receive v3
+review. The old v2 decisions remain historical records.
+
 ## Recovery implementation
 
 `settle-pretransport-reservation` is limited to the reviewed interrupted request
@@ -52,6 +61,11 @@ receipt. The receipt records `live_call_made: false` and has no response. It
 clears only the reservation and inflight count. It retains submission count and
 prior spend. Ledger validation verifies the event and the evidence hashes.
 
+The existing price and budget transition receipt binds the old gate. A reviewed
+successor gate can record the exact old gate, integrated commit, review file, and
+review hash in `supersedes_config_transition_review`. The broker validates this
+predecessor binding and the new review hash. It does not edit the old transition.
+
 ## Focused checks
 
 Passed:
@@ -65,7 +79,14 @@ Passed:
 - Existing streaming regression after retaining the concise atomic-answer prompt
   wording.
 
-Commands used during the final pass will be recorded below after integration.
+Commands used:
+
+```sh
+nix develop -c env PYTHONPATH=src pytest -q tests/test_question_context.py tests/test_geography_correction.py tests/test_eligibility_span_contract.py tests/test_model_broker.py::test_pretransport_settlement_recovers_only_a_reviewed_interrupted_reservation -vv
+nix develop -c env PYTHONPATH=src pytest -q tests/test_streaming.py::test_streaming_uses_one_shared_broker_for_all_ten_stages -vv
+nix develop -c env PYTHONPATH=src python -m compileall -q src
+git diff --check
+```
 
 ## Reviewed restart path
 

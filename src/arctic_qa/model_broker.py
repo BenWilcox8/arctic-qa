@@ -75,6 +75,12 @@ AUTHORIZED_CAP_REASON = "the paid request exceeds the authorized live-test cap"
 PER_REQUEST_CAP_REASON = "the paid request exceeds USD 0.25"
 ALLOWED_LIVE_TEST_LIMITS = {(20, 100), (40, 100), (41, 101), (None, None)}
 STREAM_INPUT_BINDING_VERSION = "stream-input-binding-v1"
+TRANSITION_GATE_SUCCESSOR_FIELDS = {
+    "execution_gate_sha256",
+    "integrated_code_commit",
+    "review_record",
+    "review_record_sha256",
+}
 PRETRANSPORT_SETTLEMENT_SCHEMA = "shared-paid-call-pretransport-settlement-v1"
 PRETRANSPORT_SETTLEMENT_REQUEST = {
     "request_key": "445c8935c5dc9d1c5d03fe7d4d15308fd57d0e68f8d2d21bf310875b85b5512b",
@@ -245,6 +251,23 @@ def _validate_gate(path: Path, phase: str) -> dict[str, Any]:
         if not str(value.get(field) or "").strip():
             raise ValueError(f"the streaming execution gate lacks {field}")
     return value
+
+
+def _gate_succeeds_transition_review(
+    gate: dict[str, Any], authorization: dict[str, Any]
+) -> bool:
+    """Accept a reviewed successor gate without changing an old transition receipt."""
+    successor = gate.get("supersedes_config_transition_review")
+    if not isinstance(successor, dict) or set(successor) != TRANSITION_GATE_SUCCESSOR_FIELDS:
+        return False
+    if any(successor[field] != authorization[field] for field in successor):
+        return False
+    review_path = Path(str(gate.get("review_record") or "")).resolve()
+    return (
+        review_path.is_file()
+        and isinstance(gate.get("review_record_sha256"), str)
+        and gate["review_record_sha256"] == sha256_file(review_path)
+    )
 
 
 def _credential_status(path: Path) -> str:
@@ -525,12 +548,15 @@ class SharedGeminiBroker:
             PRODUCTION_BUDGET_EXTENSION_CHANGE,
         ) or self._is_ceiling_extension(authorization):
             self._validate_stream_input_gate(gate)
-        if (
+        direct_gate_binding = (
             authorization["execution_gate_sha256"]
-            != sha256_file(self.execution_gate_file)
-            or authorization["integrated_code_commit"] != gate["integrated_code_commit"]
-            or authorization["review_record"] != gate["review_record"]
-            or authorization["review_record_sha256"] != gate.get("review_record_sha256")
+            == sha256_file(self.execution_gate_file)
+            and authorization["integrated_code_commit"] == gate["integrated_code_commit"]
+            and authorization["review_record"] == gate["review_record"]
+            and authorization["review_record_sha256"] == gate.get("review_record_sha256")
+        )
+        if not direct_gate_binding and not _gate_succeeds_transition_review(
+            gate, authorization
         ):
             raise ValueError("the configuration transition review changed")
         review_path = Path(authorization["review_record"]).resolve()
@@ -2354,7 +2380,7 @@ class SharedGeminiBroker:
                     raise ValueError("a pretransport settlement sidecar already exists")
                 if not review_file.is_file() or not traceback_evidence_file.is_file():
                     raise ValueError("the reviewed pretransport evidence is absent")
-                gate = _validate_gate(self.execution_gate_file, request["phase"])
+                _validate_gate(self.execution_gate_file, request["phase"])
                 if request.get("gate_sha256") != sha256_file(self.execution_gate_file):
                     raise ValueError("the reviewed reservation gate changed")
                 reserved = _money(request["reserved_usd"], "reservation", positive=True)

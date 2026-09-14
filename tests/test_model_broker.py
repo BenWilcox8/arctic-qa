@@ -1627,6 +1627,65 @@ def test_transition_restart_with_unchanged_review_allows_downstream(tmp_path: Pa
     assert restarted_transport.methods == ["countTokens", "generateContent"]
 
 
+def test_reviewed_successor_gate_preserves_an_immutable_transition(
+    tmp_path: Path,
+):
+    values = fixture(tmp_path, transport=Transport())
+    assert execute(values["broker"])["state"] == "completed"
+    active_config = tmp_path / "active-price-config.json"
+    active_config.write_bytes(
+        (ROOT / "config" / "gemini-eligibility-v1.json").read_bytes() + b"\n"
+    )
+    transition = reviewed_transition(tmp_path, values, active_config)
+    transitioned = SharedGeminiBroker(
+        policy_file=ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
+        price_config_file=active_config,
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=Transport(),
+        config_transition_file=transition,
+    )
+    assert execute(transitioned, paper="p2")["state"] == "completed"
+    authorization = json.loads(transition.read_text(encoding="utf-8"))
+    gate = json.loads(values["gate"].read_text(encoding="utf-8"))
+    successor_review = tmp_path / "successor-review.md"
+    successor_review.write_text("Corrected release passed review.\n", encoding="utf-8")
+    gate.update(
+        {
+            "integrated_code_commit": "corrected-release",
+            "review_record": str(successor_review),
+            "review_record_sha256": sha256_file(successor_review),
+            "supersedes_config_transition_review": {
+                field: authorization[field]
+                for field in (
+                    "execution_gate_sha256",
+                    "integrated_code_commit",
+                    "review_record",
+                    "review_record_sha256",
+                )
+            },
+        }
+    )
+    write_json(values["gate"], gate)
+
+    restarted = SharedGeminiBroker(
+        policy_file=ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
+        price_config_file=active_config,
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=Transport(),
+        config_transition_file=transition,
+    )
+
+    assert execute(restarted, paper="p3")["state"] == "completed"
+
+
 def test_transition_does_not_apply_to_an_unsettled_ledger(tmp_path: Path):
     values = fixture(tmp_path, transport=Transport("generate"))
     assert execute(values["broker"])["state"] == "ambiguous_charge"
