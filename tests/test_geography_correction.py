@@ -244,8 +244,24 @@ def test_scope_finding_span_allows_only_whitespace_equivalent_chunk_text() -> No
     assert spans[0]["eligibility_match_kind"] == "whitespace_equivalent"
 
 
-def test_scope_finding_span_word_difference_is_paper_local_rejection() -> None:
-    eligibility_quote = "At 76.2 N, Arctic station nitrate declined by 15 percent."
+@pytest.mark.parametrize(
+    ("eligibility_quote", "chunk_quote"),
+    [
+        (
+            "At 76.2 N, Arctic station nitrate declined by 15 percent.",
+            "At 76.2 N, Arctic station nitrate increased by 15 percent.",
+        ),
+        (
+            "At 76.2 N, Arctic station nitrate declined by 15",
+            "At 76.2 N, Arctic\nstation nitrate declined by 150",
+        ),
+        ("The concentration was 4.2 m", "The concentration\nwas 4.2 mg"),
+        ("The sample was not retained", "The sample\nwas not retainedly"),
+    ],
+)
+def test_scope_finding_span_word_difference_is_paper_local_rejection(
+    eligibility_quote: str, chunk_quote: str
+) -> None:
     source = {
         "scope_rule_version": "gemini-fulltext-arctic-eligibility-v2",
         "scope_evidence_json": json.dumps(
@@ -273,7 +289,7 @@ def test_scope_finding_span_word_difference_is_paper_local_rejection() -> None:
             [
                 {
                     "chunk_id": "chunk-1",
-                    "text": "At 76.2 N, Arctic station nitrate increased by 15 percent.",
+                    "text": chunk_quote,
                 }
             ],
         )

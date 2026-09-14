@@ -1554,9 +1554,13 @@ def _eligible_generation_scope(
                 # the chunk bytes as the downstream evidence, and retain the
                 # eligibility quote hash for custody. Do not normalize words or
                 # punctuation: any other difference remains fail-closed.
-                whitespace_equivalent = re.compile(
-                    r"\s+".join(re.escape(part) for part in quote.split())
-                ).search(chunk_text)
+                tokens = quote.split()
+                pattern = r"\s+".join(re.escape(token) for token in tokens)
+                if tokens[0][0].isalnum() or tokens[0][0] == "_":
+                    pattern = r"(?<!\w)" + pattern
+                if tokens[-1][-1].isalnum() or tokens[-1][-1] == "_":
+                    pattern += r"(?!\w)"
+                whitespace_equivalent = re.compile(pattern).search(chunk_text)
                 if whitespace_equivalent is None:
                     continue
                 start = whitespace_equivalent.start()
