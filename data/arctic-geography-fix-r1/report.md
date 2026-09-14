@@ -98,3 +98,9 @@ budget. Then run the recovery command with the exact reviewed evidence paths.
 After the recovery check, run the existing production command with the new
 eligibility paths and the existing ledger, ranked input, campaign ID, and budget
 baseline. Do not create a ledger or submit a batch.
+
+The reviewable successor gate draft is
+`data/arctic-geography-fix-r1/release-draft/successor-execution-gate-v3.draft.json`.
+It is deliberately disabled and has a pending review hash. The exact recovery
+and restart commands are in
+`data/arctic-geography-fix-r1/release-draft/recovery-and-restart.md`.
