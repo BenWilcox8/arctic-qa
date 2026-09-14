@@ -21,6 +21,16 @@ from arctic_qa.util import canonical_json, sha256_bytes
 ROOT = Path(__file__).parents[1]
 
 
+def test_v6_scope_prompt_requires_source_self_binding() -> None:
+    prompt = (ROOT / "config" / "gemini-eligibility-prompt-v6.txt").read_text(
+        encoding="utf-8"
+    )
+
+    normalized = " ".join(prompt.split())
+    assert "activity_span_ids value must also appear" in normalized
+    assert "exact substring of the selected finding_span_ids text" in normalized
+
+
 def _response(
     *,
     request_id: str,
