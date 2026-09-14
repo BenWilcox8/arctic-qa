@@ -1397,6 +1397,67 @@ def test_generation_runs_qa_gates_before_exact_option_verification(
     assert receipt["validation"]["labels"]["mcq_eligible"] is True
 
 
+@pytest.mark.parametrize("reported_version", ["2024-09-01", None])
+def test_controller_bound_standalone_version_preserves_receipt_and_exports(
+    tmp_path: Path, reported_version: str | None
+) -> None:
+    setup = smoke(tmp_path, "controller-version-setup")
+    run_id = "controller-version-export"
+    verifier_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-verifier.jsonl").read_text().splitlines()
+    ]
+    if reported_version is None:
+        verifier_events[0]["response"].pop("contract_version")
+    else:
+        verifier_events[0]["response"]["contract_version"] = reported_version
+    verifier_path = tmp_path / "controller-version-verifier.jsonl"
+    verifier_path.write_text(
+        "\n".join(json.dumps(event) for event in verifier_events) + "\n",
+        encoding="utf-8",
+    )
+    command = list(
+        generate_command(
+            setup["screen"]["source_id"],
+            run_id,
+            FIXTURES / "fake-author.jsonl",
+        )
+    )
+    command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(
+        verifier_path
+    )
+
+    generated = json.loads(cli(tmp_path, *command).stdout)
+    validation = json.loads(
+        cli(tmp_path, "validate", "--item-id", generated["item_id"]).stdout
+    )
+    exported = json.loads(cli(tmp_path, "export", "--run-id", run_id).stdout)
+    with database(tmp_path) as connection:
+        raw = connection.execute(
+            "SELECT response_json FROM calls WHERE run_id=? AND role='standalone_verifier'",
+            (run_id,),
+        ).fetchone()[0]
+
+    assert json.loads(raw).get("contract_version") == reported_version
+    assert generated["standalone_verification"]["contract_version"] == (
+        "source-blind-standalone-gate-v1"
+    )
+    assert validation["final_label"] == "machine_accepted_unverified"
+    assert exported["short_answer_count"] == 1
+
+    mutated = json.loads(json.dumps(generated))
+    mutated["standalone_verification"]["review_rationale"] = (
+        "A different substantive rationale."
+    )
+    mutated_path = write_candidate(tmp_path, mutated, "controller-version-mutated.json")
+    rejected = json.loads(
+        cli(tmp_path, "validate", "--candidate", str(mutated_path)).stdout
+    )
+
+    assert rejected["final_label"] == "rejected"
+    assert rejected["reasons"] == ["qa_verification_call_receipt_missing"]
+
+
 def test_source_blind_gate_rejects_undefined_metric_acronym_and_event(
     tmp_path: Path,
 ) -> None:

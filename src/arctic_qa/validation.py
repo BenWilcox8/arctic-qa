@@ -1944,7 +1944,11 @@ def _qa_verification_receipts_match(db: Database, candidate: dict[str, Any]) -> 
             response = json.loads(receipt["response_json"])
         except (TypeError, json.JSONDecodeError):
             return False
-        if not _response_matches_resolved_record(response, record):
+        if role == "standalone_verifier":
+            matches = _standalone_response_matches_resolved_record(response, record)
+        else:
+            matches = _response_matches_resolved_record(response, record)
+        if not matches:
             return False
     return True
 
@@ -2003,6 +2007,25 @@ def standalone_verification_resolves(
     ):
         return False
     return True
+
+
+def _standalone_response_matches_resolved_record(
+    response: Any, record: Any
+) -> bool:
+    """Match every verdict field while allowing controller-owned version metadata."""
+    if not isinstance(response, dict) or not isinstance(record, dict):
+        return False
+    substantive_fields = set(record) - {"contract_version"}
+    if (
+        record.get("contract_version") != STANDALONE_VERIFICATION_CONTRACT_VERSION
+        or set(response) - {"contract_version"} != substantive_fields
+        or any(response.get(field) != record.get(field) for field in substantive_fields)
+    ):
+        return False
+    reported_version = response.get("contract_version")
+    return reported_version is None or (
+        isinstance(reported_version, str) and bool(reported_version)
+    )
 
 
 def _response_matches_resolved_record(response: Any, record: Any) -> bool:
