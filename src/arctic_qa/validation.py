@@ -23,6 +23,8 @@ SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v3"
 LEGACY_SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v2"
 GENERATION_PROMPT_VERSION = "arctic-qa-generation-v16"
 NUMERIC_RULE_CONTRACT_VERSION = "numeric-rule-source-support-v2"
+DIRECT_SOURCE_VALUE_CONTRACT_VERSION = "direct-source-value-v1"
+MULTI_VALUE_NUMERIC_CONTRACT_VERSION = "numeric-rule-multiple-values-v1"
 SCOPE_CONTRACT_VERSION = "selected-evidence-literal-scope-v4"
 EVIDENCE_COMBINATION_CONTRACT_VERSION = "contiguous-source-evidence-v1"
 MAX_COMBINED_EVIDENCE_CHARS = 3_200
@@ -67,6 +69,22 @@ DIRECTION_PAIRS = {
     ("earlier", "later"),
     ("north", "south"),
     ("greater", "less"),
+}
+DIRECTIONAL_CANONICAL_FORMS = {
+    "increased": "increased",
+    "decreased": "decreased",
+    "higher": "higher",
+    "lower": "lower",
+    "positive": "positive",
+    "positively": "positive",
+    "negative": "negative",
+    "negatively": "negative",
+    "earlier": "earlier",
+    "later": "later",
+    "north": "north",
+    "south": "south",
+    "greater": "greater",
+    "less": "less",
 }
 SAFE_UNIT_SPELLINGS = {
     "%": "%",
@@ -360,7 +378,7 @@ def validate_candidate(
         reasons.append("answer_scope_not_source_bound")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     if candidate["answer"].get("numeric_rule") and not numeric_rule_is_source_bound(
-        candidate["answer"]
+        candidate["answer"], provenance
     ):
         reasons.append("source_bound_numeric_rule_missing")
         return _finish(db, candidate, labels, reasons, [], "rejected")
@@ -644,10 +662,17 @@ def reconstruction_matches(
 ) -> bool:
     proposed = [answer.get("text", ""), *answer.get("variants", [])]
     rebuilt = reconstruction.get("answer", "")
+    if _has_unrepresented_multiple_numeric_values(answer):
+        return False
     if _requires_structured_numeric_match(str(answer.get("text", ""))):
         return _source_bound_numeric_text_matches(answer, str(rebuilt))
     if _source_bound_directional_answer_matches(answer, str(rebuilt)):
         return True
+    if isinstance(reconstruction.get("numeric"), dict):
+        return bool(
+            _source_bound_numeric_text_matches(answer, str(rebuilt))
+            or _reconstruction_numeric_matches(answer, reconstruction)
+        )
     rebuilt_text = _answer_match_text(str(rebuilt))
     if any(
         _bounded_text_match(_answer_match_text(str(value)), rebuilt_text)
@@ -656,13 +681,7 @@ def reconstruction_matches(
         return True
     if _source_bound_numeric_text_matches(answer, str(rebuilt)):
         return True
-    numeric = answer.get("numeric_rule")
-    rebuilt_numeric = reconstruction.get("numeric")
-    return bool(
-        numeric
-        and rebuilt_numeric
-        and _reconstruction_numeric_matches(answer, rebuilt_numeric)
-    )
+    return _reconstruction_numeric_matches(answer, reconstruction)
 
 
 def question_context_verification_reason(
@@ -733,11 +752,43 @@ def _source_bound_directional_answer_matches(
     answer_text = normalize_text(str(answer.get("text", "")))
     source_text = normalize_text(str(answer.get("evidence_quote", "")))
     rebuilt_text = normalize_text(rebuilt)
+    source_direction = _single_canonical_direction(direction)
+    rebuilt_direction = _single_canonical_direction(rebuilt_text)
     return bool(
         direction
-        and rebuilt_text == direction
-        and direction in answer_text
-        and direction in source_text
+        and source_direction
+        and rebuilt_direction == source_direction
+        and rebuilt_text in DIRECTIONAL_CANONICAL_FORMS
+        and not _contains_negation(direction)
+        and not _contains_negation(answer_text)
+        and not _contains_negation(rebuilt_text)
+        and _contains_canonical_direction(answer_text, source_direction)
+        and _contains_canonical_direction(source_text, source_direction)
+    )
+
+
+def _single_canonical_direction(value: str) -> str | None:
+    directions = {
+        DIRECTIONAL_CANONICAL_FORMS[token]
+        for token in normalize_text(value).split()
+        if token in DIRECTIONAL_CANONICAL_FORMS
+    }
+    if len(directions) != 1:
+        return None
+    return directions.pop()
+
+
+def _contains_negation(value: str) -> bool:
+    return bool(
+        set(normalize_text(value).split())
+        & {"no", "not", "never", "neither", "nor", "without"}
+    )
+
+
+def _contains_canonical_direction(value: str, expected: str) -> bool:
+    return any(
+        DIRECTIONAL_CANONICAL_FORMS.get(token) == expected
+        for token in normalize_text(value).split()
     )
 
 
@@ -798,23 +849,106 @@ def _has_numeric_equivalence_marker(value: str) -> bool:
 
 
 def _reconstruction_numeric_matches(
-    answer: dict[str, Any], rebuilt: dict[str, Any]
+    answer: dict[str, Any], reconstruction: dict[str, Any]
 ) -> bool:
-    rule = answer.get("numeric_rule")
-    if not isinstance(rule, dict):
+    rebuilt = reconstruction.get("numeric")
+    if not isinstance(rebuilt, dict):
         return False
+    rule = answer.get("numeric_rule")
+    try:
+        rebuilt_value = Decimal(str(rebuilt["canonical_value"]))
+    except (KeyError, InvalidOperation, ValueError):
+        return False
+    rebuilt_unit = str(rebuilt.get("unit", ""))
+    if not _typed_numeric_scope_is_complete(answer, reconstruction):
+        return False
+    if not isinstance(rule, dict):
+        return bool(
+            _contains_quantity(str(answer.get("text", "")), rebuilt_value, rebuilt_unit)
+            and _contains_quantity(
+                str(answer.get("evidence_quote", "")), rebuilt_value, rebuilt_unit
+            )
+        )
     try:
         value = Decimal(str(rule["canonical_value"]))
-        rebuilt_value = Decimal(str(rebuilt["canonical_value"]))
     except (KeyError, InvalidOperation, ValueError):
         return False
     return bool(
         value == rebuilt_value
         and _units_are_safe_equivalents(
-            str(rule.get("unit", "")), str(rebuilt.get("unit", ""))
+            str(rule.get("unit", "")), rebuilt_unit
         )
-        and _source_bound_numeric_text_matches(answer, str(rebuilt.get("display", "")))
     )
+
+
+def _typed_numeric_scope_is_complete(
+    answer: dict[str, Any], reconstruction: dict[str, Any]
+) -> bool:
+    required = answer.get("required_question_phrases")
+    scope = reconstruction.get("scope")
+    if not isinstance(required, list) or not isinstance(scope, dict):
+        return False
+    scope_text = normalize_text(
+        " ".join(str(value) for value in scope.values() if isinstance(value, str))
+    )
+    return bool(
+        scope_text
+        and all(
+            isinstance(phrase, str)
+            and normalize_text(phrase)
+            and normalize_text(phrase) in scope_text
+            for phrase in required
+        )
+    )
+
+
+def _has_unrepresented_multiple_numeric_values(answer: dict[str, Any]) -> bool:
+    quantities = _typed_numeric_quantities(str(answer.get("text", "")))
+    if len(quantities) < 2:
+        return False
+    rule = answer.get("numeric_rule")
+    if not isinstance(rule, dict):
+        return True
+    if rule.get("structure_contract_version") != MULTI_VALUE_NUMERIC_CONTRACT_VERSION:
+        return True
+    values = rule.get("values")
+    if not isinstance(values, list) or len(values) != len(quantities):
+        return True
+    if any(
+        not isinstance(value, dict)
+        or value.get("operator") not in {">", ">=", "<", "<=", "="}
+        for value in values
+    ):
+        return True
+    try:
+        structured = [
+            (Decimal(str(value["canonical_value"])), str(value["unit"]))
+            for value in values
+            if isinstance(value, dict)
+        ]
+    except (KeyError, InvalidOperation, ValueError):
+        return True
+    return len(structured) != len(quantities) or any(
+        value != expected_value
+        or not _units_are_safe_equivalents(unit, expected_unit)
+        for (value, unit), (expected_value, expected_unit) in zip(structured, quantities)
+    )
+
+
+def _typed_numeric_quantities(value: str) -> list[tuple[Decimal, str]]:
+    quantities: list[tuple[Decimal, str]] = []
+    for match in NUMERIC_LITERAL_PATTERN.finditer(value):
+        unit_match = re.match(r"\s*(%|°?[A-Za-z]+)(?!\w)", value[match.end() :])
+        if not unit_match:
+            continue
+        try:
+            number = Decimal(match.group("value").replace(",", "").replace("−", "-"))
+        except (InvalidOperation, ValueError):
+            continue
+        unit = unit_match.group(1)
+        if _has_numeric_equivalence_marker(f"{number}{unit}"):
+            quantities.append((number, unit))
+    return quantities
 
 
 def _bounded_text_match(left: str, right: str) -> bool:
@@ -849,6 +983,9 @@ def reconstruction_has_competing_alternatives(
         if _source_bound_directional_answer_matches(answer, str(alternative)):
             continue
         if _source_bound_numeric_text_matches(answer, str(alternative)):
+            continue
+        typed_alternative = {**reconstruction, "answer": alternative}
+        if _reconstruction_numeric_matches(answer, typed_alternative):
             continue
         if _bare_count_alias_matches(answer, reconstruction, normalized):
             continue
@@ -991,7 +1128,7 @@ def validate_distractor(
     kind = deterministic.get("kind")
     passed = False
     if kind == "numeric_outside_tolerance":
-        if numeric_rule_is_source_bound(answer):
+        if numeric_rule_is_source_bound(answer, candidate.get("provenance")):
             passed = _numeric_incompatible(answer.get("numeric_rule"), numeric)
         else:
             result["reasons"].append("source_bound_numeric_rule_missing")
@@ -1308,7 +1445,9 @@ def _numeric_incompatible(
     return abs(answer - candidate) > tolerance
 
 
-def numeric_rule_is_source_bound(answer: dict[str, Any]) -> bool:
+def numeric_rule_is_source_bound(
+    answer: dict[str, Any], provenance: dict[str, Any] | None = None
+) -> bool:
     rule = answer.get("numeric_rule")
     if not isinstance(rule, dict):
         return False
@@ -1326,7 +1465,7 @@ def numeric_rule_is_source_bound(answer: dict[str, Any]) -> bool:
             _contains_count_quantity(displayed, answer_value, unit)
             and _contains_count_quantity(evidence, answer_value, unit)
         )
-    if _is_direct_exact_source_literal_rule(rule, evidence, displayed):
+    if _is_direct_exact_source_literal_rule(rule, evidence, displayed, provenance):
         return True
     return bool(
         tolerance >= 0
@@ -1340,7 +1479,10 @@ def numeric_rule_is_source_bound(answer: dict[str, Any]) -> bool:
 
 
 def _is_direct_exact_source_literal_rule(
-    rule: dict[str, Any], evidence: str, displayed: str
+    rule: dict[str, Any],
+    evidence: str,
+    displayed: str,
+    provenance: dict[str, Any] | None,
 ) -> bool:
     try:
         value = Decimal(str(rule["canonical_value"]))
@@ -1348,20 +1490,52 @@ def _is_direct_exact_source_literal_rule(
         unit = str(rule["unit"])
     except (KeyError, InvalidOperation, ValueError):
         return False
-    tolerance_basis = normalize_text(str(rule.get("tolerance_basis", "")))
-    reported_precision = normalize_text(str(rule.get("reported_precision", "")))
+    tolerance_basis = str(rule.get("tolerance_basis", ""))
+    reported_precision = str(rule.get("reported_precision", ""))
     rounding_rule = normalize_text(str(rule.get("rounding_rule", "")))
     conversion_rule = normalize_text(str(rule.get("conversion_rule", "")))
     literal = str(rule["canonical_value"]).replace(",", "")
     return bool(
-        tolerance == 0
-        and tolerance_basis.startswith("exact")
+        _direct_source_value_request_is_bound(rule, provenance)
+        and tolerance == 0
+        and _numeric_equivalence_text(tolerance_basis)
+        == _numeric_equivalence_text(f"{literal}{unit}")
         and _contains_quantity_literal(evidence, value, unit)
         and _contains_quantity_literal(displayed, value, unit)
-        and reported_precision == normalize_text(literal)
-        and _rounding_rule_matches_literal(rounding_rule, literal)
-        and conversion_rule.startswith("direct")
+        and _reported_precision_matches_literal(reported_precision, literal)
+        and rounding_rule.startswith("direct reporting")
+        and "without additional rounding" in rounding_rule
+        and conversion_rule.startswith("direct source reporting")
+        and "no conversion" in conversion_rule
     )
+
+
+def _direct_source_value_request_is_bound(
+    rule: dict[str, Any], provenance: dict[str, Any] | None
+) -> bool:
+    if rule.get("direct_value_contract_version") != DIRECT_SOURCE_VALUE_CONTRACT_VERSION:
+        return False
+    request_id = rule.get("direct_value_request_id")
+    if not isinstance(request_id, str) or not request_id:
+        return False
+    if not isinstance(provenance, dict):
+        return False
+    calls = provenance.get("verification_calls")
+    if not isinstance(calls, dict):
+        return False
+    verifier = calls.get("answer_verifier")
+    return bool(
+        isinstance(verifier, dict)
+        and verifier.get("role") == "answer_verifier"
+        and verifier.get("request_id") == request_id
+    )
+
+
+def _reported_precision_matches_literal(reported_precision: str, literal: str) -> bool:
+    if not re.fullmatch(r"[-+]?\d+(?:\.\d+)?", literal):
+        return False
+    decimal_places = len(literal.partition(".")[2])
+    return reported_precision == str(Decimal(1).scaleb(-decimal_places))
 
 
 def scope_is_source_bound(
