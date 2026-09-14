@@ -142,6 +142,40 @@ def test_fallback_prefers_one_question_revision_then_alternative() -> None:
     assert alternative["parent_attempt_id"] == revision["attempt_id"]
 
 
+def test_fallback_does_not_progress_from_a_contract_mismatch() -> None:
+    primary = streaming_module._generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        finding_attempt_index=1,
+        question_revision_index=0,
+        attempt_kind="primary",
+        parent_attempt_id=None,
+        parent_item_id=None,
+        trigger_reason_code=None,
+        excluded_finding_span_ids=[],
+    )
+    path = {
+        "attempt": primary,
+        "candidate": {
+            "item_id": "item-primary",
+            "candidate_json": canonical_json(
+                {"answer": {"source_span_id": "span-primary"}}
+            ),
+        },
+    }
+
+    assert (
+        streaming_module._next_generation_attempt(
+            campaign_id="campaign",
+            family_id="family",
+            paths={(1, 0): path},
+            failed_path=path,
+            reason_codes=["generation_contract_version_mismatch"],
+        )
+        is None
+    )
+
+
 @pytest.mark.parametrize(
     ("failure_reason", "expected_kind"),
     [

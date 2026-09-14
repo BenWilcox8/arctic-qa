@@ -1674,7 +1674,7 @@ def test_same_campaign_regenerates_a_stale_terminal_candidate(
         "SELECT item_id,candidate_json FROM candidates "
         "WHERE run_id='same-campaign' ORDER BY created_at,item_id"
     )
-    assert second["resumed_papers"] == 0
+    assert second["resumed_papers"] == 1
     assert second["counts"]["generation_rejected"] == 1
     assert len(candidates) == 2
     assert {json.loads(row["candidate_json"])["provenance"]["prompt_version"] for row in candidates} == {
@@ -2137,6 +2137,21 @@ def test_failed_reconstruction_never_reaches_distractor_generation(
     tmp_path: Path,
 ) -> None:
     access, eligibility = streaming_fixture(tmp_path)
+    author_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-author.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    alternative_author_script = tmp_path / "ambiguous-alternative-author.jsonl"
+    alternative_author_script.write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in [author_events[0], author_events[1], author_events[0]]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     verifier_events = [
         json.loads(line)
         for line in (FIXTURES / "fake-verifier.jsonl")
@@ -2153,7 +2168,10 @@ def test_failed_reconstruction_never_reaches_distractor_generation(
     paths = DataPaths.open(tmp_path, test_mode=True)
     database = Database(paths.database)
     database.migrate(paths.namespace / "backups")
-    transport = ScriptedBrokerTransport(verifier_script=verifier_script)
+    transport = ScriptedBrokerTransport(
+        author_script=alternative_author_script,
+        verifier_script=verifier_script,
+    )
     broker = shared_broker(tmp_path, transport)
     provider = BrokerProvider(
         broker=broker,

@@ -48,6 +48,12 @@ REPAIRABLE_QUESTION_REASONS = frozenset(
         "scope_qualifier_missing",
     }
 )
+ALTERNATIVE_FINDING_REASONS = frozenset(
+    {
+        "insufficient_verified_distractors",
+        "reconstruction_disagreement",
+    }
+)
 
 
 def run_stream(
@@ -1208,6 +1214,8 @@ def _next_generation_attempt(
                 excluded_finding_span_ids=[],
             )
     if (2, 0) in paths:
+        return None
+    if len(reason_codes) != 1 or reason_codes[0] not in ALTERNATIVE_FINDING_REASONS:
         return None
     excluded = _prior_finding_span_ids(paths)
     return _generation_attempt(
