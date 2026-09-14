@@ -72,7 +72,8 @@ def _receipt_trace(connection: sqlite3.Connection, candidate: dict[str, Any]) ->
     for request_id in sorted(set(requests)):
         row = connection.execute("SELECT call_id,role,request_id,returned_model,response_json FROM calls WHERE request_id=? ORDER BY attempt DESC LIMIT 1", (request_id,)).fetchone()
         if row and row["response_json"]:
-            result.append({"call_id": row["call_id"], "role": row["role"], "request_id": row["request_id"], "returned_model": row["returned_model"], "response_sha256": hashlib.sha256(row["response_json"].encode()).hexdigest(), "response": _json(row["response_json"], None)})
+            response = _json(row["response_json"], {})
+            result.append({"call_id": row["call_id"], "role": row["role"], "request_id": row["request_id"], "returned_model": row["returned_model"], "response_sha256": hashlib.sha256(row["response_json"].encode()).hexdigest(), "rationale": response.get("rationale"), "verdict": {name: response.get(name) for name in ("contradiction_established", "alternative_answer_search_passed", "source_entailment_model_verified") if name in response}, "evidence": {name: response.get(name) for name in ("evidence_quote", "locator", "source_span_id", "span_contract_version") if name in response}})
     return result
 
 
@@ -117,6 +118,7 @@ def _row(connection: sqlite3.Connection, candidate: dict[str, Any], source: sqli
         "options": review_options,
         "validation": validation,
         "provenance": {key: value for key, value in (candidate.get("provenance") or {}).items() if key != "run_id"},
+        "receipt_derived_verification": _receipt_trace(connection, candidate),
         "rationale_availability": {
             "question": bool(candidate.get("question_rationale")),
             "answer_selection": bool(candidate.get("answer", {}).get("selection_rationale")),
