@@ -41,8 +41,8 @@ A context change creates a different generated item and invalidates old option b
 ## Scope roles
 
 Generation roles use `scope-role-semantics-v2`.
-New candidates use generation prompt `arctic-qa-generation-v20`.
-They use scope contract `selected-evidence-literal-scope-v4` and candidate schema `2.5.0`.
+New candidates use generation prompt `arctic-qa-generation-v22`.
+They use scope contract `selected-evidence-literal-scope-v4` and candidate schema `2.7.0`.
 Before source-aware checks, a source-blind gate reads only the question and question context.
 It rejects missing definitions or answer leakage that make the displayed task ambiguous.
 Schema 2.4 records the answer-agreement method and confidence category.
@@ -59,3 +59,24 @@ The question and context state each independent place, period, sample or cohort,
 Generation keeps a sample descriptor in the population field, even when the descriptor contains Arctic or another place name.
 Generation uses geography only for an independent place qualifier.
 Generation uses comparison for an independent comparison or condition qualifier.
+
+## Two-part evidence bundle
+
+Schema `2.7.0` gives every generation role two kinds of source span.
+A finding span in `SOURCE_DATA` is selectable evidence for the answer.
+An interpretation span in `CONTEXT_ONLY_SOURCE` is study context only.
+It states the place, the period, the population, the instrument, or an acronym expansion.
+The eligibility classifier already selected and hashed these spans as `activity_spans`.
+Generation re-locates each one in the source chunks through the same sha256 custody path.
+
+`CONTEXT_ONLY_SOURCE` supports `question_context` statements only.
+No role can select such a span as answer evidence, as a scope value, or as a required question phrase.
+Generation drops a span that holds a figure, table or citation locator, a two-column join, or the answer text.
+Candidate provenance records every forwarded span under `context_only_source`.
+The validator re-checks each recorded span against the chunk bytes and its hash.
+
+A whole-study paper has no span restriction, because the classifier certified every result as Arctic.
+A separable Arctic component keeps its span restriction, and receives only the setting spans of that component.
+
+The writer fills a `referent_slots` record with one entry for each of the ten referent slots.
+The record is a diagnostic. No gate reads it, and it never supplies a slot that the displayed task leaves unfixed.

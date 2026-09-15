@@ -56,7 +56,10 @@ REPAIRABLE_QUESTION_REASONS = frozenset(
         "reconstruction_disagreement",
         "relation_scope_mismatch",
         "scope_qualifier_missing",
+        "scope_qualifier_not_displayed",
         "scope_qualifier_not_source_bound",
+        "benchmark_text_raw_source_artifact",
+        "interpretation_scope_not_applicable_to_finding",
         "source_entailment_not_verified",
         "insufficient_verified_distractors",
         "standalone_gate_failed",
@@ -86,6 +89,9 @@ ALTERNATIVE_FINDING_REASONS = frozenset(
         "eligible_arctic_scope_missing_from_finding",
         "eligible_arctic_finding_out_of_scope",
         "revision_unchanged_payload",
+        "finding_span_is_table_or_caption",
+        "finding_span_figure_defined_referent",
+        "interpretation_span_contains_answer",
     }
 )
 IMMEDIATE_ALTERNATIVE_FINDING_REASONS = frozenset(
@@ -94,6 +100,9 @@ IMMEDIATE_ALTERNATIVE_FINDING_REASONS = frozenset(
         "eligible_arctic_scope_missing_from_finding",
         "eligible_arctic_finding_out_of_scope",
         "revision_unchanged_payload",
+        "finding_span_is_table_or_caption",
+        "finding_span_figure_defined_referent",
+        "interpretation_span_contains_answer",
     }
 )
 OPTION_REPAIR_REASONS = frozenset({"insufficient_verified_distractors"})

@@ -194,7 +194,7 @@ def test_separable_arctic_scope_limits_finding_context_and_requires_custody() ->
         ),
     }
 
-    scope, spans = _eligible_generation_scope(source, chunks)
+    scope, spans, _ = _eligible_generation_scope(source, chunks)
     context, _ = _finding_context(chunks, spans)
 
     assert scope is not None
@@ -226,7 +226,7 @@ def test_scope_finding_span_allows_only_whitespace_equivalent_chunk_text() -> No
             {
                 "eligibility_job_key": "job-v3-whitespace",
                 "resolved_eligible_arctic_scope": {
-                    "component": "whole_study",
+                    "component": "separable_arctic_component",
                     "finding_spans": [
                         {
                             "quote": eligibility_quote,
@@ -235,13 +235,13 @@ def test_scope_finding_span_allows_only_whitespace_equivalent_chunk_text() -> No
                             ),
                         }
                     ],
-                    "question_scope_phrases": [],
+                    "question_scope_phrases": ["Arctic station"],
                 },
             }
         ),
     }
 
-    _, spans = _eligible_generation_scope(
+    _, spans, _ = _eligible_generation_scope(
         source, [{"chunk_id": "chunk-1", "text": chunk_quote}]
     )
 
@@ -264,7 +264,7 @@ def test_scope_finding_span_ignores_a_whitespace_only_separator() -> None:
             {
                 "eligibility_job_key": "job-v3-line-separator",
                 "resolved_eligible_arctic_scope": {
-                    "component": "whole_study",
+                    "component": "separable_arctic_component",
                     "finding_spans": [
                         {
                             "span_id": "s1",
@@ -286,13 +286,13 @@ def test_scope_finding_span_ignores_a_whitespace_only_separator() -> None:
                             ),
                         },
                     ],
-                    "question_scope_phrases": [],
+                    "question_scope_phrases": ["Mercury concentrations"],
                 },
             }
         ),
     }
 
-    scope, spans = _eligible_generation_scope(
+    scope, spans, _ = _eligible_generation_scope(
         source,
         [
             {

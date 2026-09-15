@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -22,7 +23,8 @@ UNIT_FACTORS: dict[tuple[str, str], Decimal] = {
 }
 SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v3"
 LEGACY_SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v2"
-GENERATION_PROMPT_VERSION = "arctic-qa-generation-v21"
+GENERATION_PROMPT_VERSION = "arctic-qa-generation-v22"
+LEGACY_GENERATION_PROMPT_VERSION = "arctic-qa-generation-v21"
 LEGACY_STANDALONE_VERIFICATION_CONTRACT_VERSION = "source-blind-standalone-gate-v1"
 STANDALONE_VERIFICATION_CONTRACT_VERSION = "source-blind-scientific-referent-v2"
 ANSWER_AGREEMENT_CONTRACT_VERSION = "deterministic-first-answer-agreement-v1"
@@ -38,6 +40,9 @@ DIRECT_SOURCE_VALUE_CONTRACT_VERSION = "direct-source-value-v1"
 MULTI_VALUE_NUMERIC_CONTRACT_VERSION = "numeric-rule-multiple-values-v1"
 SCOPE_CONTRACT_VERSION = "selected-evidence-literal-scope-v4"
 EVIDENCE_COMBINATION_CONTRACT_VERSION = "contiguous-source-evidence-v1"
+CONTEXT_ONLY_EVIDENCE_CONTRACT_VERSION = "question-context-evidence-v1"
+REFERENT_SLOT_CONTRACT_VERSION = "referent-slot-checklist-v1"
+FINDING_ADMISSION_CONTRACT_VERSION = "freeze-time-finding-admission-v1"
 MAX_COMBINED_EVIDENCE_CHARS = 3_200
 MAX_COMBINED_EVIDENCE_COMPONENTS = 4
 MAX_ADJACENT_WHITESPACE_CHARS = 32
@@ -60,6 +65,12 @@ _BENCHMARK_REFERENT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _SCIENTIFIC_ABBREVIATION_PATTERN = re.compile(r"\b[A-Z]\.\s*[a-z][a-z-]+\b")
+# Two-column PDF extraction joins the neighbouring column with a run of spaces.
+_COLUMN_GUTTER_PATTERN = re.compile(r"[ \t]{3,}")
+# A quotation of more than eight words is a pasted source sentence, not a stem.
+_QUOTED_SOURCE_RUN_PATTERN = re.compile('["“‟«](?:\\S+[ \t]+){8,}\\S+["”‟»]')
+# Scope dimensions a reader without the paper always needs displayed.
+DISPLAYED_SCOPE_DIMENSIONS = ("geography", "period", "population")
 _UNFAMILIAR_ACRONYM_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]{1,7}\b")
 _NON_ACRONYM_TOKENS = frozenset(
     {"CH4", "CO2", "DNA", "II", "III", "IV", "N2O", "O2", "RNA", "VI"}
@@ -203,7 +214,7 @@ CANDIDATE_CONTRACTS = {
         ),
     },
     "2.6.0": {
-        "prompt_version": GENERATION_PROMPT_VERSION,
+        "prompt_version": LEGACY_GENERATION_PROMPT_VERSION,
         "generation_attempt_contract_version": "bounded-failure-routing-v3",
         "answer_agreement_contract_version": ANSWER_AGREEMENT_CONTRACT_VERSION,
         "standalone_verification_contract_version": (
@@ -223,7 +234,34 @@ CANDIDATE_CONTRACTS = {
             EVIDENCE_COMBINATION_CONTRACT_VERSION
         ),
     },
+    "2.7.0": {
+        "prompt_version": GENERATION_PROMPT_VERSION,
+        "generation_attempt_contract_version": "bounded-failure-routing-v3",
+        "answer_agreement_contract_version": ANSWER_AGREEMENT_CONTRACT_VERSION,
+        "standalone_verification_contract_version": (
+            STANDALONE_VERIFICATION_CONTRACT_VERSION
+        ),
+        "question_verification_contract_version": (
+            QUESTION_VERIFICATION_CONTRACT_VERSION
+        ),
+        "numeric_rule_contract_version": NUMERIC_RULE_CONTRACT_VERSION,
+        "direct_value_contract_version": DIRECT_SOURCE_VALUE_CONTRACT_VERSION,
+        "scope_contract_version": SCOPE_CONTRACT_VERSION,
+        "scope_role_semantics_version": "scope-role-semantics-v2",
+        "scope_role_binding_contract_version": (
+            "scope-role-question-context-binding-v1"
+        ),
+        "evidence_combination_contract_version": (
+            EVIDENCE_COMBINATION_CONTRACT_VERSION
+        ),
+        "context_only_evidence_contract_version": (
+            CONTEXT_ONLY_EVIDENCE_CONTRACT_VERSION
+        ),
+        "referent_slot_contract_version": REFERENT_SLOT_CONTRACT_VERSION,
+        "finding_admission_contract_version": FINDING_ADMISSION_CONTRACT_VERSION,
+    },
 }
+CONTEXT_ONLY_EVIDENCE_SCHEMA_VERSIONS = frozenset({"2.7.0"})
 
 
 def expected_standalone_contract(schema_version: object) -> str | None:
@@ -380,6 +418,115 @@ def _scope_phrase_in_text(phrase: str, text: str) -> bool:
     return bool(phrase_projection and phrase_projection in text_projection)
 
 
+def scope_phrase_in_text(phrase: str, text: str) -> bool:
+    """Compare one phrase through the shared line-wrap repair projection."""
+    return _scope_phrase_in_text(phrase, text)
+
+
+def scope_phrase_is_displayed(
+    phrase: str, question: str, question_context: str
+) -> bool:
+    """Return whether one required phrase reaches the reader in either field."""
+    return _scope_phrase_in_text(phrase, question) or _scope_phrase_in_text(
+        phrase, question_context
+    )
+
+
+def scope_qualifier_not_displayed(
+    answer: dict[str, Any], question: str, question_context: str
+) -> bool:
+    """Return whether a displayed-scope dimension never reaches the reader."""
+    scope = answer.get("scope")
+    if not isinstance(scope, dict):
+        return False
+    for dimension in DISPLAYED_SCOPE_DIMENSIONS:
+        value = scope.get(dimension)
+        if not isinstance(value, str) or not normalize_text(value):
+            continue
+        if not scope_phrase_is_displayed(value, question, question_context):
+            return True
+    return False
+
+
+def benchmark_text_raw_source_artifact(*values: str) -> bool:
+    """Detect raw PDF extraction bytes or a long source quotation in shown text."""
+    for value in values:
+        if not isinstance(value, str) or not value:
+            continue
+        if "\n" in value or "\r" in value:
+            return True
+        if _COLUMN_GUTTER_PATTERN.search(value):
+            return True
+        if _QUOTED_SOURCE_RUN_PATTERN.search(value):
+            return True
+    return False
+
+
+def context_only_span_records(provenance: object) -> list[dict[str, Any]]:
+    """Return the context-only spans that one candidate recorded as forwarded."""
+    if not isinstance(provenance, dict):
+        return []
+    block = provenance.get("context_only_source")
+    if not isinstance(block, dict):
+        return []
+    spans = block.get("spans")
+    if not isinstance(spans, list):
+        return []
+    return [span for span in spans if isinstance(span, dict)]
+
+
+def context_only_spans_resolve(
+    provenance: object, chunks: dict[str, dict[str, Any]]
+) -> bool:
+    """Re-verify every forwarded context-only span against its source chunk."""
+    block = (provenance or {}).get("context_only_source") if provenance else None
+    if not isinstance(block, dict):
+        return True
+    if block.get("contract_version") != CONTEXT_ONLY_EVIDENCE_CONTRACT_VERSION:
+        return False
+    if block.get("selectable_for_answer_evidence") is not False:
+        return False
+    for span in context_only_span_records(provenance):
+        chunk = chunks.get(span.get("chunk_id"))
+        text = span.get("text")
+        if not chunk or not isinstance(text, str) or not text:
+            return False
+        try:
+            start = int(span["start_offset"])
+            end = int(span["end_offset"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        chunk_text = str(chunk["text"])
+        if not 0 <= start < end <= len(chunk_text) or chunk_text[start:end] != text:
+            return False
+        if span.get("text_sha256") != sha256_bytes(text.encode("utf-8")):
+            return False
+    return True
+
+
+def interpretation_spans_contain_answer(
+    spans: list[dict[str, Any]], answer: dict[str, Any]
+) -> bool:
+    """Return whether the answer or a variant occurs in a context-only span."""
+    variants = answer.get("variants")
+    values = [answer.get("text", ""), *(variants if isinstance(variants, list) else [])]
+    normalized_answers = [
+        normalized
+        for normalized in (_answer_match_text(str(value)) for value in values)
+        if normalized and normalized not in {"yes", "no"}
+    ]
+    if not normalized_answers:
+        return False
+    return any(
+        re.search(rf"(?<!\w){re.escape(normalized)}(?!\w)", span_text)
+        for span_text in (
+            _answer_match_text(str(span.get("text", ""))) for span in spans
+        )
+        if span_text
+        for normalized in normalized_answers
+    )
+
+
 def _eligible_arctic_scope_error(
     candidate: dict[str, Any], source: dict[str, Any]
 ) -> str | None:
@@ -391,12 +538,26 @@ def _eligible_arctic_scope_error(
         return "eligible_arctic_scope_invalid"
     scope = evidence.get("resolved_eligible_arctic_scope")
     provenance = candidate.get("provenance") or {}
-    if not isinstance(scope, dict) or provenance.get("eligible_arctic_scope") != {
-        "component": scope.get("component"),
-        "question_scope_phrases": scope.get("question_scope_phrases"),
+    expected_scope = {
+        "component": scope.get("component") if isinstance(scope, dict) else None,
+        "question_scope_phrases": (
+            scope.get("question_scope_phrases") if isinstance(scope, dict) else None
+        ),
         "eligibility_job_key": evidence.get("eligibility_job_key"),
-        "finding_spans": scope.get("finding_spans"),
-    }:
+        "finding_spans": scope.get("finding_spans")
+        if isinstance(scope, dict)
+        else None,
+    }
+    if str(candidate.get("schema_version")) in CONTEXT_ONLY_EVIDENCE_SCHEMA_VERSIONS:
+        # The two-part evidence bundle also freezes the classifier's study-setting
+        # spans into provenance, so the forwarded context-only text stays bound to
+        # the same eligibility record.
+        expected_scope["activity_spans"] = (
+            scope.get("activity_spans") or [] if isinstance(scope, dict) else None
+        )
+    if not isinstance(scope, dict) or provenance.get("eligible_arctic_scope") != (
+        expected_scope
+    ):
         return "eligible_arctic_scope_provenance_mismatch"
     if provenance.get("eligible_arctic_scope_sha256") != sha256_bytes(
         canonical_json(provenance["eligible_arctic_scope"]).encode()
@@ -425,7 +586,7 @@ def _eligible_arctic_scope_error(
         eligibility_ids = (candidate.get("answer") or {}).get("eligibility_span_ids")
         if (
             candidate.get("schema_version")
-            not in {"2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0", "2.6.0"}
+            not in {"2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0", "2.6.0", "2.7.0"}
             or not isinstance(components, list)
             or not isinstance(eligibility_ids, list)
             or not eligibility_ids
@@ -531,6 +692,16 @@ def validate_candidate(
     if not source_span_evidence_resolves(candidate["answer"], chunks):
         reasons.append("answer_evidence_span_invalid")
         return _finish(db, candidate, labels, reasons, [], "rejected")
+    if not context_only_spans_resolve(candidate.get("provenance"), chunks):
+        reasons.append("interpretation_span_not_located")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
+    interpretation_spans = context_only_span_records(candidate.get("provenance"))
+    interpretation_texts = [str(span.get("text", "")) for span in interpretation_spans]
+    if interpretation_spans and interpretation_spans_contain_answer(
+        interpretation_spans, candidate["answer"]
+    ):
+        reasons.append("interpretation_span_contains_answer")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
     scope_error = _eligible_arctic_scope_error(candidate, source_record)
     if scope_error:
         reasons.append(scope_error)
@@ -574,9 +745,17 @@ def validate_candidate(
             return _finish(db, candidate, labels, reasons, [], "rejected")
         labels["standalone_interpretable"] = True
     if not scope_is_evidence_bound(
-        candidate["answer"].get("scope"), candidate["answer"]
+        candidate["answer"].get("scope"), candidate["answer"], interpretation_texts
     ):
         reasons.append("answer_scope_not_source_bound")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
+    if benchmark_text_raw_source_artifact(str(candidate["question"]), question_context):
+        reasons.append("benchmark_text_raw_source_artifact")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
+    if scope_qualifier_not_displayed(
+        candidate["answer"], str(candidate["question"]), question_context
+    ):
+        reasons.append("scope_qualifier_not_displayed")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     if candidate["answer"].get("numeric_rule") and not numeric_rule_is_source_bound(
         candidate["answer"], provenance
@@ -605,10 +784,14 @@ def validate_candidate(
     ):
         reasons.append("scope_qualifier_not_source_bound")
         return _finish(db, candidate, labels, reasons, [], "rejected")
+    # Coverage, not verbatim splicing: a required phrase must reach the reader,
+    # in the question or in question_context, under the same repair projection.
     missing_scope = [
         phrase
         for phrase in required_phrases
-        if not _scope_phrase_in_text(phrase, str(candidate["question"]))
+        if not scope_phrase_is_displayed(
+            phrase, str(candidate["question"]), question_context
+        )
     ]
     if missing_scope:
         reasons.append("scope_qualifier_missing")
@@ -618,15 +801,24 @@ def validate_candidate(
     if not role_evidence_resolves(reconstruction, chunks):
         reasons.append("reconstruction_evidence_not_located")
         return _finish(db, candidate, labels, reasons, [], "rejected")
-    if not scope_is_evidence_bound(reconstruction.get("scope"), reconstruction):
+    if not scope_is_evidence_bound(
+        reconstruction.get("scope"), reconstruction, interpretation_texts
+    ):
         reasons.append("reconstruction_scope_not_source_bound")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     verification = candidate.get("answer_verification") or {}
     if not role_evidence_resolves(verification, chunks):
         reasons.append("answer_verifier_evidence_not_located")
         return _finish(db, candidate, labels, reasons, [], "rejected")
-    if not scope_is_evidence_bound(verification.get("scope"), verification):
+    if not scope_is_evidence_bound(
+        verification.get("scope"), verification, interpretation_texts
+    ):
         reasons.append("answer_verifier_scope_not_source_bound")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
+    if interpretation_spans and (
+        verification.get("interpretation_scope_applies_to_finding") is not True
+    ):
+        reasons.append("interpretation_scope_not_applicable_to_finding")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     context_reason = question_context_verification_reason(
         question_context,
@@ -671,7 +863,7 @@ def validate_candidate(
         labels["unresolved"] = True
         return _finish(db, candidate, labels, reasons, [], "unresolved")
     agreement = candidate.get("answer_agreement")
-    if schema_version in {"2.4.0", "2.5.0", "2.6.0"}:
+    if schema_version in {"2.4.0", "2.5.0", "2.6.0", "2.7.0"}:
         if not answer_agreement_resolves(db, candidate, agreement):
             reasons.append("answer_agreement_unresolved")
             labels["unresolved"] = True
@@ -1865,6 +2057,7 @@ def answer_agreement_resolves(
         "2.4.0",
         "2.5.0",
         "2.6.0",
+        "2.7.0",
     } or not isinstance(agreement, dict):
         return False
     deterministic_match = reconstruction_matches(
@@ -2704,11 +2897,35 @@ def scope_is_source_bound(
 
 
 def scope_is_evidence_bound(
-    scope: dict[str, Any] | None, evidence_record: dict[str, Any]
+    scope: dict[str, Any] | None,
+    evidence_record: dict[str, Any],
+    interpretation_texts: Sequence[str] = (),
 ) -> bool:
-    return scope_is_source_bound(
-        scope,
-        [{"text": str(evidence_record.get("evidence_quote", ""))}],
+    """Bind every scope value to the selected span, or to an interpretation span.
+
+    An interpretation span is hash-verified text of the same paper. It supplies
+    only a dimension that the selected finding span does not state, because a
+    value the finding span states already matches on the first text.
+    """
+    if not interpretation_texts:
+        return scope_is_source_bound(
+            scope,
+            [{"text": str(evidence_record.get("evidence_quote", ""))}],
+        )
+    if not isinstance(scope, dict):
+        return False
+    values = [value for value in scope.values() if value is not None]
+    if not values or any(not isinstance(value, str) for value in values):
+        return False
+    if any(not normalize_text(value) for value in values):
+        return False
+    evidence = str(evidence_record.get("evidence_quote", ""))
+    if not evidence:
+        return False
+    supporting = [evidence, *(str(text) for text in interpretation_texts)]
+    return all(
+        any(_scope_phrase_in_text(value, text) for text in supporting)
+        for value in values
     )
 
 
