@@ -29,6 +29,7 @@ from .exporting import export_run
 from .chapter2_corpus import CHAPTER2_DIRECTORY
 from .chapter2_corpus import DEFAULT_JOBS as CHAPTER2_DEFAULT_JOBS
 from .chapter2_corpus import freeze as chapter2_freeze
+from .chapter2_corpus import materialize_stream_input as chapter2_stream_input
 from .chapter2_corpus import prepare_root as chapter2_prepare_root
 from .chapter2_corpus import reextract as chapter2_reextract
 from .extraction import extract_source, load_chunks
@@ -278,7 +279,7 @@ def parser() -> argparse.ArgumentParser:
     )
     chapter2.add_argument(
         "--action",
-        choices=("prepare", "extract", "freeze", "quality"),
+        choices=("prepare", "extract", "freeze", "quality", "stream-input"),
         required=True,
     )
     chapter2.add_argument("--access-run-dir", type=Path, required=True)
@@ -393,7 +394,7 @@ def parser() -> argparse.ArgumentParser:
     )
     stream.add_argument("--eligibility-policy-file", type=Path)
     stream.add_argument("--roles-file", type=Path)
-    stream.add_argument("--role-profile", choices=("strongest", "cost_aware"))
+    stream.add_argument("--role-profile")
     stream.add_argument("--author-script", type=Path)
     stream.add_argument("--verifier-script", type=Path)
     stream.add_argument("--max-papers", type=int, default=1)
@@ -952,6 +953,8 @@ def _chapter2_corpus(args, paths: DataPaths) -> dict[str, Any]:
         )
     if not args.freeze_id or not args.run_id:
         raise ValueError("the chapter 2 freeze needs a freeze id and a run id")
+    if args.action == "stream-input":
+        return chapter2_stream_input(root, freeze_id=args.freeze_id, run_id=args.run_id)
     return chapter2_freeze(
         root,
         access_run_dir=args.access_run_dir,

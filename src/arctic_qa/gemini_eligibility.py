@@ -100,6 +100,7 @@ def _config(path: Path) -> dict[str, Any]:
         "arctic-gemini-eligibility-r1-config-v3",
         "arctic-gemini-eligibility-r1-config-v4",
         "arctic-gemini-eligibility-r1-config-v5",
+        "arctic-gemini-eligibility-r1-config-v6",
     }:
         raise ValueError("the Gemini eligibility config revision is not approved")
     if value.get("model") != "gemini-3.8-flash":
@@ -152,6 +153,17 @@ def _config(path: Path) -> dict[str, Any]:
             )
         else:
             _validate_answer_agreement_config(stage_models["answer_agreement"])
+    elif value["config_id"] == "arctic-gemini-eligibility-r1-config-v6":
+        # Chapter 2: the source-blind judge, the option judge, the blind
+        # reconstructor and the answer verifier run on a stronger model than
+        # the writer (r15 audit section 4.2 fix 4). Every price is pinned.
+        if not isinstance(stage_models, dict) or set(stage_models) != (
+            {"answer_agreement"} | PRO_JUDGE_STAGES
+        ):
+            raise ValueError("the Gemini stage model registry changed")
+        _validate_answer_agreement_config(stage_models["answer_agreement"])
+        for stage in sorted(PRO_JUDGE_STAGES):
+            _validate_pro_judge_config(stage_models[stage])
     elif stage_models is not None:
         raise ValueError("the legacy Gemini configuration has stage models")
     start = date.fromisoformat(value["price_valid_from"])
@@ -161,6 +173,61 @@ def _config(path: Path) -> dict[str, Any]:
     if not str(value.get("price_source", "")).startswith("https://ai.google.dev/"):
         raise ValueError("Gemini price source is not an official Google URL")
     return value
+
+
+PRO_JUDGE_STAGES = frozenset(
+    {
+        "standalone_verification",
+        "option_verification",
+        "blinded_reconstruction",
+        "answer_verification",
+    }
+)
+PRO_JUDGE_MODEL = "gemini-3.1-pro-preview"
+# Verified against https://ai.google.dev/gemini-api/docs/pricing on 2026-09-15:
+# standard tier, prompts up to 200k tokens. The input limit below keeps every
+# request inside that price tier.
+PRO_JUDGE_EXACT_CONFIG = {
+    "model": PRO_JUDGE_MODEL,
+    "lifecycle": "preview",
+    "maximum_input_tokens": 200_000,
+    "model_output_token_limit": 65_536,
+    "maximum_output_tokens": 8192,
+    "thinking_level": "low",
+    "input_usd_per_million_tokens": "2.00",
+    "output_usd_per_million_tokens_including_thinking": "12.00",
+    "price_tier": "standard, prompts up to 200k tokens",
+    "price_source": "https://ai.google.dev/gemini-api/docs/pricing",
+    "model_source": "https://ai.google.dev/gemini-api/docs/models/gemini-3.1-pro-preview",
+    "thinking_source": "https://ai.google.dev/gemini-api/docs/generate-content/thinking",
+    "structured_output_source": "https://ai.google.dev/api/generate-content",
+}
+
+
+def _validate_pro_judge_config(value: Any) -> None:
+    if not isinstance(value, dict):
+        raise ValueError("the judge model price configuration is invalid")
+    if any(
+        value.get(name) != expected for name, expected in PRO_JUDGE_EXACT_CONFIG.items()
+    ):
+        raise ValueError("the verified judge model configuration changed")
+    if value.get("documented_supported_methods") != [
+        "generateContent",
+        "countTokens",
+        "batchGenerateContent",
+    ]:
+        raise ValueError("the documented judge model methods changed")
+    checked = datetime.fromisoformat(
+        str(value.get("documented_availability_checked_at_utc") or "").replace(
+            "Z", "+00:00"
+        )
+    )
+    if checked.tzinfo is None:
+        raise ValueError("the judge model availability date is invalid")
+    start = date.fromisoformat(str(value.get("price_valid_from")))
+    end = date.fromisoformat(str(value.get("price_valid_through")))
+    if not start <= date.today() <= end:
+        raise ValueError("judge model pricing is not active; update the price record")
 
 
 def _validate_answer_agreement_config(value: Any) -> None:

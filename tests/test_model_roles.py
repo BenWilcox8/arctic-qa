@@ -44,9 +44,11 @@ def test_shipped_role_contract_separates_the_writer_from_every_judge() -> None:
         roles = resolve_roles(contract, profile)
         writer = roles[WRITER_ROLE]
         strength = contract["model_strength_rank"]
+        single_provider = len({row["provider"] for row in roles.values()}) == 1
         for role in JUDGE_ROLES:
             assert roles[role]["model"] != writer["model"]
-            assert roles[role]["provider"] != writer["provider"]
+            # A single-provider profile separates by model; a mixed one by family.
+            assert single_provider or roles[role]["provider"] != writer["provider"]
         best = max(strength[roles[role]["model"]] for role in JUDGE_ROLES)
         for role in STRONGEST_JUDGE_ROLES:
             assert strength[roles[role]["model"]] == best

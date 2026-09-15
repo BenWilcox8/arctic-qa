@@ -73,6 +73,12 @@ LIVE_TEST_BUDGET_EXTENSION_CHANGE = {
 PRODUCTION_BUDGET_EXTENSION_CHANGE = {
     "away_session_total_ceiling_usd": {"from": "25.00", "to": "61.614496"}
 }
+# Chapter 2 (captain order 2026-09-15): one USD 75.00 allocation on top of the
+# USD 33.994972 spent before chapter 2. Halt at exhaustion, no reset, no replay.
+CHAPTER2_BUDGET_EXTENSION_CHANGE = {
+    "away_session_total_ceiling_usd": {"from": "61.614496", "to": "108.994972"}
+}
+CHAPTER2_CUMULATIVE_CEILING_USD = Decimal("108.994972")
 POLICY_TRANSITION_CHANGES = (
     {"live_test_maximum_papers": {"from": 20, "to": 40}},
     {
@@ -82,6 +88,7 @@ POLICY_TRANSITION_CHANGES = (
     UNBOUNDED_COUNT_CHANGE,
     LIVE_TEST_BUDGET_EXTENSION_CHANGE,
     PRODUCTION_BUDGET_EXTENSION_CHANGE,
+    CHAPTER2_BUDGET_EXTENSION_CHANGE,
 )
 CEILING_EXTENSION_CHANGE: dict[str, Any] = {}
 AUTHORIZED_CAP_REASON = "the paid request exceeds the authorized live-test cap"
@@ -405,7 +412,11 @@ def _validate_policy(path: Path) -> dict[str, Any]:
         "away_session_total_ceiling_usd",
         positive=True,
     )
-    if away_ceiling not in {Decimal("25"), Decimal("61.614496")}:
+    if away_ceiling not in {
+        Decimal("25"),
+        Decimal("61.614496"),
+        CHAPTER2_CUMULATIVE_CEILING_USD,
+    }:
         raise ValueError(
             "streaming budget value changed: away_session_total_ceiling_usd"
         )
@@ -738,11 +749,11 @@ class SharedGeminiBroker:
         )
 
     def _apply_transition_controls(self, authorization: dict[str, Any]) -> None:
-        if (
-            authorization.get("schema") == "shared-paid-call-config-transition-v2"
-            and authorization.get("changed_policy_fields")
-            != PRODUCTION_BUDGET_EXTENSION_CHANGE
-        ):
+        if authorization.get(
+            "schema"
+        ) == "shared-paid-call-config-transition-v2" and authorization.get(
+            "changed_policy_fields"
+        ) not in (PRODUCTION_BUDGET_EXTENSION_CHANGE, CHAPTER2_BUDGET_EXTENSION_CHANGE):
             self._authorized_live_test_ceiling_usd = _money(
                 authorization["maximum_authorized_cumulative_tranche_usd"],
                 "transition tranche",
@@ -806,6 +817,7 @@ class SharedGeminiBroker:
             UNBOUNDED_COUNT_CHANGE,
             LIVE_TEST_BUDGET_EXTENSION_CHANGE,
             PRODUCTION_BUDGET_EXTENSION_CHANGE,
+            CHAPTER2_BUDGET_EXTENSION_CHANGE,
         ) or self._is_ceiling_extension(authorization):
             self._validate_stream_input_gate(gate)
         direct_gate_binding = (
@@ -938,6 +950,8 @@ class SharedGeminiBroker:
                     expected_tranche = Decimal("20")
                 elif changed_policy_fields == PRODUCTION_BUDGET_EXTENSION_CHANGE:
                     expected_tranche = Decimal("61.614496")
+                elif changed_policy_fields == CHAPTER2_BUDGET_EXTENSION_CHANGE:
+                    expected_tranche = CHAPTER2_CUMULATIVE_CEILING_USD
                 else:
                     expected_tranche = Decimal("5")
                 if from_pair[1] == to_pair[1] or tranche != expected_tranche:

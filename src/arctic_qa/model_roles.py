@@ -142,13 +142,19 @@ def _validate_profile(name: str, profile: Any, strength: dict[str, Any]) -> None
                 f"model role {name}.{role} uses an unranked model: {assignment['model']}"
             )
     writer = profile[WRITER_ROLE]
+    # A profile may run inside one provider only when every role does. The
+    # chapter 2 launch needs that, because the shared broker meters one
+    # provider. The judge must still be a different model from the writer,
+    # which is the audit's point (r15 section 4.2 fix 4). A profile that mixes
+    # providers must keep every judge outside the writer's family.
+    single_provider = len({row["provider"] for row in profile.values()}) == 1
     for role in JUDGE_ROLES:
         judge = profile[role]
         if judge["model"] == writer["model"]:
             raise ValueError(
                 f"model role profile {name} judges with the writer model: {role}"
             )
-        if judge["provider"] == writer["provider"]:
+        if not single_provider and judge["provider"] == writer["provider"]:
             raise ValueError(
                 f"model role profile {name} judges inside the writer family: {role}"
             )

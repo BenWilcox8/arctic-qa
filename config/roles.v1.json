@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.1.0",
+  "schema_version": "1.2.0",
   "contract_version": "generation-model-roles-v1",
   "effective_date": "2026-09-15",
   "qualification": "Starting configuration. No Arctic QA comparison has validated these assignments. Role separation removes a correlated-error source; it does not establish independent error evidence.",
@@ -12,28 +12,148 @@
   },
   "profiles": {
     "strongest": {
-      "extractor": {"provider": "claude", "model": "claude-opus-5"},
-      "question_writer": {"provider": "claude", "model": "claude-opus-5"},
-      "direct_joint": {"provider": "claude", "model": "claude-opus-5"},
-      "distractor_writer": {"provider": "claude", "model": "claude-opus-5"},
-      "correction": {"provider": "claude", "model": "claude-opus-5"},
-      "standalone_verifier": {"provider": "gemini", "model": "gemini-3.1-pro-preview", "lifecycle": "preview"},
-      "option_verifier": {"provider": "gemini", "model": "gemini-3.1-pro-preview", "lifecycle": "preview"},
-      "reconstructor": {"provider": "gemini", "model": "gemini-3.1-pro-preview", "lifecycle": "preview"},
-      "answer_verifier": {"provider": "gemini", "model": "gemini-3.1-pro-preview", "lifecycle": "preview"},
-      "answer_judge": {"provider": "gemini", "model": "gemini-3.1-flash-lite", "lifecycle": "stable"}
+      "extractor": {
+        "provider": "claude",
+        "model": "claude-opus-5"
+      },
+      "question_writer": {
+        "provider": "claude",
+        "model": "claude-opus-5"
+      },
+      "direct_joint": {
+        "provider": "claude",
+        "model": "claude-opus-5"
+      },
+      "distractor_writer": {
+        "provider": "claude",
+        "model": "claude-opus-5"
+      },
+      "correction": {
+        "provider": "claude",
+        "model": "claude-opus-5"
+      },
+      "standalone_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "option_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "reconstructor": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "answer_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "answer_judge": {
+        "provider": "gemini",
+        "model": "gemini-3.1-flash-lite",
+        "lifecycle": "stable"
+      }
     },
     "cost_aware": {
-      "extractor": {"provider": "claude", "model": "claude-sonnet-5"},
-      "question_writer": {"provider": "claude", "model": "claude-sonnet-5"},
-      "direct_joint": {"provider": "claude", "model": "claude-sonnet-5"},
-      "distractor_writer": {"provider": "claude", "model": "claude-sonnet-5"},
-      "correction": {"provider": "claude", "model": "claude-sonnet-5"},
-      "standalone_verifier": {"provider": "gemini", "model": "gemini-3.1-pro-preview", "lifecycle": "preview"},
-      "option_verifier": {"provider": "gemini", "model": "gemini-3.1-pro-preview", "lifecycle": "preview"},
-      "reconstructor": {"provider": "gemini", "model": "gemini-3.8-flash", "lifecycle": "stable"},
-      "answer_verifier": {"provider": "gemini", "model": "gemini-3.8-flash", "lifecycle": "stable"},
-      "answer_judge": {"provider": "gemini", "model": "gemini-3.1-flash-lite", "lifecycle": "stable"}
+      "extractor": {
+        "provider": "claude",
+        "model": "claude-sonnet-5"
+      },
+      "question_writer": {
+        "provider": "claude",
+        "model": "claude-sonnet-5"
+      },
+      "direct_joint": {
+        "provider": "claude",
+        "model": "claude-sonnet-5"
+      },
+      "distractor_writer": {
+        "provider": "claude",
+        "model": "claude-sonnet-5"
+      },
+      "correction": {
+        "provider": "claude",
+        "model": "claude-sonnet-5"
+      },
+      "standalone_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "option_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "reconstructor": {
+        "provider": "gemini",
+        "model": "gemini-3.8-flash",
+        "lifecycle": "stable"
+      },
+      "answer_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.8-flash",
+        "lifecycle": "stable"
+      },
+      "answer_judge": {
+        "provider": "gemini",
+        "model": "gemini-3.1-flash-lite",
+        "lifecycle": "stable"
+      }
+    },
+    "gemini_separated": {
+      "extractor": {
+        "provider": "gemini",
+        "model": "gemini-3.8-flash"
+      },
+      "question_writer": {
+        "provider": "gemini",
+        "model": "gemini-3.8-flash"
+      },
+      "direct_joint": {
+        "provider": "gemini",
+        "model": "gemini-3.8-flash"
+      },
+      "distractor_writer": {
+        "provider": "gemini",
+        "model": "gemini-3.8-flash"
+      },
+      "correction": {
+        "provider": "gemini",
+        "model": "gemini-3.8-flash"
+      },
+      "standalone_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "option_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "reconstructor": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "answer_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "answer_judge": {
+        "provider": "gemini",
+        "model": "gemini-3.1-flash-lite",
+        "lifecycle": "stable"
+      }
     }
+  },
+  "profile_notes": {
+    "gemini_separated": "Chapter 2 launch profile. The shared paid-call broker meters one provider, so every role runs on Gemini. The writer is gemini-3.8-flash; every judge is a different model, and the source-blind and option gates carry the strongest ranked judge model, as the r15 audit requires."
   }
 }

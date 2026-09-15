@@ -60,6 +60,8 @@ ACCESS_ITEM_SCHEMA = "article-access-item-v1"
 ACCESS_PROGRESS_SCHEMA = "article-access-progress-v1"
 ACCESS_RECEIPT_SCHEMA = "article-access-run-receipt-v1"
 
+STREAM_INPUT_DIRECTORY = "streaming-input"
+
 DEFAULT_JOBS = 2
 _READY = "full_text_ready"
 
@@ -632,6 +634,130 @@ def _write_access_run(
         },
     )
     return {"selection_keys_sha256": selection_keys_sha256}
+
+
+def materialize_stream_input(
+    root: Path, *, freeze_id: str, run_id: str
+) -> dict[str, Any]:
+    """Write the gate-bindable streaming input for one chapter 2 freeze.
+
+    The streaming execution gate binds its input through the hashes of the
+    access run manifest, the access run receipt, the frozen manifest and the
+    frozen order. The chapter 2 access run records its selection but not those
+    bindings, so this writes a second access run, under the chapter 2 root,
+    that carries them and repeats the same items. Nothing is retrieved, no
+    model runs, and no existing chapter 2 object changes. The write is
+    idempotent: a repeated call verifies the stored objects and writes nothing.
+    """
+    if not freeze_id or not run_id or "/" in run_id:
+        raise ValueError("the chapter 2 stream input needs a freeze id and a run id")
+    freeze_dir = root / "corpus-freeze" / freeze_id
+    access_dir = root / "article-access" / freeze_id
+    descriptor_file = freeze_dir / "manifest-descriptor.json"
+    manifest_file = freeze_dir / "chapter2-corpus-manifest.jsonl"
+    descriptor = _read_json(descriptor_file)
+    if (
+        descriptor.get("schema") != DESCRIPTOR_SCHEMA
+        or descriptor.get("freeze_id") != freeze_id
+    ):
+        raise ValueError("the chapter 2 freeze descriptor is invalid")
+    manifest_sha256 = sha256_file(manifest_file)
+    if manifest_sha256 != descriptor.get("manifest_sha256"):
+        raise ValueError("the chapter 2 corpus manifest hash changed")
+    access_manifest = _read_json(access_dir / "run-manifest.json")
+    access_receipt = _read_json(access_dir / "run-receipt.json")
+    selection = access_manifest.get("selection")
+    if not isinstance(selection, list) or not selection:
+        raise ValueError("the chapter 2 access run has no selection")
+    order_sha256 = sha256_bytes(
+        canonical_json([row["candidate_key"] for row in selection]).encode()
+    )
+    if (
+        access_manifest.get("schema") != ACCESS_MANIFEST_SCHEMA
+        or access_manifest.get("target_total") != len(selection)
+        or access_manifest.get("selection_keys_sha256") != order_sha256
+        or access_receipt.get("selection_keys_sha256") != order_sha256
+        or descriptor.get("order_sha256") != order_sha256
+        or descriptor.get("record_count") != len(selection)
+    ):
+        raise ValueError("the chapter 2 access run does not match its freeze")
+    output_dir = root / STREAM_INPUT_DIRECTORY / run_id
+    (output_dir / "items").mkdir(mode=0o700, parents=True, exist_ok=True)
+    manifest = {
+        "schema": ACCESS_MANIFEST_SCHEMA,
+        "run_id": run_id,
+        "target_total": len(selection),
+        "selection_keys_sha256": order_sha256,
+        "remaining_order_sha256": order_sha256,
+        "frozen_manifest_sha256": manifest_sha256,
+        "frozen_manifest_descriptor_sha256": sha256_file(descriptor_file),
+        "freeze_id": freeze_id,
+        "purpose": "Chapter 2 streaming input bound to the chapter 2 corpus freeze.",
+        "scientific_eligibility_effect": "none",
+        "chapter2_corpus_source_version": CORPUS_SOURCE_VERSION,
+        "chapter2_access_run_dir": str(access_dir.resolve()),
+        "chapter2_access_manifest_sha256": sha256_file(
+            access_dir / "run-manifest.json"
+        ),
+        "chapter2_access_receipt_sha256": sha256_file(access_dir / "run-receipt.json"),
+        "selection": selection,
+    }
+    _write_once(output_dir / "run-manifest.json", manifest)
+    for position, row in enumerate(selection, start=1):
+        item = _read_json(access_dir / "items" / f"item-{position:06d}.json")
+        if (
+            item.get("schema") != ACCESS_ITEM_SCHEMA
+            or item.get("candidate_key") != row["candidate_key"]
+            or item.get("access_state") != _READY
+            or item.get("identity_verified") is not True
+        ):
+            raise ValueError("a chapter 2 access item does not match its selection")
+        item["run_id"] = run_id
+        _write_once(output_dir / "items" / f"item-{position:06d}.json", item)
+    counts = {
+        "checked": len(selection),
+        "full_text_ready": len(selection),
+        "ready_for_eligibility": len(selection),
+        "target": len(selection),
+    }
+    _write_once(
+        output_dir / "progress.json",
+        {
+            "schema": ACCESS_PROGRESS_SCHEMA,
+            "state": "completed",
+            "run_id": run_id,
+            "current_stage": "materialized_from_chapter2_freeze",
+            "counts": counts,
+            "model_calls": 0,
+            "paid_calls": 0,
+        },
+    )
+    receipt = {
+        "schema": ACCESS_RECEIPT_SCHEMA,
+        "state": "completed",
+        "run_id": run_id,
+        "run_manifest_sha256": sha256_file(output_dir / "run-manifest.json"),
+        "frozen_manifest_sha256": manifest_sha256,
+        "frozen_manifest_descriptor_sha256": manifest[
+            "frozen_manifest_descriptor_sha256"
+        ],
+        "selection_keys_sha256": order_sha256,
+        "remaining_order_sha256": order_sha256,
+        "counts": counts,
+        "model_calls": 0,
+        "paid_calls": 0,
+        "scientific_eligibility_effect": "none",
+    }
+    _write_once(output_dir / "run-receipt.json", receipt)
+    return {
+        "access_run_dir": str(output_dir.resolve()),
+        "run_id": run_id,
+        "target_total": len(selection),
+        "run_manifest_sha256": receipt["run_manifest_sha256"],
+        "run_receipt_sha256": sha256_file(output_dir / "run-receipt.json"),
+        "frozen_manifest_sha256": manifest_sha256,
+        "order_sha256": order_sha256,
+    }
 
 
 def _run_tasks(tasks: list[tuple[Any, ...]], jobs: int) -> Iterator[dict[str, Any]]:
