@@ -465,6 +465,33 @@ def test_the_chapter_two_access_run_matches_the_streaming_contract(corpus) -> No
         text = Path(item["extraction_path"])
         assert sha256_bytes(text.read_bytes()) == item["extraction_sha256"]
 
+    # run_stream validates the access run directory before it does anything with
+    # a provider. Call it with providers it cannot use: the run must get past
+    # every access check and fail later, never on the access contract.
+    from arctic_qa.streaming import run_stream
+
+    access_contract_errors = {
+        "the article-access run is not complete",
+        "the article-access completion receipt is missing",
+        "the article-access selection is missing",
+        "the ordered selection count is inconsistent",
+        "max papers cannot exceed the ordered selection count",
+        "the ordered selection does not match its access item",
+    }
+    with pytest.raises(Exception) as failure:  # noqa: B017 - any later failure
+        run_stream(
+            None,
+            corpus["root"],
+            run_id="chapter2-offline",
+            campaign_id="chapter2-offline",
+            access_run_dir=access_dir,
+            eligibility_run_dir=corpus["root"] / "no-eligibility-run",
+            author=object(),
+            verifier=object(),
+            max_papers=len(manifest["selection"]),
+        )
+    assert str(failure.value) not in access_contract_errors
+
 
 def test_the_chapter_two_build_writes_nothing_outside_its_own_root(corpus) -> None:
     namespace = corpus["root"].parent
