@@ -369,3 +369,47 @@ def test_the_rescreen_action_is_offered_by_the_command_line() -> None:
     )
     assert "geography-rescreen" in action.choices
     assert "geography-rescreen-dry-run" in action.choices
+
+
+def test_the_status_reports_an_exhausted_paper_as_unresolved_not_queued(
+    tmp_path: Path,
+) -> None:
+    """A spent paper must not show as queued for the rest of the run."""
+    run = tmp_path / "run"
+    (run / "unresolved").mkdir(parents=True)
+    (run / "unresolved" / "k.json").write_text(
+        canonical_json(
+            {
+                "state": eligibility.UNRESOLVED_STATE,
+                "job_key": "k",
+                "candidate_key": "10.1/x",
+                "attempts": eligibility.MAXIMUM_FORMAT_ATTEMPTS,
+                "format_errors": ["eligible_arctic_scope_phrase_unbound"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run / "budget-ledger.json").write_text(canonical_json({}), encoding="utf-8")
+
+    status = eligibility._status(
+        run,
+        config={"model": "test-model"},
+        sources=[{"candidate_key": "10.1/x"}],
+        key_present=True,
+        enabled=True,
+        state="paused",
+        live_call_made=False,
+        estimated=0,
+    )
+    assert status["counts"]["unresolved_rescreenable"] == 1
+    assert status["counts"]["screening_error"] == 0
+    assert status["counts"]["queued"] == 0
+    rows = [
+        json.loads(line)
+        for line in (run / "gemini-overlay.ndjson")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line
+    ]
+    assert [row["gemini_status"] for row in rows] == ["unresolved_rescreenable"]
+    assert rows[0]["gemini_decision"] is None

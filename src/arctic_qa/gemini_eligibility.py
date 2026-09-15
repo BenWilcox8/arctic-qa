@@ -50,6 +50,9 @@ MAXIMUM_FORMAT_ATTEMPTS = 2
 UNRESOLVED_STATE = "unresolved_rescreenable"
 
 
+_WRAPPED_WORD = re.compile(r"(?<=[^\W\d_])[-" + chr(0x2010) + r"]\s*\n\s*")
+
+
 def _normalize_for_binding(text: str) -> str:
     """Fold only the presentation differences that text extraction introduces.
 
@@ -59,9 +62,6 @@ def _normalize_for_binding(text: str) -> str:
     """
     folded = unicodedata.normalize("NFKC", text.replace(chr(0x00AD), ""))
     return " ".join(_WRAPPED_WORD.sub("", folded).split())
-
-
-_WRAPPED_WORD = re.compile(r"(?<=[^\W\d_])[-" + chr(0x2010) + r"]\s*\n\s*")
 
 
 def format_repairable(errors: Any) -> bool:
@@ -176,7 +176,8 @@ def _validate_answer_agreement_config(value: Any) -> None:
         "output_usd_per_million_tokens_including_thinking": "1.50",
         "price_source": "https://ai.google.dev/gemini-api/docs/pricing",
         "model_source": (
-            "https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite"
+            "https://ai.google.dev/gemini-api/docs/models/"
+            "gemini-3.1-flash-lite"
         ),
         "thinking_source": (
             "https://ai.google.dev/gemini-api/docs/generate-content/thinking"
@@ -235,7 +236,8 @@ def _validate_legacy_flash_lite_answer_agreement_config(value: Any) -> None:
         "output_usd_per_million_tokens_including_thinking": "1.50",
         "price_source": "https://ai.google.dev/gemini-api/docs/pricing",
         "model_source": (
-            "https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite"
+            "https://ai.google.dev/gemini-api/docs/models/"
+            "gemini-3.1-flash-lite"
         ),
         "thinking_source": (
             "https://ai.google.dev/gemini-api/docs/generate-content/thinking"
@@ -1547,7 +1549,9 @@ def _span_catalog_v2(
         errors.append("evidence_catalog_changed")
     try:
         manifest_sha256 = sha256_bytes(
-            canonical_json(_span_manifest_v2(blocks, response_schema_version)).encode()
+            canonical_json(
+                _span_manifest_v2(blocks, response_schema_version)
+            ).encode()
         )
     except (KeyError, TypeError):
         manifest_sha256 = None
@@ -2077,8 +2081,28 @@ def _status(
         "screening_error": 0,
         "too_large_not_ready": 0,
         "ambiguous_charge": 0,
+        "unresolved_rescreenable": 0,
     }
     overlay = []
+    for path in (run_dir / "unresolved").glob("*.json"):
+        row = _read(path)
+        # A paper whose repair attempts are spent is out of this run and is not a
+        # screening error. A later prompt, schema or policy version screens it
+        # again under a new job key.
+        if int(row.get("attempts") or 0) < MAXIMUM_FORMAT_ATTEMPTS:
+            continue
+        counts["unresolved_rescreenable"] += 1
+        overlay.append(
+            {
+                "schema": "gemini-eligibility-overlay-row-v1",
+                "run_id": run_dir.name,
+                "ready_source_keys_sha256": source_keys_hash,
+                "candidate_key": row["candidate_key"],
+                "gemini_status": UNRESOLVED_STATE,
+                "gemini_decision": None,
+                "job_key": row["job_key"],
+            }
+        )
     for directory, fixed in (
         ("jobs", None),
         ("errors", "screening_error"),

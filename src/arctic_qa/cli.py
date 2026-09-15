@@ -453,9 +453,7 @@ def parser() -> argparse.ArgumentParser:
     continuation.add_argument("--evidence-file", type=Path, required=True)
     continuation.add_argument("--authorized-run-id", required=True)
     continuation.add_argument("--operator-id", required=True)
-    continuation.add_argument(
-        "--streaming-budget-policy-file", type=Path, required=True
-    )
+    continuation.add_argument("--streaming-budget-policy-file", type=Path, required=True)
     continuation.add_argument("--price-config-file", type=Path, required=True)
     continuation.add_argument("--execution-gate-file", type=Path, required=True)
     continuation.add_argument("--shared-ledger-file", type=Path, required=True)
@@ -483,7 +481,9 @@ def parser() -> argparse.ArgumentParser:
     orphaned.add_argument("--model-receipts-dir", type=Path, required=True)
     orphaned.add_argument("--ledger-config-transition-file", type=Path)
     orphaned.add_argument("--credential-file", type=Path, required=True)
-    orphaned.add_argument("--prior-construction-spend-usd", type=Decimal, required=True)
+    orphaned.add_argument(
+        "--prior-construction-spend-usd", type=Decimal, required=True
+    )
 
     settle = commands.add_parser(
         "settle-pretransport-reservation",
