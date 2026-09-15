@@ -169,7 +169,9 @@ def _validate_batch_shared_ledger(
     try:
         reserved_expected = sum(
             (
-                _money(request.get("reserved_usd"), "retained reservation", positive=True)
+                _money(
+                    request.get("reserved_usd"), "retained reservation", positive=True
+                )
                 for request in ledger["requests"].values()
                 if request.get("state") == "orphaned_no_replay"
             ),
@@ -177,7 +179,9 @@ def _validate_batch_shared_ledger(
         )
         ambiguous_expected = sum(
             (
-                _money(request.get("reserved_usd"), "ambiguous reservation", positive=True)
+                _money(
+                    request.get("reserved_usd"), "ambiguous reservation", positive=True
+                )
                 for request in ledger["requests"].values()
                 if request.get("state") == "ambiguous_charge"
             ),
@@ -208,7 +212,10 @@ def _validate_batch_shared_ledger(
             raise ValueError(
                 "the shared paid-call ledger has an unreviewed submitted liability"
             )
-        if state in {"orphaned_no_replay", "ambiguous_charge"} and request_key not in liabilities:
+        if (
+            state in {"orphaned_no_replay", "ambiguous_charge"}
+            and request_key not in liabilities
+        ):
             raise ValueError(
                 "the shared paid-call ledger has a retained liability without "
                 "validated no-replay recovery evidence"
@@ -319,9 +326,9 @@ class BatchStore:
                     "model_source": self.config["model_source"],
                 },
                 "answer_agreement": {
-                    "model": model_config_for_stage(
-                        self.config, "answer_agreement"
-                    )["model"],
+                    "model": model_config_for_stage(self.config, "answer_agreement")[
+                        "model"
+                    ],
                     "pricing": _batch_pricing(
                         model_config_for_stage(self.config, "answer_agreement")
                     ),
@@ -379,9 +386,7 @@ class BatchStore:
         pricing = state.get("pricing") or {}
         if pricing != self._initial_state()["pricing"]:
             raise ValueError("the batch pricing record changed")
-        if state.get("registered_models") != self._initial_state()[
-            "registered_models"
-        ]:
+        if state.get("registered_models") != self._initial_state()["registered_models"]:
             raise ValueError("the batch model registry changed")
 
     def read(self) -> dict[str, Any]:
@@ -489,9 +494,7 @@ class BatchStore:
         )
         first_model = self.prepared_record(keys[0])["model"]
         keys = [
-            key
-            for key in keys
-            if self.prepared_record(key)["model"] == first_model
+            key for key in keys if self.prepared_record(key)["model"] == first_model
         ]
         lines = []
         total = Decimal("0")
@@ -502,12 +505,9 @@ class BatchStore:
             total += Decimal(request["reserved_usd"])
             stages[request["stage"]] = stages.get(request["stage"], 0) + 1
         pricing_records = {
-            canonical_json(self.prepared_record(key)["batch_pricing"])
-            for key in keys
+            canonical_json(self.prepared_record(key)["batch_pricing"]) for key in keys
         }
-        model_sources = {
-            self.prepared_record(key)["model_source"] for key in keys
-        }
+        model_sources = {self.prepared_record(key)["model_source"] for key in keys}
         if len(pricing_records) != 1 or len(model_sources) != 1:
             raise ValueError("one batch round must use one model price record")
         round_pricing = json.loads(next(iter(pricing_records)))
@@ -1164,9 +1164,7 @@ def select_continuation(
         for row in rows
         if row["state"] != "completed" and row["request_key"] not in liabilities
     )
-    provisional = (
-        progress.get("state") == "running" or bool(unsettled)
-    )
+    provisional = progress.get("state") == "running" or bool(unsettled)
     if require_stopped and provisional:
         raise ValueError("the production campaign has not reached a settled stop")
     identity = {
@@ -1423,11 +1421,7 @@ def prepare_pipeline(
         "models": sorted(
             {
                 MODEL,
-                str(
-                    model_config_for_stage(
-                        store.config, "answer_agreement"
-                    )["model"]
-                ),
+                str(model_config_for_stage(store.config, "answer_agreement")["model"]),
             }
         ),
         "price_config_sha256": sha256_file(store.price_config_file),

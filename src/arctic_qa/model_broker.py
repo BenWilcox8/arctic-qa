@@ -141,16 +141,15 @@ AMBIGUOUS_CONTINUATION_FIELDS = {
     "authorized_at_utc",
     "operator_id",
 }
-RECEIVED_MAX_TOKENS_CONTINUATION_FIELDS = (
-    AMBIGUOUS_CONTINUATION_FIELDS
-    - {"http_status", "received_receipt_absent"}
-    | {
-        "received_receipt_sha256",
-        "request_trace_sha256",
-        "finish_reason",
-        "received_receipt_present",
-    }
-)
+RECEIVED_MAX_TOKENS_CONTINUATION_FIELDS = AMBIGUOUS_CONTINUATION_FIELDS - {
+    "http_status",
+    "received_receipt_absent",
+} | {
+    "received_receipt_sha256",
+    "request_trace_sha256",
+    "finish_reason",
+    "received_receipt_present",
+}
 ORPHANED_CONTINUATION_FIELDS = {
     "schema",
     "request_key",
@@ -232,9 +231,7 @@ def _is_received_max_tokens_ambiguous_case(
     trace: dict[str, Any],
     request: dict[str, Any],
 ) -> bool:
-    if not all(
-        isinstance(value, dict) for value in (final, received, trace, request)
-    ):
+    if not all(isinstance(value, dict) for value in (final, received, trace, request)):
         return False
     response = received.get("response")
     if not isinstance(response, dict):
@@ -243,8 +240,7 @@ def _is_received_max_tokens_ambiguous_case(
     usage = response.get("usageMetadata")
     if (
         not isinstance(candidates, list)
-        or candidates
-        != [{"content": {}, "finishReason": "MAX_TOKENS", "index": 0}]
+        or candidates != [{"content": {}, "finishReason": "MAX_TOKENS", "index": 0}]
         or not isinstance(usage, dict)
         or "candidatesTokenCount" in usage
         or "thoughtsTokenCount" in usage
@@ -312,7 +308,9 @@ def activate_exclusive_batch_mode(
         with ledger_lock_path.open("a+") as ledger_lock:
             fcntl.flock(ledger_lock, fcntl.LOCK_EX)
             if sha256_file(ledger_file) != expected_ledger_sha256:
-                raise ValueError("the shared paid-call ledger changed before batch activation")
+                raise ValueError(
+                    "the shared paid-call ledger changed before batch activation"
+                )
             ledger = _read(ledger_file)
             if (
                 ledger.get("schema") != "shared-paid-call-ledger-v1"
@@ -339,7 +337,9 @@ def activate_exclusive_batch_mode(
                 )
                 comparable["activated_at_utc"] = existing.get("activated_at_utc")
                 if existing != comparable:
-                    raise ValueError("another exclusive batch mode owns the shared ledger")
+                    raise ValueError(
+                        "another exclusive batch mode owns the shared ledger"
+                    )
                 return existing
             atomic_json(marker_path, marker, immutable=True)
             return marker
@@ -471,7 +471,10 @@ def _gate_succeeds_transition_review(
 ) -> bool:
     """Accept a reviewed successor gate without changing an old transition receipt."""
     successor = gate.get("supersedes_config_transition_review")
-    if not isinstance(successor, dict) or set(successor) != TRANSITION_GATE_SUCCESSOR_FIELDS:
+    if (
+        not isinstance(successor, dict)
+        or set(successor) != TRANSITION_GATE_SUCCESSOR_FIELDS
+    ):
         return False
     if any(successor[field] != authorization[field] for field in successor):
         return False
@@ -808,9 +811,11 @@ class SharedGeminiBroker:
         direct_gate_binding = (
             authorization["execution_gate_sha256"]
             == sha256_file(self.execution_gate_file)
-            and authorization["integrated_code_commit"] == gate["integrated_code_commit"]
+            and authorization["integrated_code_commit"]
+            == gate["integrated_code_commit"]
             and authorization["review_record"] == gate["review_record"]
-            and authorization["review_record_sha256"] == gate.get("review_record_sha256")
+            and authorization["review_record_sha256"]
+            == gate.get("review_record_sha256")
         )
         if not direct_gate_binding and not _gate_succeeds_transition_review(
             gate, authorization
@@ -870,7 +875,10 @@ class SharedGeminiBroker:
                 if sha256_file(path) != predecessor:
                     continue
                 event = self._read_transition_event(path)
-                if self._transition_pairs(event["authorization"], identity)[1] == from_pair:
+                if (
+                    self._transition_pairs(event["authorization"], identity)[1]
+                    == from_pair
+                ):
                     matching_predecessors.append(path)
             if len(matching_predecessors) != 1:
                 raise ValueError("the price configuration predecessor changed")
@@ -1689,12 +1697,9 @@ class SharedGeminiBroker:
             family_id = value.get("family_id")
             item_id = value.get("item_id")
             if value.get("schema") == ACCEPTED_ITEM_V1_SCHEMA:
-                expected_name = (
-                    f"accepted-{sha256_bytes(str(family_id).encode())}.json"
-                )
+                expected_name = f"accepted-{sha256_bytes(str(family_id).encode())}.json"
                 if (
-                    set(value)
-                    != {"schema", "family_id", "item_id", "recorded_at_utc"}
+                    set(value) != {"schema", "family_id", "item_id", "recorded_at_utc"}
                     or not isinstance(family_id, str)
                     or not family_id
                     or not isinstance(item_id, str)
@@ -1777,15 +1782,30 @@ class SharedGeminiBroker:
         except (OSError, ValueError, json.JSONDecodeError):
             return False
         required = {
-            "schema", "request_key", "ledger_sha256_before", "request_identity",
-            "sidecars_absent", "traceback_evidence_file", "traceback_evidence_sha256",
-            "review_file", "review_file_sha256", "gate_sha256",
-            "config_transition_sha256", "actual_cost_usd", "live_call_made",
+            "schema",
+            "request_key",
+            "ledger_sha256_before",
+            "request_identity",
+            "sidecars_absent",
+            "traceback_evidence_file",
+            "traceback_evidence_sha256",
+            "review_file",
+            "review_file_sha256",
+            "gate_sha256",
+            "config_transition_sha256",
+            "actual_cost_usd",
+            "live_call_made",
             "settled_at_utc",
         }
         identity_keys = {
-            "run_id", "stage", "paper_id", "family_id", "source_version_id",
-            "request_sha256", "reserved_usd", "submitted_at_utc",
+            "run_id",
+            "stage",
+            "paper_id",
+            "family_id",
+            "source_version_id",
+            "request_sha256",
+            "reserved_usd",
+            "submitted_at_utc",
         }
         if (
             not isinstance(event, dict)
@@ -1794,7 +1814,8 @@ class SharedGeminiBroker:
             or event.get("request_key") != request.get("request_key")
             or event.get("request_identity")
             != {key: request.get(key) for key in identity_keys}
-            or event.get("sidecars_absent") != ["final", "received", "submitted", "trace"]
+            or event.get("sidecars_absent")
+            != ["final", "received", "submitted", "trace"]
             or event.get("actual_cost_usd") != "0"
             or event.get("live_call_made") is not False
             or event.get("config_transition_sha256")
@@ -1817,7 +1838,9 @@ class SharedGeminiBroker:
             ("review_file", "review_file_sha256"),
         ):
             evidence_path = Path(str(event.get(path_key) or ""))
-            if not evidence_path.is_file() or sha256_file(evidence_path) != event.get(hash_key):
+            if not evidence_path.is_file() or sha256_file(evidence_path) != event.get(
+                hash_key
+            ):
                 return False
         return True
 
@@ -1888,9 +1911,10 @@ class SharedGeminiBroker:
 
     def _read_ambiguous_continuation(self, path: Path) -> dict[str, Any]:
         event = _read(path)
-        if isinstance(event, dict) and event.get(
-            "schema"
-        ) == RECEIVED_MAX_TOKENS_CONTINUATION_SCHEMA:
+        if (
+            isinstance(event, dict)
+            and event.get("schema") == RECEIVED_MAX_TOKENS_CONTINUATION_SCHEMA
+        ):
             return self._validate_received_max_tokens_continuation(event, path)
         if (
             not isinstance(event, dict)
@@ -1922,8 +1946,7 @@ class SharedGeminiBroker:
             or event.get("reservation_policy")
             != AMBIGUOUS_CONTINUATION_RESERVATION_POLICY
             or event.get("scope") != "unrelated_families_only"
-            or event.get("skip_reason_code")
-            != "operational_ambiguous_charge_http_500"
+            or event.get("skip_reason_code") != "operational_ambiguous_charge_http_500"
             or not str(event.get("affected_family_id") or "").strip()
             or not str(event.get("authorized_run_id") or "").strip()
             or not str(event.get("integrated_code_commit") or "").strip()
@@ -1948,7 +1971,10 @@ class SharedGeminiBroker:
             )
         ):
             raise ValueError("an ambiguous continuation request identity changed")
-        if _money(event.get("reserved_usd"), "continuation reservation", positive=True) <= 0:
+        if (
+            _money(event.get("reserved_usd"), "continuation reservation", positive=True)
+            <= 0
+        ):
             raise ValueError("an ambiguous continuation reservation changed")
         evidence_path = Path(str(event.get("evidence_file") or "")).resolve()
         review_path = Path(str(event.get("review_file") or "")).resolve()
@@ -2143,8 +2169,7 @@ class SharedGeminiBroker:
                 if (
                     not received_path.is_file()
                     or not trace_path.is_file()
-                    or event["received_receipt_sha256"]
-                    != sha256_file(received_path)
+                    or event["received_receipt_sha256"] != sha256_file(received_path)
                     or event["request_trace_sha256"] != sha256_file(trace_path)
                     or not _is_received_max_tokens_ambiguous_case(
                         final,
@@ -2183,11 +2208,9 @@ class SharedGeminiBroker:
             if not re.fullmatch(r"[a-f0-9]{64}", str(event.get(field) or "")):
                 raise ValueError("an orphaned continuation event changed")
         if (
-            event.get("reservation_policy")
-            != ORPHANED_CONTINUATION_RESERVATION_POLICY
+            event.get("reservation_policy") != ORPHANED_CONTINUATION_RESERVATION_POLICY
             or event.get("scope") != "unrelated_families_only"
-            or event.get("skip_reason_code")
-            != "operational_orphaned_request_no_replay"
+            or event.get("skip_reason_code") != "operational_orphaned_request_no_replay"
             or not str(event.get("affected_family_id") or "").strip()
             or not str(event.get("authorized_run_id") or "").strip()
             or not str(event.get("integrated_code_commit") or "").strip()
@@ -2196,8 +2219,14 @@ class SharedGeminiBroker:
             raise ValueError("an orphaned continuation event changed")
         identity = event.get("request_identity")
         if not isinstance(identity, dict) or set(identity) != {
-            "run_id", "stage", "paper_id", "family_id", "source_version_id",
-            "request_sha256", "reserved_usd", "submitted_at_utc",
+            "run_id",
+            "stage",
+            "paper_id",
+            "family_id",
+            "source_version_id",
+            "request_sha256",
+            "reserved_usd",
+            "submitted_at_utc",
         }:
             raise ValueError("an orphaned continuation event changed")
         try:
@@ -2218,7 +2247,11 @@ class SharedGeminiBroker:
             event = self._read_orphaned_continuation(path)
             request_key = event["request_key"]
             request = ledger["requests"].get(request_key)
-            if request_key in events or request is None or request.get("state") != "orphaned_no_replay":
+            if (
+                request_key in events
+                or request is None
+                or request.get("state") != "orphaned_no_replay"
+            ):
                 raise ValueError("an orphaned continuation request changed")
             if any(
                 event["request_identity"].get(field) != request.get(field)
@@ -2247,7 +2280,8 @@ class SharedGeminiBroker:
                 raise ValueError("an orphaned continuation review evidence changed")
             events[request_key] = event
         if {
-            key for key, request in ledger["requests"].items()
+            key
+            for key, request in ledger["requests"].items()
             if request.get("state") == "orphaned_no_replay"
         } != set(events):
             raise ValueError("an orphaned request lacks its continuation event")
@@ -3221,7 +3255,9 @@ class SharedGeminiBroker:
                 ledger = self._validated_ledger()
                 request = ledger["requests"].get(request_key)
                 if request is None:
-                    raise ValueError("the ambiguous continuation request does not exist")
+                    raise ValueError(
+                        "the ambiguous continuation request does not exist"
+                    )
                 continuation_path = (
                     self.receipts_dir / f"ambiguous-continuation-{request_key}.json"
                 )
@@ -3245,7 +3281,9 @@ class SharedGeminiBroker:
                 ):
                     raise ValueError("the ambiguous-charge halt state changed")
                 if request.get("run_id") != authorized_run_id:
-                    raise ValueError("the request is outside the authorized continuation run")
+                    raise ValueError(
+                        "the request is outside the authorized continuation run"
+                    )
                 gate = _validate_gate(self.execution_gate_file, request["phase"])
                 gate_sha256 = sha256_file(self.execution_gate_file)
                 if (
@@ -3262,8 +3300,7 @@ class SharedGeminiBroker:
                 )
                 http_500_case = (
                     final.get("state") == "ambiguous_charge"
-                    and final.get("error_class")
-                    == "known_http_response_unknown_charge"
+                    and final.get("error_class") == "known_http_response_unknown_charge"
                     and final.get("http_status") == 500
                     and final.get("live_call_made") is True
                     and "response" not in final
@@ -3467,7 +3504,9 @@ class SharedGeminiBroker:
                     or not review_file.is_file()
                     or not evidence_file.is_file()
                 ):
-                    raise ValueError("the orphaned continuation custody evidence is absent")
+                    raise ValueError(
+                        "the orphaned continuation custody evidence is absent"
+                    )
                 evidence = _read(evidence_file)
                 expected_evidence = {
                     "schema": ORPHANED_CONTINUATION_EVIDENCE_SCHEMA,
@@ -3484,7 +3523,9 @@ class SharedGeminiBroker:
                 }
                 if evidence != expected_evidence:
                     raise ValueError("the orphaned continuation evidence is not exact")
-                reserved = _money(request["reserved_usd"], "orphan reservation", positive=True)
+                reserved = _money(
+                    request["reserved_usd"], "orphan reservation", positive=True
+                )
                 event = {
                     "schema": ORPHANED_CONTINUATION_SCHEMA,
                     "request_key": request_key,
@@ -3493,8 +3534,13 @@ class SharedGeminiBroker:
                     "request_identity": {
                         key: request[key]
                         for key in (
-                            "run_id", "stage", "paper_id", "family_id",
-                            "source_version_id", "request_sha256", "reserved_usd",
+                            "run_id",
+                            "stage",
+                            "paper_id",
+                            "family_id",
+                            "source_version_id",
+                            "request_sha256",
+                            "reserved_usd",
                             "submitted_at_utc",
                         )
                     },
@@ -3581,10 +3627,15 @@ class SharedGeminiBroker:
                 request = ledger["requests"].get(request_key)
                 if request is None:
                     raise ValueError("the reviewed reservation does not exist")
-                settlement_path = self.receipts_dir / f"{request_key}.pretransport-settlement.json"
+                settlement_path = (
+                    self.receipts_dir / f"{request_key}.pretransport-settlement.json"
+                )
                 applied_hash = request.get("pretransport_settlement_sha256")
                 if applied_hash is not None:
-                    if not settlement_path.is_file() or sha256_file(settlement_path) != applied_hash:
+                    if (
+                        not settlement_path.is_file()
+                        or sha256_file(settlement_path) != applied_hash
+                    ):
                         raise ValueError("the pretransport settlement record changed")
                     return {
                         "schema": "shared-paid-call-pretransport-settlement-result-v1",
@@ -3607,7 +3658,9 @@ class SharedGeminiBroker:
                     "received": self.receipts_dir / f"{event_stem}.received.json",
                     "trace": self.receipts_dir / f"{request_key}.request-trace.json",
                 }
-                if settlement_path.exists() or any(path.exists() for path in sidecars.values()):
+                if settlement_path.exists() or any(
+                    path.exists() for path in sidecars.values()
+                ):
                     raise ValueError("a pretransport settlement sidecar already exists")
                 if not review_file.is_file() or not traceback_evidence_file.is_file():
                     raise ValueError("the reviewed pretransport evidence is absent")
@@ -3619,10 +3672,19 @@ class SharedGeminiBroker:
                     "schema": PRETRANSPORT_SETTLEMENT_SCHEMA,
                     "request_key": request_key,
                     "ledger_sha256_before": expected_ledger_sha256,
-                    "request_identity": {key: request[key] for key in (
-                        "run_id", "stage", "paper_id", "family_id", "source_version_id",
-                        "request_sha256", "reserved_usd", "submitted_at_utc",
-                    )},
+                    "request_identity": {
+                        key: request[key]
+                        for key in (
+                            "run_id",
+                            "stage",
+                            "paper_id",
+                            "family_id",
+                            "source_version_id",
+                            "request_sha256",
+                            "reserved_usd",
+                            "submitted_at_utc",
+                        )
+                    },
                     "sidecars_absent": sorted(sidecars),
                     "traceback_evidence_file": str(traceback_evidence_file.resolve()),
                     "traceback_evidence_sha256": sha256_file(traceback_evidence_file),
@@ -3651,23 +3713,31 @@ class SharedGeminiBroker:
                     "completed_at_utc": _now(),
                 }
                 atomic_json(final_path, final, immutable=True)
-                ledger["reserved_usd"] = str(_money(ledger["reserved_usd"], "reserved") - reserved)
+                ledger["reserved_usd"] = str(
+                    _money(ledger["reserved_usd"], "reserved") - reserved
+                )
                 ledger["inflight"] -= 1
                 for row in (
                     ledger["stages"][request["stage"]],
                     ledger["papers"][request["family_id"]],
                 ):
-                    row["reserved_usd"] = str(_money(row["reserved_usd"], "reserved") - reserved)
+                    row["reserved_usd"] = str(
+                        _money(row["reserved_usd"], "reserved") - reserved
+                    )
                 if request["phase"] == "live_test":
                     live = ledger["live_test_papers"][request["family_id"]]
-                    live["reserved_usd"] = str(_money(live["reserved_usd"], "reserved") - reserved)
-                request.update({
-                    "state": "completed",
-                    "actual_cost_usd": "0",
-                    "usage": final["usage"],
-                    "pretransport_settlement_sha256": settlement_sha256,
-                    "completed_at_utc": final["completed_at_utc"],
-                })
+                    live["reserved_usd"] = str(
+                        _money(live["reserved_usd"], "reserved") - reserved
+                    )
+                request.update(
+                    {
+                        "state": "completed",
+                        "actual_cost_usd": "0",
+                        "usage": final["usage"],
+                        "pretransport_settlement_sha256": settlement_sha256,
+                        "completed_at_utc": final["completed_at_utc"],
+                    }
+                )
                 ledger["updated_at_utc"] = _now()
                 self._commit_ledger(ledger)
                 return {
@@ -3704,8 +3774,7 @@ class SharedGeminiBroker:
                 request = ledger["requests"].get(request_key)
                 final_path = self.receipts_dir / f"{request_key}.json"
                 continuation_path = (
-                    self.receipts_dir
-                    / f"{request_key}.count-error-continuation.json"
+                    self.receipts_dir / f"{request_key}.count-error-continuation.json"
                 )
                 if request is None or not final_path.is_file():
                     raise ValueError("the reviewed count-error request is absent")

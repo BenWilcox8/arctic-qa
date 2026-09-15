@@ -54,9 +54,7 @@ def _response(
                 "status": status,
                 "reason_codes": [f"test_{status}"],
                 "evidence": (
-                    [{"span_ids": selected[criterion]}]
-                    if status != "uncertain"
-                    else []
+                    [{"span_ids": selected[criterion]}] if status != "uncertain" else []
                 ),
                 "missing_context": (
                     ["No correction registry metadata was supplied."]
@@ -183,9 +181,7 @@ def test_separable_arctic_scope_limits_finding_context_and_requires_custody() ->
                     "finding_spans": [
                         {
                             "quote": arctic_quote,
-                            "source_bytes_sha256": sha256_bytes(
-                                arctic_quote.encode()
-                            ),
+                            "source_bytes_sha256": sha256_bytes(arctic_quote.encode()),
                         }
                     ],
                     "question_scope_phrases": ["Arctic station"],
@@ -269,9 +265,7 @@ def test_scope_finding_span_ignores_a_whitespace_only_separator() -> None:
                         {
                             "span_id": "s1",
                             "quote": first_quote,
-                            "source_bytes_sha256": sha256_bytes(
-                                first_quote.encode()
-                            ),
+                            "source_bytes_sha256": sha256_bytes(first_quote.encode()),
                         },
                         {
                             "span_id": "s2",
@@ -281,9 +275,7 @@ def test_scope_finding_span_ignores_a_whitespace_only_separator() -> None:
                         {
                             "span_id": "s3",
                             "quote": second_quote,
-                            "source_bytes_sha256": sha256_bytes(
-                                second_quote.encode()
-                            ),
+                            "source_bytes_sha256": sha256_bytes(second_quote.encode()),
                         },
                     ],
                     "question_scope_phrases": ["Mercury concentrations"],
@@ -397,7 +389,10 @@ def test_scope_finding_span_word_difference_is_paper_local_rejection(
 @pytest.mark.parametrize(
     "text,geography_status",
     [
-        ("Methods: Sampling occurred in a boundary-crossing named region.\n", "uncertain"),
+        (
+            "Methods: Sampling occurred in a boundary-crossing named region.\n",
+            "uncertain",
+        ),
         ("Methods: Observations were made at 69.0 S in Antarctica.\n", "failed"),
         ("Title: Arctic change. Methods: Sampling occurred at 54.0 N.\n", "failed"),
     ],
@@ -492,9 +487,11 @@ def test_correction_overlay_preserves_old_jobs_as_reviewed_proposals(
         decision_at_utc="2026-09-14T00:00:00Z",
     )
 
-    rows = (tmp_path / "overlay" / "geography-correction-overlay.ndjson").read_text(
-        encoding="utf-8"
-    ).splitlines()
+    rows = (
+        (tmp_path / "overlay" / "geography-correction-overlay.ndjson")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
     assert result["rows"] == 16
     assert len(rows) == 16
     first = json.loads(rows[0])

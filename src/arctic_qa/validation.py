@@ -609,6 +609,8 @@ def interpretation_spans_contain_answer(
         if span_text
         for normalized in normalized_answers
     )
+
+
 def _eligibility_components_adjacent(
     previous: dict[str, Any],
     current: dict[str, Any],

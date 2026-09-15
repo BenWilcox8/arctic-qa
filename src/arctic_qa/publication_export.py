@@ -158,7 +158,9 @@ def _live_latest_validation(
     ).fetchone()
 
 
-def _live_preview_distractors(validation_details: dict[str, Any]) -> list[dict[str, Any]]:
+def _live_preview_distractors(
+    validation_details: dict[str, Any],
+) -> list[dict[str, Any]]:
     """Return retained model-verified distractors for the live review preview."""
     return [
         item

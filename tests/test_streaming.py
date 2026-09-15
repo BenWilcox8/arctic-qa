@@ -1761,17 +1761,21 @@ def test_streaming_uses_one_shared_broker_for_all_eleven_calls(
         "A scope value that comes from an interpretation span belongs in "
         "question_context" in prompts["extractor"]
     )
-    assert "CONTEXT_ONLY_SOURCE supports question_context statements only." in (
-        prompts["question_writer"]
+    assert (
+        "CONTEXT_ONLY_SOURCE supports question_context statements only."
+        in (prompts["question_writer"])
     )
-    assert "CONTEXT_ONLY_SOURCE supports question_context statements only." in (
-        prompts["reconstructor"]
+    assert (
+        "CONTEXT_ONLY_SOURCE supports question_context statements only."
+        in (prompts["reconstructor"])
     )
-    assert "CONTEXT_ONLY_SOURCE supports question_context statements only." in (
-        prompts["answer_verifier"]
+    assert (
+        "CONTEXT_ONLY_SOURCE supports question_context statements only."
+        in (prompts["answer_verifier"])
     )
-    assert "CONTEXT_ONLY_SOURCE supports question_context statements only." in (
-        prompts["option_verifier"]
+    assert (
+        "CONTEXT_ONLY_SOURCE supports question_context statements only."
+        in (prompts["option_verifier"])
     )
     assert (
         "Populate only scope qualifiers stated verbatim in the QUESTION"

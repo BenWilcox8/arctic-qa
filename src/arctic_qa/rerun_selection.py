@@ -49,9 +49,7 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 def _candidate_history(
     state_db_file: Path, family_to_paper: dict[str, str]
 ) -> dict[str, list[dict[str, Any]]]:
-    connection = sqlite3.connect(
-        f"file:{state_db_file.resolve()}?mode=ro", uri=True
-    )
+    connection = sqlite3.connect(f"file:{state_db_file.resolve()}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     result: dict[str, list[dict[str, Any]]] = defaultdict(list)
     try:
@@ -73,9 +71,7 @@ def _candidate_history(
                     "prompt_version": (candidate.get("provenance") or {}).get(
                         "prompt_version"
                     ),
-                    "finding_policy_version": candidate.get(
-                        "finding_policy_version"
-                    ),
+                    "finding_policy_version": candidate.get("finding_policy_version"),
                 }
             )
     finally:
@@ -134,8 +130,7 @@ def build_rerun_selection(
     if (
         descriptor.get("schema") != "full-text-ready-freeze-descriptor-v1"
         or descriptor.get("state") != "frozen_offline"
-        or (descriptor.get("counts") or {}).get("manifest_records")
-        != len(source_rows)
+        or (descriptor.get("counts") or {}).get("manifest_records") != len(source_rows)
     ):
         raise ValueError("the frozen source descriptor is inconsistent")
     if limit < 1 or limit > len(source_rows):
@@ -314,8 +309,7 @@ def build_rerun_selection(
             "prior_evaluated_count": len(ordered_prior),
             "ranked_unseen_count": limit - len(ordered_prior),
             "prior_set_precedes_unseen": True,
-            "all_prior_evaluated_included": len(ordered_prior)
-            == len(paper_bindings),
+            "all_prior_evaluated_included": len(ordered_prior) == len(paper_bindings),
             "selected_jsonl": str(selection_file),
             "selected_jsonl_sha256": sha256_file(selection_file),
             "descriptor": str(selected_descriptor_file),

@@ -13,6 +13,9 @@ The command refuses to resume if an input changed.
 Each network attempt has an immutable receipt in `attempts/`.
 Each selected candidate has one immutable receipt in `items/` after processing.
 Originals and extracted text are private run files.
+The source pass extracts with `pdftotext -layout`, which interleaves the two columns of a page.
+The chapter 2 corpus extracts the same stored originals again in reading order.
+Read [the chapter 2 corpus document](CHAPTER2_CORPUS.md) for that extractor.
 Do not serve the run directory over HTTP.
 
 The `progress.json` file shows a live observation.

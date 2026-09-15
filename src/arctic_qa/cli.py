@@ -26,7 +26,13 @@ from .discovery import (
 )
 from .errors import ArcticQAError
 from .exporting import export_run
+from .chapter2_corpus import CHAPTER2_DIRECTORY
+from .chapter2_corpus import DEFAULT_JOBS as CHAPTER2_DEFAULT_JOBS
+from .chapter2_corpus import freeze as chapter2_freeze
+from .chapter2_corpus import prepare_root as chapter2_prepare_root
+from .chapter2_corpus import reextract as chapter2_reextract
 from .extraction import extract_source, load_chunks
+from .extraction_quality import quality_report as chapter2_quality_report
 from .generation import generate_candidate, resume_candidate_distractors
 from .geography_correction import write_geography_correction_overlay
 from .gemini_eligibility import run_gemini_eligibility
@@ -175,11 +181,25 @@ def parser() -> argparse.ArgumentParser:
     )
     gemini.add_argument(
         "--action",
-        choices=("doctor", "dry-run", "run", "resume", "pause", "status"),
+        choices=(
+            "doctor",
+            "dry-run",
+            "run",
+            "resume",
+            "pause",
+            "status",
+            "geography-rescreen",
+            "geography-rescreen-dry-run",
+        ),
         required=True,
     )
     gemini.add_argument("--access-run-dir", type=Path, required=True)
     gemini.add_argument("--run-dir", type=Path, required=True)
+    gemini.add_argument(
+        "--prior-run-dir",
+        type=Path,
+        help="The completed run whose unresolved geography papers are re-screened.",
+    )
     gemini.add_argument(
         "--config-file", type=Path, default=Path("config/gemini-eligibility-v1.json")
     )
@@ -251,6 +271,27 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Permit an explicit file URL only together with global --test-mode.",
     )
+
+    chapter2 = commands.add_parser(
+        "chapter2-corpus",
+        help="Build, freeze and measure the chapter 2 column-aware corpus.",
+    )
+    chapter2.add_argument(
+        "--action",
+        choices=("prepare", "extract", "freeze", "quality"),
+        required=True,
+    )
+    chapter2.add_argument("--access-run-dir", type=Path, required=True)
+    chapter2.add_argument("--legacy-freeze-dir", type=Path, required=True)
+    chapter2.add_argument("--code-commit", default="unknown")
+    chapter2.add_argument("--freeze-id")
+    chapter2.add_argument("--run-id")
+    chapter2.add_argument("--jobs", type=int, default=CHAPTER2_DEFAULT_JOBS)
+    chapter2.add_argument("--limit", type=int)
+    chapter2.add_argument("--char-cap", type=int, default=6000)
+    chapter2.add_argument("--overlap-chars", type=int, default=500)
+    chapter2.add_argument("--sample-size", type=int, default=50)
+    chapter2.add_argument("--report-file", type=Path)
 
     extract = commands.add_parser(
         "extract", help="Extract sections and chunks from one stored source."
@@ -414,7 +455,9 @@ def parser() -> argparse.ArgumentParser:
     continuation.add_argument("--evidence-file", type=Path, required=True)
     continuation.add_argument("--authorized-run-id", required=True)
     continuation.add_argument("--operator-id", required=True)
-    continuation.add_argument("--streaming-budget-policy-file", type=Path, required=True)
+    continuation.add_argument(
+        "--streaming-budget-policy-file", type=Path, required=True
+    )
     continuation.add_argument("--price-config-file", type=Path, required=True)
     continuation.add_argument("--execution-gate-file", type=Path, required=True)
     continuation.add_argument("--shared-ledger-file", type=Path, required=True)
@@ -442,9 +485,7 @@ def parser() -> argparse.ArgumentParser:
     orphaned.add_argument("--model-receipts-dir", type=Path, required=True)
     orphaned.add_argument("--ledger-config-transition-file", type=Path)
     orphaned.add_argument("--credential-file", type=Path, required=True)
-    orphaned.add_argument(
-        "--prior-construction-spend-usd", type=Decimal, required=True
-    )
+    orphaned.add_argument("--prior-construction-spend-usd", type=Decimal, required=True)
 
     settle = commands.add_parser(
         "settle-pretransport-reservation",
@@ -519,6 +560,9 @@ def main(argv: list[str] | None = None) -> int:
                 process_stale_after_seconds=args.process_stale_after_seconds,
             )
             return 0
+        if args.command == "chapter2-corpus":
+            paths = DataPaths.open(args.data_root, test_mode=args.test_mode)
+            return _emit(args, _chapter2_corpus(args, paths))
         if args.command == "metadata-prefilter":
             return _emit(
                 args,
@@ -603,6 +647,7 @@ def main(argv: list[str] | None = None) -> int:
                     project_ledger_file=args.project_ledger_file,
                     max_cost_usd=args.max_cost_usd,
                     credential_file=args.credential_file,
+                    prior_run_dir=args.prior_run_dir,
                 ),
             )
         if args.command == "geography-correction-overlay":
@@ -871,6 +916,67 @@ def _fetch(args, paths: DataPaths, db: Database) -> dict[str, Any]:
     )
     result["manifest"] = write_source_manifest(db, paths.namespace)
     return result
+
+
+def _chapter2_corpus(args, paths: DataPaths) -> dict[str, Any]:
+    root = paths.namespace / CHAPTER2_DIRECTORY
+    if args.action == "prepare":
+        return chapter2_prepare_root(
+            root,
+            access_run_dir=args.access_run_dir,
+            legacy_freeze_dir=args.legacy_freeze_dir,
+            code_commit=args.code_commit,
+        )
+    if args.action == "extract":
+        chapter2_prepare_root(
+            root,
+            access_run_dir=args.access_run_dir,
+            legacy_freeze_dir=args.legacy_freeze_dir,
+            code_commit=args.code_commit,
+        )
+        return chapter2_reextract(
+            root,
+            access_run_dir=args.access_run_dir,
+            jobs=args.jobs,
+            limit=args.limit,
+            char_cap=args.char_cap,
+            overlap_chars=args.overlap_chars,
+            on_result=_chapter2_progress(root),
+        )
+    if args.action == "quality":
+        return chapter2_quality_report(
+            root,
+            access_run_dir=args.access_run_dir,
+            sample_size=args.sample_size,
+            report_file=args.report_file,
+        )
+    if not args.freeze_id or not args.run_id:
+        raise ValueError("the chapter 2 freeze needs a freeze id and a run id")
+    return chapter2_freeze(
+        root,
+        access_run_dir=args.access_run_dir,
+        legacy_freeze_dir=args.legacy_freeze_dir,
+        freeze_id=args.freeze_id,
+        run_id=args.run_id,
+        code_commit=args.code_commit,
+    )
+
+
+def _chapter2_progress(root: Path):
+    path = root / "progress" / "reextraction-progress.json"
+
+    def report(result: dict[str, Any], counts: dict[str, int]) -> None:
+        atomic_json(
+            path,
+            {
+                "schema": "arctic-qa-chapter2-reextraction-status-v1",
+                "counts": dict(counts),
+                "latest": result,
+                "updated_at_utc": result.get("at_utc"),
+            },
+        )
+
+    return report
 
 
 def _extract(args, paths: DataPaths, db: Database) -> dict[str, Any]:

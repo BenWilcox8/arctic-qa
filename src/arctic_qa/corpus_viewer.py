@@ -53,6 +53,7 @@ GEMINI_FILTERS = {
     "screening_error",
     "too_large_not_ready",
     "ambiguous_charge",
+    "unresolved_rescreenable",
 }
 PROJECT_PROGRESS_STATUSES = {"completed", "in_progress", "not_finished"}
 PROJECT_PROGRESS_SCHEMA = "project-progress-overview-v1"
