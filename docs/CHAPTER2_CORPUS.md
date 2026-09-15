@@ -115,7 +115,7 @@ The `provenance` field names the chapter 1 item receipt and its sha256.
 
 ## Extraction quality measures
 
-`src/arctic_qa/extraction_quality.py` counts four defects on any text:
+`src/arctic_qa/extraction_quality.py` counts five measures on any text:
 
 - `gutter_rate` is the share of text lines that join two columns.
 - `mid_word_break_rate` is the count of mid-word line breaks for each thousand characters.
