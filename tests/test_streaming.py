@@ -209,7 +209,7 @@ def test_compound_unit_rule_without_source_tolerance_remains_rejected() -> None:
 def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
     properties = generation_module.NUMERIC_RULE_SCHEMA["properties"]
 
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v20"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v21"
     assert (
         generation_module.NUMERIC_RULE_CONTRACT_VERSION
         == "numeric-rule-source-support-v2"
@@ -264,7 +264,7 @@ def test_generation_prompt_requires_atomic_answers_and_aligned_questions() -> No
 
 
 def test_generation_schemas_require_concise_review_justifications() -> None:
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v20"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v21"
     assert (
         generation_module.MODEL_JUSTIFICATION_CONTRACT_VERSION
         == "model-justification-v1"
@@ -1121,6 +1121,8 @@ def test_streaming_resolves_every_role_evidence_from_source_spans(
         .splitlines()
     ]
     for event in verifier_events:
+        if event["role"] == "standalone_verifier":
+            continue
         response = event["response"]
         response.pop("evidence_quote", None)
         response.pop("locator", None)
@@ -1642,10 +1644,7 @@ def test_streaming_uses_one_shared_broker_for_all_eleven_calls(
         "Select one atomic claim from a complete prose finding sentence"
         in prompts["extractor"]
     )
-    assert (
-        "Do not select a title, heading, caption"
-        in prompts["extractor"]
-    )
+    assert "Do not select a title, heading, caption" in prompts["extractor"]
     assert "SOURCE_DATA" not in prompts["standalone_verifier"]
     assert "ANSWER_RECORD" not in prompts["standalone_verifier"]
     assert "RECONSTRUCTION" not in prompts["standalone_verifier"]
@@ -1749,8 +1748,11 @@ def test_same_campaign_regenerates_a_stale_terminal_candidate(
     assert second["resumed_papers"] == 1
     assert second["counts"]["generation_rejected"] == 1
     assert len(candidates) == 2
-    assert {json.loads(row["candidate_json"])["provenance"]["prompt_version"] for row in candidates} == {
-        "arctic-qa-generation-v20",
+    assert {
+        json.loads(row["candidate_json"])["provenance"]["prompt_version"]
+        for row in candidates
+    } == {
+        "arctic-qa-generation-v21",
         "arctic-qa-generation-test-next",
     }
 
@@ -2066,7 +2068,7 @@ def test_low_thinking_counterfactual_completes_the_structured_stream(
     )
 
     assert result["counts"]["accepted_base_questions"] == 1
-    assert len(transport.generation_configs) == 10
+    assert len(transport.generation_configs) == 11
     assert all(
         config["thinkingConfig"] == {"thinkingLevel": "low"}
         for config in transport.generation_configs
@@ -2223,7 +2225,6 @@ def test_failed_reconstruction_never_reaches_distractor_generation(
                 author_events[0],
                 author_events[1],
                 author_events[1],
-                author_events[1],
                 author_events[0],
             ]
         )
@@ -2243,9 +2244,7 @@ def test_failed_reconstruction_never_reaches_distractor_generation(
         "\n".join(
             json.dumps(event)
             for event in [
-                verifier_events[0],
-                verifier_events[1],
-                verifier_events[2],
+                *verifier_events[:3],
             ]
         )
         + "\n",
@@ -2445,10 +2444,13 @@ def test_short_answer_without_three_distractors_is_not_counted_as_accepted(
     }
     assert broker.status()["stages"]["question_generation"]["submissions"] == 1
     assert broker.status()["stages"]["distractor_generation"]["submissions"] == 3
-    assert sum(
-        bool(attempt["provenance"].get("distractor_only_retry"))
-        for attempt in attempts
-    ) == 2
+    assert (
+        sum(
+            bool(attempt["provenance"].get("distractor_only_retry"))
+            for attempt in attempts
+        )
+        == 2
+    )
 
     base = database.one("SELECT * FROM candidates WHERE status='incomplete_non_mcq'")
     targeted_author = FakeProvider("gemini-3.8-flash", FIXTURES / "fake-author.jsonl")
@@ -2801,9 +2803,9 @@ def test_live_stream_records_schema_invalid_reconstruction_and_advances(
     assert result["paper_results"][0]["reason_codes"] == [
         "reconstructor_response_invalid"
     ]
-    assert transport.methods.count("generateContent") == 14
+    assert transport.methods.count("generateContent") == 16
     status = broker.status()
-    assert status["generation_submissions"] == 14
+    assert status["generation_submissions"] == 16
     assert Decimal(status["reserved_usd"]) == 0
     assert Decimal(status["ambiguous_reserved_usd"]) == 0
     invalid_receipts = [
@@ -2833,17 +2835,17 @@ def test_live_stream_records_schema_invalid_reconstruction_and_advances(
     assert resumed["counts"]["processed"] == 2
     assert resumed["counts"]["generation_rejected"] == 1
     assert resumed["counts"]["accepted_base_questions"] == 1
-    assert transport.methods.count("generateContent") == 14
-    assert broker.status()["generation_submissions"] == 14
+    assert transport.methods.count("generateContent") == 16
+    assert broker.status()["generation_submissions"] == 16
 
 
 @pytest.mark.parametrize(
     ("role", "event_index", "reason_code"),
     [
-        ("reconstructor", 0, "reconstruction_evidence_span_not_found"),
-        ("answer_verifier", 1, "answer_verifier_evidence_span_not_found"),
+        ("reconstructor", 1, "reconstruction_evidence_span_not_found"),
+        ("answer_verifier", 2, "answer_verifier_evidence_span_not_found"),
         ("distractor_writer", 2, "distractor_evidence_span_not_found"),
-        ("option_verifier", 2, "option_verifier_evidence_span_not_found"),
+        ("option_verifier", 3, "option_verifier_evidence_span_not_found"),
     ],
 )
 def test_streaming_rejects_invalid_downstream_source_span_selection(
@@ -3024,7 +3026,7 @@ def test_streaming_cli_resumes_without_a_duplicate_model_call(tmp_path: Path) ->
     assert second["counts"]["accepted_base_questions"] == 1
     assert second["resumed_papers"] == 1
     status = run_cli(tmp_path, "status", "--run-id", "stream-resume")
-    assert status["calls"] == [{"count": 9, "status": "completed"}]
+    assert status["calls"] == [{"count": 10, "status": "completed"}]
 
 
 def test_streaming_cli_fails_closed_on_an_unbound_selection(tmp_path: Path) -> None:
@@ -3167,7 +3169,7 @@ def test_streaming_family_freeze_spans_test_and_production_phases(
     assert second["campaign_id"] == "streaming-commission"
     assert second["resumed_papers"] == 1
     status = run_cli(tmp_path, "status", "--run-id", "streaming-commission")
-    assert status["calls"] == [{"count": 9, "status": "completed"}]
+    assert status["calls"] == [{"count": 10, "status": "completed"}]
 
 
 def test_streaming_export_discloses_same_model_correlated_error(

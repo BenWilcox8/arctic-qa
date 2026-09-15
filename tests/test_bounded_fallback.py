@@ -14,15 +14,20 @@ from arctic_qa.streaming import _Progress, _progress_generation
 from arctic_qa.util import canonical_json, stable_id
 
 
+R14_FIXTURE = json.loads(
+    (Path(__file__).parents[1] / "fixtures" / "r14-audit-priorities-r1.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+
 def _database(tmp_path: Path) -> Database:
     database = Database(tmp_path / "state.sqlite3")
     database.migrate(tmp_path / "backups")
     return database
 
 
-def _candidate(
-    *, attempt: dict, item_id: str, source_id: str, family_id: str
-) -> dict:
+def _candidate(*, attempt: dict, item_id: str, source_id: str, family_id: str) -> dict:
     return {
         "schema_version": generation_contract.CANDIDATE_SCHEMA_VERSION,
         "item_id": item_id,
@@ -42,8 +47,17 @@ def _candidate(
         "option_verdicts": [],
         "provenance": {
             "prompt_version": generation_contract.PROMPT_VERSION,
+            "generation_attempt_contract_version": (
+                generation_contract.GENERATION_ATTEMPT_CONTRACT_VERSION
+            ),
+            "answer_agreement_contract_version": (
+                generation_contract.ANSWER_AGREEMENT_CONTRACT_VERSION
+            ),
             "question_verification_contract_version": (
                 generation_contract.QUESTION_VERIFICATION_CONTRACT_VERSION
+            ),
+            "standalone_verification_contract_version": (
+                generation_contract.STANDALONE_VERIFICATION_CONTRACT_VERSION
             ),
             "numeric_rule_contract_version": (
                 generation_contract.NUMERIC_RULE_CONTRACT_VERSION
@@ -57,6 +71,9 @@ def _candidate(
             ),
             "scope_role_binding_contract_version": (
                 generation_contract.SCOPE_ROLE_BINDING_CONTRACT_VERSION
+            ),
+            "evidence_combination_contract_version": (
+                generation_contract.EVIDENCE_COMBINATION_CONTRACT_VERSION
             ),
             "generation_attempt": attempt,
         },
@@ -99,7 +116,9 @@ def test_generation_counts_include_both_question_revisions(tmp_path: Path) -> No
             attempt_kind="primary" if revision_index == 0 else "question_revision",
             parent_attempt_id=parent_attempt_id,
             parent_item_id=parent_item_id,
-            trigger_reason_code=("question_context_missing" if revision_index else None),
+            trigger_reason_code=(
+                "question_context_missing" if revision_index else None
+            ),
             excluded_finding_span_ids=[],
         )
         item_id = f"item-{revision_index}"
@@ -206,12 +225,17 @@ def test_fallback_allows_two_revisions_before_an_alternative_finding() -> None:
     assert alternative["question_revision_index"] == 0
     assert alternative["parent_attempt_id"] == second_revision["attempt_id"]
 
-    assert len({
-        primary["attempt_id"],
-        revision["attempt_id"],
-        second_revision["attempt_id"],
-        alternative["attempt_id"],
-    }) == 4
+    assert (
+        len(
+            {
+                primary["attempt_id"],
+                revision["attempt_id"],
+                second_revision["attempt_id"],
+                alternative["attempt_id"],
+            }
+        )
+        == 4
+    )
 
 
 def test_answer_bearing_required_phrase_routes_immediately_to_alternative() -> None:
@@ -249,6 +273,133 @@ def test_answer_bearing_required_phrase_routes_immediately_to_alternative() -> N
     assert alternative["finding_attempt_index"] == 2
     assert alternative["question_revision_index"] == 0
     assert alternative["excluded_finding_span_ids"] == ["span-primary"]
+
+
+def test_option_failures_route_to_two_bounded_option_repairs() -> None:
+    primary = streaming_module._generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        finding_attempt_index=1,
+        question_revision_index=0,
+        attempt_kind="primary",
+        parent_attempt_id=None,
+        parent_item_id=None,
+        trigger_reason_code=None,
+        excluded_finding_span_ids=[],
+    )
+    paths = {
+        (1, 0): {
+            "attempt": primary,
+            "candidate": {
+                "item_id": "item-primary",
+                "candidate_json": canonical_json(
+                    {"answer": {"source_span_id": "span-primary"}}
+                ),
+            },
+        }
+    }
+
+    for revision_index in (1, 2):
+        repair = streaming_module._next_generation_attempt(
+            campaign_id="campaign",
+            family_id="family",
+            paths=paths,
+            failed_path=paths[(1, revision_index - 1)],
+            reason_codes=["insufficient_verified_distractors"],
+        )
+        assert repair is not None
+        assert repair["attempt_kind"] == "option_repair"
+        assert repair["question_revision_index"] == revision_index
+        paths[(1, revision_index)] = {
+            "attempt": repair,
+            "candidate": {
+                "item_id": f"item-{revision_index}",
+                "candidate_json": canonical_json(
+                    {"answer": {"source_span_id": "span-primary"}}
+                ),
+            },
+        }
+
+    alternative = streaming_module._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths=paths,
+        failed_path=paths[(1, 2)],
+        reason_codes=["insufficient_verified_distractors"],
+    )
+    assert alternative is not None
+    assert alternative["attempt_kind"] == "alternative_finding"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "eligible_arctic_scope_missing_from_finding",
+        "eligible_arctic_finding_out_of_scope",
+        "revision_unchanged_payload",
+    ],
+)
+def test_finding_and_no_progress_failures_escape_immediately(reason: str) -> None:
+    primary = streaming_module._generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        finding_attempt_index=1,
+        question_revision_index=0,
+        attempt_kind="primary",
+        parent_attempt_id=None,
+        parent_item_id=None,
+        trigger_reason_code=None,
+        excluded_finding_span_ids=[],
+    )
+    path = {
+        "attempt": primary,
+        "candidate": {
+            "item_id": "item-primary",
+            "candidate_json": canonical_json(
+                {"answer": {"source_span_id": "span-primary"}}
+            ),
+        },
+    }
+
+    alternative = streaming_module._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths={(1, 0): path},
+        failed_path=path,
+        reason_codes=[reason],
+    )
+
+    assert alternative is not None
+    assert alternative["attempt_kind"] == "alternative_finding"
+
+
+def test_independent_leakage_and_scope_failures_stop_paid_retry() -> None:
+    primary = streaming_module._generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        finding_attempt_index=1,
+        question_revision_index=0,
+        attempt_kind="primary",
+        parent_attempt_id=None,
+        parent_item_id=None,
+        trigger_reason_code=None,
+        excluded_finding_span_ids=[],
+    )
+    path = {"attempt": primary, "candidate": None}
+
+    assert streaming_module._routing_reason_codes(
+        ["standalone_answer_leakage", "relation_scope_mismatch"]
+    ) == ["standalone_answer_leakage", "relation_scope_mismatch"]
+    assert (
+        streaming_module._next_generation_attempt(
+            campaign_id="campaign",
+            family_id="family",
+            paths={(1, 0): path},
+            failed_path=path,
+            reason_codes=["standalone_answer_leakage", "relation_scope_mismatch"],
+        )
+        is None
+    )
 
 
 def test_generation_lineage_allows_six_bounded_paths() -> None:
@@ -520,9 +671,12 @@ def test_progress_generation_continues_with_a_fresh_path_after_rejection(
         for previous, attempt in zip(calls, calls[1:])
     )
     assert all(not attempt["excluded_finding_span_ids"] for attempt in calls)
-    assert database.one(
-        "SELECT COUNT(*) AS count FROM candidates WHERE run_id=?", ("campaign",)
-    )["count"] == accept_on
+    assert (
+        database.one(
+            "SELECT COUNT(*) AS count FROM candidates WHERE run_id=?", ("campaign",)
+        )["count"]
+        == accept_on
+    )
 
 
 def test_existing_findings_seed_alternative_exclusions(tmp_path: Path) -> None:
@@ -558,9 +712,80 @@ def test_existing_findings_seed_alternative_exclusions(tmp_path: Path) -> None:
         family_id=family_id,
     )
 
-    assert paths[(2, 0)]["attempt"]["excluded_finding_span_ids"] == [
-        "frozen-primary"
-    ]
+    assert paths[(2, 0)]["attempt"]["excluded_finding_span_ids"] == ["frozen-primary"]
+
+
+def test_r14_predecessor_attempts_consume_successor_retry_slots(
+    tmp_path: Path,
+) -> None:
+    database = _database(tmp_path)
+    parent_attempt_id = None
+    parent_item_id = None
+    for revision_index, item_id in enumerate(R14_FIXTURE["bumblebee_item_ids"]):
+        old_attempt = {
+            "contract_version": "bounded-paper-progression-v2",
+            "attempt_id": f"old-attempt-{revision_index}",
+            "attempt_kind": "primary" if revision_index == 0 else "question_revision",
+            "finding_attempt_index": 1,
+            "question_revision_index": revision_index,
+            "parent_attempt_id": parent_attempt_id,
+            "parent_item_id": parent_item_id,
+            "trigger_reason_code": (
+                "insufficient_verified_distractors" if revision_index else None
+            ),
+            "finding_policy_version": (
+                generation_contract.SCOPE_ROLE_FINDING_POLICY_VERSION + ":finding-1"
+            ),
+            "excluded_finding_span_ids": [],
+        }
+        candidate = _candidate(
+            attempt=old_attempt,
+            item_id=item_id,
+            source_id="source",
+            family_id="family",
+        )
+        candidate["schema_version"] = "2.5.0"
+        candidate["provenance"].update(
+            {
+                "prompt_version": "arctic-qa-generation-v20",
+                "standalone_verification_contract_version": (
+                    "source-blind-standalone-gate-v1"
+                ),
+            }
+        )
+        _insert_candidate(
+            database,
+            candidate,
+            run_id="campaign",
+            family_id="family",
+            status="incomplete_non_mcq",
+        )
+        parent_attempt_id = old_attempt["attempt_id"]
+        parent_item_id = item_id
+
+    paths = streaming_module._generation_paths(
+        database,
+        campaign_id="campaign",
+        source_id="source",
+        family_id="family",
+    )
+
+    assert list(paths) == [(1, 0), (1, 1), (1, 2)]
+    assert paths[(1, 1)]["attempt"]["attempt_kind"] == "option_repair"
+    assert paths[(1, 2)]["attempt"]["attempt_kind"] == "option_repair"
+    assert all(
+        path["predecessor_contract"] == "bounded-paper-progression-v2"
+        for path in paths.values()
+    )
+    alternative = streaming_module._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths=paths,
+        failed_path=paths[(1, 2)],
+        reason_codes=["insufficient_verified_distractors"],
+    )
+    assert alternative is not None
+    assert alternative["attempt_kind"] == "alternative_finding"
 
 
 def test_existing_findings_restore_primary_before_alternative_parent(
@@ -601,9 +826,10 @@ def test_existing_findings_restore_primary_before_alternative_parent(
         family_id=family_id,
     )
 
-    assert paths[(2, 0)]["attempt"]["parent_attempt_id"] == paths[(1, 0)][
-        "attempt"
-    ]["attempt_id"]
+    assert (
+        paths[(2, 0)]["attempt"]["parent_attempt_id"]
+        == paths[(1, 0)]["attempt"]["attempt_id"]
+    )
 
     namespace = tmp_path / "namespace"
     namespace.mkdir()
@@ -666,9 +892,7 @@ def test_generation_path_restore_error_stops_running_progress(
     def fail_to_restore_paths(*args, **kwargs):
         raise ValueError("the generation attempt parent is missing")
 
-    monkeypatch.setattr(
-        streaming_module, "_generation_paths", fail_to_restore_paths
-    )
+    monkeypatch.setattr(streaming_module, "_generation_paths", fail_to_restore_paths)
 
     with pytest.raises(ValueError, match="generation attempt parent is missing"):
         _progress_generation(
@@ -819,6 +1043,9 @@ def test_budget_stop_is_terminal_when_generation_resumes(
         "resumed": True,
     }
     assert calls == 1
-    assert database.one(
-        "SELECT stage FROM rejection_ledger WHERE source_id=?", ("source",)
-    )["stage"] == "generation_budget"
+    assert (
+        database.one(
+            "SELECT stage FROM rejection_ledger WHERE source_id=?", ("source",)
+        )["stage"]
+        == "generation_budget"
+    )

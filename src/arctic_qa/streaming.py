@@ -34,7 +34,7 @@ from .util import atomic_json, canonical_json, sha256_bytes, sha256_file, stable
 from .validation import validate_candidate
 
 
-GENERATION_ATTEMPT_CONTRACT_VERSION = "bounded-paper-progression-v2"
+GENERATION_ATTEMPT_CONTRACT_VERSION = "bounded-failure-routing-v3"
 MAX_FINDING_ATTEMPTS = 2
 MAX_QUESTION_REVISIONS = 2
 MAX_CANDIDATE_PATHS = MAX_FINDING_ATTEMPTS * (MAX_QUESTION_REVISIONS + 1)
@@ -83,11 +83,20 @@ ALTERNATIVE_FINDING_REASONS = frozenset(
         "finding_answer_phrase_in_required_question_phrases",
         "insufficient_verified_distractors",
         "reconstruction_disagreement",
+        "eligible_arctic_scope_missing_from_finding",
+        "eligible_arctic_finding_out_of_scope",
+        "revision_unchanged_payload",
     }
 )
 IMMEDIATE_ALTERNATIVE_FINDING_REASONS = frozenset(
-    {"finding_answer_phrase_in_required_question_phrases"}
+    {
+        "finding_answer_phrase_in_required_question_phrases",
+        "eligible_arctic_scope_missing_from_finding",
+        "eligible_arctic_finding_out_of_scope",
+        "revision_unchanged_payload",
+    }
 )
+OPTION_REPAIR_REASONS = frozenset({"insufficient_verified_distractors"})
 _DEPENDENT_ROUTING_REASONS = {
     "question_context_referent_unresolved": frozenset(
         {"relation_scope_mismatch", "answer_verifier_scope_not_source_bound"}
@@ -686,8 +695,7 @@ def _progress_generation(
                 path
                 for path in sorted(paths.values(), key=_path_sort_key)
                 if path.get("candidate") is not None
-                and path["candidate"]["status"]
-                in {"candidate", "qa_gate_failed"}
+                and path["candidate"]["status"] in {"candidate", "qa_gate_failed"}
             ),
             None,
         )
@@ -855,7 +863,10 @@ def _progress_generation(
         if candidate_row is None:
             raise ValueError("generation returned a candidate that was not persisted")
         candidate_provenance = candidate.get("provenance") or {}
-        if generation_attempt_supported and "generation_attempt" not in candidate_provenance:
+        if (
+            generation_attempt_supported
+            and "generation_attempt" not in candidate_provenance
+        ):
             raise ValueError("generation did not persist its attempt provenance")
         candidate_attempt = _candidate_generation_attempt(candidate, next_attempt)
         if candidate_attempt != next_attempt:
@@ -1025,6 +1036,9 @@ def _validate_generation_attempt(attempt: Any) -> dict[str, Any]:
         if (finding_index, revision_index) == (1, 0)
         else "alternative_finding"
         if (finding_index, revision_index) == (2, 0)
+        else "option_repair"
+        if revision_index in {1, 2}
+        and attempt.get("trigger_reason_code") in OPTION_REPAIR_REASONS
         else "question_revision"
         if revision_index in {1, 2}
         else None
@@ -1035,12 +1049,9 @@ def _validate_generation_attempt(attempt: Any) -> dict[str, Any]:
         raise ValueError("the generation attempt ID is missing")
     if not isinstance(attempt["finding_policy_version"], str):
         raise ValueError("the generation finding policy is missing")
-    if (
-        not isinstance(attempt["excluded_finding_span_ids"], list)
-        or any(
-            not isinstance(span_id, str) or not span_id
-            for span_id in attempt["excluded_finding_span_ids"]
-        )
+    if not isinstance(attempt["excluded_finding_span_ids"], list) or any(
+        not isinstance(span_id, str) or not span_id
+        for span_id in attempt["excluded_finding_span_ids"]
     ):
         raise ValueError("the excluded finding span IDs are invalid")
     if attempt["attempt_kind"] == "primary":
@@ -1076,6 +1087,12 @@ def _is_current_contract_candidate(candidate: dict[str, Any]) -> bool:
         or provenance.get("prompt_version") != generation_contract.PROMPT_VERSION
         or provenance.get("question_verification_contract_version")
         != generation_contract.QUESTION_VERIFICATION_CONTRACT_VERSION
+        or provenance.get("standalone_verification_contract_version")
+        != generation_contract.STANDALONE_VERIFICATION_CONTRACT_VERSION
+        or provenance.get("generation_attempt_contract_version")
+        != generation_contract.GENERATION_ATTEMPT_CONTRACT_VERSION
+        or provenance.get("answer_agreement_contract_version")
+        != generation_contract.ANSWER_AGREEMENT_CONTRACT_VERSION
         or provenance.get("numeric_rule_contract_version")
         != generation_contract.NUMERIC_RULE_CONTRACT_VERSION
         or provenance.get("direct_value_contract_version")
@@ -1086,6 +1103,8 @@ def _is_current_contract_candidate(candidate: dict[str, Any]) -> bool:
         != generation_contract.SCOPE_ROLE_SEMANTICS_VERSION
         or provenance.get("scope_role_binding_contract_version")
         != generation_contract.SCOPE_ROLE_BINDING_CONTRACT_VERSION
+        or provenance.get("evidence_combination_contract_version")
+        != generation_contract.EVIDENCE_COMBINATION_CONTRACT_VERSION
     ):
         return False
     attempt = provenance.get("generation_attempt")
@@ -1104,6 +1123,19 @@ def _is_current_contract_candidate(candidate: dict[str, Any]) -> bool:
     }
 
 
+def _is_predecessor_contract_candidate(candidate: dict[str, Any]) -> bool:
+    provenance = candidate.get("provenance") or {}
+    attempt = provenance.get("generation_attempt")
+    return bool(
+        candidate.get("schema_version") == "2.5.0"
+        and provenance.get("prompt_version") == "arctic-qa-generation-v20"
+        and isinstance(attempt, dict)
+        and attempt.get("contract_version") == "bounded-paper-progression-v2"
+        and type(attempt.get("finding_attempt_index")) is int
+        and type(attempt.get("question_revision_index")) is int
+    )
+
+
 def _generation_paths(
     db: Database,
     *,
@@ -1112,6 +1144,7 @@ def _generation_paths(
     family_id: str,
 ) -> dict[tuple[int, int], dict[str, Any]]:
     paths: dict[tuple[int, int], dict[str, Any]] = {}
+    predecessor_rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
     rows = db.rows(
         """SELECT item_id,status,candidate_json FROM candidates
         WHERE run_id=? AND source_id=? AND paper_family_id=?
@@ -1121,10 +1154,10 @@ def _generation_paths(
     for row in rows:
         candidate = json.loads(row["candidate_json"])
         if not _is_current_contract_candidate(candidate):
+            if _is_predecessor_contract_candidate(candidate):
+                predecessor_rows.append((row, candidate))
             continue
-        attempt_value = (candidate.get("provenance") or {}).get(
-            "generation_attempt"
-        )
+        attempt_value = (candidate.get("provenance") or {}).get("generation_attempt")
         legacy = attempt_value is None
         attempt = (
             _generation_attempt(
@@ -1150,6 +1183,79 @@ def _generation_paths(
             "candidate": row,
             "candidate_status": row["status"],
             "legacy": legacy,
+        }
+
+    predecessor_rows.sort(
+        key=lambda item: (
+            int(item[1]["provenance"]["generation_attempt"]["finding_attempt_index"]),
+            int(item[1]["provenance"]["generation_attempt"]["question_revision_index"]),
+        )
+    )
+    for row, candidate in predecessor_rows:
+        old_attempt = candidate["provenance"]["generation_attempt"]
+        finding_index = int(old_attempt["finding_attempt_index"])
+        revision_index = int(old_attempt["question_revision_index"])
+        key = (finding_index, revision_index)
+        if (
+            key in paths
+            or finding_index not in {1, 2}
+            or revision_index not in {0, 1, 2}
+        ):
+            continue
+        if key == (1, 0):
+            parent_path = None
+            attempt_kind = "primary"
+        elif revision_index == 0:
+            parent_path = max(
+                (
+                    path
+                    for path in paths.values()
+                    if path["attempt"]["finding_attempt_index"] == 1
+                ),
+                key=_path_sort_key,
+                default=None,
+            )
+            attempt_kind = "alternative_finding"
+        else:
+            parent_path = paths.get((finding_index, revision_index - 1))
+            attempt_kind = (
+                "option_repair"
+                if old_attempt.get("trigger_reason_code") in OPTION_REPAIR_REASONS
+                else "question_revision"
+            )
+        if key != (1, 0) and parent_path is None:
+            continue
+        attempt = _generation_attempt(
+            campaign_id=campaign_id,
+            family_id=family_id,
+            finding_attempt_index=finding_index,
+            question_revision_index=revision_index,
+            attempt_kind=attempt_kind,
+            parent_attempt_id=(
+                parent_path["attempt"]["attempt_id"] if parent_path else None
+            ),
+            parent_item_id=(
+                parent_path["candidate"]["item_id"]
+                if parent_path and parent_path.get("candidate")
+                else None
+            ),
+            trigger_reason_code=(
+                str(old_attempt.get("trigger_reason_code") or "generation_rejected")
+                if parent_path
+                else None
+            ),
+            excluded_finding_span_ids=(
+                list(old_attempt.get("excluded_finding_span_ids") or [])
+                if attempt_kind == "alternative_finding"
+                else []
+            ),
+        )
+        paths[key] = {
+            "attempt": attempt,
+            "candidate": row,
+            "candidate_status": row["status"],
+            "legacy": False,
+            "predecessor_contract": old_attempt["contract_version"],
         }
 
     for row in db.rows(
@@ -1210,11 +1316,11 @@ def _generation_paths(
             family_id=family_id,
             finding_attempt_index=finding_index,
             question_revision_index=0,
-            attempt_kind=(
-                "primary" if finding_index == 1 else "alternative_finding"
-            ),
+            attempt_kind=("primary" if finding_index == 1 else "alternative_finding"),
             parent_attempt_id=(
-                parent_path["attempt"]["attempt_id"] if parent_path else None
+                parent_path["attempt"]["attempt_id"]
+                if parent_path
+                else None
                 if finding_index == 2
                 else None
             ),
@@ -1253,9 +1359,7 @@ def _generation_paths(
     return paths
 
 
-def _validate_generation_lineage(
-    paths: dict[tuple[int, int], dict[str, Any]]
-) -> None:
+def _validate_generation_lineage(paths: dict[tuple[int, int], dict[str, Any]]) -> None:
     if len(paths) > MAX_CANDIDATE_PATHS:
         raise ValueError("the paper exceeds the bounded generation path limit")
     for key, path in paths.items():
@@ -1283,22 +1387,20 @@ def _validate_generation_lineage(
 
 
 def _accepted_generation_path(
-    paths: dict[tuple[int, int], dict[str, Any]]
+    paths: dict[tuple[int, int], dict[str, Any]],
 ) -> dict[str, Any] | None:
     for path in sorted(paths.values(), key=_path_sort_key):
         candidate = path.get("candidate")
         validation = path.get("validation")
         if candidate is None or validation is None:
             continue
-        if (
-            validation["final_label"] == "machine_accepted_unverified"
-            and validation["labels"].get("mcq_eligible")
-        ):
+        if validation["final_label"] == "machine_accepted_unverified" and validation[
+            "labels"
+        ].get("mcq_eligible"):
             return path
-        if (
-            candidate["status"] == "machine_accepted_unverified"
-            and validation["labels"].get("mcq_eligible")
-        ):
+        if candidate["status"] == "machine_accepted_unverified" and validation[
+            "labels"
+        ].get("mcq_eligible"):
             return path
     return None
 
@@ -1326,12 +1428,13 @@ def _next_generation_attempt(
     reason_codes: list[str],
 ) -> dict[str, Any] | None:
     reason_codes = _routing_reason_codes(reason_codes)
+    if len({_failure_layer(reason) for reason in reason_codes}) > 1:
+        return None
     failed_attempt = failed_path["attempt"]
     finding_index = int(failed_attempt["finding_attempt_index"])
     revision_index = int(failed_attempt["question_revision_index"])
     if (
         finding_index == 1
-        and revision_index == 0
         and len(reason_codes) == 1
         and reason_codes[0] in IMMEDIATE_ALTERNATIVE_FINDING_REASONS
         and (2, 0) not in paths
@@ -1361,22 +1464,25 @@ def _next_generation_attempt(
                 family_id=family_id,
                 finding_attempt_index=key[0],
                 question_revision_index=next_revision,
-                attempt_kind="question_revision",
+                attempt_kind=(
+                    "option_repair"
+                    if reason_codes[0] in OPTION_REPAIR_REASONS
+                    else "question_revision"
+                ),
                 parent_attempt_id=failed_attempt["attempt_id"],
-                parent_item_id=(
-                    failed_path.get("candidate") or {}
-                ).get("item_id"),
+                parent_item_id=(failed_path.get("candidate") or {}).get("item_id"),
                 trigger_reason_code=reason_codes[0],
                 excluded_finding_span_ids=[],
             )
-    if (
-        finding_index != 1
-        or revision_index < MAX_QUESTION_REVISIONS
-    ):
+    if finding_index != 1:
         return None
     if (2, 0) in paths:
         return None
-    if len(reason_codes) != 1 or reason_codes[0] not in ALTERNATIVE_FINDING_REASONS:
+    can_leave_finding = bool(reason_codes) and all(
+        reason in REPAIRABLE_QUESTION_REASONS or reason in ALTERNATIVE_FINDING_REASONS
+        for reason in reason_codes
+    )
+    if not can_leave_finding or revision_index < MAX_QUESTION_REVISIONS:
         return None
     excluded = _prior_finding_span_ids(paths)
     return _generation_attempt(
@@ -1395,11 +1501,48 @@ def _next_generation_attempt(
 def _routing_reason_codes(reason_codes: list[str]) -> list[str]:
     """Collapse only documented downstream symptoms for one repair root."""
     normalized = list(dict.fromkeys(str(reason) for reason in reason_codes))
+    specific_standalone = [
+        reason for reason in normalized if reason.startswith("standalone_undefined_")
+    ]
+    if specific_standalone:
+        correlated = {
+            "standalone_gate_failed",
+            "standalone_unresolved_study_local_referent",
+        }
+        normalized = [reason for reason in normalized if reason not in correlated]
     roots = set(normalized).intersection(_DEPENDENT_ROUTING_REASONS)
     if not roots:
         return normalized
     dependent = set().union(*(_DEPENDENT_ROUTING_REASONS[root] for root in roots))
     return [reason for reason in normalized if reason not in dependent]
+
+
+def _failure_layer(reason: str) -> str:
+    if reason in {
+        "standalone_answer_leakage",
+        "question_answer_leakage",
+        "question_context_answer_leakage",
+    }:
+        return "leakage"
+    if reason in OPTION_REPAIR_REASONS or reason.startswith(("option_", "distractor_")):
+        return "options"
+    if reason.startswith("standalone_") or reason.startswith("question_context_"):
+        return "context"
+    if reason in {
+        "relation_scope_mismatch",
+        "scope_qualifier_missing",
+        "scope_qualifier_not_source_bound",
+    }:
+        return "context"
+    if reason in {
+        "source_entailment_not_verified",
+        "reconstruction_disagreement",
+        "alternative_answer_unresolved",
+    }:
+        return "evidence"
+    if reason.startswith("eligible_arctic_") or reason.startswith("finding_"):
+        return "finding"
+    return "contract"
 
 
 def _prior_finding_span_ids(paths: dict[tuple[int, int], dict[str, Any]]) -> list[str]:
