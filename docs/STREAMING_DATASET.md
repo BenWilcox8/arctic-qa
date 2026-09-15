@@ -351,6 +351,17 @@ It does not increase the 500-item target or headline `accepted_qa` count.
 It exports an answer-present MCQ only with three accepted distractors.
 It exports an absent-answer form only with four accepted distractors and the `invalid_option_set` label.
 
+## Chapter 2 launch contract
+
+Chapter 2 (captain order of 2026-09-15) runs campaign `arctic-qa-production-campaign-002` on the column-aware chapter 2 corpus.
+The streaming input is the gate-bindable access run that `chapter2-corpus --action stream-input` writes under the chapter 2 root.
+It carries the frozen manifest hash, the frozen order hash, and the run manifest hash that the execution gate binds.
+The run names the role profile `gemini_separated`, so the writer is `gemini-3.8-flash` and every judge is a different model.
+The broker price config revision `arctic-gemini-eligibility-r1-config-v6` registers the judge stage models with verified pricing.
+The budget is one chained ledger transition: the price config change first, then the policy ceiling from USD 61.614496 to USD 108.994972, which is the USD 33.994972 spent before chapter 2 plus the USD 75.00 chapter 2 allocation.
+The run halts at exhaustion, with no replay, no retry, and no budget reset.
+The live export selects schema `2.7.0` and prompt `arctic-qa-generation-v22`, so the dataset page shows chapter 2 items only.
+
 ## Viewer command
 
 The read-only viewer accepts the shared ledger, progress, budget policy, and export metadata files.

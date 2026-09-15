@@ -1679,14 +1679,21 @@ def test_streaming_uses_one_shared_broker_for_all_eleven_calls(
         if key != "model_roles"
     } == {
         "model": "gemini-3.8-flash",
-        "same_model_roles": True,
-        "correlated_error_disclosed": True,
+        "same_model_roles": False,
+        "correlated_error_disclosed": False,
         "live_provider": True,
     }
-    # A live test phase discloses the shared model. Only the production phase
-    # must name a separated role profile.
-    assert result["provider_policy"]["model_roles"]["enforced"] is False
-    assert result["provider_policy"]["model_roles"]["same_model_roles"] is True
+    # A live test phase discloses the effective per-role models without a
+    # profile. Only the production phase must name a separated role profile.
+    # The chapter 2 price config meters every judge stage on a different
+    # model from the writer, so the disclosure reports separated roles.
+    roles = result["provider_policy"]["model_roles"]
+    assert roles["enforced"] is False
+    assert roles["same_model_roles"] is False
+    assert roles["effective_role_models"]["question_writer"] == "gemini-3.8-flash"
+    assert roles["effective_role_models"]["standalone_verifier"] == (
+        "gemini-3.1-pro-preview"
+    )
     status = broker.status()
     assert status["generation_submissions"] == 11
     assert status["accepted_question_count"] == 1

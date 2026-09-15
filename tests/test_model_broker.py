@@ -463,7 +463,7 @@ def execute(
     family = family or f"family-{paper}"
     source = source or f"source-{paper}"
     key = broker_request_key(
-        model="gemini-3.8-flash",
+        model=str(broker.config_for_stage(stage)["model"]),
         run_id=run_id,
         phase=phase,
         stage=stage,
@@ -846,6 +846,8 @@ def test_reviewed_count_error_continuation_clears_halt_without_replay(
 ) -> None:
     legacy = json.loads((ROOT / "config" / "gemini-eligibility-v1.json").read_text())
     legacy["config_id"] = "arctic-gemini-eligibility-r1-config-v3"
+    # The legacy revision registered only the answer judge stage.
+    legacy["stage_models"] = {}
     legacy["stage_models"]["answer_agreement"] = {
         "model": "gemini-2.5-flash-lite",
         "maximum_input_tokens": 1_048_576,

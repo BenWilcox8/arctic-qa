@@ -676,7 +676,10 @@ def run_stream(
     progress.set_dataset_metadata(
         namespace / "exports" / exported["export_id"] / "manifest.json"
     )
-    same_model_roles = author.name == verifier.name and author.model == verifier.model
+    # One broker provider can serve both the author and the verifier while
+    # metering a different model for each role, so the disclosure reads the
+    # per-role effective models, never the two provider objects.
+    same_model_roles = bool(model_roles["same_model_roles"])
     if model_roles["enforced"] and same_model_roles:
         raise ValueError("an enforced model role run kept one model in every role")
     live_provider = bool(getattr(author, "externally_metered", False))
