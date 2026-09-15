@@ -184,10 +184,11 @@ The whole suite ran in three bounded parts on the final commit, because `test_st
 
 | Part | Files | Result |
 | --- | --- | --- |
-| A | every test except the three below | SUITE_A |
-| B | `test_streaming.py`, `test_cli_integration.py` | SUITE_B |
-| C | `test_model_broker.py` | SUITE_C |
+| A | every test except the three below | 568 passed, 0 failed |
+| B | `test_streaming.py`, `test_cli_integration.py` | 148 passed, 0 failed |
+| C | `test_model_broker.py` | 86 passed, 0 failed |
 
+In total 802 tests passed and none failed or was skipped, on commit `2ef39bd`, which differs from the branch head only by this report file.
 `ruff check src tests` and `ruff format --check src tests` pass on every file.
 
 New regression tests, `tests/test_chapter2_integration.py`:
