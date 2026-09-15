@@ -896,15 +896,16 @@ class PipelineTraceStore:
         }:
             projection = self._progress_projection(progress)
             if projected["state"] != "machine_accepted_unverified":
-                if projection["state"] != projected["state"]:
-                    projection["state_entered_at_utc"] = progress.get(
-                        "state_changed_at_utc"
-                    )
-                elif progress.get("state_changed_at_utc"):
-                    projection["state_entered_at_utc"] = progress[
-                        "state_changed_at_utc"
-                    ]
-                projected.update(projection)
+                if projection["state"] != "machine_accepted_unverified":
+                    if projection["state"] != projected["state"]:
+                        projection["state_entered_at_utc"] = progress.get(
+                            "state_changed_at_utc"
+                        )
+                    elif progress.get("state_changed_at_utc"):
+                        projection["state_entered_at_utc"] = progress[
+                            "state_changed_at_utc"
+                        ]
+                    projected.update(projection)
             else:
                 projected.pop("final_reason", None)
                 projected.pop("reason", None)

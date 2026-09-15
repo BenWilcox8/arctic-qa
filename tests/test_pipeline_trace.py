@@ -1207,6 +1207,31 @@ def test_empty_newest_invocation_does_not_fall_back_to_history(tmp_path: Path) -
         store.paper_detail(stable_id("pipeline-paper", "family-fixture"))
 
 
+def test_progress_acceptance_without_final_candidate_is_not_accepted(
+    tmp_path: Path,
+) -> None:
+    namespace, _, _ = fixture_namespace(tmp_path)
+    set_active_invocation(
+        namespace,
+        "accepted-label-without-candidate",
+        [
+            {
+                "paper_id": "src-second",
+                "title": "Second searchable paper",
+                "current_stage": "completed",
+                "final_state": "accepted",
+            }
+        ],
+    )
+
+    item = next(
+        item
+        for item in PipelineTraceStore(namespace).list_papers()["items"]
+        if item["title"] == "Second searchable paper"
+    )
+    assert item["state"] != "machine_accepted_unverified"
+
+
 @pytest.mark.parametrize(
     ("decision", "expected"),
     (("excluded", "eligibility_rejected"), ("uncertain", "eligibility_unresolved")),
