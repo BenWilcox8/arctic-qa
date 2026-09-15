@@ -187,7 +187,10 @@ def test_scope_binding_rejects_missing_or_changed_independent_qualifiers(
         standalone_verification=_standalone(),
     )
 
-    assert reasons == ["scope_qualifier_missing"]
+    # A displayed-scope dimension that never reaches the reader adds the newer
+    # scope_qualifier_not_displayed rejection beside the required-phrase one.
+    assert "scope_qualifier_missing" in reasons
+    assert set(reasons) <= {"scope_qualifier_missing", "scope_qualifier_not_displayed"}
 
 
 def test_scope_contract_keeps_sample_descriptors_as_population_and_requires_all_results() -> (

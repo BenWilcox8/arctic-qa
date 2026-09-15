@@ -327,6 +327,12 @@ It does not receive the reference answer, answer evidence, rationale, paper-sele
 All later option checks bind to the question and the question context.
 Existing records and receipts keep their original prompt versions and decisions.
 The pipeline does not add context to an existing record without a new versioned process.
+Generation prompt version 22 gives every role a two-part evidence bundle.
+`SOURCE_DATA` holds the selectable finding spans. `CONTEXT_ONLY_SOURCE` holds the hashed study-setting spans of the same paper.
+A context-only span supports a `question_context` statement only. No role can select one as answer evidence, as a scope value, or as a required question phrase.
+Version 22 replaces the empty-context default with a checklist of ten referent slots.
+The writer sets `question_context` to an empty string only when the question alone fixes every applicable slot.
+Candidate schema 2.7.0 records the forwarded context-only spans and the writer's `referent_slots` diagnostic.
 See [the benchmark input contract](BENCHMARK_INPUT_CONTRACT.md) for external evaluation custody.
 See [the shared model broker guide](SHARED_MODEL_BROKER.md) for the exact command and rules.
 An immutable-event failure republishes broker status with `halted` set to `true` and `integrity_valid` set to `false`.

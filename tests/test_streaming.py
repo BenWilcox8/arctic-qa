@@ -209,7 +209,7 @@ def test_compound_unit_rule_without_source_tolerance_remains_rejected() -> None:
 def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
     properties = generation_module.NUMERIC_RULE_SCHEMA["properties"]
 
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v21"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v22"
     assert (
         generation_module.NUMERIC_RULE_CONTRACT_VERSION
         == "numeric-rule-source-support-v2"
@@ -264,7 +264,7 @@ def test_generation_prompt_requires_atomic_answers_and_aligned_questions() -> No
 
 
 def test_generation_schemas_require_concise_review_justifications() -> None:
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v21"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v22"
     assert (
         generation_module.MODEL_JUSTIFICATION_CONTRACT_VERSION
         == "model-justification-v1"
@@ -286,7 +286,15 @@ def test_generation_schemas_require_concise_review_justifications() -> None:
             ].lower()
         )
 
-    answer_schema = generation_module.ROLE_SCHEMAS["extractor"]["properties"]["answer"]
+    candidate_schema = generation_module.ROLE_SCHEMAS["extractor"]["properties"][
+        "candidate_findings"
+    ]["items"]
+    assert "ranking_rationale" in candidate_schema["required"]
+    assert (
+        "concise"
+        in candidate_schema["properties"]["ranking_rationale"]["description"].lower()
+    )
+    answer_schema = candidate_schema["properties"]["answer"]
     assert "selection_rationale" in answer_schema["required"]
     assert (
         "concise"
@@ -1028,7 +1036,7 @@ def test_finding_prompt_requires_one_exact_source_span(
         .splitlines()
     ]
     author_events[0]["require_prompt_contains"] = [
-        "Select one source_span_id.",
+        "Select one source_span_id for each candidate.",
         "one exact selectable interval",
         "Do not combine span IDs yourself.",
     ]
@@ -1110,7 +1118,7 @@ def test_finding_span_id_resolves_to_exact_source_evidence(tmp_path: Path) -> No
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    answer = author_events[0]["response"]["answer"]
+    answer = author_events[0]["response"]["candidate_findings"][0]["answer"]
     answer.pop("evidence_quote", None)
     answer.pop("locator", None)
     answer["source_span_id"] = "{{span_id}}"
@@ -1119,7 +1127,7 @@ def test_finding_span_id_resolves_to_exact_source_evidence(tmp_path: Path) -> No
         '"span_id"',
         '"span_contract_version":"finding-evidence-span-v3"',
         '"text_sha256"',
-        "Select one source_span_id.",
+        "Select one source_span_id for each candidate.",
     ]
     author_script = tmp_path / "finding-span-author.jsonl"
     author_script.write_text(
@@ -1737,8 +1745,24 @@ def test_streaming_uses_one_shared_broker_for_all_eleven_calls(
     assert "ANSWER_RECORD" not in prompts["standalone_verifier"]
     assert "RECONSTRUCTION" not in prompts["standalone_verifier"]
     assert (
-        "Each non-null scope value must also appear in required_question_phrases"
-        in prompts["extractor"]
+        "Populate every scope qualifier that a reader without the paper needs to "
+        "interpret the result" in prompts["extractor"]
+    )
+    assert (
+        "A scope value that comes from an interpretation span belongs in "
+        "question_context" in prompts["extractor"]
+    )
+    assert "CONTEXT_ONLY_SOURCE supports question_context statements only." in (
+        prompts["question_writer"]
+    )
+    assert "CONTEXT_ONLY_SOURCE supports question_context statements only." in (
+        prompts["reconstructor"]
+    )
+    assert "CONTEXT_ONLY_SOURCE supports question_context statements only." in (
+        prompts["answer_verifier"]
+    )
+    assert "CONTEXT_ONLY_SOURCE supports question_context statements only." in (
+        prompts["option_verifier"]
     )
     assert (
         "Populate only scope qualifiers stated verbatim in the QUESTION"
@@ -1840,7 +1864,7 @@ def test_same_campaign_regenerates_a_stale_terminal_candidate(
         json.loads(row["candidate_json"])["provenance"]["prompt_version"]
         for row in candidates
     } == {
-        "arctic-qa-generation-v21",
+        "arctic-qa-generation-v22",
         "arctic-qa-generation-test-next",
     }
 
@@ -2727,9 +2751,9 @@ def test_streaming_records_invalid_finding_and_advances_to_next_paper(
         .splitlines()
     ]
     invalid_extractor = json.loads(json.dumps(author_events[0]))
-    invalid_extractor["response"]["answer"]["source_span_id"] = (
-        "evidence-span-does-not-exist"
-    )
+    invalid_extractor["response"]["candidate_findings"][0]["answer"][
+        "source_span_id"
+    ] = "evidence-span-does-not-exist"
     author_script = tmp_path / "invalid-finding-then-valid-author.jsonl"
     author_script.write_text(
         "\n".join(json.dumps(event) for event in [invalid_extractor, *author_events])

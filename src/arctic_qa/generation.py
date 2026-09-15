@@ -22,14 +22,20 @@ from .validation import (
     ANSWER_AGREEMENT_CONTRACT_VERSION,
     ANSWER_AGREEMENT_PROMPT_VERSION,
     ANSWER_AGREEMENT_SYSTEM,
+    CONTEXT_ONLY_EVIDENCE_CONTRACT_VERSION,
     DIRECT_SOURCE_VALUE_CONTRACT_VERSION,
+    FINDING_ADMISSION_CONTRACT_VERSION,
     GENERATION_PROMPT_VERSION,
     NUMERIC_RULE_CONTRACT_VERSION,
     QUESTION_VERIFICATION_CONTRACT_VERSION,
     ROUTING_CONTRACT_VERSION,
+    REFERENT_SLOT_CONTRACT_VERSION,
     SCOPE_CONTRACT_VERSION,
     STANDALONE_VERIFICATION_CONTRACT_VERSION,
     benchmark_context_verification_reason,
+    benchmark_text_raw_source_artifact,
+    context_only_span_records,
+    interpretation_spans_contain_answer,
     numeric_rule_is_source_bound,
     option_display_issue,
     phrase_in_source_text,
@@ -38,15 +44,26 @@ from .validation import (
     reconstruction_matches,
     required_question_phrases_contain_answer,
     scope_is_evidence_bound,
+    scope_phrase_in_text,
+    scope_phrase_is_displayed,
+    scope_qualifier_not_displayed,
 )
 
 
 PROMPT_VERSION = GENERATION_PROMPT_VERSION
-CANDIDATE_SCHEMA_VERSION = "2.6.0"
+CANDIDATE_SCHEMA_VERSION = "2.7.0"
 FINDING_POLICY_VERSION = "one-finding-per-paper-full-context-v6"
-SCOPE_ROLE_FINDING_POLICY_VERSION = "one-finding-per-paper-full-context-v7"
+SCOPE_ROLE_FINDING_POLICY_VERSION = "one-finding-per-paper-ranked-context-v8"
 GENERATION_ATTEMPT_CONTRACT_VERSION = ROUTING_CONTRACT_VERSION
 FINDING_ADMISSION_PASSES = 2
+FINDING_ADMISSION_REASK_REASONS = frozenset(
+    {
+        "finding_evidence_quote_excludes_finding",
+        "finding_answer_phrase_in_required_question_phrases",
+        "finding_span_is_table_or_caption",
+        "finding_span_figure_defined_referent",
+    }
+)
 QUESTION_REPAIR_KINDS = frozenset(
     {"question_revision", "context_widened_revision", "surgical_correction"}
 )
@@ -66,6 +83,37 @@ ARCTIC_SCOPE_CONTRACT_VERSION = "eligible-arctic-finding-scope-v1"
 EVIDENCE_COMBINATION_CONTRACT_VERSION = "contiguous-source-evidence-v1"
 SCOPE_ROLE_SEMANTICS_VERSION = "scope-role-semantics-v2"
 SCOPE_ROLE_BINDING_CONTRACT_VERSION = "scope-role-question-context-binding-v1"
+MAX_RANKED_CANDIDATE_FINDINGS = 3
+MAX_CONTEXT_ONLY_SPANS = 12
+MIN_CONTEXT_ONLY_SPAN_CHARS = 16
+# A figure, table or citation locator makes a span unusable as displayed context.
+_CONTEXT_ONLY_LOCATOR_PATTERN = re.compile(
+    r"\b(?:fig(?:ure|s)?|tab(?:le|s)?|eq(?:uation)?|suppl(?:ementary)?|"
+    r"sect(?:ion)?|panel|appendix)\s*\.?\s*(?:[0-9]|[IVX]+\b|S[0-9])|"
+    r"\(\s*(?:e\.g\.,?\s*)?[A-Z][A-Za-z'’-]+\s+"
+    r"(?:et\s+al\.?|and\s+[A-Z][A-Za-z'’-]+),?\s*\d{4}|"
+    r"\[\s*\d+(?:\s*[,–-]\s*\d+)*\s*\]",
+    re.IGNORECASE,
+)
+# Two-column PDF extraction joins the neighbouring column with a long space run.
+_COLUMN_INTERLEAVE_PATTERN = re.compile(r"[ \t]{8,}")
+_LINE_WRAP_HYPHEN_PATTERN = re.compile(r"[^\W\d_]-[ \t]*\n[ \t]*[^\W\d_]")
+_NUMERIC_CELL_PATTERN = re.compile(r"(?<![\w.])[-+−]?\d[\d.,]*(?:\s*[±]\s*\d[\d.,]*)?")
+_FINITE_VERB_PATTERN = re.compile(
+    r"\b(?:is|are|was|were|has|have|had|do|does|did|show(?:s|ed|n)?|"
+    r"report(?:s|ed)?|increas(?:e|es|ed)|decreas(?:e|es|ed)|declin(?:e|es|ed)|"
+    r"rang(?:e|es|ed)|occur(?:s|red)?|reach(?:es|ed)?|exceed(?:s|ed)?|"
+    r"averag(?:e|es|ed)|remain(?:s|ed)?|var(?:y|ies|ied)|contribut(?:e|es|ed)|"
+    r"represent(?:s|ed)?|indicat(?:e|es|ed)|found|observed|measured|estimated|"
+    r"account(?:s|ed)?|correlat(?:e|es|ed)|differ(?:s|ed)?)\b",
+    re.IGNORECASE,
+)
+# A region, class, or boundary defined only by a figure panel reference.
+_FIGURE_REFERENT_PATTERN = re.compile(
+    r"\b(?:fig(?:ure)?s?\.?\s*\d+\s*[a-z]?|panel\s+[a-z]\b|"
+    r"see\s+fig(?:ure)?s?\.?\s*\d+)",
+    re.IGNORECASE,
+)
 MAX_FINDING_CONTEXT_CHARS = 3_000_000
 MAX_FINDING_SPAN_CHARS = 1_600
 FINDING_SPAN_OVERLAP_CHARS = 400
@@ -158,9 +206,46 @@ BENCHMARK_STANDALONE_INSTRUCTIONS = (
     "an explicit phrase such as 'the correct answer is'. "
     "These rules do not restrict exact evidence quotes, source locators, or rationale fields."
 )
+CONTEXT_ONLY_SOURCE_INSTRUCTIONS = (
+    "CONTEXT_ONLY_SOURCE supports question_context statements only. "
+    "Never select a CONTEXT_ONLY_SOURCE span as answer evidence, as a scope value, "
+    "or as a required question phrase."
+)
+REFERENT_SLOT_DEFINITION = (
+    "A displayed task is self-contained when every referent slot is fixed. The slots "
+    "are subject or system, measured variable, unit meaning, percentage basis, "
+    "acronym, location, period or event, population or sample, treatment or "
+    "condition, and comparison basis. A slot is fixed when the question or "
+    "question_context states it, or when the claim does not depend on it. "
+    "question_context is required when the question alone leaves any applicable slot "
+    "unfixed. question_context is unnecessary only when the question alone fixes "
+    "every applicable slot."
+)
+REFERENT_SLOT_RECORD_INSTRUCTIONS = (
+    "Fill referent_slots for every slot. For a slot stated in the question, use "
+    "stated_in_question. For a slot stated in question_context, use stated_in_context. "
+    "For either state, copy the exact words from your question or question_context "
+    "into displayed_text. Use not_applicable only when the claim does not depend on "
+    "the slot, and leave displayed_text empty. Use unavailable_in_source when the "
+    "claim depends on the slot and neither SOURCE_DATA nor CONTEXT_ONLY_SOURCE states "
+    "it, and leave displayed_text empty. A cross-sectional single-survey observation "
+    "has no comparison_basis. A dimensionless ratio has no unit_meaning. "
+    "referent_slots is a diagnostic record. It does not replace any question_context "
+    "rule and it never supplies a missing slot."
+)
 QUESTION_CONTEXT_INSTRUCTIONS = (
-    "Set question_context to an empty string when the question is self-contained. "
-    "Otherwise, add only source-supported information that is necessary to understand "
+    "For each referent slot, decide whether the question alone fixes it: subject or "
+    "system, measured variable, unit meaning, percentage basis, acronym, location, "
+    "period or event, population or sample, treatment or condition, comparison basis. "
+    "A slot is fixed only when the question states it, or when the slot does not apply "
+    "to this claim. Set question_context to an empty string only when every applicable "
+    "slot is fixed by the question alone. Otherwise state each unfixed slot in "
+    "question_context, in source-supported words, taken from SOURCE_DATA or from "
+    "CONTEXT_ONLY_SOURCE. Take a location, period, sample, or term definition from "
+    "CONTEXT_ONLY_SOURCE when SOURCE_DATA does not state it. Do not invent a slot "
+    "value that neither source states. Cite, for each context statement, the span id "
+    "it rests on, in question_rationale. "
+    "Add only source-supported information that is necessary to understand "
     "the question. The context can expand an unfamiliar acronym, identify an ambiguous "
     "referent, or distinguish a sample, location, period, condition, system, or measurement "
     "meaning. Keep this context separate from the question. Do not put the task in the "
@@ -170,7 +255,8 @@ QUESTION_CONTEXT_INSTRUCTIONS = (
     "taxonomic counts, relationships, results, conclusions, answer-choice eliminators, "
     "or a paper summary. If an acronym expansion answers the question, do not supply that "
     "expansion. Expand an unfamiliar acronym only when its expansion occurs in "
-    "SOURCE_DATA. For a study-local definite description or abbreviated species name, "
+    "SOURCE_DATA or in CONTEXT_ONLY_SOURCE. "
+    "For a study-local definite description or abbreviated species name, "
     "the context must identify the source-supported subject, place, time, sample, or "
     "event. A latitude alone does not identify a station or event. Do not infer or invent "
     "a definition."
@@ -183,23 +269,47 @@ REVISION_INSTRUCTIONS = (
     "period, or sample description that an earlier attempt added. Change only what "
     "failure_feedback and unresolved_phrases name. Define each phrase in "
     "unresolved_phrases in question_context, or remove that phrase from the "
-    "question. Use the source only to add supported subject, place, time, sample, "
-    "or event context. If SOURCE_DATA does not state the detail that "
-    "failure_feedback demands, set context_gap to that exact detail and leave the "
+    "question. When failure_feedback names one or more referent slots, resolve "
+    "every named slot in question_context before you change any other wording, "
+    "and take the value from SOURCE_DATA or from CONTEXT_ONLY_SOURCE in plain "
+    "words. Use the source only to add supported subject, place, time, sample, "
+    "or event context. If neither SOURCE_DATA nor CONTEXT_ONLY_SOURCE states the "
+    "detail that failure_feedback demands, set context_gap to that exact detail, "
+    "set that slot to unavailable_in_source in referent_slots, and leave the "
     "question unchanged. Do not add answer-bearing information. Do not repeat the "
     "parent question and question_context unchanged. Do not change the frozen "
     "finding. "
 )
 CONTEXT_WIDENED_REVISION_INSTRUCTIONS = (
-    "This attempt repeats an earlier rejection on this finding. SOURCE_DATA now "
-    "carries every hash-bound study-setting span this paper supplies for the "
-    "frozen finding. Take the missing subject, place, period, sample, or acronym "
-    "expansion from that text, in the source's own words. Set context_gap when it "
-    "still is not there. "
+    "This attempt repeats an earlier rejection on this finding. "
+    "CONTEXT_ONLY_SOURCE carries every hash-bound study-setting span this paper "
+    "supplies for the frozen finding. Take the missing subject, place, period, "
+    "sample, or acronym expansion from that text, in the source's own words. Set "
+    "context_gap when it still is not there. "
 )
 SURGICAL_CORRECTION_INSTRUCTIONS = (
     "Exactly one defect is recorded. Change the smallest span of text that removes "
     "it. Keep every other word of the parent exactly as written. "
+)
+REQUIRED_PHRASE_COVERAGE_INSTRUCTIONS = (
+    "Cover the meaning of every required_question_phrases entry in the question or in "
+    "question_context. Normalize the wording first: join words broken by a line wrap, "
+    "collapse runs of spaces to one space, and remove citation marker digits attached "
+    "to a word. Do not copy a source sentence, a figure or table caption, or a clause "
+    "that states the answer. Do not quote SOURCE_DATA inside the question. Place an "
+    "independent scope qualifier in question_context, not in the question stem, when "
+    "the question reads better without it. Do not drop a required phrase. If a "
+    "required phrase cannot be covered without stating the answer, or its text is "
+    "unreadable, name the phrase in question_rationale. "
+    "Write the question and question_context as plain running text on one line. "
+    "Do not use a line break, a tab, or a run of two or more spaces."
+)
+DISPLAYED_PERIOD_INSTRUCTIONS = (
+    "When SOURCE_DATA or CONTEXT_ONLY_SOURCE states a calendar period, a site name, "
+    "or a sample size for this finding, state it. Do not write 'the past N years', "
+    "'recent years', 'at this time', or another publication-relative period. A period "
+    "must be a calendar period or an event-anchored period that the displayed task "
+    "names."
 )
 RECONSTRUCTION_NUMERIC_INSTRUCTIONS = (
     "Populate numeric only for one scalar value with one applicable unit. Never "
@@ -407,7 +517,71 @@ ANSWER_SCHEMA = {
     },
     "additionalProperties": False,
 }
-EXTRACTOR_ANSWER_SCHEMA = _source_span_selected_schema(ANSWER_SCHEMA)
+_EXTRACTOR_SELECTED_ANSWER_SCHEMA = _source_span_selected_schema(ANSWER_SCHEMA)
+REFERENT_SLOT_NAMES = (
+    "subject_or_system",
+    "measured_variable",
+    "unit_meaning",
+    "percentage_basis",
+    "acronym",
+    "location",
+    "period_or_event",
+    "population_or_sample",
+    "treatment_or_condition",
+    "comparison_basis",
+)
+REFERENT_SLOTS_SCHEMA = {
+    "type": "array",
+    "minItems": len(REFERENT_SLOT_NAMES),
+    "maxItems": len(REFERENT_SLOT_NAMES),
+    "description": (
+        "One diagnostic entry per referent slot. This record is not evidence and "
+        "never supplies a slot that the displayed task leaves unfixed."
+    ),
+    "items": {
+        "type": "object",
+        "required": ["slot", "state", "displayed_text"],
+        "properties": {
+            "slot": {"enum": list(REFERENT_SLOT_NAMES)},
+            "state": {
+                "enum": [
+                    "stated_in_question",
+                    "stated_in_context",
+                    "not_applicable",
+                    "unavailable_in_source",
+                ]
+            },
+            "displayed_text": {"type": "string"},
+        },
+        "additionalProperties": False,
+    },
+}
+EXTRACTOR_ANSWER_SCHEMA = {
+    **_EXTRACTOR_SELECTED_ANSWER_SCHEMA,
+    "properties": {
+        **_EXTRACTOR_SELECTED_ANSWER_SCHEMA["properties"],
+        "interpretation_span_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "maxItems": MAX_CONTEXT_ONLY_SPANS,
+            "description": (
+                "CONTEXT_ONLY_SOURCE span ids that define the place, period, "
+                "population, metric, column label, or acronym of this finding. "
+                "These spans are never answer evidence."
+            ),
+        },
+    },
+}
+CANDIDATE_FINDING_SCHEMA = {
+    "type": "object",
+    "required": ["rank", "answer", "ranking_rationale"],
+    "properties": {
+        "rank": {"type": "integer", "minimum": 1},
+        "answer": EXTRACTOR_ANSWER_SCHEMA,
+        "ranking_rationale": JUSTIFICATION_SCHEMA,
+    },
+    "additionalProperties": False,
+}
 FROZEN_ANSWER_SCHEMA = {
     **ANSWER_SCHEMA,
     "required": ANSWER_SCHEMA["required"]
@@ -429,6 +603,9 @@ FROZEN_ANSWER_SCHEMA = {
             "items": {"type": "string", "minLength": 1},
             "minItems": 1,
         },
+        "interpretation_span_ids": EXTRACTOR_ANSWER_SCHEMA["properties"][
+            "interpretation_span_ids"
+        ],
         "evidence_components": {
             "type": "array",
             "items": {
@@ -516,16 +693,30 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
     "answer_judge": {"type": "string", "enum": ["yes", "no"]},
     "extractor": {
         "type": "object",
-        "required": ["answer"],
-        "properties": {"answer": EXTRACTOR_ANSWER_SCHEMA},
+        "required": ["candidate_findings"],
+        "properties": {
+            "candidate_findings": {
+                "type": "array",
+                "items": CANDIDATE_FINDING_SCHEMA,
+                "minItems": 1,
+                "maxItems": MAX_RANKED_CANDIDATE_FINDINGS,
+                "description": "Candidate findings ranked best first.",
+            }
+        },
         "additionalProperties": False,
     },
     "question_writer": {
         "type": "object",
-        "required": ["question", "question_context", "question_rationale"],
+        "required": [
+            "question",
+            "question_context",
+            "referent_slots",
+            "question_rationale",
+        ],
         "properties": {
             "question": {"type": "string", "minLength": 1},
             "question_context": {"type": "string"},
+            "referent_slots": REFERENT_SLOTS_SCHEMA,
             "question_rationale": JUSTIFICATION_SCHEMA,
             "context_gap": {
                 "type": "string",
@@ -676,6 +867,7 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
                 "question_context_required",
                 "question_context_source_supported",
                 "question_context_answer_leakage_absent",
+                "interpretation_scope_applies_to_finding",
                 "question_verification_contract_version",
                 "question_context_referent_resolved",
                 "question_context_missing_detail",
@@ -694,6 +886,14 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
                 "question_context_required": {"type": "boolean"},
                 "question_context_source_supported": {"type": "boolean"},
                 "question_context_answer_leakage_absent": {"type": "boolean"},
+                "interpretation_scope_applies_to_finding": {
+                    "type": "boolean",
+                    "description": (
+                        "False when a place or a period taken from CONTEXT_ONLY_SOURCE "
+                        "does not apply to the selected finding. True when no context "
+                        "statement rests on CONTEXT_ONLY_SOURCE."
+                    ),
+                },
                 "question_verification_contract_version": {
                     "const": QUESTION_VERIFICATION_CONTRACT_VERSION
                 },
@@ -978,7 +1178,11 @@ def generate_candidate(
         raise ValueError(f"source has no usable chunks: {source_id}")
     prose_chunks = [row for row in chunks if not row.get("object_labels")]
     chunk = max(prose_chunks or chunks, key=lambda row: len(row["text"]))
-    arctic_scope, arctic_scope_spans = _eligible_generation_scope(source, chunks)
+    (
+        arctic_scope,
+        arctic_scope_spans,
+        interpretation_spans,
+    ) = _eligible_generation_scope(source, chunks)
     externally_metered = (
         getattr(author, "externally_metered", False),
         getattr(verifier, "externally_metered", False),
@@ -1034,6 +1238,7 @@ def generate_candidate(
             WHERE run_id=? AND paper_family_id=? AND selection_policy_version=?""",
             (run_id, source["paper_family_id"], finding_policy_version),
         )
+    admission: dict[str, Any] | None = None
     if existing_finding:
         if existing_finding["source_id"] != source_id:
             raise ValueError(
@@ -1053,9 +1258,11 @@ def generate_candidate(
         scope_instruction = (
             "\nELIGIBLE_ARCTIC_SCOPE\n"
             + canonical_json(arctic_scope)
-            + "\nSelect a finding only from the supplied Arctic result spans. "
-            "For a separable Arctic component, include at least one supplied "
-            "question_scope_phrases value in required_question_phrases."
+            + "\nFor a separable Arctic component, select the finding only from the "
+            "supplied Arctic result spans, and include at least one supplied "
+            "question_scope_phrases value in required_question_phrases. For a whole "
+            "study, the classifier certified every reported result as Arctic: select "
+            "the finding from any result or discussion sentence in SOURCE_DATA."
             if arctic_scope is not None
             else ""
         )
@@ -1071,7 +1278,6 @@ def generate_candidate(
         admission_exclusions: list[str] = []
         answer = None
         chunk = None
-        admission_reason: tuple[str, str] | None = None
         for admission_pass in range(FINDING_ADMISSION_PASSES):
             excluded_span_ids = sorted(
                 set(routed_exclusions) | set(admission_exclusions)
@@ -1089,34 +1295,56 @@ def generate_candidate(
                 if admission_pass == 0
                 else stable_id("finding-readmission", finding_entity_id, admission_pass)
             )
-            answer_proposal = _call(
+            candidate_findings = _call(
                 db,
                 author,
                 run_id,
                 pass_entity_id,
                 "extractor",
                 context
+                + _context_only_source(interpretation_spans)
                 + scope_instruction
                 + exclusion_instruction
-                + "\nExtract one bounded answer record. Select one source_span_id. "
+                + "\nExtract one to three bounded answer records in candidate_findings, "
+                "ranked best first. Set rank to 1 for the best candidate. Rank first the "
+                "finding whose place, period, population, and measured variable are all "
+                "stated in the supplied spans. Rank last a finding that needs a figure, a "
+                "table layout, or a study-internal code name that no supplied span "
+                "defines. Set ranking_rationale for each candidate. Select one "
+                "source_span_id for each candidate. "
                 + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS
                 + " "
+                "SOURCE_DATA contains two kinds of span. A finding span is selectable "
+                "evidence for the answer. An interpretation span in CONTEXT_ONLY_SOURCE "
+                "is study context that identifies the place, the period, the population, "
+                "the instrument, or an acronym expansion. Do not select an interpretation "
+                "span as the finding. Use an interpretation span only to set a scope value "
+                "and to judge whether a reader without the paper can interpret the "
+                "finding. "
                 "Select a complete prose finding sentence. Select one atomic claim from a complete prose finding sentence "
                 "in the results or discussion. Do not select a title, heading, caption, "
                 "legend, axis label, methods-only description, or sentence fragment as the "
                 "finding by itself. For a selected numerical row, include its adjacent caption "
                 "or definition when that text defines the metric, unit, percentage basis, acronym, "
-                "location, or period needed to interpret the finding. Reject the finding when the "
-                "available spans do not support a complete definition. "
+                "location, or period needed to interpret the finding. "
+                "If the finding is a numerical row, a cell, or a figure value, put the "
+                "caption span, the column-header span, and the metric-definition span in "
+                "interpretation_span_ids. If those spans are not available, do not select "
+                "this finding. Select a prose finding sentence instead. "
                 "The selected span must contain exact, sufficient evidence for the "
                 "entire answer and every required question phrase. Evidence spans are "
                 "bounded source paragraphs or overlapping windows and can contain PDF "
                 "line wraps. The pipeline can combine adjacent eligible fragments into "
-                "one exact selectable interval. Do not combine span IDs yourself. Set each non-null "
-                "scope value to exact SOURCE_DATA text from the selected span, without "
-                "aliases or paraphrases, and keep at least one value non-null. Populate "
-                "only the minimum scope qualifiers needed to make the answer unique. "
-                "Each non-null scope value must also appear in "
+                "one exact selectable interval. Do not combine span IDs yourself. "
+                "Set each non-null scope value to exact SOURCE_DATA text, from a finding "
+                "span or from an interpretation span. Do not use an alias or a paraphrase. "
+                "Keep at least one value non-null. Populate every scope qualifier that a "
+                "reader without the paper needs to interpret the result. This always "
+                "includes geography and period when any supplied span states them. "
+                "Uniqueness inside the paper is not sufficient. "
+                "Put a scope value in required_question_phrases only when the question "
+                "must repeat it word for word. A scope value that comes from an "
+                "interpretation span belongs in question_context, not in "
                 "required_question_phrases. Every required_question_phrases entry must "
                 "be exact selected-span text and must not contain answer.text or any "
                 "answer variant. Prefer a non-numeric finding unless the "
@@ -1150,45 +1378,28 @@ def generate_candidate(
                 timeout,
                 retries,
                 rate_limit_seconds,
-            )["answer"]
-            answer = _resolve_source_span(
-                answer_proposal,
-                finding_spans,
-                reason_code="finding_evidence_span_not_found",
-            )
-            selected_ids = {
-                answer.get("source_span_id"),
-                *answer.get("source_span_ids", []),
-            }
-            if routed_exclusions and selected_ids.intersection(routed_exclusions):
-                raise CandidateRejectedError(
-                    "alternative_finding_not_distinct",
-                    "the alternative selected an excluded finding span",
+            )["candidate_findings"]
+            try:
+                answer, chunk, admission = _admit_ranked_finding(
+                    candidate_findings,
+                    finding_spans,
+                    chunks,
+                    arctic_scope,
+                    interpretation_spans,
+                    excluded_span_ids=excluded_span_ids,
+                    admission_exclusions=admission_exclusions,
                 )
-            _require_arctic_scope_custody(answer, arctic_scope)
-            chunk = next(
-                (
-                    row
-                    for row in chunks
-                    if row["chunk_id"] == (answer.get("locator") or {}).get("chunk_id")
-                ),
-                None,
-            )
-            if chunk is None or not _record_resolves(answer, chunk):
-                raise CandidateRejectedError(
-                    "finding_evidence_not_located",
-                    "the selected finding does not resolve to one source chunk",
-                )
-            admission_reason = finding_admission_reason(answer, chunk)
-            if admission_reason is None:
-                break
-            admission_exclusions.extend(
-                span_id
-                for span_id in selected_ids
-                if isinstance(span_id, str) and span_id
-            )
-        if admission_reason is not None:
-            raise CandidateRejectedError(admission_reason[0], admission_reason[1])
+            except CandidateRejectedError as error:
+                # r15 audit section 4.5: one free re-ask when every ranked
+                # candidate failed freeze-time admission. The rejected spans join
+                # the excluded set, and the re-ask spends no family retry path.
+                if (
+                    error.reason_code in FINDING_ADMISSION_REASK_REASONS
+                    and admission_pass + 1 < FINDING_ADMISSION_PASSES
+                ):
+                    continue
+                raise
+            break
         if answer is None or chunk is None:
             raise ValueError("the finding admission loop produced no finding")
         finding_id = stable_id(
@@ -1219,22 +1430,30 @@ def generate_candidate(
     # A finding frozen before this contract never ran the admission gate, so
     # the same checks still report at the QA gate for an inherited finding.
     frozen_admission = finding_admission_reason(answer, chunk)
-    finding_quality_reason = frozen_admission[0] if frozen_admission else None
+    finding_quality_reason = (
+        frozen_admission[0]
+        if frozen_admission
+        else _finding_admission_reason(
+            answer, list(answer.get("interpretation_span_ids") or [])
+        )
+    )
+    # A whole-study paper carries no span restriction, so the guard must test the
+    # restriction itself. Testing arctic_scope here emptied the writer bundle.
     scoped_chunk_spans = (
-        [
-            span
-            for span in arctic_scope_spans or []
-            if span["chunk_id"] == chunk["chunk_id"]
-        ]
-        if arctic_scope is not None
+        [span for span in arctic_scope_spans if span["chunk_id"] == chunk["chunk_id"]]
+        if arctic_scope_spans is not None
         else None
     )
     context_spans = {
         span["span_id"]: span for span in (scoped_chunk_spans or _finding_spans(chunk))
     }
-    context = _context(chunk, scoped_chunk_spans)
-    if attempt is not None and attempt["attempt_kind"] == "context_widened_revision":
-        context += activity_context_block(source, answer)
+    # The answer is frozen here, so a study-setting span that carries the answer
+    # never reaches the writer, the reconstructor, or either verifier.
+    forwarded_interpretation_spans = _forwarded_context_only_spans(
+        interpretation_spans, answer
+    )
+    context_only_block = _context_only_source(forwarded_interpretation_spans)
+    context = _context(chunk, scoped_chunk_spans) + context_only_block
     entity_id = (
         stable_id("unit", finding_id, arm, attempt["attempt_id"])
         if attempt is not None
@@ -1309,12 +1528,14 @@ def generate_candidate(
         if attempt_kind in QUESTION_REPAIR_KINDS
         else ""
     )
+    referent_slots: list[dict[str, Any]] = []
     if distractor_only_retry or answer_rule_repair:
         if revision_parent is None:
             raise ValueError("a bounded repair requires its parent candidate")
         question = revision_parent["question"]
         question_context = revision_parent.get("question_context", "")
         question_rationale = revision_parent["question_rationale"]
+        referent_slots = revision_parent.get("referent_slots") or []
     elif arm == "answer_first":
         question_record = _call(
             db,
@@ -1326,15 +1547,24 @@ def generate_candidate(
             + "\nANSWER_RECORD\n"
             + canonical_json(answer)
             + revision_instruction
-            + "\nWrite one self-contained question. Include every "
-            "required_question_phrases entry verbatim. Set question_rationale "
+            + "\nWrite one self-contained question. Set question_rationale "
             "to a concise evidence-grounded justification for the question's "
             "wording and scope. "
+            + REQUIRED_PHRASE_COVERAGE_INSTRUCTIONS
+            + " "
+            + DISPLAYED_PERIOD_INSTRUCTIONS
+            + " "
             + QUESTION_ALIGNMENT_INSTRUCTIONS
             + " "
             + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS
             + " "
+            + REFERENT_SLOT_DEFINITION
+            + " "
+            + CONTEXT_ONLY_SOURCE_INSTRUCTIONS
+            + " "
             + QUESTION_CONTEXT_INSTRUCTIONS
+            + " "
+            + REFERENT_SLOT_RECORD_INSTRUCTIONS
             + " "
             + BENCHMARK_STANDALONE_INSTRUCTIONS
             + " Do not provide hidden reasoning.",
@@ -1353,6 +1583,7 @@ def generate_candidate(
                 "slot_evidence_unavailable",
                 f"the source does not state the demanded detail: {context_gap}",
             )
+        referent_slots = question_record["referent_slots"]
     elif arm == "direct_joint":
         joint = _call(
             db,
@@ -1363,16 +1594,23 @@ def generate_candidate(
             context
             + "\nFROZEN_FINDING\n"
             + canonical_json(answer)
-            + "\nWrite one question and answer record for exactly this finding. "
-            "Include every required_question_phrases entry verbatim. Set "
+            + "\nWrite one question and answer record for exactly this finding. Set "
             "question_rationale to a concise evidence-grounded justification "
             "for the question's wording and scope. Preserve the answer's "
             "selection_rationale exactly. "
+            + REQUIRED_PHRASE_COVERAGE_INSTRUCTIONS
+            + " "
+            + DISPLAYED_PERIOD_INSTRUCTIONS
+            + " "
             + ANSWER_FORMAT_INSTRUCTIONS
             + " Preserve every field of the frozen answer record exactly. "
             + QUESTION_ALIGNMENT_INSTRUCTIONS
             + " "
             + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS
+            + " "
+            + REFERENT_SLOT_DEFINITION
+            + " "
+            + CONTEXT_ONLY_SOURCE_INSTRUCTIONS
             + " "
             + QUESTION_CONTEXT_INSTRUCTIONS
             + " "
@@ -1459,7 +1697,8 @@ def generate_candidate(
         "condition, or referent. If the displayed task is incomplete, report ambiguity "
         "instead of resolving it from SOURCE_DATA. SOURCE_DATA can still determine the "
         "answer. Reconstruct the answer. The proposed answer is hidden. "
-        "Select one source_span_id for the evidence. A selectable span can be an "
+        + CONTEXT_ONLY_SOURCE_INSTRUCTIONS
+        + " Select one source_span_id for the evidence. A selectable span can be an "
         "exact combined interval from adjacent eligible fragments. Copy each non-null scope "
         "value exactly from its selected SOURCE_DATA span, without aliases or "
         "paraphrases. Populate only scope qualifiers stated verbatim in the "
@@ -1512,10 +1751,18 @@ def generate_candidate(
         "alternatives, evidence, and the question claim type. Label the question claim "
         "type from QUESTION and SOURCE_DATA alone. "
         "Treat QUESTION and QUESTION_CONTEXT as the complete model-facing task. "
-        "Set question_context_required to true only when the nonempty context supplies "
-        "information necessary to understand the question. Set it to false when the "
-        "question is self-contained. Set question_context_source_supported to true "
-        "only when every context statement has source support. Set "
+        + REFERENT_SLOT_DEFINITION
+        + " Set question_context_required to true when the question alone leaves any "
+        "applicable slot unfixed. Set it to false only when the question alone fixes "
+        "every applicable slot. "
+        + CONTEXT_ONLY_SOURCE_INSTRUCTIONS
+        + " Set question_context_source_supported to true only when every context "
+        "statement is supported by SOURCE_DATA or by CONTEXT_ONLY_SOURCE, and is "
+        "applicable to the selected finding. Set it to false for any statement "
+        "supported by neither. Set interpretation_scope_applies_to_finding to false "
+        "when a place or a period taken from CONTEXT_ONLY_SOURCE does not apply to "
+        "the selected finding. Set it to true when no context statement rests on "
+        "CONTEXT_ONLY_SOURCE. Set "
         "question_context_answer_leakage_absent to false when the context gives the "
         "answer, a result, a conclusion, a relationship, an answer-bearing number, "
         "or an answer-choice eliminator. "
@@ -1538,9 +1785,10 @@ def generate_candidate(
         "selected SOURCE_DATA span and the QUESTION. Do not assume any proposed "
         "scope value is true. Select one source_span_id for the evidence. A selectable "
         "span can be an exact combined interval from adjacent eligible fragments. It must "
-        "contain the answer and every verified scope value. Return the exact "
-        "proposed scope only when "
-        "each value occurs verbatim in that span and the QUESTION states it. "
+        "contain the answer and every verified scope value that SOURCE_DATA states. "
+        "Return the exact proposed scope only when each value occurs verbatim in that "
+        "span or in a CONTEXT_ONLY_SOURCE span, and the QUESTION or the "
+        "QUESTION_CONTEXT states it. "
         "Otherwise set relation_scope_match to false. Do not add scope merely "
         "because it appears elsewhere in the source. Copy each non-null scope "
         "value exactly from its selected SOURCE_DATA span, without aliases or "
@@ -1710,6 +1958,7 @@ def generate_candidate(
         direct_value_provenance,
         answer_agreement=answer_agreement,
         standalone_verification=standalone_verification,
+        interpretation_spans=forwarded_interpretation_spans,
     )
     if finding_quality_reason and finding_quality_reason not in qa_gate_reasons:
         qa_gate_reasons.insert(0, finding_quality_reason)
@@ -1786,6 +2035,7 @@ def generate_candidate(
         "question": question,
         "question_context": question_context,
         "question_rationale": question_rationale,
+        "referent_slots": referent_slots,
         "answer": answer,
         "arm_answer_proposal": arm_answer_proposal,
         "reconstruction": reconstruction,
@@ -1823,6 +2073,19 @@ def generate_candidate(
             "evidence_combination_contract_version": (
                 EVIDENCE_COMBINATION_CONTRACT_VERSION
             ),
+            "context_only_evidence_contract_version": (
+                CONTEXT_ONLY_EVIDENCE_CONTRACT_VERSION
+            ),
+            "referent_slot_contract_version": REFERENT_SLOT_CONTRACT_VERSION,
+            "finding_admission_contract_version": FINDING_ADMISSION_CONTRACT_VERSION,
+            "context_only_source": {
+                "contract_version": CONTEXT_ONLY_EVIDENCE_CONTRACT_VERSION,
+                "selectable_for_answer_evidence": False,
+                "spans": [
+                    _context_only_span(span) for span in forwarded_interpretation_spans
+                ],
+            },
+            "finding_admission": admission,
             "model_justification_contract_version": (
                 MODEL_JUSTIFICATION_CONTRACT_VERSION
             ),
@@ -2162,6 +2425,8 @@ def _generate_distractors(
         + " "
         + CLOSED_SET_INSTRUCTIONS
         + " "
+        + CONTEXT_ONLY_SOURCE_INSTRUCTIONS
+        + " "
         + DISTRACTOR_WRITER_INSTRUCTIONS,
         parameters,
         reservation,
@@ -2225,7 +2490,8 @@ def _generate_distractors(
             "or time alone does not make a scoped substitution correct."
             " Reject an option with a study-local definite description or abbreviated species "
             "name when QUESTION and QUESTION_CONTEXT do not identify its subject, place, "
-            "time, sample, or event. A latitude alone does not identify a station or event."
+            "time, sample, or event. A latitude alone does not identify a station or event. "
+            + CONTEXT_ONLY_SOURCE_INSTRUCTIONS
             + " Select one source_span_id for the evidence. Set rationale to a "
             "concise evidence-grounded justification for the verdict fields. "
             "Do not provide hidden reasoning."
@@ -2285,6 +2551,7 @@ def resume_candidate_distractors(
     chunk = next((value for value in chunks if value["chunk_id"] == chunk_id), None)
     if chunk is None:
         raise ValueError("the targeted candidate source chunk is unavailable")
+    stored_context_only = context_only_span_records(base.get("provenance"))
     qa_reasons = _qa_gate_reasons(
         chunk,
         base["question"],
@@ -2295,6 +2562,7 @@ def resume_candidate_distractors(
         base.get("provenance"),
         answer_agreement=base["answer_agreement"],
         standalone_verification=base.get("standalone_verification"),
+        interpretation_spans=stored_context_only,
     )
     if qa_reasons:
         raise ValueError("the targeted candidate no longer passes its QA gate")
@@ -2334,7 +2602,7 @@ def resume_candidate_distractors(
     distractors, verdicts, _prefiltered = _generate_distractors(
         db=db,
         source=source,
-        context=_context(chunk),
+        context=_context(chunk) + _context_only_source(stored_context_only),
         context_spans={span["span_id"]: span for span in _finding_spans(chunk)},
         question=base["question"],
         question_context=base.get("question_context", ""),
@@ -2598,8 +2866,11 @@ def _qa_gate_reasons(
     *,
     answer_agreement: dict[str, Any] | None = None,
     standalone_verification: dict[str, Any] | None = None,
+    interpretation_spans: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     reasons: list[str] = []
+    interpretation_spans = interpretation_spans or []
+    interpretation_texts = [str(span.get("text", "")) for span in interpretation_spans]
     if standalone_verification is None:
         reasons.append("standalone_verification_unresolved")
     else:
@@ -2637,12 +2908,28 @@ def _qa_gate_reasons(
         answer, provenance
     ):
         reasons.append("source_bound_numeric_rule_missing")
-    if not scope_is_evidence_bound(answer.get("scope"), answer):
+    if not scope_is_evidence_bound(answer.get("scope"), answer, interpretation_texts):
         reasons.append("answer_scope_not_source_bound")
-    if not scope_is_evidence_bound(reconstruction.get("scope"), reconstruction):
+    if not scope_is_evidence_bound(
+        reconstruction.get("scope"), reconstruction, interpretation_texts
+    ):
         reasons.append("reconstruction_scope_not_source_bound")
-    if not scope_is_evidence_bound(verification.get("scope"), verification):
+    if not scope_is_evidence_bound(
+        verification.get("scope"), verification, interpretation_texts
+    ):
         reasons.append("answer_verifier_scope_not_source_bound")
+    if interpretation_spans and interpretation_spans_contain_answer(
+        interpretation_spans, answer
+    ):
+        reasons.append("interpretation_span_contains_answer")
+    if interpretation_spans and (
+        verification.get("interpretation_scope_applies_to_finding") is not True
+    ):
+        reasons.append("interpretation_scope_not_applicable_to_finding")
+    if benchmark_text_raw_source_artifact(str(question), question_context):
+        reasons.append("benchmark_text_raw_source_artifact")
+    if scope_qualifier_not_displayed(answer, str(question), question_context):
+        reasons.append("scope_qualifier_not_displayed")
     if not verification.get("source_entailment_model_verified"):
         reasons.append("source_entailment_not_verified")
     if not verification.get("relation_scope_match"):
@@ -2686,13 +2973,15 @@ def _qa_gate_reasons(
         required_phrases = []
     if required_question_phrases_contain_answer(answer):
         reasons.append("finding_answer_phrase_in_required_question_phrases")
-    answer_evidence = normalize_text(str(answer.get("evidence_quote", "")))
+    answer_evidence = str(answer.get("evidence_quote", ""))
+    # The router and validate_candidate must compare through one projection, so
+    # a phrase broken by a line wrap cannot pass one gate and fail the other.
     if any(
-        normalize_text(phrase) not in answer_evidence for phrase in required_phrases
+        not scope_phrase_in_text(phrase, answer_evidence) for phrase in required_phrases
     ):
         reasons.append("scope_qualifier_not_source_bound")
     for phrase in required_phrases:
-        if normalize_text(phrase) not in normalize_text(question):
+        if not scope_phrase_is_displayed(phrase, str(question), question_context):
             reasons.append("scope_qualifier_missing")
             break
     return list(dict.fromkeys(reasons))
@@ -2740,6 +3029,211 @@ def _context(
         )
         + "\nSOURCE_DATA_END"
     )
+
+
+def _admit_ranked_finding(
+    candidate_findings: list[dict[str, Any]],
+    finding_spans: dict[str, dict[str, Any]],
+    chunks: list[dict[str, Any]],
+    arctic_scope: dict[str, Any] | None,
+    interpretation_spans: list[dict[str, Any]] | None,
+    *,
+    excluded_span_ids: list[str],
+    admission_exclusions: list[str] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Freeze the highest-ranked candidate finding that passes admission.
+
+    ``admission_exclusions`` collects the span ids of every candidate that the
+    freeze-time admission checks rejected, so the caller's one free re-ask can
+    exclude them (r15 audit section 4.5).
+
+    Every check below only rejects. Ranking decides which surviving candidate is
+    frozen; it never admits a finding that a later gate would refuse.
+    The recorded ``admitted_rank`` and each rejection ``rank`` are 1-based
+    positions in the sorted order, so they stay meaningful when the model
+    returns a duplicate or absent rank value.
+    """
+    ordered = sorted(
+        (row for row in candidate_findings if isinstance(row, dict)),
+        key=lambda row: int(row.get("rank") or 0) or MAX_RANKED_CANDIDATE_FINDINGS,
+    )
+    excluded = set(excluded_span_ids)
+    rejections: list[dict[str, Any]] = []
+    last_error: CandidateRejectedError | None = None
+    for index, row in enumerate(ordered):
+        proposal = row.get("answer")
+        if not isinstance(proposal, dict):
+            continue
+        try:
+            answer = _resolve_source_span(
+                proposal,
+                finding_spans,
+                reason_code="finding_evidence_span_not_found",
+            )
+            if excluded and {
+                answer.get("source_span_id"),
+                *answer.get("source_span_ids", []),
+            }.intersection(excluded):
+                raise CandidateRejectedError(
+                    "alternative_finding_not_distinct",
+                    "the alternative selected an excluded finding span",
+                )
+            _require_arctic_scope_custody(answer, arctic_scope)
+            chunk = next(
+                (
+                    value
+                    for value in chunks
+                    if value["chunk_id"]
+                    == (answer.get("locator") or {}).get("chunk_id")
+                ),
+                None,
+            )
+            if chunk is None or not _record_resolves(answer, chunk):
+                raise CandidateRejectedError(
+                    "finding_evidence_not_located",
+                    "the selected finding does not resolve to one source chunk",
+                )
+            # The extractor cannot invent an interpretation span id: keep only
+            # the ids of spans this run actually forwarded.
+            available = {span["span_id"] for span in interpretation_spans or []}
+            declared = [
+                span_id
+                for span_id in answer.get("interpretation_span_ids") or []
+                if span_id in available
+            ]
+            if declared:
+                answer["interpretation_span_ids"] = declared
+            else:
+                answer.pop("interpretation_span_ids", None)
+            reason = _finding_admission_reason(answer, declared)
+            if reason is not None:
+                raise CandidateRejectedError(
+                    reason, "the candidate finding failed freeze-time admission"
+                )
+            frozen_admission = finding_admission_reason(answer, chunk)
+            if frozen_admission is not None:
+                raise CandidateRejectedError(*frozen_admission)
+        except CandidateRejectedError as error:
+            last_error = error
+            rejections.append({"rank": index + 1, "reason_code": error.reason_code})
+            if (
+                admission_exclusions is not None
+                and error.reason_code in FINDING_ADMISSION_REASK_REASONS
+                and isinstance(proposal, dict)
+            ):
+                admission_exclusions.extend(
+                    span_id
+                    for span_id in (
+                        proposal.get("source_span_id"),
+                        *(proposal.get("source_span_ids") or []),
+                    )
+                    if isinstance(span_id, str)
+                    and span_id
+                    and span_id not in admission_exclusions
+                )
+            continue
+        return (
+            answer,
+            chunk,
+            {
+                "contract_version": FINDING_ADMISSION_CONTRACT_VERSION,
+                "candidate_count": len(ordered),
+                "admitted_rank": index + 1,
+                "rejected_candidates": rejections,
+                "coherence_shadow_reason": _finding_coherence_shadow(answer),
+            },
+        )
+    if last_error is not None:
+        raise last_error
+    raise CandidateRejectedError(
+        "finding_evidence_span_not_found",
+        "the extractor returned no usable candidate finding",
+    )
+
+
+def _finding_admission_reason(
+    answer: dict[str, Any], interpretation_span_ids: list[str]
+) -> str | None:
+    """Return the first freeze-time admission failure, or None.
+
+    Every check here only rejects. It moves a rejection the pipeline already
+    made after five model calls to the point before the finding is frozen, so a
+    bounded retry path buys a new finding instead of re-testing a dead one.
+    ``interpretation_span_ids`` holds the forwarded spans the extractor cited
+    as the caption, column header, or metric definition of this finding.
+    """
+    text = str(answer.get("evidence_quote") or "")
+    labelled = bool(interpretation_span_ids)
+    cells = [cell for cell in re.split(r"[ \t]{2,}", text) if cell.strip()]
+    numeric_cells = [cell for cell in cells if _NUMERIC_CELL_PATTERN.search(cell)]
+    if (
+        len(numeric_cells) >= 3
+        and not _FINITE_VERB_PATTERN.search(text)
+        and not labelled
+    ):
+        return "finding_span_is_table_or_caption"
+    if _FIGURE_REFERENT_PATTERN.search(text) and not labelled:
+        return "finding_span_figure_defined_referent"
+    return None
+
+
+def _finding_coherence_shadow(answer: dict[str, Any]) -> str | None:
+    """Report the two-column signature without rejecting. Shadow mode only."""
+    text = str(answer.get("evidence_quote") or "")
+    if len(_COLUMN_INTERLEAVE_PATTERN.findall(text)) >= 2:
+        return "finding_span_not_coherent_prose"
+    if _LINE_WRAP_HYPHEN_PATTERN.search(text):
+        return "finding_span_not_coherent_prose"
+    return None
+
+
+def _context_only_span(span: dict[str, Any]) -> dict[str, Any]:
+    """Expose one study-setting span that no role can select as evidence."""
+    return {
+        "span_id": span["span_id"],
+        "span_role": "interpretation",
+        "chunk_id": span["chunk_id"],
+        "start_offset": span["start_offset"],
+        "end_offset": span["end_offset"],
+        "text_sha256": span["text_sha256"],
+        "text": span["text"],
+    }
+
+
+def _context_only_source(spans: list[dict[str, Any]] | None) -> str:
+    """Render the second half of the evidence bundle, or nothing when empty."""
+    if not spans:
+        return ""
+    return (
+        "\nCONTEXT_ONLY_SOURCE_BEGIN\n"
+        + canonical_json(
+            {
+                "contract_version": CONTEXT_ONLY_EVIDENCE_CONTRACT_VERSION,
+                "selectable_for_answer_evidence": False,
+                "purpose": (
+                    "study geography, period, sample identity, and term definitions"
+                ),
+                "spans": [_context_only_span(span) for span in spans],
+            }
+        )
+        + "\nCONTEXT_ONLY_SOURCE_END\n"
+        + CONTEXT_ONLY_SOURCE_INSTRUCTIONS
+    )
+
+
+def _forwarded_context_only_spans(
+    spans: list[dict[str, Any]] | None, answer: dict[str, Any] | None
+) -> list[dict[str, Any]]:
+    """Drop every study-setting span that carries the frozen answer."""
+    if not spans:
+        return []
+    if answer is None:
+        return list(spans)
+    return [
+        span
+        for span in spans
+        if not interpretation_spans_contain_answer([{"text": span["text"]}], answer)
+    ]
 
 
 def _finding_context(
@@ -3092,11 +3586,99 @@ def _decision_evidence(
     return result
 
 
+def _locate_eligibility_span(
+    record: Any,
+    chunks: list[dict[str, Any]],
+    *,
+    invalid_message: str,
+    unbound_reason: str | None,
+) -> dict[str, Any] | None:
+    """Re-locate one hashed eligibility quote in the generation chunks.
+
+    Return None for a whitespace-only quote. Raise the fail-closed rejection
+    when ``unbound_reason`` is set and the quote is not in the chunks.
+    """
+    quote = record.get("quote") if isinstance(record, dict) else None
+    source_hash = (
+        record.get("source_bytes_sha256") if isinstance(record, dict) else None
+    )
+    if (
+        not isinstance(quote, str)
+        or not quote
+        or source_hash != sha256_bytes(quote.encode("utf-8"))
+    ):
+        raise ValueError(invalid_message)
+    if not quote.strip():
+        return None
+    for chunk in chunks:
+        chunk_text = str(chunk["text"])
+        start = chunk_text.find(quote)
+        matched_text = quote
+        match_kind = "exact"
+        if start < 0:
+            # Eligibility spans use the immutable full-text extraction while
+            # generation chunks can differ only at wrapping whitespace. Keep
+            # the chunk bytes as the downstream evidence, and retain the
+            # eligibility quote hash for custody. Do not normalize words or
+            # punctuation: any other difference remains fail-closed.
+            tokens = quote.split()
+            pattern = r"\s+".join(re.escape(token) for token in tokens)
+            if tokens[0][0].isalnum() or tokens[0][0] == "_":
+                pattern = r"(?<!\w)" + pattern
+            if tokens[-1][-1].isalnum() or tokens[-1][-1] == "_":
+                pattern += r"(?!\w)"
+            whitespace_equivalent = re.compile(pattern).search(chunk_text)
+            if whitespace_equivalent is None:
+                continue
+            start = whitespace_equivalent.start()
+            matched_text = whitespace_equivalent.group(0)
+            match_kind = "whitespace_equivalent"
+        if not matched_text:
+            continue
+        end = start + len(matched_text)
+        text_hash = sha256_bytes(matched_text.encode("utf-8"))
+        return {
+            "span_id": stable_id(
+                FINDING_SPAN_CONTRACT_VERSION,
+                chunk["chunk_id"],
+                start,
+                end,
+                text_hash,
+            ),
+            "chunk_id": chunk["chunk_id"],
+            "start_offset": start,
+            "end_offset": end,
+            "text_sha256": text_hash,
+            "text": matched_text,
+            "eligibility_span_id": record.get("span_id"),
+            "eligibility_quote_sha256": source_hash,
+            "eligibility_locator": record.get("locator"),
+            "eligibility_match_kind": match_kind,
+        }
+    if unbound_reason is not None:
+        raise CandidateRejectedError(
+            unbound_reason,
+            "an eligible Arctic finding span is not in source chunks",
+        )
+    return None
+
+
+def _context_only_span_is_usable(text: str) -> bool:
+    """Drop a study-setting span the reader cannot use as plain context."""
+    if len(text.strip()) < MIN_CONTEXT_ONLY_SPAN_CHARS:
+        return False
+    if _CONTEXT_ONLY_LOCATOR_PATTERN.search(text):
+        return False
+    return not _COLUMN_INTERLEAVE_PATTERN.search(text)
+
+
 def _eligible_generation_scope(
     source: dict[str, Any], chunks: list[dict[str, Any]]
-) -> tuple[dict[str, Any] | None, list[dict[str, Any]] | None]:
+) -> tuple[
+    dict[str, Any] | None, list[dict[str, Any]] | None, list[dict[str, Any]] | None
+]:
     if source.get("scope_rule_version") != "gemini-fulltext-arctic-eligibility-v2":
-        return None, None
+        return None, None, None
     try:
         evidence = json.loads(source["scope_evidence_json"])
     except (KeyError, TypeError, json.JSONDecodeError) as error:
@@ -3106,81 +3688,27 @@ def _eligible_generation_scope(
         raise ValueError("the eligible Arctic scope record is absent")
     component = resolved.get("component")
     finding_records = resolved.get("finding_spans")
+    activity_records = resolved.get("activity_spans") or []
     phrases = resolved.get("question_scope_phrases")
     if (
         component not in {"whole_study", "separable_arctic_component"}
         or not isinstance(finding_records, list)
         or not finding_records
+        or not isinstance(activity_records, list)
         or not isinstance(phrases, list)
         or any(not isinstance(phrase, str) or not phrase for phrase in phrases)
     ):
         raise ValueError("the eligible Arctic scope record is invalid")
     spans: list[dict[str, Any]] = []
     for record in finding_records:
-        quote = record.get("quote") if isinstance(record, dict) else None
-        source_hash = (
-            record.get("source_bytes_sha256") if isinstance(record, dict) else None
+        located = _locate_eligibility_span(
+            record,
+            chunks,
+            invalid_message="an eligible Arctic finding span is invalid",
+            unbound_reason="eligible_arctic_scope_finding_unbound",
         )
-        if (
-            not isinstance(quote, str)
-            or not quote
-            or source_hash != sha256_bytes(quote.encode("utf-8"))
-        ):
-            raise ValueError("an eligible Arctic finding span is invalid")
-        if not quote.strip():
-            continue
-        located = None
-        for chunk in chunks:
-            chunk_text = str(chunk["text"])
-            start = chunk_text.find(quote)
-            matched_text = quote
-            match_kind = "exact"
-            if start < 0:
-                # Eligibility spans use the immutable full-text extraction while
-                # generation chunks can differ only at wrapping whitespace. Keep
-                # the chunk bytes as the downstream evidence, and retain the
-                # eligibility quote hash for custody. Do not normalize words or
-                # punctuation: any other difference remains fail-closed.
-                tokens = quote.split()
-                pattern = r"\s+".join(re.escape(token) for token in tokens)
-                if tokens[0][0].isalnum() or tokens[0][0] == "_":
-                    pattern = r"(?<!\w)" + pattern
-                if tokens[-1][-1].isalnum() or tokens[-1][-1] == "_":
-                    pattern += r"(?!\w)"
-                whitespace_equivalent = re.compile(pattern).search(chunk_text)
-                if whitespace_equivalent is None:
-                    continue
-                start = whitespace_equivalent.start()
-                matched_text = whitespace_equivalent.group(0)
-                match_kind = "whitespace_equivalent"
-            if not matched_text:
-                continue
-            end = start + len(matched_text)
-            text_hash = sha256_bytes(matched_text.encode("utf-8"))
-            located = {
-                "span_id": stable_id(
-                    FINDING_SPAN_CONTRACT_VERSION,
-                    chunk["chunk_id"],
-                    start,
-                    end,
-                    text_hash,
-                ),
-                "chunk_id": chunk["chunk_id"],
-                "start_offset": start,
-                "end_offset": end,
-                "text_sha256": text_hash,
-                "text": matched_text,
-                "eligibility_span_id": record.get("span_id"),
-                "eligibility_quote_sha256": source_hash,
-                "eligibility_locator": record.get("locator"),
-                "eligibility_match_kind": match_kind,
-            }
-            break
         if located is None:
-            raise CandidateRejectedError(
-                "eligible_arctic_scope_finding_unbound",
-                "an eligible Arctic finding span is not in source chunks",
-            )
+            continue
         if located["span_id"] not in {span["span_id"] for span in spans}:
             spans.append(located)
     if not spans:
@@ -3188,14 +3716,53 @@ def _eligible_generation_scope(
             "eligible_arctic_scope_finding_unbound",
             "the eligible Arctic finding spans contain no source content",
         )
+    # The classifier already hashed the study-setting sentences. Re-locate them
+    # through the same custody path and forward them as context-only evidence.
+    finding_span_ids = {span["span_id"] for span in spans}
+    interpretation_spans: list[dict[str, Any]] = []
+    for record in activity_records:
+        located = _locate_eligibility_span(
+            record,
+            chunks,
+            invalid_message="an eligible Arctic activity span is invalid",
+            unbound_reason=None,
+        )
+        if located is None:
+            # An unlocatable study-setting sentence costs context, never custody.
+            continue
+        if located["span_id"] in finding_span_ids:
+            continue
+        if not _context_only_span_is_usable(located["text"]):
+            continue
+        if component == "separable_arctic_component" and not any(
+            phrase in located["text"] for phrase in phrases
+        ):
+            # Only the setting of the separable Arctic component applies to a
+            # finding that the component rule already restricted.
+            continue
+        if located["span_id"] not in {row["span_id"] for row in interpretation_spans}:
+            interpretation_spans.append(located)
+        if len(interpretation_spans) >= MAX_CONTEXT_ONLY_SPANS:
+            break
     scope = {
         "component": component,
         "question_scope_phrases": list(phrases),
         "eligibility_job_key": evidence.get("eligibility_job_key"),
         "finding_spans": finding_records,
+        "activity_spans": list(activity_records),
     }
-    return scope, _coalesce_source_spans(
-        spans, {str(chunk["chunk_id"]): chunk for chunk in chunks}
+    if component == "whole_study":
+        # The classifier certified that all study activity and all results are
+        # inside the boundary. The frozen policy restricts downstream spans only
+        # for a separable component, so keep the scope record for custody and
+        # provenance and let finding selection read the whole paper.
+        return scope, None, interpretation_spans
+    return (
+        scope,
+        _coalesce_source_spans(
+            spans, {str(chunk["chunk_id"]): chunk for chunk in chunks}
+        ),
+        interpretation_spans,
     )
 
 
