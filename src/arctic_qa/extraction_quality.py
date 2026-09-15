@@ -10,6 +10,7 @@ The four measures:
 ``mid_word_break_rate``    mid-word line breaks per thousand characters.
 ``presentation_rate``      ligatures and soft hyphens per thousand characters.
 ``sentence_complete_rate`` share of chunks that start and end on a sentence.
+``word_retention``         chapter 2 words for each chapter 1 word.
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ def measure_text(text: str) -> dict[str, Any]:
         "presentation_marks": len(_PRESENTATION.findall(text)),
         "presentation_rate": len(_PRESENTATION.findall(text)) * _THOUSAND / characters,
         "characters": len(text),
+        "words": len(text.split()),
     }
 
 
@@ -138,6 +140,9 @@ def quality_report(
                 "pages": index["coverage"]["pages"],
                 "legacy": legacy,
                 "chapter2": chapter2,
+                # The reading-order extractor must keep the words of the paper.
+                # Only a repeated running head is expected to disappear.
+                "word_retention": chapter2["words"] / max(1, legacy["words"]),
                 "legacy_chunks": measure_chunks(
                     legacy_chunks(
                         legacy_path.read_text(encoding="utf-8", errors="replace")
@@ -158,6 +163,14 @@ def quality_report(
             "mid_word_break_rate": "mid-word line breaks per thousand characters",
             "presentation_rate": "ligatures and soft hyphens per thousand characters",
             "sentence_complete_rate": "share of chunks ending on a sentence",
+            "word_retention": "chapter 2 words for each chapter 1 word",
+        },
+        "word_retention": {
+            "median": _median([row["word_retention"] for row in rows]),
+            "minimum": min((row["word_retention"] for row in rows), default=0.0),
+            "documents_below_0_9": sum(
+                1 for row in rows if row["word_retention"] < 0.9
+            ),
         },
         "legacy": _summarize(rows, "legacy"),
         "chapter2": _summarize(rows, "chapter2"),
@@ -213,3 +226,13 @@ def _load_chunks(root: Path, index: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    if not ordered:
+        return 0.0
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2

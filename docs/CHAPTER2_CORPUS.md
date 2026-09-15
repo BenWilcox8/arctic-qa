@@ -121,6 +121,11 @@ The `provenance` field names the chapter 1 item receipt and its sha256.
 - `mid_word_break_rate` is the count of mid-word line breaks for each thousand characters.
 - `presentation_rate` is the count of ligatures and soft hyphens for each thousand characters.
 - `sentence_complete_rate` is the share of chunks that end on a sentence.
+- `word_retention` is the count of chapter 2 words for each chapter 1 word.
+
+`word_retention` is the guard against text loss.
+A value near 1.0 shows that the reading-order extractor kept the words of the paper.
+A repeated running head is the only text the extractor removes on purpose.
 
 A chunk that holds a heading or an identifier has no terminal punctuation.
 The sentence measure counts such a chunk as incomplete, so the number is a lower bound.

@@ -577,6 +577,8 @@ def test_the_quality_report_compares_the_two_extractions(corpus) -> None:
     assert report["legacy"]["gutter_lines"] > 0
     assert report["chapter2"]["gutter_lines"] == 0
     assert report["documents_with_any_gutter_line"]["chapter2"] == 0
+    assert report["word_retention"]["median"] > 0.9
+    assert report["word_retention"]["documents_below_0_9"] == 0
     assert report["legacy_chunks"]["gutter_chunks"] > 0
     assert report["chapter2_chunks"]["gutter_chunks"] == 0
     assert (
