@@ -179,6 +179,20 @@ A run reads the chapter 2 corpus without any change to `streaming.py`.
 When the root holds a verified parse of the same bytes, it returns that frozen parse and pays no extraction cost.
 The parse is faithful because the chapter 2 build derives the same source identifier as the streaming bridge.
 
+### No new dependency
+
+The brief allows a new dependency for a layout-aware extractor.
+None was added.
+`poppler-utils` is already in the nix devshell, and its `pdftotext -bbox-layout` mode publishes the bounding box of every word, line and block.
+That geometry is all the reading-order cut needs, so `flake.nix` and `pyproject.toml` are unchanged and the project keeps its empty dependency list.
+
+### The database
+
+The chapter 2 build writes no database row at all.
+`extract_source` inserts an artifact row for a parse and a chunk object, and the object digest is part of the artifact identity, so a chapter 2 object always inserts a new row.
+No row of a chapter 1 run is read for update, and no `UPDATE` statement runs.
+The chapter 2 source version `chapter2-corpus-v1` is recorded in the chapter 2 manifest and in the chapter 2 access run manifest.
+
 ### Stored originals
 
 All 4,420 usable full texts are PDFs.
