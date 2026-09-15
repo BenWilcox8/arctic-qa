@@ -350,6 +350,7 @@ All test runs used the project nix devshell: `nix develop -c bash -c 'PYTHONPATH
 | Run | Files | Result |
 | --- | --- | --- |
 | Whole suite | `tests/` | **580 passed**, 0 failed, 698 seconds |
+| Whole suite, on the final commit | `tests/` | **580 passed**, 0 failed, 703 seconds |
 | Focused set | `test_streaming.py`, `test_gemini_eligibility.py`, `test_question_context.py`, `test_eligibility_span_contract.py`, `test_chapter2_corpus.py`, `test_eligibility_geography_v7.py`, `test_geography_correction.py`, `test_corpus_viewer.py`, `test_project_progress_viewer.py`, `test_source_pass.py`, `test_metadata_prefilter.py`, `test_pipeline_trace.py`, `test_cli_integration.py` | **324 passed**, 0 failed, 584 seconds |
 | Lint | `ruff check src/ tests/` | clean |
 | Format | `ruff format --check` on every file of this slice | clean |
@@ -363,6 +364,12 @@ New test files:
 - `tests/test_chapter2_corpus.py`, 18 tests. Extraction, chunking, locators, the corpus root, frozen-parse reuse, the freeze, the access run contract, legacy isolation, and the quality measures.
 - `tests/test_eligibility_geography_v7.py`, 16 tests. Prompt v7, the re-screen prompt, phrase binding, the bounded repair, the unresolved record, the re-screen selector, and the viewer state.
 - `tests/pdf_fixture.py`. Builds a real two-column PDF, so the column tests run against page geometry and not against a string.
+
+Evidence stored beside this report:
+
+- `freeze-receipt.json`, the chapter 2 freeze receipt.
+- `extraction-quality-summary.json`, the quality report without its per-document rows.
+- `verify-freeze.py`, the independent verification of the freeze. It exits non-zero on any failure.
 
 ## The red test on the base commit
 
