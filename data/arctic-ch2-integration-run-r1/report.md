@@ -276,3 +276,22 @@ The geography re-screen is a separate paid command after the producer halts, ins
 | The validator half of sentence-complete finding spans | Deferred by the corpus slice; unchanged. | open |
 | Two-labeler calibration set | The fixture stays `single_labeler_provisional`, as the gates slice recorded. | open |
 | The geography re-screen command | Paid, runs after the producer halts if budget remains (section 10). | activation half |
+
+## 12. Activation half, first attempt
+
+The activation set for commit `e8d4cad` is under the task data directory: source archive, runtime snapshot, chapter 2 streaming input, execution gate, the two chained transitions, launcher, and receipt.
+Both transitions applied on the shared ledger: the price config moved to revision v6, and the ceiling moved to USD 108.994972 with spend USD 33.994972 unchanged.
+The producer started in tmux session `arctic-ch2-production-r1`, screened the first paper eligible under prompt v7, and ran every judge stage on `gemini-3.1-pro-preview`.
+Twenty chapter 2 calls completed for USD 0.334945.
+
+On the second paper Gemini answered HTTP 503 to one writer call.
+The broker recorded an ambiguous charge, retained USD 0.012351, halted the ledger, and the producer exited.
+No request was replayed.
+The live exporter was rebound to the chapter 2 runtime and contract; the prior snapshot stays on disk.
+
+The reviewed continuation admitted only an HTTP 500 receipt.
+`model_broker.authorize_ambiguous_continuation` and its event validator now treat every 5xx `known_http_response_unknown_charge` receipt without a received response as the same bounded case.
+The evidence file must name the receipt's own status, and the stored event records that status.
+No other check of the authorizer changed.
+`tests/test_ambiguous_continuation.py::test_service_unavailable_continuation_is_the_same_bounded_case` covers the 503 case, the refusal of generic 500 evidence for a 503 receipt, and the retained reservation.
+The exact-500 tests are unchanged and still pass.

@@ -35,6 +35,8 @@ def request_payload() -> dict:
 
 
 class Http500ThenSuccess:
+    status = 500
+
     def __init__(self) -> None:
         self.methods: list[str] = []
         self.generation_calls = 0
@@ -46,7 +48,7 @@ class Http500ThenSuccess:
         self.generation_calls += 1
         if self.generation_calls == 1:
             raise urllib.error.HTTPError(
-                "https://fake.invalid", 500, "upstream failure", {}, None
+                "https://fake.invalid", self.status, "upstream failure", {}, None
             )
         return {
             "candidates": [{"content": {"parts": [{"text": "{}"}]}}],
@@ -223,14 +225,14 @@ def execute_answer_judge(
     )
 
 
-def evidence_for(receipt: dict, path: Path) -> None:
+def evidence_for(receipt: dict, path: Path, *, http_status: int = 500) -> None:
     write_json(
         path,
         {
             "schema": "shared-paid-call-ambiguous-continuation-evidence-v1",
             "request_key": receipt["request_key"],
             "error_class": "known_http_response_unknown_charge",
-            "http_status": 500,
+            "http_status": http_status,
             "live_call_made": True,
             "received_receipt_absent": True,
             "actual_cost_known": False,
@@ -241,9 +243,11 @@ def evidence_for(receipt: dict, path: Path) -> None:
     )
 
 
-def authorize(values: dict[str, object], receipt: dict) -> dict:
+def authorize(
+    values: dict[str, object], receipt: dict, *, evidence_status: int = 500
+) -> dict:
     evidence = Path(values["ledger"].parent) / "evidence.json"
-    evidence_for(receipt, evidence)
+    evidence_for(receipt, evidence, http_status=evidence_status)
     broker = values["broker"]
     return broker.authorize_ambiguous_continuation(
         request_key=receipt["request_key"],
@@ -377,6 +381,41 @@ def test_unknown_charge_continuation_retains_cap_and_never_replays(tmp_path: Pat
         ]
         == first["reserved_usd"]
     )
+
+
+class Http503ThenSuccess(Http500ThenSuccess):
+    status = 503
+
+
+def test_service_unavailable_continuation_is_the_same_bounded_case(
+    tmp_path: Path,
+) -> None:
+    """Chapter 2 halted on a 503. Every 5xx unknown charge is one bounded case."""
+    transport = Http503ThenSuccess()
+    values = fixture(tmp_path, transport)
+    broker = values["broker"]
+    first = execute(broker, paper="affected", run_id="run-current")
+    assert first["state"] == "ambiguous_charge"
+    assert first["http_status"] == 503
+    # The evidence must name the receipt's own status, not the generic 500.
+    with pytest.raises(ValueError, match="evidence is not exact"):
+        authorize(values, first, evidence_status=500)
+    assert json.loads(values["ledger"].read_text(encoding="utf-8"))["halted"] is True
+    result = authorize(values, first, evidence_status=503)
+    assert result["applied"] is True
+    event = json.loads(Path(result["continuation_receipt"]).read_text(encoding="utf-8"))
+    assert event["http_status"] == 503
+    assert event["skip_reason_code"] == "operational_ambiguous_charge_http_500"
+    after = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    assert after["halted"] is False
+    assert after["ambiguous_reserved_usd"] == first["reserved_usd"]
+    with pytest.raises(ValueError, match="request key already exists"):
+        execute(broker, paper="affected", run_id="run-current")
+    assert (
+        execute(broker, paper="unrelated", run_id="run-current")["state"] == "completed"
+    )
+    # The stored event is re-validated on the next broker start.
+    assert broker.status()["halted"] is False
 
 
 def test_received_max_tokens_continuation_preserves_response_and_never_replays(

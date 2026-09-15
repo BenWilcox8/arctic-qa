@@ -461,6 +461,13 @@ def _validate_policy(path: Path) -> dict[str, Any]:
     return value
 
 
+def _is_server_error_status(value: Any) -> bool:
+    """Return whether a status is a provider server error (HTTP 5xx)."""
+    return (
+        isinstance(value, int) and not isinstance(value, bool) and 500 <= value <= 599
+    )
+
+
 def _validate_gate(path: Path, phase: str) -> dict[str, Any]:
     value = _read(path)
     if value.get("schema") != "streaming-live-execution-gate-v1":
@@ -1954,7 +1961,7 @@ class SharedGeminiBroker:
                 raise ValueError("an ambiguous continuation event changed")
         if (
             event.get("error_class") != "known_http_response_unknown_charge"
-            or event.get("http_status") != 500
+            or not _is_server_error_status(event.get("http_status"))
             or event.get("live_call_made") is not True
             or event.get("received_receipt_absent") is not True
             or event.get("reservation_policy")
@@ -3312,10 +3319,13 @@ class SharedGeminiBroker:
                 reserved = _money(
                     request.get("reserved_usd"), "ambiguous reservation", positive=True
                 )
+                # One bounded case for every 5xx answer: the provider reported a
+                # server error, the charge is unknown, and no response was
+                # received. The evidence must name the receipt's own status.
                 http_500_case = (
                     final.get("state") == "ambiguous_charge"
                     and final.get("error_class") == "known_http_response_unknown_charge"
-                    and final.get("http_status") == 500
+                    and _is_server_error_status(final.get("http_status"))
                     and final.get("live_call_made") is True
                     and "response" not in final
                     and not received_path.exists()
@@ -3342,7 +3352,7 @@ class SharedGeminiBroker:
                         "schema": AMBIGUOUS_CONTINUATION_EVIDENCE_SCHEMA,
                         "request_key": request_key,
                         "error_class": "known_http_response_unknown_charge",
-                        "http_status": 500,
+                        "http_status": final["http_status"],
                         "live_call_made": True,
                         "received_receipt_absent": True,
                         "actual_cost_known": False,
@@ -3424,7 +3434,7 @@ class SharedGeminiBroker:
                 if http_500_case:
                     event.update(
                         {
-                            "http_status": 500,
+                            "http_status": final["http_status"],
                             "received_receipt_absent": True,
                         }
                     )
