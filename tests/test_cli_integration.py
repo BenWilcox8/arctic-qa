@@ -1788,9 +1788,10 @@ def test_full_validator_accepts_typed_numeric_text_with_complete_scope(
     assert result["labels"]["reconstruction_agreement"] is True
 
 
-def test_validation_keeps_current_legacy_candidate_contract_readable(
+def test_validation_refuses_a_v14_candidate_that_never_ran_the_standalone_gate(
     tmp_path: Path,
 ) -> None:
+    """r15 audit section 4.8 item 5: schema 2.0.0 declares no standalone contract."""
     smoke(tmp_path, "legacy-evidence-contract")
     item = candidate(tmp_path)
     item["schema_version"] = "2.0.0"
@@ -1801,10 +1802,13 @@ def test_validation_keeps_current_legacy_candidate_contract_readable(
 
     result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
 
-    assert result["final_label"] == "machine_accepted_unverified"
+    assert result["final_label"] == "rejected"
+    assert result["reasons"] == ["unsafe_legacy_candidate_schema"]
 
 
-def test_validation_keeps_v15_candidate_contract_readable(tmp_path: Path) -> None:
+def test_validation_refuses_a_v15_candidate_that_never_ran_the_standalone_gate(
+    tmp_path: Path,
+) -> None:
     smoke(tmp_path, "legacy-v15-contract")
     item = candidate(tmp_path)
     item["schema_version"] = "2.1.0"
@@ -1816,7 +1820,8 @@ def test_validation_keeps_v15_candidate_contract_readable(tmp_path: Path) -> Non
 
     result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
 
-    assert result["final_label"] == "machine_accepted_unverified"
+    assert result["final_label"] == "rejected"
+    assert result["reasons"] == ["unsafe_legacy_candidate_schema"]
 
 
 def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> None:

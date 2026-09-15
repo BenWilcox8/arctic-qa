@@ -5,6 +5,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Read `docs/CORPUS_VIEWER.md` before you operate the read-only corpus-stage monitor.
 - Read `docs/PUBLICATION_EXPORT.md` before you operate the live publication snapshot service.
 - Read `docs/SOURCE_SCREENING_PASS.md` before you operate a bounded source pass.
+- Run the tests as `nix develop -c bash -c 'PYTHONPATH=src pytest tests/<file>'`. The devshell does not install the package, so a bare `pytest` fails to import `arctic_qa`.
 
 ## Maintaining this file
 

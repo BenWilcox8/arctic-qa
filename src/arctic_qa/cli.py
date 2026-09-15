@@ -351,6 +351,8 @@ def parser() -> argparse.ArgumentParser:
         default=Path("schemas/gemini-eligibility.v1.schema.json"),
     )
     stream.add_argument("--eligibility-policy-file", type=Path)
+    stream.add_argument("--roles-file", type=Path)
+    stream.add_argument("--role-profile", choices=("strongest", "cost_aware"))
     stream.add_argument("--author-script", type=Path)
     stream.add_argument("--verifier-script", type=Path)
     stream.add_argument("--max-papers", type=int, default=1)
@@ -1144,6 +1146,8 @@ def _stream(args, paths: DataPaths, db: Database) -> dict[str, Any]:
             if args.eligibility_policy_file
             else None
         ),
+        roles_file=args.roles_file.resolve() if args.roles_file else None,
+        role_profile=args.role_profile,
     )
 
 

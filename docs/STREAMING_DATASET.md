@@ -134,6 +134,10 @@ PYTHONPATH=src python -m arctic_qa --json stream \
   --max-papers 20
 ```
 
+Use `--role-profile` to bind the run to one profile in `config/roles.v1.json`.
+Each judge role must then use the model that profile configures.
+A run in the `away_production` phase must give this option.
+
 Use `--ledger-config-transition-file` only when an existing ledger has a reviewed configuration change.
 
 The transition must bind the current ledger, identity record, private gate, exact code revision, and independent review record.

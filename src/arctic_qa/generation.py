@@ -26,10 +26,13 @@ from .validation import (
     GENERATION_PROMPT_VERSION,
     NUMERIC_RULE_CONTRACT_VERSION,
     QUESTION_VERIFICATION_CONTRACT_VERSION,
+    ROUTING_CONTRACT_VERSION,
     SCOPE_CONTRACT_VERSION,
     STANDALONE_VERIFICATION_CONTRACT_VERSION,
     benchmark_context_verification_reason,
     numeric_rule_is_source_bound,
+    option_display_issue,
+    phrase_in_source_text,
     question_answer_leaks_answer,
     question_context_verification_reason,
     reconstruction_matches,
@@ -42,7 +45,21 @@ PROMPT_VERSION = GENERATION_PROMPT_VERSION
 CANDIDATE_SCHEMA_VERSION = "2.6.0"
 FINDING_POLICY_VERSION = "one-finding-per-paper-full-context-v6"
 SCOPE_ROLE_FINDING_POLICY_VERSION = "one-finding-per-paper-full-context-v7"
-GENERATION_ATTEMPT_CONTRACT_VERSION = "bounded-failure-routing-v3"
+GENERATION_ATTEMPT_CONTRACT_VERSION = ROUTING_CONTRACT_VERSION
+FINDING_ADMISSION_PASSES = 2
+QUESTION_REPAIR_KINDS = frozenset(
+    {"question_revision", "context_widened_revision", "surgical_correction"}
+)
+ATTEMPT_KINDS = frozenset(
+    {
+        "primary",
+        "option_repair",
+        "alternative_finding",
+        "answer_rule_repair",
+        *QUESTION_REPAIR_KINDS,
+    }
+)
+REPAIR_KINDS = ATTEMPT_KINDS - {"primary", "alternative_finding"}
 FINDING_SPAN_CONTRACT_VERSION = "finding-evidence-span-v3"
 MODEL_JUSTIFICATION_CONTRACT_VERSION = "model-justification-v1"
 ARCTIC_SCOPE_CONTRACT_VERSION = "eligible-arctic-finding-scope-v1"
@@ -158,9 +175,37 @@ QUESTION_CONTEXT_INSTRUCTIONS = (
     "event. A latitude alone does not identify a station or event. Do not infer or invent "
     "a definition."
 )
+REVISION_INSTRUCTIONS = (
+    "\nRevise only the question and question_context. ATTEMPT_HISTORY lists every "
+    "earlier attempt on this finding with its question, its question_context, and "
+    "the exact reason for its rejection. Keep every element of the parent that "
+    "failure_feedback did not name as a defect. Keep every definition, place name, "
+    "period, or sample description that an earlier attempt added. Change only what "
+    "failure_feedback and unresolved_phrases name. Define each phrase in "
+    "unresolved_phrases in question_context, or remove that phrase from the "
+    "question. Use the source only to add supported subject, place, time, sample, "
+    "or event context. If SOURCE_DATA does not state the detail that "
+    "failure_feedback demands, set context_gap to that exact detail and leave the "
+    "question unchanged. Do not add answer-bearing information. Do not repeat the "
+    "parent question and question_context unchanged. Do not change the frozen "
+    "finding. "
+)
+CONTEXT_WIDENED_REVISION_INSTRUCTIONS = (
+    "This attempt repeats an earlier rejection on this finding. SOURCE_DATA now "
+    "carries every hash-bound study-setting span this paper supplies for the "
+    "frozen finding. Take the missing subject, place, period, sample, or acronym "
+    "expansion from that text, in the source's own words. Set context_gap when it "
+    "still is not there. "
+)
+SURGICAL_CORRECTION_INSTRUCTIONS = (
+    "Exactly one defect is recorded. Change the smallest span of text that removes "
+    "it. Keep every other word of the parent exactly as written. "
+)
 RECONSTRUCTION_NUMERIC_INSTRUCTIONS = (
-    "Populate numeric only for one scalar value with one applicable unit. Omit "
-    "numeric for ranges, tuples, counts written as words, nonnumeric answers, or "
+    "Populate numeric only for one scalar value with one applicable unit. Never "
+    "emit numeric_rule for a non-scalar answer: omit "
+    "numeric for ranges, tuples, counts written as words, nonnumeric answers, "
+    "categorical answers, multi-value answers, descriptive answers, or "
     "directional answers. Never put the string 'null' in a numeric field. Return only "
     "the concise answer required by QUESTION. Do not add p-values, confidence intervals, "
     "explanations, or other source values."
@@ -482,6 +527,14 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
             "question": {"type": "string", "minLength": 1},
             "question_context": {"type": "string"},
             "question_rationale": JUSTIFICATION_SCHEMA,
+            "context_gap": {
+                "type": "string",
+                "description": (
+                    "Name the exact detail that failure_feedback demands and "
+                    "SOURCE_DATA does not state. Leave it empty otherwise. This "
+                    "field routes the repair budget. It never creates an item."
+                ),
+            },
         },
         "additionalProperties": False,
     },
@@ -693,7 +746,7 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
         "type": "object",
         "required": ["component", "replacement"],
         "properties": {
-            "component": {"enum": ["question", "distractors"]},
+            "component": {"enum": ["question", "distractors", "numeric_rule"]},
             "replacement": {},
         },
         "additionalProperties": False,
@@ -707,6 +760,41 @@ def _bind_standalone_contract_version(payload: dict[str, Any]) -> dict[str, Any]
         **payload,
         "contract_version": STANDALONE_VERIFICATION_CONTRACT_VERSION,
     }
+
+
+def finding_admission_reason(
+    answer: dict[str, Any], chunk: dict[str, Any]
+) -> tuple[str, str] | None:
+    """Reject a finding before it freezes, or return None to admit it.
+
+    r15 audit section 4.5: the answer-leak check was computed at freeze time and
+    applied 440 lines later at the QA gate, so every retry on the family
+    inherited a finding that was already known to be dead. The evidence-quote
+    assertion removes the page-header and author-byline locator class. Both
+    checks only reject.
+    """
+    if not _record_resolves(answer, chunk):
+        return (
+            "finding_evidence_not_located",
+            "the selected finding does not resolve to one source chunk",
+        )
+    quote = str(answer.get("evidence_quote", ""))
+    claim = str(answer.get("text", ""))
+    rule = answer.get("deterministic_rule")
+    source_value = str(rule.get("source_value", "")) if isinstance(rule, dict) else ""
+    if not phrase_in_source_text(claim, quote) and not (
+        source_value and phrase_in_source_text(source_value, quote)
+    ):
+        return (
+            "finding_evidence_quote_excludes_finding",
+            "the evidence quote at the recorded offsets does not contain the finding",
+        )
+    if required_question_phrases_contain_answer(answer):
+        return (
+            "finding_answer_phrase_in_required_question_phrases",
+            "the finding requires its own answer as a question phrase",
+        )
+    return None
 
 
 def _validated_generation_attempt(
@@ -730,12 +818,7 @@ def _validated_generation_attempt(
         raise ValueError("generation attempt fields do not match the contract")
     if value["contract_version"] != GENERATION_ATTEMPT_CONTRACT_VERSION:
         raise ValueError("generation attempt contract version is not current")
-    if value["attempt_kind"] not in {
-        "primary",
-        "question_revision",
-        "option_repair",
-        "alternative_finding",
-    }:
+    if value["attempt_kind"] not in ATTEMPT_KINDS:
         raise ValueError("generation attempt kind is invalid")
     finding_index = value["finding_attempt_index"]
     revision_index = value["question_revision_index"]
@@ -779,7 +862,7 @@ def _validated_generation_attempt(
             or not value["trigger_reason_code"]
         ):
             raise ValueError("fallback generation attempt lacks a trigger reason")
-    if value["attempt_kind"] == "question_revision":
+    if value["attempt_kind"] in QUESTION_REPAIR_KINDS:
         if revision_index not in {1, 2} or (
             value["parent_item_id"] is not None
             and not isinstance(value["parent_item_id"], str)
@@ -787,6 +870,15 @@ def _validated_generation_attempt(
             raise ValueError("question revision parent state is invalid")
         if exclusions:
             raise ValueError("question revision cannot exclude a finding")
+    if value["attempt_kind"] == "surgical_correction" and not isinstance(
+        value["parent_item_id"], str
+    ):
+        raise ValueError("surgical correction requires a parent candidate")
+    if value["attempt_kind"] == "answer_rule_repair":
+        if revision_index not in {1, 2} or not isinstance(value["parent_item_id"], str):
+            raise ValueError("answer rule repair parent state is invalid")
+        if exclusions:
+            raise ValueError("answer rule repair cannot exclude a finding")
     if value["attempt_kind"] == "option_repair":
         if revision_index not in {1, 2} or not isinstance(value["parent_item_id"], str):
             raise ValueError("option repair parent state is invalid")
@@ -877,7 +969,7 @@ def generate_candidate(
     )
     if (
         attempt is not None
-        and attempt["attempt_kind"] in {"question_revision", "option_repair"}
+        and attempt["attempt_kind"] in REPAIR_KINDS
         and arm != "answer_first"
     ):
         raise ValueError("question revision requires the answer-first arm")
@@ -906,10 +998,7 @@ def generate_candidate(
             key: str(value) for key, value in pricing_usd_per_million_tokens.items()
         }
     revision_parent: dict[str, Any] | None = None
-    if attempt is not None and attempt["attempt_kind"] in {
-        "question_revision",
-        "option_repair",
-    }:
+    if attempt is not None and attempt["attempt_kind"] in REPAIR_KINDS:
         if attempt["parent_item_id"] is not None:
             parent_row = db.one(
                 "SELECT candidate_json FROM candidates WHERE item_id=? AND run_id=?",
@@ -970,13 +1059,8 @@ def generate_candidate(
             if arctic_scope is not None
             else ""
         )
-        exclusion_instruction = (
-            "\nEXCLUDED_FINDING_SPAN_IDS\n"
-            + canonical_json(attempt["excluded_finding_span_ids"])
-            + "\nSelect a different scientific finding. Do not select an excluded "
-            "span or any combined span that contains an excluded component."
-            if attempt is not None and attempt["excluded_finding_span_ids"]
-            else ""
+        routed_exclusions = list(
+            attempt["excluded_finding_span_ids"] if attempt is not None else []
         )
         finding_entity_id = stable_id(
             "finding-selection",
@@ -984,92 +1068,129 @@ def generate_candidate(
             finding_policy_version,
             attempt["attempt_id"] if attempt is not None else "",
         )
-        answer_proposal = _call(
-            db,
-            author,
-            run_id,
-            finding_entity_id,
-            "extractor",
-            context
-            + scope_instruction
-            + exclusion_instruction
-            + "\nExtract one bounded answer record. Select one source_span_id. "
-            + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS
-            + " "
-            "Select a complete prose finding sentence. Select one atomic claim from a complete prose finding sentence "
-            "in the results or discussion. Do not select a title, heading, caption, "
-            "legend, axis label, methods-only description, or sentence fragment as the "
-            "finding by itself. For a selected numerical row, include its adjacent caption "
-            "or definition when that text defines the metric, unit, percentage basis, acronym, "
-            "location, or period needed to interpret the finding. Reject the finding when the "
-            "available spans do not support a complete definition. "
-            "The selected span must contain exact, sufficient evidence for the "
-            "entire answer and every required question phrase. Evidence spans are "
-            "bounded source paragraphs or overlapping windows and can contain PDF "
-            "line wraps. The pipeline can combine adjacent eligible fragments into "
-            "one exact selectable interval. Do not combine span IDs yourself. Set each non-null "
-            "scope value to exact SOURCE_DATA text from the selected span, without "
-            "aliases or paraphrases, and keep at least one value non-null. Populate "
-            "only the minimum scope qualifiers needed to make the answer unique. "
-            "Each non-null scope value must also appear in "
-            "required_question_phrases. Every required_question_phrases entry must "
-            "be exact selected-span text and must not contain answer.text or any "
-            "answer variant. Prefer a non-numeric finding unless the "
-            "selected span supports the complete numeric contract. Add numeric_rule "
-            "only for one scalar value when the same selected span explicitly "
-            "supports its value, unit, tolerance, tolerance basis, precision, "
-            "rounding, and conversion. The tolerance_basis must be exact text "
-            "from that span. Omit numeric_rule when any field is unsupported or "
-            "when the answer contains multiple values. The only zero-tolerance "
-            "exception is a literal exact integer count: use tolerance_basis "
-            "'count', reported_precision 'exact integer', rounding_rule 'none', "
-            "and a conversion_rule that starts with 'direct count'. A directly "
-            "published exact scalar can also use zero tolerance. For that scalar, "
-            "copy its displayed quantity into tolerance_basis. Set reported_precision "
-            "to the decimal increment of the literal value. Set rounding_rule to "
-            "'direct reporting without additional rounding'. Set conversion_rule to "
-            "'direct source reporting with no conversion'. The pipeline binds this "
-            "rule to the answer-verifier request in candidate provenance. "
-            + ANSWER_FORMAT_INSTRUCTIONS
-            + " "
-            + CLOSED_SET_INSTRUCTIONS
-            + " Set selection_rationale to a concise evidence-grounded justification "
-            "for selecting this finding. Do not provide hidden reasoning.",
-            parameters,
-            reservation,
-            timeout,
-            retries,
-            rate_limit_seconds,
-        )["answer"]
-        answer = _resolve_source_span(
-            answer_proposal,
-            finding_spans,
-            reason_code="finding_evidence_span_not_found",
-        )
-        if attempt is not None and attempt["excluded_finding_span_ids"]:
+        admission_exclusions: list[str] = []
+        answer = None
+        chunk = None
+        admission_reason: tuple[str, str] | None = None
+        for admission_pass in range(FINDING_ADMISSION_PASSES):
+            excluded_span_ids = sorted(
+                set(routed_exclusions) | set(admission_exclusions)
+            )
+            exclusion_instruction = (
+                "\nEXCLUDED_FINDING_SPAN_IDS\n"
+                + canonical_json(excluded_span_ids)
+                + "\nSelect a different scientific finding. Do not select an excluded "
+                "span or any combined span that contains an excluded component."
+                if excluded_span_ids
+                else ""
+            )
+            pass_entity_id = (
+                finding_entity_id
+                if admission_pass == 0
+                else stable_id("finding-readmission", finding_entity_id, admission_pass)
+            )
+            answer_proposal = _call(
+                db,
+                author,
+                run_id,
+                pass_entity_id,
+                "extractor",
+                context
+                + scope_instruction
+                + exclusion_instruction
+                + "\nExtract one bounded answer record. Select one source_span_id. "
+                + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS
+                + " "
+                "Select a complete prose finding sentence. Select one atomic claim from a complete prose finding sentence "
+                "in the results or discussion. Do not select a title, heading, caption, "
+                "legend, axis label, methods-only description, or sentence fragment as the "
+                "finding by itself. For a selected numerical row, include its adjacent caption "
+                "or definition when that text defines the metric, unit, percentage basis, acronym, "
+                "location, or period needed to interpret the finding. Reject the finding when the "
+                "available spans do not support a complete definition. "
+                "The selected span must contain exact, sufficient evidence for the "
+                "entire answer and every required question phrase. Evidence spans are "
+                "bounded source paragraphs or overlapping windows and can contain PDF "
+                "line wraps. The pipeline can combine adjacent eligible fragments into "
+                "one exact selectable interval. Do not combine span IDs yourself. Set each non-null "
+                "scope value to exact SOURCE_DATA text from the selected span, without "
+                "aliases or paraphrases, and keep at least one value non-null. Populate "
+                "only the minimum scope qualifiers needed to make the answer unique. "
+                "Each non-null scope value must also appear in "
+                "required_question_phrases. Every required_question_phrases entry must "
+                "be exact selected-span text and must not contain answer.text or any "
+                "answer variant. Prefer a non-numeric finding unless the "
+                "selected span supports the complete numeric contract. Add numeric_rule "
+                "only for one scalar value when the same selected span explicitly "
+                "supports its value, unit, tolerance, tolerance basis, precision, "
+                "rounding, and conversion. The tolerance_basis must be exact text "
+                "from that span. Emit numeric_rule only when answer.text displays "
+                "exactly one number with its unit. Never emit numeric_rule for a "
+                "non-scalar answer: never for a categorical, directional, "
+                "multi-value, range, or descriptive answer, and never with a "
+                "placeholder canonical_value. Omit numeric_rule when any field is "
+                "unsupported or "
+                "when the answer contains multiple values. The only zero-tolerance "
+                "exception is a literal exact integer count: use tolerance_basis "
+                "'count', reported_precision 'exact integer', rounding_rule 'none', "
+                "and a conversion_rule that starts with 'direct count'. A directly "
+                "published exact scalar can also use zero tolerance. For that scalar, "
+                "copy its displayed quantity into tolerance_basis. Set reported_precision "
+                "to the decimal increment of the literal value. Set rounding_rule to "
+                "'direct reporting without additional rounding'. Set conversion_rule to "
+                "'direct source reporting with no conversion'. The pipeline binds this "
+                "rule to the answer-verifier request in candidate provenance. "
+                + ANSWER_FORMAT_INSTRUCTIONS
+                + " "
+                + CLOSED_SET_INSTRUCTIONS
+                + " Set selection_rationale to a concise evidence-grounded justification "
+                "for selecting this finding. Do not provide hidden reasoning.",
+                parameters,
+                reservation,
+                timeout,
+                retries,
+                rate_limit_seconds,
+            )["answer"]
+            answer = _resolve_source_span(
+                answer_proposal,
+                finding_spans,
+                reason_code="finding_evidence_span_not_found",
+            )
             selected_ids = {
                 answer.get("source_span_id"),
                 *answer.get("source_span_ids", []),
             }
-            if selected_ids.intersection(attempt["excluded_finding_span_ids"]):
+            if routed_exclusions and selected_ids.intersection(routed_exclusions):
                 raise CandidateRejectedError(
                     "alternative_finding_not_distinct",
                     "the alternative selected an excluded finding span",
                 )
-        _require_arctic_scope_custody(answer, arctic_scope)
-        chunk = next(
-            (
-                row
-                for row in chunks
-                if row["chunk_id"] == (answer.get("locator") or {}).get("chunk_id")
-            ),
-            None,
-        )
-        if chunk is None or not _record_resolves(answer, chunk):
-            raise CandidateRejectedError(
-                "finding_evidence_not_located",
-                "the selected finding does not resolve to one source chunk",
+            _require_arctic_scope_custody(answer, arctic_scope)
+            chunk = next(
+                (
+                    row
+                    for row in chunks
+                    if row["chunk_id"] == (answer.get("locator") or {}).get("chunk_id")
+                ),
+                None,
             )
+            if chunk is None or not _record_resolves(answer, chunk):
+                raise CandidateRejectedError(
+                    "finding_evidence_not_located",
+                    "the selected finding does not resolve to one source chunk",
+                )
+            admission_reason = finding_admission_reason(answer, chunk)
+            if admission_reason is None:
+                break
+            admission_exclusions.extend(
+                span_id
+                for span_id in selected_ids
+                if isinstance(span_id, str) and span_id
+            )
+        if admission_reason is not None:
+            raise CandidateRejectedError(admission_reason[0], admission_reason[1])
+        if answer is None or chunk is None:
+            raise ValueError("the finding admission loop produced no finding")
         finding_id = stable_id(
             "finding",
             run_id,
@@ -1095,11 +1216,10 @@ def generate_candidate(
                 ),
             )
     _require_arctic_scope_custody(answer, arctic_scope)
-    finding_quality_reason = (
-        "finding_answer_phrase_in_required_question_phrases"
-        if required_question_phrases_contain_answer(answer)
-        else None
-    )
+    # A finding frozen before this contract never ran the admission gate, so
+    # the same checks still report at the QA gate for an inherited finding.
+    frozen_admission = finding_admission_reason(answer, chunk)
+    finding_quality_reason = frozen_admission[0] if frozen_admission else None
     scoped_chunk_spans = (
         [
             span
@@ -1113,6 +1233,8 @@ def generate_candidate(
         span["span_id"]: span for span in (scoped_chunk_spans or _finding_spans(chunk))
     }
     context = _context(chunk, scoped_chunk_spans)
+    if attempt is not None and attempt["attempt_kind"] == "context_widened_revision":
+        context += activity_context_block(source, answer)
     entity_id = (
         stable_id("unit", finding_id, arm, attempt["attempt_id"])
         if attempt is not None
@@ -1121,6 +1243,9 @@ def generate_candidate(
     arm_answer_proposal = answer
     question_rationale: str
     question_context: str
+    answer_rule_repair = bool(
+        attempt is not None and attempt["attempt_kind"] == "answer_rule_repair"
+    )
     revision_payload: dict[str, Any] = {
         "trigger_reason_code": attempt["trigger_reason_code"]
         if attempt is not None
@@ -1142,25 +1267,51 @@ def generate_candidate(
                     revision_parent.get("answer_verification") or {}
                 ),
                 "standalone_review": revision_parent.get("standalone_verification"),
+                "unresolved_phrases": list(
+                    (revision_parent.get("standalone_verification") or {}).get(
+                        "unresolved_phrases"
+                    )
+                    or []
+                ),
             }
         )
+    attempt_history = (
+        _attempt_history(db, run_id, source["paper_family_id"], finding_id)
+        if attempt is not None and attempt["attempt_kind"] in QUESTION_REPAIR_KINDS
+        else []
+    )
     distractor_only_retry = bool(
         revision_parent is not None
         and attempt is not None
         and attempt["attempt_kind"] == "option_repair"
     )
+    attempt_kind = attempt["attempt_kind"] if attempt is not None else "primary"
+    history_instruction = (
+        "\nATTEMPT_HISTORY\n" + canonical_json(attempt_history)
+        if attempt_history
+        else ""
+    )
     revision_instruction = (
         "\nQUESTION_REVISION\n"
         + canonical_json(revision_payload)
-        + "\nRevise only the question and question_context. Fix the recorded "
-        "stand-alone wording or context defect named in failure_feedback. Use the "
-        "source only to add supported subject, place, time, sample, or event context. "
-        "Do not add answer-bearing information. Do not repeat the parent question and "
-        "question_context unchanged. Do not change the frozen finding. "
-        if attempt is not None and attempt["attempt_kind"] == "question_revision"
+        + history_instruction
+        + REVISION_INSTRUCTIONS
+        + (
+            CONTEXT_WIDENED_REVISION_INSTRUCTIONS
+            if attempt_kind == "context_widened_revision"
+            else ""
+        )
+        + (
+            SURGICAL_CORRECTION_INSTRUCTIONS
+            if attempt_kind == "surgical_correction"
+            else ""
+        )
+        if attempt_kind in QUESTION_REPAIR_KINDS
         else ""
     )
-    if distractor_only_retry:
+    if distractor_only_retry or answer_rule_repair:
+        if revision_parent is None:
+            raise ValueError("a bounded repair requires its parent candidate")
         question = revision_parent["question"]
         question_context = revision_parent.get("question_context", "")
         question_rationale = revision_parent["question_rationale"]
@@ -1196,6 +1347,12 @@ def generate_candidate(
         question = question_record["question"]
         question_context = question_record["question_context"]
         question_rationale = question_record["question_rationale"]
+        context_gap = str(question_record.get("context_gap") or "").strip()
+        if context_gap and attempt_kind in QUESTION_REPAIR_KINDS:
+            raise CandidateRejectedError(
+                "slot_evidence_unavailable",
+                f"the source does not state the demanded detail: {context_gap}",
+            )
     elif arm == "direct_joint":
         joint = _call(
             db,
@@ -1233,6 +1390,22 @@ def generate_candidate(
         arm_answer_proposal = joint["answer"]
     else:
         raise ValueError(f"unknown generation arm: {arm}")
+    if answer_rule_repair:
+        answer = _repaired_numeric_rule_answer(
+            db,
+            author,
+            run_id=run_id,
+            entity_id=entity_id,
+            answer=answer,
+            parent=revision_parent,
+            context=context,
+            parameters=parameters,
+            reservation=reservation,
+            timeout=timeout,
+            retries=retries,
+            rate_limit_seconds=rate_limit_seconds,
+        )
+        arm_answer_proposal = answer
     creation_context_reason = (
         "question_answer_leakage"
         if question_answer_leaks_answer(question, answer)
@@ -1241,6 +1414,7 @@ def generate_candidate(
     if (
         revision_parent is not None
         and not distractor_only_retry
+        and not answer_rule_repair
         and (
             question == revision_parent.get("question")
             and question_context == revision_parent.get("question_context", "")
@@ -1290,8 +1464,9 @@ def generate_candidate(
         "value exactly from its selected SOURCE_DATA span, without aliases or "
         "paraphrases. Populate only scope qualifiers stated verbatim in the "
         "QUESTION and supported by the selected span. Use null for every other "
-        "scope dimension, even when the source contains additional context. At "
-        "least one scope value must be non-null. Return alternatives only when "
+        "scope dimension, even when the source contains additional context. "
+        "Leave every scope value null when the QUESTION states no qualifier that "
+        "the selected span supports. Return alternatives only when "
         "the source supports a distinct answer that also correctly answers this "
         "question. Do not list paraphrases, spelling or unit variants, or false "
         "and negated answer choices as alternatives. "
@@ -1326,17 +1501,16 @@ def generate_candidate(
         + question_context
         + "\nANSWER_RECORD\n"
         + canonical_json(answer)
-        + "\nRECONSTRUCTION\n"
-        + canonical_json(reconstruction)
         + "\n"
         + BENCHMARK_STANDALONE_INSTRUCTIONS
-        + " Read QUESTION and QUESTION_CONTEXT alone before you use SOURCE_DATA, ANSWER_RECORD, "
-        "or RECONSTRUCTION. " + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS + " "
+        + " Read QUESTION and QUESTION_CONTEXT alone before you use SOURCE_DATA or "
+        "ANSWER_RECORD. " + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS + " "
         "Do not use those records to repair a missing system, location, "
         "sample, period, condition, or referent. If the displayed task needs SOURCE_DATA to "
         "identify a referent or interpret scope, set relation_scope_match to false. SOURCE_DATA "
         "can still determine or verify the answer. Verify entailment, relation, scope, ambiguity, "
-        "alternatives, evidence, and the question claim type. "
+        "alternatives, evidence, and the question claim type. Label the question claim "
+        "type from QUESTION and SOURCE_DATA alone. "
         "Treat QUESTION and QUESTION_CONTEXT as the complete model-facing task. "
         "Set question_context_required to true only when the nonempty context supplies "
         "information necessary to understand the question. Set it to false when the "
@@ -1545,9 +1719,10 @@ def generate_candidate(
         qa_gate_reasons.append("generation_arm_finding_mismatch")
     distractors: list[dict[str, Any]] = []
     option_verdicts: list[dict[str, Any]] = []
+    prefiltered_options: list[dict[str, Any]] = []
     qa_hash = stable_id("qa", question, question_context, canonical_json(answer))
     if not qa_gate_reasons:
-        distractors, option_verdicts = _generate_distractors(
+        distractors, option_verdicts, prefiltered_options = _generate_distractors(
             db=db,
             source=source,
             context=context,
@@ -1566,6 +1741,11 @@ def generate_candidate(
             retries=retries,
             rate_limit_seconds=rate_limit_seconds,
             attempt_id=(attempt["attempt_id"] if distractor_only_retry else None),
+            option_feedback=(
+                _rejected_option_feedback(db, revision_parent)
+                if distractor_only_retry
+                else None
+            ),
         )
     item_id = stable_id(
         "aqa",
@@ -1677,6 +1857,7 @@ def generate_candidate(
             },
             "method_status": "proposed_unvalidated",
             "distractor_only_retry": distractor_only_retry,
+            "option_display_prefilter": prefiltered_options,
             "policy_ablation_metadata": {
                 "V0": "base_checks_without_reconstruction_retention",
                 "V1": "same_checks_with_reconstruction_retention",
@@ -1704,6 +1885,228 @@ def generate_candidate(
     return candidate
 
 
+ACTIVITY_CONTEXT_HEADER = (
+    "\nCONTEXT_ONLY_SOURCE\n"
+    "CONTEXT_ONLY_SOURCE supports question_context statements only. Never select "
+    "a CONTEXT_ONLY_SOURCE span as answer evidence, as a scope value, or as a "
+    "required question phrase.\n"
+)
+
+
+def eligible_activity_spans(source: dict[str, Any]) -> list[str]:
+    """Return the hash-verified study-setting quotes of one eligible paper.
+
+    The eligibility classifier already located the study site and study period
+    sentences and stored them as `activity_spans`. Nothing downstream read them
+    (r15 audit section 4.1). A quote whose recorded sha256 does not match is
+    dropped, so custody stays exact.
+    """
+    if source.get("scope_rule_version") != "gemini-fulltext-arctic-eligibility-v2":
+        return []
+    try:
+        evidence = json.loads(source["scope_evidence_json"])
+    except (KeyError, TypeError, json.JSONDecodeError):
+        return []
+    resolved = evidence.get("resolved_eligible_arctic_scope")
+    if not isinstance(resolved, dict):
+        return []
+    quotes: list[str] = []
+    for record in resolved.get("activity_spans") or []:
+        if not isinstance(record, dict):
+            continue
+        quote = record.get("quote")
+        digest = record.get("source_bytes_sha256")
+        if (
+            isinstance(quote, str)
+            and quote.strip()
+            and digest == sha256_bytes(quote.encode("utf-8"))
+        ):
+            quotes.append(quote)
+    return quotes
+
+
+def activity_context_block(source: dict[str, Any], answer: dict[str, Any]) -> str:
+    """Render the study-setting spans that carry no answer-bearing text."""
+    answer_texts = [
+        str(value)
+        for value in (answer.get("text"), *(answer.get("variants") or []))
+        if isinstance(value, str) and value.strip()
+    ]
+    quotes = [
+        quote
+        for quote in eligible_activity_spans(source)
+        if not any(phrase_in_source_text(text, quote) for text in answer_texts)
+    ]
+    if not quotes:
+        return ""
+    return ACTIVITY_CONTEXT_HEADER + "\n".join(quotes) + "\n"
+
+
+def _repaired_numeric_rule_answer(
+    db: Database,
+    provider: Provider,
+    *,
+    run_id: str,
+    entity_id: str,
+    answer: dict[str, Any],
+    parent: dict[str, Any] | None,
+    context: str,
+    parameters: dict[str, Any],
+    reservation: Decimal,
+    timeout: float,
+    retries: int,
+    rate_limit_seconds: float,
+) -> dict[str, Any]:
+    """Rebuild only the numeric metadata of the frozen answer record.
+
+    A question rewrite cannot repair a numeric rule, so v21 spent nothing on the
+    13 `source_bound_numeric_rule_missing` kills (r15 audit section 4.6 fix 1).
+    The finding text, its evidence span, and the displayed answer never change.
+    The regenerated rule must bind verbatim to the same frozen span through the
+    unchanged deterministic check, or the attempt is rejected.
+    """
+    if not isinstance(answer.get("numeric_rule"), dict):
+        raise CandidateRejectedError(
+            "answer_rule_repair_not_applicable",
+            "the frozen answer carries no numeric rule to repair",
+        )
+    replacement = correct_one_component(
+        db,
+        provider,
+        run_id=run_id,
+        entity_id=entity_id,
+        component="numeric_rule",
+        candidate_record={
+            "answer_text": answer.get("text"),
+            "evidence_quote": answer.get("evidence_quote"),
+            "numeric_rule": answer.get("numeric_rule"),
+        },
+        context=context,
+        reason_codes=["source_bound_numeric_rule_missing"],
+        defect={
+            "residual_error": str(
+                ((parent or {}).get("answer_verification") or {}).get(
+                    "residual_error", ""
+                )
+            ),
+        },
+        parameters=parameters,
+        reservation=reservation,
+        timeout=timeout,
+        retries=retries,
+        rate_limit_seconds=rate_limit_seconds,
+    )
+    if not isinstance(replacement, dict):
+        raise CandidateRejectedError(
+            "answer_rule_repair_invalid",
+            "the numeric rule repair did not return a rule object",
+        )
+    repaired = {**answer, "numeric_rule": replacement}
+    if not numeric_rule_is_source_bound(repaired):
+        raise CandidateRejectedError(
+            "source_bound_numeric_rule_missing",
+            "the repaired numeric rule is not bound to the frozen span",
+        )
+    return repaired
+
+
+def _attempt_history(
+    db: Database, run_id: str, family_id: str, finding_id: str
+) -> list[dict[str, Any]]:
+    """Return every earlier attempt on one frozen finding, oldest first.
+
+    r15 audit section 4.6 fix 3 (finding R3): the repair loop loaded only the
+    immediate parent, so the second repair satisfied "do not repeat the parent"
+    by reverting to the grandparent text that had already failed. The history
+    carries the writer's own earlier payloads and the typed reason codes only,
+    never a judge's free text.
+    """
+    rows = db.rows(
+        """SELECT candidate_json FROM candidates
+        WHERE run_id=? AND paper_family_id=? ORDER BY created_at,item_id""",
+        (run_id, family_id),
+    )
+    history: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            payload = json.loads(row["candidate_json"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if payload.get("finding_id") != finding_id:
+            continue
+        generation_attempt = (payload.get("provenance") or {}).get(
+            "generation_attempt"
+        ) or {}
+        history.append(
+            {
+                "attempt_kind": generation_attempt.get("attempt_kind"),
+                "question": payload.get("question", ""),
+                "question_context": payload.get("question_context", ""),
+                "reason_codes": [
+                    str(reason)
+                    for reason in payload.get("qa_gate_reasons") or []
+                    if isinstance(reason, str)
+                ],
+                "unresolved_phrases": [
+                    str(phrase)
+                    for phrase in (payload.get("standalone_verification") or {}).get(
+                        "unresolved_phrases"
+                    )
+                    or []
+                    if isinstance(phrase, str)
+                ],
+            }
+        )
+    return history
+
+
+def _rejected_option_feedback(
+    db: Database, parent: dict[str, Any] | None
+) -> list[dict[str, Any]]:
+    """Return each earlier option with the deterministic code that rejected it.
+
+    The v21 option repair sent a nonce and no feedback to a temperature-zero
+    model, so it proposed the same options again (r15 audit section 4.6 fix 5).
+    """
+    if not isinstance(parent, dict) or not parent.get("item_id"):
+        return []
+    feedback = [
+        {
+            "option_text": str(entry.get("option_text", "")),
+            "reason_code": str(entry.get("reason_code", "")),
+        }
+        for entry in (parent.get("provenance") or {}).get("option_display_prefilter")
+        or []
+        if isinstance(entry, dict)
+    ]
+    rows = db.rows(
+        """SELECT reason_code,detail_json FROM rejection_ledger
+        WHERE item_id=? AND stage='option_validation'
+        ORDER BY rejection_id""",
+        (parent["item_id"],),
+    )
+    for row in rows:
+        try:
+            detail = json.loads(row["detail_json"])
+        except (TypeError, json.JSONDecodeError):
+            detail = {}
+        feedback.append(
+            {
+                "option_text": str((detail or {}).get("option_text", "")),
+                "reason_code": str(row["reason_code"]),
+            }
+        )
+    seen: set[tuple[str, str]] = set()
+    unique: list[dict[str, Any]] = []
+    for entry in feedback:
+        key = (entry["option_text"], entry["reason_code"])
+        if key in seen or not entry["reason_code"]:
+            continue
+        seen.add(key)
+        unique.append(entry)
+    return unique
+
+
 def _generate_distractors(
     *,
     db: Database,
@@ -1724,10 +2127,20 @@ def _generate_distractors(
     retries: int,
     rate_limit_seconds: float,
     attempt_id: str | None = None,
+    option_feedback: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     attempt_context = (
         f"\nTARGETED_REGRESSION_ATTEMPT\n{attempt_id}" if attempt_id else ""
     )
+    if option_feedback:
+        attempt_context += (
+            "\nREJECTED_OPTIONS\n"
+            + canonical_json(option_feedback)
+            + "\nEach REJECTED_OPTIONS entry names one earlier option and the "
+            "deterministic rule that rejected it. Do not repeat a rejected "
+            "option or repeat its defect. Give one concise positive assertion "
+            "with one interpretation and one displayed quantity."
+        )
     proposals = _call(
         db,
         author,
@@ -1756,7 +2169,7 @@ def _generate_distractors(
         retries,
         rate_limit_seconds,
     )["distractors"]
-    distractors = [
+    resolved_proposals = [
         _resolve_source_span(
             proposal,
             context_spans,
@@ -1764,6 +2177,16 @@ def _generate_distractors(
         )
         for proposal in proposals
     ]
+    distractors: list[dict[str, Any]] = []
+    prefiltered: list[dict[str, Any]] = []
+    for proposal in resolved_proposals:
+        display_issue = option_display_issue(answer, proposal)
+        if display_issue is None:
+            distractors.append(proposal)
+            continue
+        prefiltered.append(
+            {"option_text": str(proposal.get("text", "")), "reason_code": display_issue}
+        )
     verdicts: list[dict[str, Any]] = []
     for distractor in distractors:
         option_hash = stable_id(
@@ -1834,7 +2257,7 @@ def _generate_distractors(
                 ),
             }
         )
-    return distractors, verdicts
+    return distractors, verdicts, prefiltered
 
 
 def resume_candidate_distractors(
@@ -1908,7 +2331,7 @@ def resume_candidate_distractors(
         if isinstance(generation_attempt, dict)
         else stable_id("unit", base["finding_id"], row["generation_arm"])
     )
-    distractors, verdicts = _generate_distractors(
+    distractors, verdicts, _prefiltered = _generate_distractors(
         db=db,
         source=source,
         context=_context(chunk),
@@ -2033,67 +2456,63 @@ def _call_receipt_reference(
     return reference
 
 
-def apply_one_correction(
+def correct_one_component(
     db: Database,
-    candidate: dict[str, Any],
     provider: Provider,
     *,
     run_id: str,
-    failed_components: list[str],
-    hard_gates_passed: bool,
+    entity_id: str,
+    component: str,
+    candidate_record: dict[str, Any],
+    context: str,
+    reason_codes: list[str],
+    defect: dict[str, Any],
+    parameters: dict[str, Any],
     reservation: Decimal,
     timeout: float,
     retries: int,
-) -> dict[str, Any]:
-    if not hard_gates_passed or len(failed_components) != 1:
-        raise ValueError(
-            "correction requires passed hard gates and exactly one remediable component failure"
-        )
-    if candidate.get("correction_history"):
-        raise ValueError("the candidate already used its one correction")
-    component = failed_components[0]
-    if component not in {"question", "distractors"}:
+    rate_limit_seconds: float,
+) -> Any:
+    """Ask for the smallest replacement of one component and return it.
+
+    The v21 function wrote the corrected candidate straight to the candidates
+    table and returned, so a correction bypassed every gate, and its prompt
+    carried no source text, no reason code, and no unresolved phrase (r15 audit
+    section 4.6 fix 4). This version returns the replacement only. The caller
+    rebuilds the candidate and runs the whole gate sequence on it.
+    """
+    if component not in {"question", "distractors", "numeric_rule"}:
         raise ValueError(f"component is not eligible for correction: {component}")
     response = _call(
         db,
         provider,
         run_id,
-        candidate["item_id"],
+        entity_id,
         "correction",
         "CANDIDATE\n"
-        + canonical_json(candidate)
+        + canonical_json(candidate_record)
+        + "\nSOURCE_DATA\n"
+        + context
+        + "\nDEFECT\n"
+        + canonical_json({"reason_codes": reason_codes, **defect})
         + "\n"
         + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS
-        + f" Correct only the {component} component.",
-        {"temperature": 0, "max_tokens": 2048},
+        + f" Correct only the {component} component. Change the smallest span of "
+        "text that removes every listed defect. Keep every other word exactly as "
+        "written. Every value, unit, and tolerance you write must occur verbatim "
+        "in SOURCE_DATA. Do not add answer-bearing information.",
+        parameters,
         reservation,
         timeout,
         retries,
-        0,
+        rate_limit_seconds,
     )
     if response["component"] != component:
-        raise ValueError("the correction response changed a different component")
-    corrected = json.loads(canonical_json(candidate))
-    corrected[component] = response["replacement"]
-    corrected["correction_history"] = [
-        {
-            "component": component,
-            "original": candidate[component],
-            "replacement": response["replacement"],
-        }
-    ]
-    corrected["status"] = "candidate_corrected_once"
-    with db.transaction():
-        db.connection.execute(
-            "UPDATE candidates SET candidate_json=?,status=?,updated_at=? WHERE item_id=?",
-            (
-                canonical_json(corrected),
-                corrected["status"],
-                now(),
-                candidate["item_id"],
-            ),
+        raise CandidateRejectedError(
+            "correction_component_mismatch",
+            "the correction response changed a different component",
         )
-    return corrected
+    return response["replacement"]
 
 
 def _call(

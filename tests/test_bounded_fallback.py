@@ -175,7 +175,7 @@ def test_fallback_allows_two_revisions_before_an_alternative_finding() -> None:
     )
 
     assert revision is not None
-    assert revision["attempt_kind"] == "question_revision"
+    assert revision["attempt_kind"] == "surgical_correction"
     assert revision["finding_attempt_index"] == 1
     assert revision["question_revision_index"] == 1
     paths[(1, 1)] = {
@@ -197,7 +197,7 @@ def test_fallback_allows_two_revisions_before_an_alternative_finding() -> None:
     )
 
     assert second_revision is not None
-    assert second_revision["attempt_kind"] == "question_revision"
+    assert second_revision["attempt_kind"] == "context_widened_revision"
     assert second_revision["finding_attempt_index"] == 1
     assert second_revision["question_revision_index"] == 2
     assert second_revision["parent_attempt_id"] == revision["attempt_id"]
@@ -373,7 +373,7 @@ def test_finding_and_no_progress_failures_escape_immediately(reason: str) -> Non
     assert alternative["attempt_kind"] == "alternative_finding"
 
 
-def test_independent_leakage_and_scope_failures_stop_paid_retry() -> None:
+def test_independent_leakage_and_scope_failures_repair_leakage_first() -> None:
     primary = streaming_module._generation_attempt(
         campaign_id="campaign",
         family_id="family",
@@ -391,15 +391,22 @@ def test_independent_leakage_and_scope_failures_stop_paid_retry() -> None:
         ["standalone_answer_leakage", "relation_scope_mismatch"]
     ) == ["standalone_answer_leakage", "relation_scope_mismatch"]
     assert (
-        streaming_module._next_generation_attempt(
-            campaign_id="campaign",
-            family_id="family",
-            paths={(1, 0): path},
-            failed_path=path,
-            reason_codes=["standalone_answer_leakage", "relation_scope_mismatch"],
+        streaming_module._primary_failure_layer(
+            ["standalone_answer_leakage", "relation_scope_mismatch"]
         )
-        is None
+        == "leakage"
     )
+    repair = streaming_module._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths={(1, 0): path},
+        failed_path=path,
+        reason_codes=["standalone_answer_leakage", "relation_scope_mismatch"],
+    )
+
+    assert repair is not None
+    assert repair["trigger_reason_code"] == "standalone_answer_leakage"
+    assert repair["attempt_kind"] == "question_revision"
 
 
 def test_generation_lineage_allows_six_bounded_paths() -> None:
@@ -480,7 +487,7 @@ def test_fallback_does_not_progress_from_a_contract_mismatch() -> None:
     )
 
 
-def test_fallback_stops_after_two_revisions_or_multiple_reasons() -> None:
+def test_fallback_routes_the_primary_layer_and_stops_after_two_revisions() -> None:
     primary = streaming_module._generation_attempt(
         campaign_id="campaign",
         family_id="family",
@@ -533,16 +540,17 @@ def test_fallback_stops_after_two_revisions_or_multiple_reasons() -> None:
         )
         is not None
     )
-    assert (
-        streaming_module._next_generation_attempt(
-            campaign_id="campaign",
-            family_id="family",
-            paths=paths,
-            failed_path=paths[(1, 0)],
-            reason_codes=["reconstruction_disagreement", "answer_ambiguous"],
-        )
-        is None
+    # Evidence outranks context, so two layers in one event repair the evidence
+    # layer instead of ending the family.
+    mixed = streaming_module._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths={(1, 0): paths[(1, 0)]},
+        failed_path=paths[(1, 0)],
+        reason_codes=["reconstruction_disagreement", "question_context_missing"],
     )
+    assert mixed is not None
+    assert mixed["trigger_reason_code"] == "reconstruction_disagreement"
     assert (
         streaming_module._next_generation_attempt(
             campaign_id="campaign",
@@ -558,11 +566,11 @@ def test_fallback_stops_after_two_revisions_or_multiple_reasons() -> None:
 @pytest.mark.parametrize(
     ("failure_reason", "accept_on", "expected_kinds"),
     [
-        ("question_context_missing", 2, ["primary", "question_revision"]),
+        ("question_context_missing", 2, ["primary", "surgical_correction"]),
         (
             "reconstruction_disagreement",
             3,
-            ["primary", "question_revision", "question_revision"],
+            ["primary", "question_revision", "context_widened_revision"],
         ),
     ],
 )
@@ -937,7 +945,10 @@ def test_predecessor_acceptance_starts_a_fresh_current_contract_path(
     assert result["reason_codes"] == ["request_cost_bound_exceeded"]
     assert len(provider_boundaries) == 1
     current_attempt = provider_boundaries[0]
-    assert current_attempt["contract_version"] == "bounded-failure-routing-v3"
+    assert (
+        current_attempt["contract_version"]
+        == generation_contract.GENERATION_ATTEMPT_CONTRACT_VERSION
+    )
     assert current_attempt["attempt_kind"] == "primary"
     assert current_attempt["parent_attempt_id"] is None
     assert database.one("SELECT COUNT(*) AS count FROM calls")["count"] == 0
@@ -1207,4 +1218,255 @@ def test_budget_stop_is_terminal_when_generation_resumes(
             "SELECT stage FROM rejection_ledger WHERE source_id=?", ("source",)
         )["stage"]
         == "generation_budget"
+    )
+
+
+def _primary_path(
+    *, candidate_json: str = '{"answer": {"source_span_id": "span-primary"}}'
+) -> dict:
+    primary = streaming_module._generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        finding_attempt_index=1,
+        question_revision_index=0,
+        attempt_kind="primary",
+        parent_attempt_id=None,
+        parent_item_id=None,
+        trigger_reason_code=None,
+        excluded_finding_span_ids=[],
+    )
+    return {
+        "attempt": primary,
+        "candidate": {"item_id": "item-primary", "candidate_json": candidate_json},
+    }
+
+
+def _next(paths: dict, failed: dict, reasons: list[str], **kwargs) -> dict | None:
+    return streaming_module._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths=paths,
+        failed_path=failed,
+        reason_codes=reasons,
+        **kwargs,
+    )
+
+
+def test_r1_three_codes_from_three_gates_still_earn_a_repair() -> None:
+    """family-d95f466cad4776a758b9: three codes, one attempt, five paths unused."""
+    path = _primary_path()
+
+    repair = _next(
+        {(1, 0): path},
+        path,
+        [
+            "standalone_undefined_period_or_event",
+            "source_bound_numeric_rule_missing",
+            "question_context_missing",
+        ],
+    )
+
+    assert repair is not None
+    assert repair["question_revision_index"] == 1
+    assert repair["trigger_reason_code"] == "standalone_undefined_period_or_event"
+
+
+def test_r1_layer_priority_puts_leakage_before_every_other_layer() -> None:
+    assert streaming_module._LAYER_PRIORITY[0] == "leakage"
+    assert (
+        streaming_module._primary_failure_layer(
+            ["question_context_missing", "question_answer_leakage"]
+        )
+        == "leakage"
+    )
+    assert (
+        streaming_module._primary_failure_layer(
+            ["question_context_missing", "source_bound_numeric_rule_missing"]
+        )
+        == "context"
+    )
+    assert (
+        streaming_module._primary_failure_layer(
+            ["question_context_missing", "reconstruction_disagreement"]
+        )
+        == "evidence"
+    )
+
+
+def test_r1_a_numeric_contract_kill_routes_to_the_answer_rule_repair() -> None:
+    path = _primary_path()
+
+    repair = _next({(1, 0): path}, path, ["source_bound_numeric_rule_missing"])
+
+    assert repair is not None
+    assert repair["attempt_kind"] == "answer_rule_repair"
+    assert repair["trigger_reason_code"] == "source_bound_numeric_rule_missing"
+
+
+def test_r1_the_answer_rule_repair_runs_once_only() -> None:
+    path = _primary_path()
+    paths = {(1, 0): path}
+    first = _next(paths, path, ["source_bound_numeric_rule_missing"])
+    assert first is not None
+    paths[(1, 1)] = {
+        "attempt": first,
+        "candidate": {"item_id": "item-rule", "candidate_json": "{}"},
+    }
+
+    second = _next(paths, paths[(1, 1)], ["source_bound_numeric_rule_missing"])
+
+    assert second is None or second["attempt_kind"] != "answer_rule_repair"
+
+
+def test_r2_a_repeated_demand_widens_the_context_then_leaves_the_finding() -> None:
+    """family-7ad42191e4ec5c7eb2fe: six attempts, one trigger, every time."""
+    path = _primary_path()
+    paths = {(1, 0): path}
+
+    first = _next(paths, path, ["standalone_undefined_location"])
+    assert first is not None
+    assert first["attempt_kind"] == "surgical_correction"
+    paths[(1, 1)] = {
+        "attempt": first,
+        "candidate": {
+            "item_id": "item-1",
+            "candidate_json": canonical_json(
+                {"answer": {"source_span_id": "span-primary"}}
+            ),
+        },
+    }
+
+    second = _next(paths, paths[(1, 1)], ["standalone_undefined_location"])
+    assert second is not None
+    assert second["attempt_kind"] == "context_widened_revision"
+    paths[(1, 2)] = {
+        "attempt": second,
+        "candidate": {
+            "item_id": "item-2",
+            "candidate_json": canonical_json(
+                {"answer": {"source_span_id": "span-primary"}}
+            ),
+        },
+    }
+
+    third = _next(paths, paths[(1, 2)], ["standalone_undefined_location"])
+    assert third is not None
+    assert third["attempt_kind"] == "alternative_finding"
+    assert third["excluded_finding_span_ids"] == ["span-primary"]
+
+
+def test_r2_a_demand_the_source_cannot_meet_moves_to_another_finding() -> None:
+    path = _primary_path()
+
+    routed = _next(
+        {(1, 0): path},
+        path,
+        ["standalone_undefined_location"],
+        slot_evidence=frozenset({"period", "sample"}),
+    )
+
+    assert routed is not None
+    assert routed["attempt_kind"] == "alternative_finding"
+    assert routed["trigger_reason_code"] == "slot_evidence_unavailable"
+
+
+def test_r2_a_demand_the_source_can_meet_still_spends_a_rewrite() -> None:
+    path = _primary_path()
+
+    routed = _next(
+        {(1, 0): path},
+        path,
+        ["standalone_undefined_location"],
+        slot_evidence=frozenset({"place"}),
+    )
+
+    assert routed is not None
+    assert routed["attempt_kind"] == "surgical_correction"
+
+
+def test_slot_evidence_reads_place_period_sample_and_acronym() -> None:
+    quotes = [
+        "The study site was the Villum Research Station in Greenland.",
+        "Sampling ran through 2015 with n = 457 individuals.",
+        "Hydroperoxymethyl thioformate (HPMTF) was measured.",
+    ]
+
+    slots = streaming_module._slot_evidence_types(quotes)
+
+    assert slots == frozenset({"place", "period", "sample", "acronym"})
+    assert (
+        streaming_module._slot_evidence_types(["no setting stated here"]) == frozenset()
+    )
+
+
+def test_recon_r4_a_standalone_root_collapses_its_downstream_symptoms() -> None:
+    collapsed = streaming_module._routing_reason_codes(
+        [
+            "standalone_undefined_location",
+            "relation_scope_mismatch",
+            "answer_verifier_scope_not_source_bound",
+            "reconstruction_scope_not_source_bound",
+            "answer_ambiguous",
+            "question_claim_type_disagreement",
+        ]
+    )
+
+    assert collapsed == ["standalone_undefined_location"]
+
+
+def test_recon_r4_never_collapses_the_paper_support_signal() -> None:
+    collapsed = streaming_module._routing_reason_codes(
+        ["standalone_undefined_location", "source_entailment_not_verified"]
+    )
+
+    assert "source_entailment_not_verified" in collapsed
+
+
+def test_a_leakage_root_does_not_collapse_an_independent_scope_defect() -> None:
+    collapsed = streaming_module._routing_reason_codes(
+        ["standalone_answer_leakage", "relation_scope_mismatch"]
+    )
+
+    assert collapsed == ["standalone_answer_leakage", "relation_scope_mismatch"]
+
+
+def test_the_six_path_bound_and_the_option_repair_set_do_not_move() -> None:
+    assert streaming_module.MAX_CANDIDATE_PATHS == 6
+    assert streaming_module.OPTION_REPAIR_REASONS == frozenset(
+        {"insufficient_verified_distractors"}
+    )
+
+
+def test_a_spent_answer_rule_rung_leaves_the_finding() -> None:
+    path = _primary_path()
+    paths = {(1, 0): path}
+    first = _next(paths, path, ["source_bound_numeric_rule_missing"])
+    assert first is not None
+    paths[(1, 1)] = {
+        "attempt": first,
+        "candidate": {
+            "item_id": "item-rule",
+            "candidate_json": canonical_json(
+                {"answer": {"source_span_id": "span-primary"}}
+            ),
+        },
+    }
+
+    second = _next(paths, paths[(1, 1)], ["source_bound_numeric_rule_missing"])
+
+    assert second is not None
+    assert second["attempt_kind"] == "alternative_finding"
+    assert second["excluded_finding_span_ids"] == ["span-primary"]
+
+
+def test_slot_place_detection_fails_open_on_a_bare_proper_noun() -> None:
+    """A false 'no place' would discard a finding the source can support."""
+    assert "place" in streaming_module._slot_evidence_types(
+        ["Sampling ran at Svalbard through the melt season."]
+    )
+    assert "place" in streaming_module._slot_evidence_types(
+        ["Observations were taken at 78.9 N in the open water."]
+    )
+    assert "place" not in streaming_module._slot_evidence_types(
+        ["Samples were kept in the dark at four degrees."]
     )

@@ -46,6 +46,12 @@ Generation from a second source version in the same family stops instead of sele
 
 The role defaults reflect vendor capabilities recorded on 2026-09-11.
 They are not winners of an Arctic QA evaluation.
+`config/roles.v1.json` holds the role assignment under contract `generation-model-roles-v1`.
+The stream loads and validates that file before the first paper.
+The writer and every judge must use different models and different providers.
+The strongest configured judge model must hold `standalone_verifier` and `option_verifier`.
+A run that names a role profile must serve those models, and a production-phase run must name one.
+The run manifest records the resolved roles and the effective model of each role.
 
 Machine acceptance stops at `machine_accepted_unverified`.
 A false or absent source-entailment result stops acceptance.

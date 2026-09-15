@@ -27,6 +27,7 @@ LEGACY_STANDALONE_VERIFICATION_CONTRACT_VERSION = "source-blind-standalone-gate-
 STANDALONE_VERIFICATION_CONTRACT_VERSION = "source-blind-scientific-referent-v2"
 ANSWER_AGREEMENT_CONTRACT_VERSION = "deterministic-first-answer-agreement-v1"
 ANSWER_AGREEMENT_PROMPT_VERSION = "answer-agreement-judge-v1"
+ROUTING_CONTRACT_VERSION = "bounded-failure-routing-v4"
 ANSWER_AGREEMENT_SYSTEM = """Decide whether two texts give the same answer to one question.
 Accept equivalent units, paraphrases, and harmless extra explanation.
 Reject contradictions, changed quantities, missing requested parts, incompatible scope, and negation changes.
@@ -204,7 +205,7 @@ CANDIDATE_CONTRACTS = {
     },
     "2.6.0": {
         "prompt_version": GENERATION_PROMPT_VERSION,
-        "generation_attempt_contract_version": "bounded-failure-routing-v3",
+        "generation_attempt_contract_version": ROUTING_CONTRACT_VERSION,
         "answer_agreement_contract_version": ANSWER_AGREEMENT_CONTRACT_VERSION,
         "standalone_verification_contract_version": (
             STANDALONE_VERIFICATION_CONTRACT_VERSION
@@ -380,6 +381,11 @@ def _scope_phrase_in_text(phrase: str, text: str) -> bool:
     return bool(phrase_projection and phrase_projection in text_projection)
 
 
+def phrase_in_source_text(phrase: str, text: str) -> bool:
+    """Public name for the one scope-phrase containment rule."""
+    return _scope_phrase_in_text(phrase, text)
+
+
 def _eligible_arctic_scope_error(
     candidate: dict[str, Any], source: dict[str, Any]
 ) -> str | None:
@@ -489,11 +495,13 @@ def validate_candidate(
     if schema_version not in CANDIDATE_CONTRACTS:
         reasons.append("unsafe_legacy_candidate_schema")
         return _finish(db, candidate, labels, reasons, [], "rejected")
-    required_item_keys = REQUIRED_ITEM_KEYS | (
-        {"standalone_verification"}
-        if expected_standalone_contract(schema_version)
-        else set()
-    )
+    if not expected_standalone_contract(schema_version):
+        # r15 audit section 4.8 item 5: schemas 2.0.0 to 2.4.0 declare no
+        # standalone contract, so they never ran the source-blind gate. A
+        # stored payload of that era can never be validated or re-exported.
+        reasons.append("unsafe_legacy_candidate_schema")
+        return _finish(db, candidate, labels, reasons, [], "rejected")
+    required_item_keys = REQUIRED_ITEM_KEYS | {"standalone_verification"}
     if required_item_keys - candidate.keys() or not isinstance(
         candidate.get("answer"), dict
     ):
@@ -563,16 +571,15 @@ def validate_candidate(
     ):
         reasons.append("generation_contract_version_mismatch")
         return _finish(db, candidate, labels, reasons, [], "rejected")
-    if expected_standalone_contract(schema_version):
-        standalone = candidate.get("standalone_verification")
-        if not standalone_verification_resolves(candidate, standalone):
-            reasons.append("standalone_verification_unresolved")
-            labels["unresolved"] = True
-            return _finish(db, candidate, labels, reasons, [], "unresolved")
-        if standalone["pass"] is not True:
-            reasons.extend(_standalone_reason_codes(standalone))
-            return _finish(db, candidate, labels, reasons, [], "rejected")
-        labels["standalone_interpretable"] = True
+    standalone = candidate.get("standalone_verification")
+    if not standalone_verification_resolves(candidate, standalone):
+        reasons.append("standalone_verification_unresolved")
+        labels["unresolved"] = True
+        return _finish(db, candidate, labels, reasons, [], "unresolved")
+    if standalone["pass"] is not True:
+        reasons.extend(_standalone_reason_codes(standalone))
+        return _finish(db, candidate, labels, reasons, [], "rejected")
+    labels["standalone_interpretable"] = True
     if not scope_is_evidence_bound(
         candidate["answer"].get("scope"), candidate["answer"]
     ):
@@ -618,7 +625,9 @@ def validate_candidate(
     if not role_evidence_resolves(reconstruction, chunks):
         reasons.append("reconstruction_evidence_not_located")
         return _finish(db, candidate, labels, reasons, [], "rejected")
-    if not scope_is_evidence_bound(reconstruction.get("scope"), reconstruction):
+    if not scope_is_evidence_bound(
+        reconstruction.get("scope"), reconstruction, allow_empty=True
+    ):
         reasons.append("reconstruction_scope_not_source_bound")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     verification = candidate.get("answer_verification") or {}
@@ -2484,6 +2493,23 @@ def _option_equivalence_key(
     return ("closed_set", ordering, *comparable)
 
 
+def option_display_issue(
+    answer: dict[str, Any], distractor: dict[str, Any]
+) -> str | None:
+    """Return the model-free display defect of one proposed option.
+
+    The option gate already applies these rules. Running them before the paid
+    option verifier only avoids buying a verdict for an option the gate will
+    reject anyway (r15 audit section 4.6 fix 5). It admits nothing: every
+    surviving option still runs the full option gate.
+    """
+    text = str(distractor.get("text", ""))
+    numeric = distractor.get("numeric")
+    if numeric:
+        return _numeric_display_issue(text, numeric)
+    return _text_display_issue(text, answer=answer, distractor=distractor)
+
+
 def _numeric_display_issue(text: str, numeric: dict[str, Any]) -> str | None:
     try:
         value = Decimal(str(numeric["canonical_value"]))
@@ -2687,12 +2713,21 @@ def _reported_precision_matches_literal(reported_precision: str, literal: str) -
 
 
 def scope_is_source_bound(
-    scope: dict[str, Any] | None, chunks: list[dict[str, Any]]
+    scope: dict[str, Any] | None,
+    chunks: list[dict[str, Any]],
+    *,
+    allow_empty: bool = False,
 ) -> bool:
     if not isinstance(scope, dict):
         return False
     values = [value for value in scope.values() if value is not None]
-    if not values or any(not isinstance(value, str) for value in values):
+    if not values:
+        # The blind reconstructor may honestly report no scope qualifier that
+        # the question states and the selected span supports (r15 audit 4.4).
+        # The writer answer record and the typed numeric path keep their
+        # non-null requirement.
+        return allow_empty
+    if any(not isinstance(value, str) for value in values):
         return False
     if any(not normalize_text(value) for value in values):
         return False
@@ -2704,11 +2739,15 @@ def scope_is_source_bound(
 
 
 def scope_is_evidence_bound(
-    scope: dict[str, Any] | None, evidence_record: dict[str, Any]
+    scope: dict[str, Any] | None,
+    evidence_record: dict[str, Any],
+    *,
+    allow_empty: bool = False,
 ) -> bool:
     return scope_is_source_bound(
         scope,
         [{"text": str(evidence_record.get("evidence_quote", ""))}],
+        allow_empty=allow_empty,
     )
 
 
@@ -2913,6 +2952,40 @@ def _units_are_safe_equivalents(left: str, right: str) -> bool:
     )
 
 
+REJECTION_DIAGNOSTIC_CONTRACT_VERSION = "rejection-diagnostic-detail-v1"
+
+
+def _text_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str) and item]
+
+
+def rejection_diagnostic_detail(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Return the judge-stated reasons a kill rests on.
+
+    The r15 audit (sections 4.2 fix 6 and 4.6 fix 6) found the rejection ledger
+    detail empty for every row, so no repair prompt and no analyst could state
+    what a judge actually asked for. These fields are diagnostic only: nothing
+    reads them to accept an item.
+    """
+    standalone = candidate.get("standalone_verification")
+    standalone = standalone if isinstance(standalone, dict) else {}
+    verification = candidate.get("answer_verification")
+    verification = verification if isinstance(verification, dict) else {}
+    return {
+        "contract_version": REJECTION_DIAGNOSTIC_CONTRACT_VERSION,
+        "unresolved_phrases": _text_list(standalone.get("unresolved_phrases")),
+        "missing_detail_types": _text_list(standalone.get("missing_detail_types")),
+        "review_rationale": str(standalone.get("review_rationale") or ""),
+        "verification_rationale": str(verification.get("verification_rationale") or ""),
+        "residual_error": str(verification.get("residual_error") or ""),
+        "question_context_missing_detail": str(
+            verification.get("question_context_missing_detail") or ""
+        ),
+    }
+
+
 def _finish(
     db: Database,
     candidate: dict[str, Any],
@@ -2929,6 +3002,7 @@ def _finish(
         return ValidationResult(item_id, final_label, labels, reasons, distractors)
     candidate_json = canonical_json(candidate)
     candidate_hash = stable_id("candidate-payload", candidate_json)
+    diagnostics = rejection_diagnostic_detail(candidate)
     stored = db.one("SELECT candidate_json FROM candidates WHERE item_id=?", (item_id,))
     if not stored or stored["candidate_json"] != candidate_json:
         labels["rejected"] = True
@@ -2956,6 +3030,7 @@ def _finish(
                         "labels": labels,
                         "answer_agreement": candidate.get("answer_agreement"),
                         "distractors": distractors,
+                        "rejection_diagnostics": diagnostics,
                     }
                 ),
                 now(),
@@ -2977,7 +3052,7 @@ def _finish(
                     item_id,
                     candidate.get("source", {}).get("source_id"),
                     reason,
-                    canonical_json({}),
+                    canonical_json(diagnostics),
                     now(),
                 ),
             )
