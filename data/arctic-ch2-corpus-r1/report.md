@@ -201,7 +201,71 @@ The XML and HTML paths of `extract_document` keep working and now apply the same
 
 ## Extraction quality evidence
 
-RESULTS_PLACEHOLDER
+The measurement script is `src/arctic_qa/extraction_quality.py`.
+The command is `chapter2-corpus --action quality`.
+The stored report is `/mnt/crdata/research-abstention/arctic-qa/chapter2/extraction-quality-r1.json`.
+
+The sample is 50 two-column papers, taken in the chapter 1 access order.
+A paper enters the sample when its chapter 2 parse records at least one multi-column page.
+The 50 papers hold 882 pages, of which 537 are multi-column.
+Both corpora are measured on the same 50 papers.
+
+### The extracted text
+
+| Measure | Chapter 1 | Chapter 2 |
+| --- | ---: | ---: |
+| Text lines | 39,491 | 26,959 |
+| Lines that glue two columns | 13,512 | **0** |
+| Gutter rate | 0.356 | **0.000** |
+| Documents with any gutter line | 50 of 50 | **0 of 50** |
+| Mid-word line breaks | 2,056 | 84 |
+| Mid-word breaks for each 1,000 characters | 0.433 | **0.021** |
+| Ligatures and soft hyphens | 774 | **0** |
+| Ligatures and soft hyphens for each 1,000 characters | 0.194 | **0.000** |
+
+The audit found a column gutter in 81 of 95 evidence quotes.
+On this sample the gutter is gone: not one of the 26,959 chapter 2 lines joins two columns, and every one of the 50 papers had at least one such line before.
+The 84 remaining mid-word breaks are hyphens at the end of a paragraph, where the next paragraph starts with a lowercase word. The extractor does not join across a paragraph boundary.
+
+### The chunks
+
+The chapter 1 chunker cut a fixed window inside one page section.
+`extraction_quality.legacy_chunks` repeats that algorithm on the chapter 1 text, so the two corpora are compared chunk for chunk.
+
+| Measure | Chapter 1 chunks | Chapter 2 chunks |
+| --- | ---: | ---: |
+| Chunks | 1,257 | 4,915 |
+| Chunks that carry a column gutter | 983 | **0** |
+| Gutter chunk rate | 0.798 | **0.000** |
+| Chunks that end on a sentence | 266 | 1,484 |
+| Sentence-complete rate | 0.209 | **0.402** |
+
+Four of five chapter 1 chunks carried a gutter. No chapter 2 chunk does.
+
+The sentence-complete rate is a lower bound, not a defect rate.
+The measure asks for terminal punctuation, and a chunk that holds a heading, an equation, a table row, or a reference entry has none.
+Chapter 2 has more chunks because a section is now delimited by a heading instead of by a page.
+
+### Text conservation
+
+The reading-order extractor must not lose the words of the paper.
+
+| Measure | Value |
+| --- | ---: |
+| Median chapter 2 words for each chapter 1 word | 0.971 |
+| Lowest value in the sample | 0.944 |
+| Documents below 0.9 | 0 of 50 |
+
+The missing 3 percent is the repeated running head, which the extractor removes on purpose.
+This measure is what found the lost-heading defect described above, so it is now part of the report.
+
+### The corpus
+
+| Count | Value |
+| --- | ---: |
+| Usable full texts re-extracted | 4,420 |
+| Extraction failures | 0 |
+| Chapter 2 corpus size on disk | 1.5 GB |
 
 ## Rigor safeguard for every change
 
