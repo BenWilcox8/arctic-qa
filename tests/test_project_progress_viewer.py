@@ -234,7 +234,9 @@ def test_project_overview_uses_streaming_counts_as_separate_live_metrics(
         "eligible": 0,
         "excluded": 1,
         "unresolved": 3,
-        "accepted_qa": None,
+        # The progress file carries the campaign total. Without a pipeline
+        # trace store the viewer shows it and labels it cumulative.
+        "accepted_qa": 0,
     }
 
 

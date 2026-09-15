@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import inspect
+import re
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
@@ -27,14 +28,25 @@ from .gemini_eligibility import (
     _validation_evidence,
     validate_response,
 )
-from .providers import Provider, call_provider
+from .providers import Provider, call_provider, provider_model
 from .model_broker import PER_REQUEST_CAP_REASON, broker_request_key
+from .model_roles import (
+    JUDGE_ROLES,
+    MODEL_ROLES_CONTRACT_VERSION,
+    WRITER_ROLE,
+    assert_role_separation,
+    load_role_contract,
+    resolve_roles,
+    role_separation_error,
+)
 from .storage import store_original
 from .util import atomic_json, canonical_json, sha256_bytes, sha256_file, stable_id
 from .validation import validate_candidate
 
 
-GENERATION_ATTEMPT_CONTRACT_VERSION = "bounded-failure-routing-v3"
+GENERATION_ATTEMPT_CONTRACT_VERSION = (
+    generation_contract.GENERATION_ATTEMPT_CONTRACT_VERSION
+)
 MAX_FINDING_ATTEMPTS = 2
 MAX_QUESTION_REVISIONS = 2
 MAX_CANDIDATE_PATHS = MAX_FINDING_ATTEMPTS * (MAX_QUESTION_REVISIONS + 1)
@@ -81,22 +93,62 @@ REPAIRABLE_QUESTION_REASONS = frozenset(
 ALTERNATIVE_FINDING_REASONS = frozenset(
     {
         "finding_answer_phrase_in_required_question_phrases",
+        "finding_evidence_quote_excludes_finding",
         "insufficient_verified_distractors",
         "reconstruction_disagreement",
         "eligible_arctic_scope_missing_from_finding",
         "eligible_arctic_finding_out_of_scope",
         "revision_unchanged_payload",
+        "slot_evidence_unavailable",
     }
 )
 IMMEDIATE_ALTERNATIVE_FINDING_REASONS = frozenset(
     {
         "finding_answer_phrase_in_required_question_phrases",
+        "finding_evidence_quote_excludes_finding",
         "eligible_arctic_scope_missing_from_finding",
         "eligible_arctic_finding_out_of_scope",
         "revision_unchanged_payload",
+        "slot_evidence_unavailable",
     }
 )
 OPTION_REPAIR_REASONS = frozenset({"insufficient_verified_distractors"})
+ANSWER_RULE_REPAIR_REASONS = frozenset({"source_bound_numeric_rule_missing"})
+SURGICAL_CORRECTION_REASONS = frozenset(
+    {
+        "question_context_missing",
+        "question_context_unnecessary",
+        "question_context_required",
+        "question_context_referent_unresolved",
+        "question_context_invalid",
+        "standalone_undefined_acronym",
+        "standalone_undefined_unit_meaning",
+        "standalone_undefined_percentage_basis",
+        "standalone_undefined_period_or_event",
+        "standalone_undefined_location",
+        "standalone_undefined_population_or_sample",
+    }
+)
+# One primary layer per repair, leakage first: a leaked item is worthless, a
+# finding defect cannot be reworded, and evidence outranks wording because a
+# wording fix on a disputed answer is waste. Contract codes come last because
+# they are usually derived from the context defect above them.
+_LAYER_PRIORITY = ("leakage", "finding", "evidence", "context", "options", "contract")
+_SLOT_REASON_TYPES = {
+    "standalone_undefined_location": "place",
+    "standalone_undefined_period_or_event": "period",
+    "standalone_undefined_population_or_sample": "sample",
+    "standalone_undefined_acronym": "acronym",
+}
+_STANDALONE_DEPENDENT_REASONS = frozenset(
+    {
+        "relation_scope_mismatch",
+        "answer_verifier_scope_not_source_bound",
+        "reconstruction_scope_not_source_bound",
+        "answer_ambiguous",
+        "question_claim_type_disagreement",
+    }
+)
 _DEPENDENT_ROUTING_REASONS = {
     "question_context_referent_unresolved": frozenset(
         {"relation_scope_mismatch", "answer_verifier_scope_not_source_bound"}
@@ -129,9 +181,17 @@ def run_stream(
     eligibility_prompt_file: Path | None = None,
     eligibility_schema_file: Path | None = None,
     eligibility_policy_file: Path | None = None,
+    roles_file: Path | None = None,
+    role_profile: str | None = None,
 ) -> dict[str, Any]:
     if max_papers < 1:
         raise ValueError("max papers must be at least 1")
+    model_roles = _resolve_model_roles(
+        author=author,
+        verifier=verifier,
+        roles_file=roles_file,
+        role_profile=role_profile,
+    )
     access_manifest = _read(access_run_dir / "run-manifest.json")
     if _read(access_run_dir / "progress.json").get("state") != "completed":
         raise ValueError("the article-access run is not complete")
@@ -201,6 +261,7 @@ def run_stream(
         eligibility_prompt_file=eligibility_prompt_file,
         eligibility_schema_file=eligibility_schema_file,
         eligibility_policy_file=eligibility_policy_file,
+        model_roles=model_roles,
     )
     trusted_eligibility_decisions: dict[str, str] = {}
     if verifier_broker is not None:
@@ -595,6 +656,8 @@ def run_stream(
         namespace / "exports" / exported["export_id"] / "manifest.json"
     )
     same_model_roles = author.name == verifier.name and author.model == verifier.model
+    if model_roles["enforced"] and same_model_roles:
+        raise ValueError("an enforced model role run kept one model in every role")
     live_provider = bool(getattr(author, "externally_metered", False))
     generation_counts = _generation_counts(db, campaign_id)
     result = {
@@ -611,6 +674,7 @@ def run_stream(
             "same_model_roles": same_model_roles,
             "correlated_error_disclosed": same_model_roles,
             "live_provider": live_provider,
+            "model_roles": model_roles,
         },
     }
     progress.write("completed", "completed", "Streaming pipeline completed.")
@@ -740,6 +804,7 @@ def _progress_generation(
                 paths=paths,
                 failed_path=failed_path,
                 reason_codes=failure["reason_codes"],
+                slot_evidence=_source_slot_evidence(db, source_id),
             )
             if next_attempt is None:
                 incomplete = next(
@@ -1038,19 +1103,20 @@ def _validate_generation_attempt(attempt: Any) -> dict[str, Any]:
         or not 0 <= revision_index <= MAX_QUESTION_REVISIONS
     ):
         raise ValueError("the generation attempt indexes are invalid")
-    expected_kind = (
-        "primary"
-        if (finding_index, revision_index) == (1, 0)
-        else "alternative_finding"
-        if (finding_index, revision_index) == (2, 0)
-        else "option_repair"
-        if revision_index in {1, 2}
-        and attempt.get("trigger_reason_code") in OPTION_REPAIR_REASONS
-        else "question_revision"
-        if revision_index in {1, 2}
-        else None
-    )
-    if attempt["attempt_kind"] != expected_kind:
+    trigger = attempt.get("trigger_reason_code")
+    if (finding_index, revision_index) == (1, 0):
+        allowed_kinds = {"primary"}
+    elif (finding_index, revision_index) == (2, 0):
+        allowed_kinds = {"alternative_finding"}
+    elif revision_index in {1, 2} and trigger in OPTION_REPAIR_REASONS:
+        allowed_kinds = {"option_repair"}
+    elif revision_index in {1, 2} and trigger in ANSWER_RULE_REPAIR_REASONS:
+        allowed_kinds = {"answer_rule_repair"}
+    elif revision_index in {1, 2}:
+        allowed_kinds = set(generation_contract.QUESTION_REPAIR_KINDS)
+    else:
+        allowed_kinds = set()
+    if attempt["attempt_kind"] not in allowed_kinds:
         raise ValueError("the generation attempt kind is inconsistent")
     if not isinstance(attempt["attempt_id"], str) or not attempt["attempt_id"]:
         raise ValueError("the generation attempt ID is missing")
@@ -1378,72 +1444,141 @@ def _path_failure(db: Database, path: dict[str, Any]) -> dict[str, list[str]]:
     return {"reason_codes": [str(reason) for reason in reasons]}
 
 
-def _next_generation_attempt(
+_SLOT_EVIDENCE_PATTERNS = {
+    "period": re.compile(
+        r"\b(?:1[89]\d{2}|20\d{2})\b|\b(?:January|February|March|April|May|June|"
+        r"July|August|September|October|November|December)\b"
+    ),
+    "sample": re.compile(
+        r"\bn\s*=\s*\d+|\b\d+\s+(?:samples|individuals|stations|cores|sites|"
+        r"replicates|animals|birds|participants)\b"
+    ),
+    "acronym": re.compile(r"\([A-Z][A-Za-z0-9-]{1,}\)|\b[A-Z]{2,}\b"),
+}
+
+
+_COORDINATE_PATTERN = re.compile(r"\b\d{1,2}(?:\.\d+)?\s*[\u00b0]?\s*[NS]\b")
+_PROPER_NOUN_PATTERN = re.compile(r"\b[A-Z][a-z\u00c0-\u024f]{2,}\b")
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+
+def _states_a_place(texts: list[str]) -> bool:
+    """Say whether the study-setting text names a place at all.
+
+    The test is deliberately wide. A false "the source states a place" only
+    spends a rewrite the pipeline would have spent anyway. A false "no place"
+    would discard a finding the source can still support, so a bare proper noun
+    counts. A sentence's first word is skipped, because every sentence starts
+    with a capital.
+    """
+    for text in texts:
+        if _COORDINATE_PATTERN.search(text):
+            return True
+        for sentence in _SENTENCE_SPLIT.split(text):
+            words = sentence.split()
+            if any(
+                _PROPER_NOUN_PATTERN.fullmatch(word.strip(",;:()"))
+                for word in words[1:]
+            ):
+                return True
+    return False
+
+
+def _slot_evidence_types(texts: list[str]) -> frozenset[str]:
+    """Return the referent slot kinds the study-setting text can supply."""
+    joined = "\n".join(texts)
+    slots = {
+        slot
+        for slot, pattern in _SLOT_EVIDENCE_PATTERNS.items()
+        if pattern.search(joined)
+    }
+    if _states_a_place(texts):
+        slots.add("place")
+    return frozenset(slots)
+
+
+def _source_slot_evidence(db: Database, source_id: str) -> frozenset[str] | None:
+    """Return the slot kinds this paper states, or None when it is unknown."""
+    source = db.one("SELECT * FROM sources WHERE source_id=?", (source_id,))
+    if not source:
+        return None
+    quotes = generation_contract.eligible_activity_spans(source)
+    if not quotes:
+        return None
+    return _slot_evidence_types(quotes)
+
+
+def _primary_failure_layer(reason_codes: list[str]) -> str:
+    """Pick the one layer a repair must act on when several layers report."""
+    layers = {_failure_layer(reason) for reason in reason_codes}
+    for layer in _LAYER_PRIORITY:
+        if layer in layers:
+            return layer
+    return "contract"
+
+
+def _reason_family(reason: str) -> str:
+    """Collapse a reason code to the demand a repair would answer."""
+    if reason.startswith(("standalone_undefined_", "standalone_unresolved_")):
+        return "referent_slot"
+    if reason.startswith("standalone_"):
+        return "standalone"
+    if reason.startswith("question_context_"):
+        return "question_context"
+    if reason in {
+        "relation_scope_mismatch",
+        "scope_qualifier_missing",
+        "scope_qualifier_not_source_bound",
+        "answer_scope_not_source_bound",
+        "answer_verifier_scope_not_source_bound",
+        "reconstruction_scope_not_source_bound",
+    }:
+        return "scope"
+    return reason
+
+
+def _repeat_depth(
+    paths: dict[tuple[int, int], dict[str, Any]], finding_index: int, family: str
+) -> int:
+    """Count earlier attempts on this finding that answered the same demand."""
+    return sum(
+        1
+        for path in paths.values()
+        if int(path["attempt"]["finding_attempt_index"]) == finding_index
+        and isinstance(path["attempt"].get("trigger_reason_code"), str)
+        and _reason_family(str(path["attempt"]["trigger_reason_code"])) == family
+    )
+
+
+def _slot_demand_unmet(
+    reason_codes: list[str], slot_evidence: frozenset[str] | None
+) -> bool:
+    """Say whether the repair would demand a slot the source cannot supply."""
+    if slot_evidence is None:
+        return False
+    demanded = {
+        _SLOT_REASON_TYPES[reason]
+        for reason in reason_codes
+        if reason in _SLOT_REASON_TYPES
+    }
+    return bool(demanded) and not (demanded & slot_evidence)
+
+
+def _alternative_finding_attempt(
     *,
     campaign_id: str,
     family_id: str,
     paths: dict[tuple[int, int], dict[str, Any]],
+    failed_attempt: dict[str, Any],
     failed_path: dict[str, Any],
-    reason_codes: list[str],
+    trigger_reason_code: str,
+    require_exclusions: bool = True,
 ) -> dict[str, Any] | None:
-    reason_codes = _routing_reason_codes(reason_codes)
-    if len({_failure_layer(reason) for reason in reason_codes}) > 1:
-        return None
-    failed_attempt = failed_path["attempt"]
-    finding_index = int(failed_attempt["finding_attempt_index"])
-    revision_index = int(failed_attempt["question_revision_index"])
-    if (
-        finding_index == 1
-        and len(reason_codes) == 1
-        and reason_codes[0] in IMMEDIATE_ALTERNATIVE_FINDING_REASONS
-        and (2, 0) not in paths
-    ):
-        excluded = _prior_finding_span_ids(paths)
-        if excluded:
-            return _generation_attempt(
-                campaign_id=campaign_id,
-                family_id=family_id,
-                finding_attempt_index=2,
-                question_revision_index=0,
-                attempt_kind="alternative_finding",
-                parent_attempt_id=failed_attempt["attempt_id"],
-                parent_item_id=(failed_path.get("candidate") or {}).get("item_id"),
-                trigger_reason_code=reason_codes[0],
-                excluded_finding_span_ids=excluded,
-            )
-    reason_is_repairable = bool(reason_codes) and all(
-        reason in REPAIRABLE_QUESTION_REASONS for reason in reason_codes
-    )
-    next_revision = int(failed_attempt["question_revision_index"]) + 1
-    if reason_is_repairable and next_revision <= MAX_QUESTION_REVISIONS:
-        key = (int(failed_attempt["finding_attempt_index"]), next_revision)
-        if key not in paths:
-            return _generation_attempt(
-                campaign_id=campaign_id,
-                family_id=family_id,
-                finding_attempt_index=key[0],
-                question_revision_index=next_revision,
-                attempt_kind=(
-                    "option_repair"
-                    if reason_codes[0] in OPTION_REPAIR_REASONS
-                    else "question_revision"
-                ),
-                parent_attempt_id=failed_attempt["attempt_id"],
-                parent_item_id=(failed_path.get("candidate") or {}).get("item_id"),
-                trigger_reason_code=reason_codes[0],
-                excluded_finding_span_ids=[],
-            )
-    if finding_index != 1:
-        return None
     if (2, 0) in paths:
         return None
-    can_leave_finding = bool(reason_codes) and all(
-        reason in REPAIRABLE_QUESTION_REASONS or reason in ALTERNATIVE_FINDING_REASONS
-        for reason in reason_codes
-    )
-    if not can_leave_finding or revision_index < MAX_QUESTION_REVISIONS:
-        return None
     excluded = _prior_finding_span_ids(paths)
+    if require_exclusions and not excluded:
+        return None
     return _generation_attempt(
         campaign_id=campaign_id,
         family_id=family_id,
@@ -1452,9 +1587,137 @@ def _next_generation_attempt(
         attempt_kind="alternative_finding",
         parent_attempt_id=failed_attempt["attempt_id"],
         parent_item_id=(failed_path.get("candidate") or {}).get("item_id"),
-        trigger_reason_code=reason_codes[0] if reason_codes else "generation_rejected",
+        trigger_reason_code=trigger_reason_code,
         excluded_finding_span_ids=excluded,
     )
+
+
+def _next_generation_attempt(
+    *,
+    campaign_id: str,
+    family_id: str,
+    paths: dict[tuple[int, int], dict[str, Any]],
+    failed_path: dict[str, Any],
+    reason_codes: list[str],
+    slot_evidence: frozenset[str] | None = None,
+) -> dict[str, Any] | None:
+    """Choose the one repair this failure earns, inside the six-path bound.
+
+    v21 returned None whenever the collapsed codes spanned more than one failure
+    layer, which is the normal case, so 30 of 43 families ended with 128 of 180
+    budgeted paths unspent (r15 audit section 4.6). Routing now repairs the
+    highest-priority layer only. It decides which repair runs, never whether an
+    item is accepted: every repaired candidate re-runs the whole gate sequence
+    and consumes a path.
+    """
+    reason_codes = _routing_reason_codes(reason_codes)
+    if not reason_codes:
+        return None
+    layer = _primary_failure_layer(reason_codes)
+    primary = [reason for reason in reason_codes if _failure_layer(reason) == layer]
+    reason_codes = primary or reason_codes
+    failed_attempt = failed_path["attempt"]
+    finding_index = int(failed_attempt["finding_attempt_index"])
+    revision_index = int(failed_attempt["question_revision_index"])
+    trigger = reason_codes[0]
+
+    if finding_index == 1 and (
+        (len(reason_codes) == 1 and trigger in IMMEDIATE_ALTERNATIVE_FINDING_REASONS)
+        or layer == "finding"
+    ):
+        alternative = _alternative_finding_attempt(
+            campaign_id=campaign_id,
+            family_id=family_id,
+            paths=paths,
+            failed_attempt=failed_attempt,
+            failed_path=failed_path,
+            trigger_reason_code=trigger,
+        )
+        if alternative is not None:
+            return alternative
+
+    # A demand is only spent when the source can meet it. When the paper states
+    # no place, period, sample size, or acronym expansion of the demanded kind,
+    # a rewrite can only invent filler, so the family moves to another finding.
+    if _slot_demand_unmet(reason_codes, slot_evidence):
+        if finding_index != 1:
+            return None
+        return _alternative_finding_attempt(
+            campaign_id=campaign_id,
+            family_id=family_id,
+            paths=paths,
+            failed_attempt=failed_attempt,
+            failed_path=failed_path,
+            trigger_reason_code="slot_evidence_unavailable",
+        )
+
+    repairable = bool(reason_codes) and all(
+        reason in REPAIRABLE_QUESTION_REASONS
+        or reason in OPTION_REPAIR_REASONS
+        or reason in ANSWER_RULE_REPAIR_REASONS
+        for reason in reason_codes
+    )
+    next_revision = revision_index + 1
+    rung_declined = False
+    if repairable and next_revision <= MAX_QUESTION_REVISIONS:
+        key = (finding_index, next_revision)
+        if key not in paths:
+            depth = _repeat_depth(paths, finding_index, _reason_family(trigger))
+            kind = _repair_kind(reason_codes, depth)
+            rung_declined = kind is None
+            if kind is not None:
+                return _generation_attempt(
+                    campaign_id=campaign_id,
+                    family_id=family_id,
+                    finding_attempt_index=finding_index,
+                    question_revision_index=next_revision,
+                    attempt_kind=kind,
+                    parent_attempt_id=failed_attempt["attempt_id"],
+                    parent_item_id=(failed_path.get("candidate") or {}).get("item_id"),
+                    trigger_reason_code=trigger,
+                    excluded_finding_span_ids=[],
+                )
+    if finding_index != 1:
+        return None
+    can_leave_finding = bool(reason_codes) and all(
+        reason in REPAIRABLE_QUESTION_REASONS
+        or reason in ALTERNATIVE_FINDING_REASONS
+        or reason in ANSWER_RULE_REPAIR_REASONS
+        for reason in reason_codes
+    )
+    if not can_leave_finding:
+        return None
+    if revision_index < MAX_QUESTION_REVISIONS and not rung_declined:
+        # The rewrite budget on this finding is not spent and no rung has given
+        # up on it, so an alternative finding would waste a path.
+        return None
+    return _alternative_finding_attempt(
+        campaign_id=campaign_id,
+        family_id=family_id,
+        paths=paths,
+        failed_attempt=failed_attempt,
+        failed_path=failed_path,
+        trigger_reason_code=trigger,
+        require_exclusions=False,
+    )
+
+
+def _repair_kind(reason_codes: list[str], repeat_depth: int) -> str | None:
+    """Pick the repair rung for one primary layer at this repeat depth."""
+    trigger = reason_codes[0]
+    if trigger in OPTION_REPAIR_REASONS:
+        return "option_repair"
+    if trigger in ANSWER_RULE_REPAIR_REASONS:
+        # A question rewrite cannot repair a numeric rule, and the rung is
+        # allowed one attempt only.
+        return "answer_rule_repair" if repeat_depth < 1 else None
+    if repeat_depth >= 2:
+        return None
+    if repeat_depth == 1:
+        return "context_widened_revision"
+    if len(reason_codes) == 1 and trigger in SURGICAL_CORRECTION_REASONS:
+        return "surgical_correction"
+    return "question_revision"
 
 
 def _routing_reason_codes(reason_codes: list[str]) -> list[str]:
@@ -1469,6 +1732,20 @@ def _routing_reason_codes(reason_codes: list[str]) -> list[str]:
             "standalone_unresolved_study_local_referent",
         }
         normalized = [reason for reason in normalized if reason not in correlated]
+    if any(
+        reason.startswith("standalone_")
+        for reason in normalized
+        if reason != "standalone_answer_leakage"
+    ):
+        # A missing referent makes the scope, ambiguity and claim-type verdicts
+        # downstream symptoms of one root (r15 audit, stage reconstruction, R4).
+        # source_entailment_not_verified is never collapsed: it is the
+        # paper-support signal.
+        normalized = [
+            reason
+            for reason in normalized
+            if reason not in _STANDALONE_DEPENDENT_REASONS
+        ]
     roots = set(normalized).intersection(_DEPENDENT_ROUTING_REASONS)
     if not roots:
         return normalized
@@ -1493,6 +1770,8 @@ def _failure_layer(reason: str) -> str:
         "scope_qualifier_not_source_bound",
     }:
         return "context"
+    if reason == "slot_evidence_unavailable":
+        return "finding"
     if reason in {
         "source_entailment_not_verified",
         "reconstruction_disagreement",
@@ -1966,6 +2245,66 @@ def _accepted_count(db: Database, run_id: str) -> int:
     return int(row["count"])
 
 
+_AUTHOR_ROLE_PROVIDER = "author"
+_ENFORCED_ROLE_PHASES = frozenset({"away_production"})
+
+
+def _resolve_model_roles(
+    *,
+    author: Provider,
+    verifier: Provider,
+    roles_file: Path | None,
+    role_profile: str | None,
+) -> dict[str, Any]:
+    """Load the role contract and bind it to the providers before any call.
+
+    The contract itself is validated on every run, so a collapsed role map can
+    never reach a paid call. A named profile additionally binds the providers:
+    each role's requested model must equal the configured one, and the writer
+    must not share a model with any judge. A production phase must name a
+    profile, because that is the run the audit found judging its own output.
+    """
+    contract = load_role_contract(roles_file)
+    phase = str(getattr(author, "phase", "offline"))
+    effective = {
+        WRITER_ROLE: provider_model(author, WRITER_ROLE),
+        **{role: provider_model(verifier, role) for role in JUDGE_ROLES},
+    }
+    if role_profile is None:
+        if phase in _ENFORCED_ROLE_PHASES:
+            raise ValueError(
+                "a production streaming run must name a model role profile"
+            )
+        return {
+            "contract_version": MODEL_ROLES_CONTRACT_VERSION,
+            "profile": None,
+            "enforced": False,
+            "resolved_roles": None,
+            "effective_role_models": effective,
+            "same_model_roles": role_separation_error(effective) is not None,
+        }
+    resolved = resolve_roles(contract, role_profile)
+    mismatched = sorted(
+        role
+        for role, assignment in resolved.items()
+        if role in effective and effective[role] != assignment["model"]
+    )
+    if mismatched:
+        raise ValueError(
+            "the streaming providers do not serve the configured model roles: "
+            + ", ".join(mismatched)
+        )
+    assert_role_separation(effective)
+    return {
+        "contract_version": MODEL_ROLES_CONTRACT_VERSION,
+        "profile": role_profile,
+        "enforced": True,
+        "resolved_roles": resolved,
+        "effective_role_models": effective,
+        "same_model_roles": False,
+    }
+
+
 def _write_run_manifest(
     namespace: Path,
     *,
@@ -1979,6 +2318,7 @@ def _write_run_manifest(
     eligibility_prompt_file: Path | None,
     eligibility_schema_file: Path | None,
     eligibility_policy_file: Path | None,
+    model_roles: dict[str, Any],
 ) -> Path:
     def file_hash(path: Path | None) -> str | None:
         return sha256_file(path) if path is not None and path.is_file() else None
@@ -2002,6 +2342,7 @@ def _write_run_manifest(
         "eligibility_policy_sha256": file_hash(eligibility_policy_file),
         "author": {"provider": author.name, "model": author.model},
         "verifier": {"provider": verifier.name, "model": verifier.model},
+        "model_roles": model_roles,
         "generation_arm": "answer_first",
         "export_seed": "streaming-20260912",
     }

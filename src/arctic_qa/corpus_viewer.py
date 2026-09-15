@@ -1044,6 +1044,7 @@ class CorpusArtifacts:
                         "accepted_qa": latest_counts["accepted_qa"],
                         "generation_rejected": latest_counts["generation_rejected"],
                     }
+                    result["accepted_qa_scope"] = "current_incremental_invocation"
             return result
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
             if (
@@ -1728,7 +1729,12 @@ class CorpusArtifacts:
             "source": "viewer_validated_pipeline_records",
             "telemetry": streaming.get("telemetry", "absent"),
             "scientific_count_scope": "current_incremental_invocation",
-            "accepted_qa_scope": "current_incremental_invocation",
+            # The progress file carries the campaign total. Only the pipeline
+            # trace store can narrow it to the latest invocation, so the label
+            # follows the data instead of claiming a scope the count lacks.
+            "accepted_qa_scope": streaming.get(
+                "accepted_qa_scope", "shared_ledger_cumulative"
+            ),
             "spent_usd": broker.get("spent_usd") if observed else None,
             "reserved_usd": broker.get("reserved_usd") if observed else None,
             "ambiguous_reserved_usd": (

@@ -6,6 +6,7 @@ import os
 import re
 import stat
 import time
+import unicodedata
 import urllib.parse
 import urllib.error
 import urllib.request
@@ -222,6 +223,23 @@ def _validate_legacy_flash_lite_answer_agreement_config(value: Any) -> None:
     end = date.fromisoformat(str(value.get("price_valid_through")))
     if not start <= date.today() <= end:
         raise ValueError("answer agreement pricing is not active")
+
+
+_PRESENTATION_LINE_BREAK_HYPHEN = re.compile(r"-\s*\n\s*")
+_SOFT_HYPHEN = "\u00ad"
+
+
+def normalize_for_phrase_binding(text: str) -> str:
+    """Fold only the presentation differences that PDF extraction introduces.
+
+    The classifier copies a phrase out of rendered line fragments. A hyphen at a
+    line break, a soft hyphen, a ligature, and the line break itself are how the
+    PDF displays the text, not what the text says. Every other difference stays
+    fail-closed: the phrase must still be present in the selected finding spans.
+    """
+    folded = unicodedata.normalize("NFKC", text).replace(_SOFT_HYPHEN, "")
+    folded = _PRESENTATION_LINE_BREAK_HYPHEN.sub("", folded)
+    return re.sub(r"\s+", " ", folded).strip()
 
 
 def model_config_for_stage(config: dict[str, Any], stage: str) -> dict[str, Any]:
@@ -1635,12 +1653,20 @@ def _validate_response_span_contract(
                     errors.append("eligible_arctic_scope_activity_unbound")
                 if component == "separable_arctic_component" and not phrases:
                     errors.append("eligible_arctic_scope_phrase_missing")
-                finding_text = "\n".join(
+                # Each span already ends with its own newline, so joining with
+                # another one inserted a second newline at every boundary and no
+                # phrase crossing a physical line could ever bind (r15 audit,
+                # stage eligibility, finding E3 defect b).
+                finding_text = "".join(
                     catalog[span_id]["text"]
                     for span_id in finding_ids
                     if span_id in catalog
                 )
-                if any(phrase not in finding_text for phrase in phrases):
+                haystack = normalize_for_phrase_binding(finding_text)
+                if any(
+                    normalize_for_phrase_binding(phrase) not in haystack
+                    for phrase in phrases
+                ):
                     errors.append("eligible_arctic_scope_phrase_unbound")
                 if not unknown and trusted_catalog:
                     resolved_scope = {

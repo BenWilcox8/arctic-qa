@@ -260,11 +260,14 @@ def test_semantic_referent_failure_routes_as_one_revision_root() -> None:
     )
 
     assert revision is not None
-    assert revision["attempt_kind"] == "question_revision"
+    assert revision["attempt_kind"] == "surgical_correction"
+    assert revision["trigger_reason_code"] == "question_context_referent_unresolved"
     assert revision["question_revision_index"] == 1
 
 
-def test_independent_semantic_and_entailment_failures_stop_routing() -> None:
+def test_independent_semantic_and_entailment_failures_repair_the_evidence_first() -> (
+    None
+):
     primary = streaming._generation_attempt(
         campaign_id="campaign",
         family_id="family",
@@ -277,19 +280,22 @@ def test_independent_semantic_and_entailment_failures_stop_routing() -> None:
         excluded_finding_span_ids=[],
     )
 
-    assert (
-        streaming._next_generation_attempt(
-            campaign_id="campaign",
-            family_id="family",
-            paths={(1, 0): {"attempt": primary, "candidate": None}},
-            failed_path={"attempt": primary, "candidate": None},
-            reason_codes=[
-                "question_context_referent_unresolved",
-                "source_entailment_not_verified",
-            ],
-        )
-        is None
+    # The paper-support signal is never collapsed and evidence outranks
+    # context, so the repair answers the entailment defect, not the wording.
+    repair = streaming._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths={(1, 0): {"attempt": primary, "candidate": None}},
+        failed_path={"attempt": primary, "candidate": None},
+        reason_codes=[
+            "question_context_referent_unresolved",
+            "source_entailment_not_verified",
+        ],
     )
+
+    assert repair is not None
+    assert repair["trigger_reason_code"] == "source_entailment_not_verified"
+    assert repair["attempt_kind"] == "question_revision"
 
 
 def test_frozen_answer_phrase_routes_alternative_after_raw_leak_reason() -> None:

@@ -1056,12 +1056,18 @@ def test_finding_prompt_requires_one_exact_source_span(
     assert result["counts"]["accepted_base_questions"] == 1
     assert result["export"]["short_answer_count"] == 1
     assert result["export"]["mcq_count"] == 2
-    assert result["provider_policy"] == {
+    assert {
+        key: value
+        for key, value in result["provider_policy"].items()
+        if key != "model_roles"
+    } == {
         "model": "fake-gemini-3.8-flash",
         "same_model_roles": True,
         "correlated_error_disclosed": True,
         "live_provider": False,
     }
+    assert result["provider_policy"]["model_roles"]["enforced"] is False
+    assert result["provider_policy"]["model_roles"]["same_model_roles"] is True
     progress = json.loads(
         (tmp_path / "arctic-qa" / "streaming-dataset-r1" / "progress.json").read_text(
             encoding="utf-8"
@@ -1650,12 +1656,20 @@ def test_streaming_uses_one_shared_broker_for_all_eleven_calls(
     )
 
     assert result["counts"]["accepted_base_questions"] == 1
-    assert result["provider_policy"] == {
+    assert {
+        key: value
+        for key, value in result["provider_policy"].items()
+        if key != "model_roles"
+    } == {
         "model": "gemini-3.8-flash",
         "same_model_roles": True,
         "correlated_error_disclosed": True,
         "live_provider": True,
     }
+    # A live test phase discloses the shared model. Only the production phase
+    # must name a separated role profile.
+    assert result["provider_policy"]["model_roles"]["enforced"] is False
+    assert result["provider_policy"]["model_roles"]["same_model_roles"] is True
     status = broker.status()
     assert status["generation_submissions"] == 11
     assert status["accepted_question_count"] == 1
