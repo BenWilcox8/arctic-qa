@@ -17,7 +17,9 @@ from arctic_qa.gemini_eligibility import (
     _segments,
     _settle_submission,
     _strict_json_loads,
+    call_timeout_seconds,
     init_budget,
+    maximum_call_timeout_seconds,
     reserve_budget,
     run_gemini_eligibility,
     validate_response,
@@ -658,7 +660,7 @@ def test_config_requires_low_thinking_for_bounded_structured_output(
 
     config = _config(config_path)
     assert config["thinking_level"] == "low"
-    assert config["config_id"] == "arctic-gemini-eligibility-r1-config-v6"
+    assert config["config_id"] == "arctic-gemini-eligibility-r1-config-v7"
     assert config["stage_models"]["answer_agreement"]["maximum_output_tokens"] == 128
     assert value["maximum_output_tokens"] == 8192
 
@@ -695,3 +697,43 @@ def test_config_requires_low_thinking_for_bounded_structured_output(
     write_json(changed_path, value)
     with pytest.raises(ValueError, match="config revision is not approved"):
         _config(changed_path)
+
+
+def test_pro_judge_stages_carry_a_pinned_longer_call_timeout(tmp_path: Path) -> None:
+    """The Pro judge thinks; 120 seconds cut live calls off mid-answer."""
+    config_path = ROOT / "config" / "gemini-eligibility-v1.json"
+    config = _config(config_path)
+    assert config["call_timeout_seconds"] == 120
+    for stage in (
+        "standalone_verification",
+        "option_verification",
+        "blinded_reconstruction",
+        "answer_verification",
+    ):
+        assert config["stage_models"][stage]["call_timeout_seconds"] == 300
+        assert call_timeout_seconds(config, stage) == 300
+    # A stage that registers no timeout keeps the one documented default.
+    assert call_timeout_seconds(config, "answer_agreement") == 120
+    assert call_timeout_seconds(config, "question_generation") == 120
+    assert maximum_call_timeout_seconds(config) == 300
+
+    value = json.loads(config_path.read_text())
+    value["stage_models"]["answer_verification"]["call_timeout_seconds"] = 120
+    changed = tmp_path / "short-judge-timeout.json"
+    write_json(changed, value)
+    with pytest.raises(ValueError, match="judge model call timeout changed"):
+        _config(changed)
+
+    value["stage_models"]["answer_verification"]["call_timeout_seconds"] = 300
+    value["call_timeout_seconds"] = 0
+    changed = tmp_path / "zero-timeout.json"
+    write_json(changed, value)
+    with pytest.raises(ValueError, match="bounded whole second count"):
+        _config(changed)
+
+    value["call_timeout_seconds"] = 120
+    value["config_id"] = "arctic-gemini-eligibility-r1-config-v6"
+    changed = tmp_path / "v6-with-judge-timeout.json"
+    write_json(changed, value)
+    with pytest.raises(ValueError, match="judge model configuration changed"):
+        _config(changed)

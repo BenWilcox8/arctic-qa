@@ -15,6 +15,7 @@ from .exporting import export_run
 from .extraction import extract_source
 from .generation import generate_candidate
 from .gemini_eligibility import (
+    DEFAULT_CALL_TIMEOUT_SECONDS,
     ELIGIBILITY_RESPONSE_V2,
     ELIGIBILITY_RESPONSE_V3,
     ELIGIBILITY_STATUS_MAPPING_VERSION,
@@ -26,6 +27,8 @@ from .gemini_eligibility import (
     _span_blocks_v2,
     _span_manifest_v2,
     _validation_evidence,
+    call_timeout_seconds,
+    maximum_call_timeout_seconds,
     validate_response,
 )
 from .providers import Provider, call_provider, provider_model
@@ -1027,6 +1030,15 @@ def _generate_candidate_attempt(
     author: Provider,
     verifier: Provider,
 ) -> dict[str, Any]:
+    # One attempt drives several roles, each with its own stage timeout. The
+    # broker applies the exact per-stage timeout itself, so this caller value
+    # only has to be no shorter than the longest stage the attempt can reach.
+    broker = getattr(author, "broker", None)
+    timeout = (
+        maximum_call_timeout_seconds(broker.config)
+        if broker is not None
+        else DEFAULT_CALL_TIMEOUT_SECONDS
+    )
     arguments = {
         "source_id": source_id,
         "run_id": run_id,
@@ -1036,7 +1048,7 @@ def _generate_candidate_attempt(
         "budget_mode": "tokens",
         "budget_limit": Decimal("1000000"),
         "reservation": Decimal("100"),
-        "timeout": 30,
+        "timeout": timeout,
         "retries": 0,
         "rate_limit_seconds": 0,
     }
@@ -2578,7 +2590,7 @@ def _run_eligibility(
         parameters=parameters,
         response_schema=schema,
         reservation=Decimal("0"),
-        timeout=120,
+        timeout=call_timeout_seconds(config, "eligibility"),
         retries=0,
         rate_limit_seconds=0,
     )

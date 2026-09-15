@@ -7,6 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from arctic_qa.gemini_eligibility import (
+    call_timeout_seconds,
+    maximum_call_timeout_seconds,
+)
 from arctic_qa.model_broker import SharedGeminiBroker, broker_request_key
 from arctic_qa.util import canonical_json, sha256_file
 
@@ -506,3 +510,206 @@ def test_integrity_failure_still_halts_after_continuation(tmp_path: Path):
     assert (
         values["ledger"].parent / ".shared-ledger.json.integrity-halt.json"
     ).is_file()
+
+
+class TimeoutThenSuccess(Http500ThenSuccess):
+    """The client stops waiting while the provider is still working."""
+
+    def post(self, model: str, method: str, body: dict) -> dict:
+        self.methods.append(method)
+        if method == "countTokens":
+            return {"totalTokens": 100}
+        self.generation_calls += 1
+        if self.generation_calls == 1:
+            raise TimeoutError("the read timed out")
+        return {
+            "candidates": [{"content": {"parts": [{"text": "{}"}]}}],
+            "usageMetadata": {
+                "promptTokenCount": 100,
+                "candidatesTokenCount": 10,
+                "thoughtsTokenCount": 5,
+                "totalTokenCount": 115,
+            },
+        }
+
+
+def execute_answer_verifier(
+    broker: SharedGeminiBroker, *, paper: str, run_id: str
+) -> dict:
+    payload = request_payload()
+    family = f"family-{paper}"
+    source = f"source-{paper}"
+    key = broker_request_key(
+        model="gemini-3.1-pro-preview",
+        run_id=run_id,
+        phase="live_test",
+        stage="answer_verification",
+        paper_id=paper,
+        family_id=family,
+        source_version_id=source,
+        payload=payload,
+    )
+    return broker.execute(
+        phase="live_test",
+        run_id=run_id,
+        stage="answer_verification",
+        paper_id=paper,
+        family_id=family,
+        source_version_id=source,
+        request_key=key,
+        payload=payload,
+    )
+
+
+def timeout_evidence(receipt: dict, path: Path, *, timeout_seconds: int) -> None:
+    write_json(
+        path,
+        {
+            "schema": "shared-paid-call-provider-timeout-continuation-evidence-v1",
+            "request_key": receipt["request_key"],
+            "error_class": "provider_timeout_unknown_charge",
+            "error": "TimeoutError: provider outcome unknown",
+            "timeout_seconds": timeout_seconds,
+            "live_call_made": True,
+            "received_receipt_absent": True,
+            "actual_cost_known": False,
+            "replay_prohibited": True,
+            "affected_family_id": receipt["family_id"],
+            "authorized_run_id": receipt["run_id"],
+        },
+    )
+
+
+def authorize_timeout(
+    values: dict[str, object], receipt: dict, *, timeout_seconds: int
+) -> dict:
+    evidence = Path(values["ledger"]).parent / "timeout-evidence.json"
+    timeout_evidence(receipt, evidence, timeout_seconds=timeout_seconds)
+    return values["broker"].authorize_ambiguous_continuation(
+        request_key=receipt["request_key"],
+        expected_ledger_sha256=sha256_file(values["ledger"]),
+        review_file=values["review"],
+        evidence_file=evidence,
+        authorized_run_id="run-current",
+        operator_id="test-operator",
+    )
+
+
+def test_provider_timeout_continuation_retains_reserve_and_never_replays(
+    tmp_path: Path,
+) -> None:
+    """The judge timed out. The charge is unknown, so the reserve is kept."""
+    transport = TimeoutThenSuccess()
+    values = fixture(tmp_path, transport)
+    broker = values["broker"]
+    first = execute_answer_verifier(broker, paper="affected", run_id="run-current")
+    assert first["state"] == "ambiguous_charge"
+    assert first["error"] == "TimeoutError: provider outcome unknown"
+    assert first["live_call_made"] is True
+    assert first["timeout_seconds"] == 300
+    assert "response" not in first
+    assert "http_status" not in first
+    assert "error_class" not in first
+    assert first.get("actual_cost_usd") is None
+    assert not (
+        Path(values["receipts"]) / f"{first['request_key']}.received.json"
+    ).exists()
+
+    before = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    assert before["halted"] is True
+    assert before["halt_reason"] == "ambiguous_generation_charge"
+
+    result = authorize_timeout(values, first, timeout_seconds=300)
+    assert result["applied"] is True
+    assert result["reserved_usd_retained"] == first["reserved_usd"]
+    event = json.loads(Path(result["continuation_receipt"]).read_text(encoding="utf-8"))
+    assert event["schema"] == "shared-paid-call-provider-timeout-continuation-v1"
+    assert event["error_class"] == "provider_timeout_unknown_charge"
+    assert event["error"] == "TimeoutError: provider outcome unknown"
+    assert event["timeout_seconds"] == 300
+    assert event["skip_reason_code"] == "operational_ambiguous_charge_provider_timeout"
+    assert event["scope"] == "unrelated_families_only"
+    assert "http_status" not in event
+
+    after = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    assert after["halted"] is False
+    assert after["requests"][first["request_key"]]["state"] == "ambiguous_charge"
+    assert after["ambiguous_reserved_usd"] == first["reserved_usd"]
+    assert after["spent_usd"] == before["spent_usd"]
+    assert broker.operational_unresolved_families() == {
+        first["family_id"]: {
+            "request_key": first["request_key"],
+            "reason_code": "operational_ambiguous_charge_provider_timeout",
+        }
+    }
+    with pytest.raises(ValueError, match="request key already exists"):
+        execute_answer_verifier(broker, paper="affected", run_id="run-current")
+    assert (
+        execute(broker, paper="unrelated", run_id="run-current")["state"] == "completed"
+    )
+    assert transport.generation_calls == 2
+    # The stored event is re-validated on the next broker start.
+    assert broker.status()["halted"] is False
+
+
+def test_timeout_and_http_evidence_never_release_each_other(tmp_path: Path) -> None:
+    """Each bounded case admits only its own evidence."""
+    values = fixture(tmp_path, TimeoutThenSuccess())
+    timed_out = execute_answer_verifier(
+        values["broker"], paper="affected", run_id="run-current"
+    )
+    with pytest.raises(ValueError, match="evidence is not exact"):
+        authorize(values, timed_out, evidence_status=503)
+    with pytest.raises(ValueError, match="evidence is not exact"):
+        authorize_timeout(values, timed_out, timeout_seconds=120)
+    assert json.loads(values["ledger"].read_text(encoding="utf-8"))["halted"] is True
+    assert not list(Path(values["receipts"]).glob("ambiguous-continuation-*.json"))
+    assert authorize_timeout(values, timed_out, timeout_seconds=300)["applied"] is True
+
+    http_root = tmp_path / "http"
+    http_root.mkdir()
+    other = fixture(http_root, Http503ThenSuccess())
+    unavailable = execute(other["broker"], paper="affected", run_id="run-current")
+    assert unavailable["http_status"] == 503
+    with pytest.raises(ValueError, match="evidence is not exact"):
+        authorize_timeout(other, unavailable, timeout_seconds=120)
+    assert json.loads(other["ledger"].read_text(encoding="utf-8"))["halted"] is True
+    assert authorize(other, unavailable, evidence_status=503)["applied"] is True
+
+
+class AlwaysSucceeds:
+    def __init__(self) -> None:
+        self.timeouts: list[float] = []
+
+    def post(self, model: str, method: str, body: dict) -> dict:
+        if method == "countTokens":
+            return {"totalTokens": 100}
+        return {
+            "candidates": [{"content": {"parts": [{"text": "{}"}]}}],
+            "usageMetadata": {
+                "promptTokenCount": 100,
+                "candidatesTokenCount": 10,
+                "thoughtsTokenCount": 5,
+                "totalTokenCount": 115,
+            },
+        }
+
+
+def test_stage_call_timeout_comes_from_the_price_config(tmp_path: Path) -> None:
+    """The Pro judge gets 300 seconds; every other stage keeps the 120 default."""
+    values = fixture(tmp_path, AlwaysSucceeds())
+    broker = values["broker"]
+    assert call_timeout_seconds(broker.config, "answer_verification") == 300
+    assert call_timeout_seconds(broker.config, "standalone_verification") == 300
+    assert call_timeout_seconds(broker.config, "option_verification") == 300
+    assert call_timeout_seconds(broker.config, "blinded_reconstruction") == 300
+    assert call_timeout_seconds(broker.config, "question_generation") == 120
+    assert call_timeout_seconds(broker.config, "answer_agreement") == 120
+    assert maximum_call_timeout_seconds(broker.config) == 300
+
+    writer = execute(broker, paper="writer", run_id="run-current")
+    assert writer["state"] == "completed"
+    assert writer["timeout_seconds"] == 120
+    judge = execute_answer_verifier(broker, paper="judge", run_id="run-current")
+    assert judge["state"] == "completed"
+    assert judge["timeout_seconds"] == 300

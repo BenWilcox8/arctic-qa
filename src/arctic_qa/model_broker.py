@@ -13,9 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from .gemini_eligibility import (
+    DEFAULT_CALL_TIMEOUT_SECONDS,
+    MAXIMUM_CALL_TIMEOUT_SECONDS,
     GeminiTransport,
     _config,
     _cost,
+    call_timeout_seconds,
     model_config_for_stage,
 )
 from .pipeline_trace import record_model_request_trace
@@ -113,6 +116,17 @@ RECEIVED_MAX_TOKENS_CONTINUATION_SCHEMA = (
 RECEIVED_MAX_TOKENS_CONTINUATION_EVIDENCE_SCHEMA = (
     "shared-paid-call-received-max-tokens-continuation-evidence-v1"
 )
+PROVIDER_TIMEOUT_CONTINUATION_SCHEMA = (
+    "shared-paid-call-provider-timeout-continuation-v1"
+)
+PROVIDER_TIMEOUT_CONTINUATION_EVIDENCE_SCHEMA = (
+    "shared-paid-call-provider-timeout-continuation-evidence-v1"
+)
+# The exact string the transport failure path writes for a timeout. The client
+# stopped waiting; the provider may have finished and billed the call.
+PROVIDER_TIMEOUT_ERROR = "TimeoutError: provider outcome unknown"
+PROVIDER_TIMEOUT_ERROR_CLASS = "provider_timeout_unknown_charge"
+PROVIDER_TIMEOUT_SKIP_REASON = "operational_ambiguous_charge_provider_timeout"
 AMBIGUOUS_CONTINUATION_RESERVATION_POLICY = (
     "retain_full_reservation_in_ambiguous_reserved_and_count_against_all_caps"
 )
@@ -157,6 +171,9 @@ RECEIVED_MAX_TOKENS_CONTINUATION_FIELDS = AMBIGUOUS_CONTINUATION_FIELDS - {
     "finish_reason",
     "received_receipt_present",
 }
+PROVIDER_TIMEOUT_CONTINUATION_FIELDS = AMBIGUOUS_CONTINUATION_FIELDS - {
+    "http_status"
+} | {"error", "timeout_seconds"}
 ORPHANED_CONTINUATION_FIELDS = {
     "schema",
     "request_key",
@@ -285,6 +302,53 @@ def _is_received_max_tokens_ambiguous_case(
         and request.get("stage") == "answer_agreement"
         and request.get("model") == "gemini-3.1-flash-lite"
     )
+
+
+def _is_provider_timeout_ambiguous_case(
+    final: dict[str, Any],
+    request: dict[str, Any],
+    *,
+    received_receipt_present: bool,
+) -> bool:
+    """Say whether one receipt is the bounded provider-timeout ambiguous case.
+
+    The client stopped waiting before the provider answered. Nothing came back,
+    so the charge is unknown in exactly the way an HTTP 5xx answer is unknown:
+    the call went out live and no usage was ever received. The receipt must
+    carry no response, no HTTP outcome and no settled cost, which keeps this
+    case disjoint from the 5xx case and from the received-max-tokens case.
+    """
+    if not isinstance(final, dict) or not isinstance(request, dict):
+        return False
+    return (
+        final.get("state") == "ambiguous_charge"
+        and final.get("error") == PROVIDER_TIMEOUT_ERROR
+        and final.get("live_call_made") is True
+        and "response" not in final
+        and "error_class" not in final
+        and "http_status" not in final
+        and not received_receipt_present
+        and final.get("reserved_usd") == request.get("reserved_usd")
+        and final.get("actual_cost_usd") is None
+    )
+
+
+def _receipt_timeout_seconds(final: dict[str, Any]) -> int:
+    """Return the timeout the timed-out call actually ran under.
+
+    A receipt written before the timeout became a stage model fact names none.
+    Such a call ran under the one fixed transport timeout, so that value is
+    reported. The current configuration is never substituted: the stage may
+    carry a longer timeout today than the call that timed out was given.
+    """
+    value = final.get("timeout_seconds", DEFAULT_CALL_TIMEOUT_SECONDS)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= MAXIMUM_CALL_TIMEOUT_SECONDS
+    ):
+        raise ValueError("the ambiguous receipt call timeout is invalid")
+    return value
 
 
 def exclusive_batch_marker_path(ledger_file: Path) -> Path:
@@ -1938,6 +2002,11 @@ class SharedGeminiBroker:
         ):
             return self._validate_received_max_tokens_continuation(event, path)
         if (
+            isinstance(event, dict)
+            and event.get("schema") == PROVIDER_TIMEOUT_CONTINUATION_SCHEMA
+        ):
+            return self._validate_provider_timeout_continuation(event, path)
+        if (
             not isinstance(event, dict)
             or set(event) != AMBIGUOUS_CONTINUATION_FIELDS
             or event.get("schema") != AMBIGUOUS_CONTINUATION_SCHEMA
@@ -2138,6 +2207,101 @@ class SharedGeminiBroker:
             raise ValueError("an ambiguous continuation time changed")
         return event
 
+    def _validate_provider_timeout_continuation(
+        self, event: dict[str, Any], path: Path
+    ) -> dict[str, Any]:
+        if set(event) != PROVIDER_TIMEOUT_CONTINUATION_FIELDS:
+            raise ValueError("an ambiguous continuation event changed")
+        request_key = event.get("request_key")
+        if (
+            not isinstance(request_key, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", request_key)
+            or path.name != f"ambiguous-continuation-{request_key}.json"
+        ):
+            raise ValueError("an ambiguous continuation event changed")
+        for field in (
+            "ambiguous_receipt_sha256",
+            "evidence_file_sha256",
+            "review_file_sha256",
+            "ledger_sha256_before",
+            "gate_sha256",
+        ):
+            if not re.fullmatch(r"[a-f0-9]{64}", str(event.get(field) or "")):
+                raise ValueError("an ambiguous continuation event changed")
+        timeout_seconds = event.get("timeout_seconds")
+        if (
+            event.get("error_class") != PROVIDER_TIMEOUT_ERROR_CLASS
+            or event.get("error") != PROVIDER_TIMEOUT_ERROR
+            or isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, int)
+            or not 1 <= timeout_seconds <= MAXIMUM_CALL_TIMEOUT_SECONDS
+            or event.get("live_call_made") is not True
+            or event.get("received_receipt_absent") is not True
+            or event.get("reservation_policy")
+            != AMBIGUOUS_CONTINUATION_RESERVATION_POLICY
+            or event.get("scope") != "unrelated_families_only"
+            or event.get("skip_reason_code") != PROVIDER_TIMEOUT_SKIP_REASON
+            or not str(event.get("affected_family_id") or "").strip()
+            or not str(event.get("authorized_run_id") or "").strip()
+            or not str(event.get("integrated_code_commit") or "").strip()
+            or not str(event.get("operator_id") or "").strip()
+        ):
+            raise ValueError("an ambiguous continuation event changed")
+        request_identity = event.get("request_identity")
+        if (
+            not isinstance(request_identity, dict)
+            or set(request_identity)
+            != {
+                "run_id",
+                "stage",
+                "paper_id",
+                "family_id",
+                "source_version_id",
+                "request_sha256",
+                "reserved_usd",
+            }
+            or not all(
+                isinstance(value, str) and value for value in request_identity.values()
+            )
+            or _money(
+                event.get("reserved_usd"), "continuation reservation", positive=True
+            )
+            <= 0
+        ):
+            raise ValueError("an ambiguous continuation request identity changed")
+        evidence_path = Path(str(event.get("evidence_file") or "")).resolve()
+        review_path = Path(str(event.get("review_file") or "")).resolve()
+        if (
+            not evidence_path.is_file()
+            or sha256_file(evidence_path) != event["evidence_file_sha256"]
+            or not review_path.is_file()
+            or sha256_file(review_path) != event["review_file_sha256"]
+        ):
+            raise ValueError("an ambiguous continuation evidence changed")
+        if _read(evidence_path) != {
+            "schema": PROVIDER_TIMEOUT_CONTINUATION_EVIDENCE_SCHEMA,
+            "request_key": request_key,
+            "error_class": PROVIDER_TIMEOUT_ERROR_CLASS,
+            "error": PROVIDER_TIMEOUT_ERROR,
+            "timeout_seconds": timeout_seconds,
+            "live_call_made": True,
+            "received_receipt_absent": True,
+            "actual_cost_known": False,
+            "replay_prohibited": True,
+            "affected_family_id": event["affected_family_id"],
+            "authorized_run_id": event["authorized_run_id"],
+        }:
+            raise ValueError("an ambiguous continuation evidence changed")
+        try:
+            authorized = datetime.fromisoformat(
+                str(event["authorized_at_utc"]).replace("Z", "+00:00")
+            )
+        except ValueError as error:
+            raise ValueError("an ambiguous continuation time changed") from error
+        if authorized.tzinfo is None:
+            raise ValueError("an ambiguous continuation time changed")
+        return event
+
     def _ambiguous_continuation_events(
         self, ledger: dict[str, Any]
     ) -> dict[str, dict[str, Any]]:
@@ -2183,6 +2347,16 @@ class SharedGeminiBroker:
                     or final.get("http_status") != event["http_status"]
                     or final.get("live_call_made") is not True
                     or "response" in final
+                ):
+                    raise ValueError("an ambiguous continuation receipt changed")
+            elif event["schema"] == PROVIDER_TIMEOUT_CONTINUATION_SCHEMA:
+                if (
+                    not _is_provider_timeout_ambiguous_case(
+                        final,
+                        request,
+                        received_receipt_present=received_path.exists(),
+                    )
+                    or _receipt_timeout_seconds(final) != event["timeout_seconds"]
                 ):
                     raise ValueError("an ambiguous continuation receipt changed")
             else:
@@ -3342,7 +3516,23 @@ class SharedGeminiBroker:
                         request,
                     )
                 )
-                if not http_500_case and not received_max_tokens_case:
+                # One bounded case for a provider timeout: the client stopped
+                # waiting, nothing came back, and the charge is unknown for the
+                # same reason a 5xx answer is. The evidence must name the
+                # timeout the call actually ran under.
+                provider_timeout_case = _is_provider_timeout_ambiguous_case(
+                    final,
+                    request,
+                    received_receipt_present=received_path.exists(),
+                )
+                timeout_seconds = (
+                    _receipt_timeout_seconds(final) if provider_timeout_case else None
+                )
+                if (
+                    not http_500_case
+                    and not received_max_tokens_case
+                    and not provider_timeout_case
+                ):
                     raise ValueError("the request is not a supported ambiguous case")
                 if not review_file.is_file() or not evidence_file.is_file():
                     raise ValueError("the ambiguous continuation evidence is absent")
@@ -3353,6 +3543,20 @@ class SharedGeminiBroker:
                         "request_key": request_key,
                         "error_class": "known_http_response_unknown_charge",
                         "http_status": final["http_status"],
+                        "live_call_made": True,
+                        "received_receipt_absent": True,
+                        "actual_cost_known": False,
+                        "replay_prohibited": True,
+                        "affected_family_id": request["family_id"],
+                        "authorized_run_id": authorized_run_id,
+                    }
+                elif provider_timeout_case:
+                    expected_evidence = {
+                        "schema": PROVIDER_TIMEOUT_CONTINUATION_EVIDENCE_SCHEMA,
+                        "request_key": request_key,
+                        "error_class": PROVIDER_TIMEOUT_ERROR_CLASS,
+                        "error": PROVIDER_TIMEOUT_ERROR,
+                        "timeout_seconds": timeout_seconds,
                         "live_call_made": True,
                         "received_receipt_absent": True,
                         "actual_cost_known": False,
@@ -3385,12 +3589,22 @@ class SharedGeminiBroker:
                     raise ValueError(
                         "every outstanding ambiguous request needs a continuation event"
                     )
+                if http_500_case:
+                    schema = AMBIGUOUS_CONTINUATION_SCHEMA
+                    error_class = "known_http_response_unknown_charge"
+                    skip_reason_code = "operational_ambiguous_charge_http_500"
+                elif provider_timeout_case:
+                    schema = PROVIDER_TIMEOUT_CONTINUATION_SCHEMA
+                    error_class = PROVIDER_TIMEOUT_ERROR_CLASS
+                    skip_reason_code = PROVIDER_TIMEOUT_SKIP_REASON
+                else:
+                    schema = RECEIVED_MAX_TOKENS_CONTINUATION_SCHEMA
+                    error_class = "received_max_tokens_usage_unknown"
+                    skip_reason_code = (
+                        "operational_ambiguous_charge_received_max_tokens"
+                    )
                 event = {
-                    "schema": (
-                        AMBIGUOUS_CONTINUATION_SCHEMA
-                        if http_500_case
-                        else RECEIVED_MAX_TOKENS_CONTINUATION_SCHEMA
-                    ),
+                    "schema": schema,
                     "request_key": request_key,
                     "ambiguous_receipt_sha256": sha256_file(final_path),
                     "request_identity": {
@@ -3405,21 +3619,13 @@ class SharedGeminiBroker:
                             "reserved_usd",
                         )
                     },
-                    "error_class": (
-                        "known_http_response_unknown_charge"
-                        if http_500_case
-                        else "received_max_tokens_usage_unknown"
-                    ),
+                    "error_class": error_class,
                     "live_call_made": True,
                     "reserved_usd": str(reserved),
                     "reservation_policy": AMBIGUOUS_CONTINUATION_RESERVATION_POLICY,
                     "scope": "unrelated_families_only",
                     "affected_family_id": request["family_id"],
-                    "skip_reason_code": (
-                        "operational_ambiguous_charge_http_500"
-                        if http_500_case
-                        else "operational_ambiguous_charge_received_max_tokens"
-                    ),
+                    "skip_reason_code": skip_reason_code,
                     "authorized_run_id": authorized_run_id,
                     "evidence_file": str(evidence_file.resolve()),
                     "evidence_file_sha256": sha256_file(evidence_file),
@@ -3435,6 +3641,14 @@ class SharedGeminiBroker:
                     event.update(
                         {
                             "http_status": final["http_status"],
+                            "received_receipt_absent": True,
+                        }
+                    )
+                elif provider_timeout_case:
+                    event.update(
+                        {
+                            "error": PROVIDER_TIMEOUT_ERROR,
+                            "timeout_seconds": timeout_seconds,
                             "received_receipt_absent": True,
                         }
                     )
@@ -4431,6 +4645,7 @@ class SharedGeminiBroker:
         if not re.fullmatch(r"[a-f0-9]{64}", request_key):
             raise ValueError("the paid request key must be a lowercase SHA-256 value")
         request_config = self.config_for_stage(stage)
+        timeout_seconds = call_timeout_seconds(self.config, stage)
         _validate_payload(payload, request_config)
         expected_key = broker_request_key(
             model=request_config["model"],
@@ -4458,6 +4673,7 @@ class SharedGeminiBroker:
             "price_config_sha256": self.active_price_config_sha256,
             "policy_sha256": sha256_file(self.policy_file),
             "config_transition_sha256": self._config_transition_sha256,
+            "timeout_seconds": timeout_seconds,
         }
         operation = self._operation_lock_file.open("a+")
         try:
@@ -4475,7 +4691,9 @@ class SharedGeminiBroker:
             )
             self._pace()
             client = self.transport or GeminiTransport(
-                self.config["api_base"], _load_key(self.credential_file)
+                self.config["api_base"],
+                _load_key(self.credential_file),
+                timeout=timeout_seconds,
             )
             exact_input = self._resume_not_submitted(request_key, base)
             resumed = exact_input is not None

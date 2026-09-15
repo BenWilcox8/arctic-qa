@@ -101,6 +101,7 @@ def _config(path: Path) -> dict[str, Any]:
         "arctic-gemini-eligibility-r1-config-v4",
         "arctic-gemini-eligibility-r1-config-v5",
         "arctic-gemini-eligibility-r1-config-v6",
+        "arctic-gemini-eligibility-r1-config-v7",
     }:
         raise ValueError("the Gemini eligibility config revision is not approved")
     if value.get("model") != "gemini-3.8-flash":
@@ -135,6 +136,8 @@ def _config(path: Path) -> dict[str, Any]:
         raise ValueError("the verified Gemini input limit changed")
     if value["maximum_output_tokens"] != 8192:
         raise ValueError("the configured Gemini output limit must be 8192")
+    if "call_timeout_seconds" in value:
+        _validate_call_timeout(value["call_timeout_seconds"])
     stage_models = value.get("stage_models")
     if value["config_id"] in {
         "arctic-gemini-eligibility-r1-config-v3",
@@ -153,17 +156,25 @@ def _config(path: Path) -> dict[str, Any]:
             )
         else:
             _validate_answer_agreement_config(stage_models["answer_agreement"])
-    elif value["config_id"] == "arctic-gemini-eligibility-r1-config-v6":
+    elif value["config_id"] in {
+        "arctic-gemini-eligibility-r1-config-v6",
+        "arctic-gemini-eligibility-r1-config-v7",
+    }:
         # Chapter 2: the source-blind judge, the option judge, the blind
         # reconstructor and the answer verifier run on a stronger model than
         # the writer (r15 audit section 4.2 fix 4). Every price is pinned.
+        # v7 adds one pinned per-call timeout to those judge stages; the Pro
+        # judge thinks for longer than the fixed 120 second transport timeout.
         if not isinstance(stage_models, dict) or set(stage_models) != (
             {"answer_agreement"} | PRO_JUDGE_STAGES
         ):
             raise ValueError("the Gemini stage model registry changed")
         _validate_answer_agreement_config(stage_models["answer_agreement"])
+        pinned_timeout = value["config_id"] == "arctic-gemini-eligibility-r1-config-v7"
         for stage in sorted(PRO_JUDGE_STAGES):
-            _validate_pro_judge_config(stage_models[stage])
+            _validate_pro_judge_config(
+                stage_models[stage], pinned_timeout=pinned_timeout
+            )
     elif stage_models is not None:
         raise ValueError("the legacy Gemini configuration has stage models")
     start = date.fromisoformat(value["price_valid_from"])
@@ -184,6 +195,13 @@ PRO_JUDGE_STAGES = frozenset(
     }
 )
 PRO_JUDGE_MODEL = "gemini-3.1-pro-preview"
+# The one per-call provider timeout every stage used before it became a stage
+# model fact. A receipt that names no timeout ran under exactly this value.
+DEFAULT_CALL_TIMEOUT_SECONDS = 120
+MAXIMUM_CALL_TIMEOUT_SECONDS = 900
+# The Pro judge thinks before it answers, so 120 seconds cut live calls off
+# while the provider was still working and left the charge unknown.
+PRO_JUDGE_CALL_TIMEOUT_SECONDS = 300
 # Verified against https://ai.google.dev/gemini-api/docs/pricing on 2026-09-15:
 # standard tier, prompts up to 200k tokens. The input limit below keeps every
 # request inside that price tier.
@@ -204,12 +222,17 @@ PRO_JUDGE_EXACT_CONFIG = {
 }
 
 
-def _validate_pro_judge_config(value: Any) -> None:
+def _validate_pro_judge_config(value: Any, *, pinned_timeout: bool = False) -> None:
     if not isinstance(value, dict):
         raise ValueError("the judge model price configuration is invalid")
     if any(
         value.get(name) != expected for name, expected in PRO_JUDGE_EXACT_CONFIG.items()
     ):
+        raise ValueError("the verified judge model configuration changed")
+    if pinned_timeout:
+        if value.get("call_timeout_seconds") != PRO_JUDGE_CALL_TIMEOUT_SECONDS:
+            raise ValueError("the verified judge model call timeout changed")
+    elif "call_timeout_seconds" in value:
         raise ValueError("the verified judge model configuration changed")
     if value.get("documented_supported_methods") != [
         "generateContent",
@@ -339,6 +362,41 @@ def model_config_for_stage(config: dict[str, Any], stage: str) -> dict[str, Any]
     """Return the registered model and price values for one broker stage."""
     override = (config.get("stage_models") or {}).get(stage)
     return {**config, **override} if isinstance(override, dict) else config
+
+
+def _validate_call_timeout(value: Any) -> int:
+    """Return one valid per-call provider timeout in whole seconds."""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= MAXIMUM_CALL_TIMEOUT_SECONDS
+    ):
+        raise ValueError("the Gemini call timeout must be a bounded whole second count")
+    return value
+
+
+def call_timeout_seconds(config: dict[str, Any], stage: str) -> int:
+    """Return the per-call provider timeout, in seconds, for one broker stage.
+
+    The timeout is a stage model fact, so it travels in the price config next
+    to the model and its rates. A stage that registers no timeout keeps the one
+    documented default, which is the fixed timeout every earlier call ran under.
+    """
+    stage_config = model_config_for_stage(config, stage)
+    if "call_timeout_seconds" not in stage_config:
+        return DEFAULT_CALL_TIMEOUT_SECONDS
+    return _validate_call_timeout(stage_config["call_timeout_seconds"])
+
+
+def maximum_call_timeout_seconds(config: dict[str, Any]) -> int:
+    """Return the longest per-call timeout any registered stage may use."""
+    stages = config.get("stage_models") or {}
+    timeouts = [call_timeout_seconds(config, stage) for stage in stages]
+    if "call_timeout_seconds" in config:
+        timeouts.append(_validate_call_timeout(config["call_timeout_seconds"]))
+    else:
+        timeouts.append(DEFAULT_CALL_TIMEOUT_SECONDS)
+    return max(timeouts)
 
 
 def _safety(path: Path) -> dict[str, Any]:
@@ -1902,7 +1960,12 @@ def validate_response(
 
 
 class GeminiTransport:
-    def __init__(self, api_base: str, api_key: str, timeout: float = 120) -> None:
+    def __init__(
+        self,
+        api_base: str,
+        api_key: str,
+        timeout: float = DEFAULT_CALL_TIMEOUT_SECONDS,
+    ) -> None:
         self.api_base = api_base.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout

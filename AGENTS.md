@@ -8,6 +8,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Run the tests as `nix develop -c bash -c 'PYTHONPATH=src pytest tests/ -q'`. The package is not installed in the devshell, so pytest cannot import `arctic_qa` without `PYTHONPATH=src`.
 - A whole-suite run takes several minutes. `tests/test_model_broker.py` and `tests/test_streaming.py` hold real rate-limit sleeps.
 - Read `docs/CHAPTER2_CORPUS.md` before you extract, freeze, or read the chapter 2 corpus.
+- `config/gemini-eligibility-v1.json` is bound into every paid receipt through `price_config_sha256`. Any edit to it needs a chained ledger price transition before a live run can resume, and a new `config_id` revision rather than a changed meaning for an old one.
 
 ## Maintaining this file
 
