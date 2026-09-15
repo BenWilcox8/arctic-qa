@@ -28,7 +28,7 @@ from arctic_qa.model_broker import (
 from arctic_qa.paths import DataPaths
 from arctic_qa.providers import FakeProvider
 from arctic_qa.streaming import run_stream
-from arctic_qa.util import sha256_file, stable_id
+from arctic_qa.util import canonical_json, sha256_file, stable_id
 from arctic_qa import validation as validation_module
 
 
@@ -508,6 +508,80 @@ def test_export_identity_changes_with_rejection_content(tmp_path: Path) -> None:
     assert Path(paths.namespace / first["files"]["rejections"]).read_bytes() == (
         first_rejections
     )
+
+
+def test_streaming_export_excludes_predecessor_contract_candidates(
+    tmp_path: Path,
+) -> None:
+    result = run_cli(
+        tmp_path,
+        "smoke",
+        "--fixture-dir",
+        str(FIXTURES),
+        "--run-id",
+        "current-export",
+    )
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    current = database.one(
+        "SELECT candidate_json FROM candidates WHERE item_id=?", (result["item_id"],)
+    )
+    predecessor = json.loads(current["candidate_json"])
+    predecessor["item_id"] = "historical-v20-item"
+    predecessor["schema_version"] = "2.5.0"
+    predecessor["provenance"]["prompt_version"] = "arctic-qa-generation-v20"
+    predecessor_json = canonical_json(predecessor)
+    current_validation = database.one(
+        "SELECT * FROM validation_events WHERE item_id=? ORDER BY rowid DESC LIMIT 1",
+        (result["item_id"],),
+    )
+    details = json.loads(current_validation["details_json"])
+    details["candidate_hash"] = stable_id("candidate-payload", predecessor_json)
+    with database.transaction():
+        database.connection.execute(
+            """INSERT INTO candidates
+            (item_id,run_id,source_id,paper_family_id,generation_arm,candidate_json,
+             status,created_at,updated_at)
+            SELECT ?,run_id,source_id,?,generation_arm,?,status,created_at,updated_at
+            FROM candidates WHERE item_id=?""",
+            (
+                predecessor["item_id"],
+                "historical-v20-family",
+                predecessor_json,
+                result["item_id"],
+            ),
+        )
+        database.connection.execute(
+            """INSERT INTO validation_events
+            (event_id,item_id,stage,label,reason_codes_json,details_json,created_at)
+            VALUES (?,?,?,?,?,?,?)""",
+            (
+                "historical-v20-validation",
+                predecessor["item_id"],
+                current_validation["stage"],
+                current_validation["label"],
+                current_validation["reason_codes_json"],
+                canonical_json(details),
+                current_validation["created_at"],
+            ),
+        )
+
+    exported = export_run(
+        database,
+        paths.namespace,
+        "current-export",
+        seed="current-contract-only",
+        candidate_schema_version=generation_module.CANDIDATE_SCHEMA_VERSION,
+        generation_prompt_version=generation_module.PROMPT_VERSION,
+    )
+    records = [
+        json.loads(line)
+        for line in (paths.namespace / exported["files"]["short_answer"])
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+
+    assert [record["item_id"] for record in records] == [result["item_id"]]
 
 
 def streaming_fixture(tmp_path: Path) -> tuple[Path, Path]:

@@ -716,7 +716,7 @@ def test_existing_findings_seed_alternative_exclusions(tmp_path: Path) -> None:
 
 
 def test_r14_predecessor_attempts_consume_successor_retry_slots(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = _database(tmp_path)
     parent_attempt_id = None
@@ -760,6 +760,29 @@ def test_r14_predecessor_attempts_consume_successor_retry_slots(
             family_id="family",
             status="incomplete_non_mcq",
         )
+        candidate_json = canonical_json(candidate)
+        with database.transaction():
+            database.connection.execute(
+                """INSERT INTO validation_events
+                (event_id,item_id,stage,label,reason_codes_json,details_json,created_at)
+                VALUES (?,?,?,?,?,?,?)""",
+                (
+                    stable_id("validation", item_id),
+                    item_id,
+                    "automated_acceptance",
+                    "machine_accepted_unverified",
+                    "[]",
+                    canonical_json(
+                        {
+                            "candidate_hash": stable_id(
+                                "candidate-payload", candidate_json
+                            ),
+                            "labels": {"mcq_eligible": False},
+                        }
+                    ),
+                    now(),
+                ),
+            )
         parent_attempt_id = old_attempt["attempt_id"]
         parent_item_id = item_id
 
@@ -770,9 +793,10 @@ def test_r14_predecessor_attempts_consume_successor_retry_slots(
         family_id="family",
     )
 
-    assert list(paths) == [(1, 0), (1, 1), (1, 2)]
-    assert paths[(1, 1)]["attempt"]["attempt_kind"] == "option_repair"
-    assert paths[(1, 2)]["attempt"]["attempt_kind"] == "option_repair"
+    assert sorted(paths) == [(1, 0), (1, 1), (1, 2)]
+    assert paths[(1, 1)]["attempt"]["attempt_kind"] == "question_revision"
+    assert paths[(1, 2)]["attempt"]["attempt_kind"] == "question_revision"
+    assert paths[(1, 2)]["attempt"]["attempt_id"] == "old-attempt-2"
     assert all(
         path["predecessor_contract"] == "bounded-paper-progression-v2"
         for path in paths.values()
@@ -786,6 +810,141 @@ def test_r14_predecessor_attempts_consume_successor_retry_slots(
     )
     assert alternative is not None
     assert alternative["attempt_kind"] == "alternative_finding"
+    assert alternative["parent_attempt_id"] == "old-attempt-2"
+
+    historical_bytes = {
+        row["item_id"]: row["candidate_json"]
+        for row in database.rows(
+            "SELECT item_id,candidate_json FROM candidates ORDER BY item_id"
+        )
+    }
+    provider_boundaries: list[dict] = []
+
+    def stop_before_provider(database, namespace, **kwargs):
+        provider_boundaries.append(kwargs["generation_attempt"])
+        raise BudgetError("the paid request exceeds USD 0.25")
+
+    monkeypatch.setattr(streaming_module, "generate_candidate", stop_before_provider)
+    namespace = tmp_path / "namespace"
+    namespace.mkdir()
+    manifest = namespace / "run-manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    result = _progress_generation(
+        database,
+        namespace,
+        _Progress(
+            namespace / "progress.json",
+            run_id="campaign",
+            invocation_run_id="successor-invocation",
+            run_manifest_file=manifest,
+            counts={},
+        ),
+        campaign_id="campaign",
+        candidate_key="r14-bumblebee",
+        source_id="source",
+        family_id="family",
+        selected={},
+        title="R14 bumblebee fixture",
+        author=object(),
+        verifier=object(),
+    )
+
+    assert result["reason_codes"] == ["request_cost_bound_exceeded"]
+    assert len(provider_boundaries) == 1
+    assert provider_boundaries[0] == alternative
+    assert database.one("SELECT COUNT(*) AS count FROM calls")["count"] == 0
+    assert {
+        row["item_id"]: row["candidate_json"]
+        for row in database.rows(
+            "SELECT item_id,candidate_json FROM candidates ORDER BY item_id"
+        )
+    } == historical_bytes
+
+
+def test_predecessor_acceptance_starts_a_fresh_current_contract_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = _database(tmp_path)
+    old_attempt = {
+        "contract_version": "bounded-paper-progression-v2",
+        "attempt_id": "old-accepted-attempt",
+        "attempt_kind": "primary",
+        "finding_attempt_index": 1,
+        "question_revision_index": 0,
+        "parent_attempt_id": None,
+        "parent_item_id": None,
+        "trigger_reason_code": None,
+        "finding_policy_version": (
+            generation_contract.SCOPE_ROLE_FINDING_POLICY_VERSION + ":finding-1"
+        ),
+        "excluded_finding_span_ids": [],
+    }
+    predecessor = _candidate(
+        attempt=old_attempt,
+        item_id="old-accepted-item",
+        source_id="source",
+        family_id="family",
+    )
+    predecessor["schema_version"] = "2.5.0"
+    predecessor["provenance"].update(
+        {
+            "prompt_version": "arctic-qa-generation-v20",
+            "standalone_verification_contract_version": (
+                "source-blind-standalone-gate-v1"
+            ),
+        }
+    )
+    _insert_candidate(
+        database,
+        predecessor,
+        run_id="campaign",
+        family_id="family",
+        status="machine_accepted_unverified",
+    )
+    predecessor_json = canonical_json(predecessor)
+    provider_boundaries: list[dict] = []
+
+    def stop_before_provider(database, namespace, **kwargs):
+        provider_boundaries.append(kwargs["generation_attempt"])
+        raise BudgetError("the paid request exceeds USD 0.25")
+
+    monkeypatch.setattr(streaming_module, "generate_candidate", stop_before_provider)
+    namespace = tmp_path / "namespace"
+    namespace.mkdir()
+    manifest = namespace / "run-manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+
+    result = _progress_generation(
+        database,
+        namespace,
+        _Progress(
+            namespace / "progress.json",
+            run_id="campaign",
+            invocation_run_id="successor-invocation",
+            run_manifest_file=manifest,
+            counts={},
+        ),
+        campaign_id="campaign",
+        candidate_key="accepted-predecessor",
+        source_id="source",
+        family_id="family",
+        selected={},
+        title="Accepted predecessor",
+        author=object(),
+        verifier=object(),
+    )
+
+    assert result["reason_codes"] == ["request_cost_bound_exceeded"]
+    assert len(provider_boundaries) == 1
+    current_attempt = provider_boundaries[0]
+    assert current_attempt["contract_version"] == "bounded-failure-routing-v3"
+    assert current_attempt["attempt_kind"] == "primary"
+    assert current_attempt["parent_attempt_id"] is None
+    assert database.one("SELECT COUNT(*) AS count FROM calls")["count"] == 0
+    stored = database.one(
+        "SELECT candidate_json FROM candidates WHERE item_id='old-accepted-item'"
+    )
+    assert stored["candidate_json"] == predecessor_json
 
 
 def test_existing_findings_restore_primary_before_alternative_parent(

@@ -578,7 +578,14 @@ def run_stream(
         )
     progress.write("running", "export", "Writing validated dataset exports.")
     try:
-        exported = export_run(db, namespace, campaign_id, seed="streaming-20260912")
+        exported = export_run(
+            db,
+            namespace,
+            campaign_id,
+            seed="streaming-20260912",
+            candidate_schema_version=generation_contract.CANDIDATE_SCHEMA_VERSION,
+            generation_prompt_version=generation_contract.PROMPT_VERSION,
+        )
     except Exception as error:
         progress.write(
             "error", "export", f"Streaming stopped on {type(error).__name__}."
@@ -1185,12 +1192,10 @@ def _generation_paths(
             "legacy": legacy,
         }
 
-    predecessor_rows.sort(
-        key=lambda item: (
-            int(item[1]["provenance"]["generation_attempt"]["finding_attempt_index"]),
-            int(item[1]["provenance"]["generation_attempt"]["question_revision_index"]),
-        )
-    )
+    if any(
+        row["status"] == "machine_accepted_unverified" for row, _ in predecessor_rows
+    ):
+        predecessor_rows = []
     for row, candidate in predecessor_rows:
         old_attempt = candidate["provenance"]["generation_attempt"]
         finding_index = int(old_attempt["finding_attempt_index"])
@@ -1202,56 +1207,8 @@ def _generation_paths(
             or revision_index not in {0, 1, 2}
         ):
             continue
-        if key == (1, 0):
-            parent_path = None
-            attempt_kind = "primary"
-        elif revision_index == 0:
-            parent_path = max(
-                (
-                    path
-                    for path in paths.values()
-                    if path["attempt"]["finding_attempt_index"] == 1
-                ),
-                key=_path_sort_key,
-                default=None,
-            )
-            attempt_kind = "alternative_finding"
-        else:
-            parent_path = paths.get((finding_index, revision_index - 1))
-            attempt_kind = (
-                "option_repair"
-                if old_attempt.get("trigger_reason_code") in OPTION_REPAIR_REASONS
-                else "question_revision"
-            )
-        if key != (1, 0) and parent_path is None:
-            continue
-        attempt = _generation_attempt(
-            campaign_id=campaign_id,
-            family_id=family_id,
-            finding_attempt_index=finding_index,
-            question_revision_index=revision_index,
-            attempt_kind=attempt_kind,
-            parent_attempt_id=(
-                parent_path["attempt"]["attempt_id"] if parent_path else None
-            ),
-            parent_item_id=(
-                parent_path["candidate"]["item_id"]
-                if parent_path and parent_path.get("candidate")
-                else None
-            ),
-            trigger_reason_code=(
-                str(old_attempt.get("trigger_reason_code") or "generation_rejected")
-                if parent_path
-                else None
-            ),
-            excluded_finding_span_ids=(
-                list(old_attempt.get("excluded_finding_span_ids") or [])
-                if attempt_kind == "alternative_finding"
-                else []
-            ),
-        )
         paths[key] = {
-            "attempt": attempt,
+            "attempt": old_attempt,
             "candidate": row,
             "candidate_status": row["status"],
             "legacy": False,
@@ -1390,6 +1347,8 @@ def _accepted_generation_path(
     paths: dict[tuple[int, int], dict[str, Any]],
 ) -> dict[str, Any] | None:
     for path in sorted(paths.values(), key=_path_sort_key):
+        if path.get("predecessor_contract"):
+            continue
         candidate = path.get("candidate")
         validation = path.get("validation")
         if candidate is None or validation is None:
