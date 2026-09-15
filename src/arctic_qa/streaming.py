@@ -51,6 +51,10 @@ REPAIRABLE_QUESTION_REASONS = frozenset(
         "question_context_required",
         "question_context_referent_unresolved",
         "question_answer_leakage",
+        "benchmark_text_malformed",
+        "publication_relative_period",
+        "question_qualifier_not_evidence_bound",
+        "scope_value_not_source_supported",
         "revision_unchanged_payload",
         "question_claim_type_disagreement",
         "reconstruction_disagreement",
@@ -85,6 +89,8 @@ ALTERNATIVE_FINDING_REASONS = frozenset(
         "reconstruction_disagreement",
         "eligible_arctic_scope_missing_from_finding",
         "eligible_arctic_finding_out_of_scope",
+        "finding_evidence_components_not_contiguous",
+        "reconstruction_alternative_answer_present",
         "revision_unchanged_payload",
     }
 )
@@ -93,6 +99,7 @@ IMMEDIATE_ALTERNATIVE_FINDING_REASONS = frozenset(
         "finding_answer_phrase_in_required_question_phrases",
         "eligible_arctic_scope_missing_from_finding",
         "eligible_arctic_finding_out_of_scope",
+        "finding_evidence_components_not_contiguous",
         "revision_unchanged_payload",
     }
 )
@@ -111,6 +118,11 @@ _DEPENDENT_ROUTING_REASONS = {
             "scope_qualifier_missing",
         }
     ),
+    # r15 audit RECON-2. The competing-alternatives check is the evidence for
+    # the same defect that the reconstructor's own ambiguity label reports.
+    # Both fire together by design, so the detail must not split the repair
+    # across two failure layers and end the family.
+    "answer_ambiguous": frozenset({"reconstruction_alternative_answer_present"}),
 }
 
 
@@ -1491,11 +1503,16 @@ def _failure_layer(reason: str) -> str:
         "relation_scope_mismatch",
         "scope_qualifier_missing",
         "scope_qualifier_not_source_bound",
+        "benchmark_text_malformed",
+        "publication_relative_period",
+        "question_qualifier_not_evidence_bound",
+        "scope_value_not_source_supported",
     }:
         return "context"
     if reason in {
         "source_entailment_not_verified",
         "reconstruction_disagreement",
+        "reconstruction_alternative_answer_present",
         "alternative_answer_unresolved",
     }:
         return "evidence"

@@ -49,6 +49,9 @@ def _records(
         "scope": deepcopy(scope),
         "source_entailment_model_verified": True,
         "relation_scope_match": True,
+        "scope_value_contradicted_by_source": False,
+        "contradicted_scope_field": "",
+        "scope_representation_note": "",
         "ambiguity_resolved": True,
         "alternative_answer_search_passed": True,
         "question_context_required": False,
@@ -220,6 +223,9 @@ def test_semantic_referent_failure_routes_as_one_revision_root() -> None:
     verification.update(
         {
             "relation_scope_match": False,
+            "scope_value_contradicted_by_source": False,
+            "contradicted_scope_field": "",
+            "scope_representation_note": "",
             "question_context_required": True,
             "question_context_referent_resolved": False,
             "question_context_missing_detail": "the sampled group's identity",

@@ -158,6 +158,21 @@ def _plain_reason(
             "failed_check": reason,
             "reason_code": reason,
         }
+    if reason in {"benchmark_text_malformed", "standalone_malformed_text"}:
+        return {
+            "category": "qa_rejection",
+            "summary": (
+                "The paper stayed eligible, but its generated question was rejected "
+                "because the displayed text was broken or garbled."
+            ),
+            "explanation": (
+                "This rejection applies to the generated QA candidate. It does not "
+                "exclude the source paper from the corpus."
+            ),
+            "failed_stage": "automated_acceptance",
+            "failed_check": reason,
+            "reason_code": reason,
+        }
     if reason.endswith("_response_invalid") or any(
         token in reason.casefold()
         for token in ("malformed", "schema_invalid", "parse_error")
