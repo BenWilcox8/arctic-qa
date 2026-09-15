@@ -73,6 +73,34 @@ def measure_chunks(chunks: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def legacy_chunks(
+    text: str, cap: int = 6000, overlap: int = 500
+) -> list[dict[str, Any]]:
+    """Chunk text the way the chapter 1 extractor did.
+
+    The chapter 1 extractor made one section for each page and cut a fixed
+    window, so a chunk could start or end inside a sentence. This function
+    repeats that algorithm, so the two corpora can be compared chunk for chunk.
+    """
+    chunks: list[dict[str, Any]] = []
+    for page in text.split("\f"):
+        body = page.strip()
+        start = 0
+        while start < len(body):
+            end = min(len(body), start + cap)
+            if end < len(body):
+                boundary = max(
+                    body.rfind("\n", start, end), body.rfind(". ", start, end)
+                )
+                if boundary > start + cap // 2:
+                    end = boundary + 1
+            chunks.append({"text": body[start:end]})
+            if end == len(body):
+                break
+            start = end - overlap
+    return chunks
+
+
 def quality_report(
     root: Path,
     *,
@@ -103,7 +131,6 @@ def quality_report(
         chapter2 = measure_text(
             chapter2_path.read_text(encoding="utf-8", errors="replace")
         )
-        chapter2_chunks = measure_chunks(_load_chunks(root, index))
         rows.append(
             {
                 "candidate_key": item["candidate_key"],
@@ -111,7 +138,12 @@ def quality_report(
                 "pages": index["coverage"]["pages"],
                 "legacy": legacy,
                 "chapter2": chapter2,
-                "chapter2_chunks": chapter2_chunks,
+                "legacy_chunks": measure_chunks(
+                    legacy_chunks(
+                        legacy_path.read_text(encoding="utf-8", errors="replace")
+                    )
+                ),
+                "chapter2_chunks": measure_chunks(_load_chunks(root, index)),
             }
         )
     report = {
@@ -129,16 +161,8 @@ def quality_report(
         },
         "legacy": _summarize(rows, "legacy"),
         "chapter2": _summarize(rows, "chapter2"),
-        "chapter2_chunks": {
-            "documents": len(rows),
-            "chunks": sum(row["chapter2_chunks"]["chunks"] for row in rows),
-            "sentence_complete_rate": _mean(
-                [row["chapter2_chunks"]["sentence_complete_rate"] for row in rows]
-            ),
-            "gutter_chunk_rate": _mean(
-                [row["chapter2_chunks"]["gutter_chunk_rate"] for row in rows]
-            ),
-        },
+        "legacy_chunks": _summarize_chunks(rows, "legacy_chunks"),
+        "chapter2_chunks": _summarize_chunks(rows, "chapter2_chunks"),
         "documents_with_any_gutter_line": {
             "legacy": sum(1 for row in rows if row["legacy"]["gutter_lines"] > 0),
             "chapter2": sum(1 for row in rows if row["chapter2"]["gutter_lines"] > 0),
@@ -148,6 +172,21 @@ def quality_report(
     if report_file is not None:
         atomic_json(report_file, report)
     return report
+
+
+def _summarize_chunks(rows: list[dict[str, Any]], key: str) -> dict[str, Any]:
+    return {
+        "documents": len(rows),
+        "chunks": sum(row[key]["chunks"] for row in rows),
+        "sentence_complete_chunks": sum(
+            row[key]["sentence_complete_chunks"] for row in rows
+        ),
+        "sentence_complete_rate": _mean(
+            [row[key]["sentence_complete_rate"] for row in rows]
+        ),
+        "gutter_chunks": sum(row[key]["gutter_chunks"] for row in rows),
+        "gutter_chunk_rate": _mean([row[key]["gutter_chunk_rate"] for row in rows]),
+    }
 
 
 def _summarize(rows: list[dict[str, Any]], key: str) -> dict[str, Any]:

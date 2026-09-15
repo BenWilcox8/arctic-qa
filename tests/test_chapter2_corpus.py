@@ -23,8 +23,18 @@ from arctic_qa.chapter2_corpus import (
     reextract,
 )
 from arctic_qa.db import Database
-from arctic_qa.extraction import build_records, extract_document, extract_source
-from arctic_qa.extraction_quality import measure_chunks, measure_text, quality_report
+from arctic_qa.extraction import (
+    build_records,
+    extract_document,
+    extract_source,
+    load_chunks,
+)
+from arctic_qa.extraction_quality import (
+    legacy_chunks,
+    measure_chunks,
+    measure_text,
+    quality_report,
+)
 from arctic_qa.pdf_layout import extract_layout, normalize_presentation
 from arctic_qa.storage import store_original
 from arctic_qa.text_structure import drop_running_heads, sentence_spans
@@ -221,6 +231,50 @@ def test_extraction_writes_under_the_chapter_two_root(tmp_path: Path) -> None:
     assert sorted(p.name for p in (namespace / "chunks").iterdir()) == before
     assert list((root / "chunks").rglob("chunks.jsonl"))
     assert list((root / "parsed").rglob("sections.jsonl"))
+
+
+def test_extraction_reuses_the_frozen_chapter_two_parse(tmp_path: Path) -> None:
+    """The run must read the exact objects the freeze receipt hashed."""
+    namespace, database = _namespace(tmp_path)
+    pdf = tmp_path / "paper-1.pdf"
+    pdf.write_bytes(two_column_pdf(LEFT, RIGHT, heading="Results 1"))
+    pdf.with_suffix(".txt").write_text("", encoding="utf-8")
+    access = _access_run(tmp_path, [pdf])
+    root = namespace / CHAPTER2_DIRECTORY
+    prepare_root(
+        root,
+        access_run_dir=access,
+        legacy_freeze_dir=_legacy_freeze(tmp_path, ["10.1234/paper-1"]),
+        code_commit="test",
+    )
+    reextract(root, access_run_dir=access, jobs=1)
+    frozen = index_record(root, sha256_bytes(pdf.read_bytes()))
+    assert frozen is not None
+
+    from arctic_qa.discovery import manual_record
+
+    record = manual_record(
+        {"doi": "10.1234/paper-1", "title": "Paper 1", "authors": []}, "test"
+    )
+    assert record["source_id"] == frozen["source_id"]
+    database.upsert_source(record)
+    store_original(
+        database,
+        namespace,
+        record["source_id"],
+        pdf.read_bytes(),
+        "application/pdf",
+        "https://example.org/paper.pdf",
+    )
+    metadata = extract_source(database, namespace, record["source_id"])
+    chunks = load_chunks(database, namespace, record["source_id"])
+    database.close()
+
+    assert metadata["frozen_corpus_parse"] is True
+    assert metadata["parse_sha256"] == frozen["parse_sha256"]
+    assert metadata["chunk_sha256"] == frozen["chunk_sha256"]
+    assert len(chunks) == frozen["chunks"]
+    assert all(row["sentence_complete"] for row in chunks)
 
 
 def _access_run(tmp_path: Path, pdfs: list[Path]) -> Path:
@@ -465,6 +519,12 @@ def test_the_quality_report_compares_the_two_extractions(corpus) -> None:
     assert report["legacy"]["gutter_lines"] > 0
     assert report["chapter2"]["gutter_lines"] == 0
     assert report["documents_with_any_gutter_line"]["chapter2"] == 0
+    assert report["legacy_chunks"]["gutter_chunks"] > 0
+    assert report["chapter2_chunks"]["gutter_chunks"] == 0
+    assert (
+        report["chapter2_chunks"]["sentence_complete_rate"]
+        >= report["legacy_chunks"]["sentence_complete_rate"]
+    )
 
 
 def test_the_quality_measures_count_the_audited_defects() -> None:
@@ -482,3 +542,11 @@ def test_the_quality_measures_count_the_audited_defects() -> None:
         [{"text": "A complete sentence."}, {"text": "An incomplete one"}]
     )
     assert clean["sentence_complete_rate"] == 0.5
+
+
+def test_the_legacy_chunker_is_reproduced_for_the_comparison() -> None:
+    """The chapter 1 chunker cut a fixed window, so a chunk could end mid-word."""
+    text = "word " * 2000
+    chunks = legacy_chunks(text, cap=100, overlap=20)
+    assert len(chunks) > 1
+    assert not any(chunk["text"].strip().endswith(".") for chunk in chunks)
