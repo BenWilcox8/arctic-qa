@@ -155,6 +155,26 @@ def test_chunks_start_and_end_on_a_sentence(tmp_path: Path) -> None:
     assert all(tail in ".!?" for tail in tails if tail not in ")\"'")
 
 
+def test_every_character_of_a_section_reaches_a_chunk(tmp_path: Path) -> None:
+    """A chunker that drops text starves the writer the same way a gutter does."""
+    sections, _, _ = extract_document(_two_column(tmp_path), "application/pdf")
+    rows, chunks = build_records("src-test", "c" * 64, sections, 120, 40)
+    for row in rows:
+        text = row["text"]
+        covered = [False] * len(text)
+        for chunk in chunks:
+            if chunk["section_id"] != row["section_id"]:
+                continue
+            for index in range(chunk["start_offset"], chunk["end_offset"]):
+                covered[index] = True
+        lost = [
+            index
+            for index, seen in enumerate(covered)
+            if not seen and not text[index].isspace()
+        ]
+        assert lost == []
+
+
 def test_the_sentence_splitter_keeps_abbreviations_and_decimals() -> None:
     text = (
         "Samples came from 78 N (Fig. 1). The mean was 3.4 mg/L, per Smith et al. 2020."
