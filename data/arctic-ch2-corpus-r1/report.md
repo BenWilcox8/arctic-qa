@@ -231,7 +231,24 @@ RESULTS_PLACEHOLDER
 
 ## Tests
 
-TESTS_PLACEHOLDER
+All test runs used the project nix devshell: `nix develop -c bash -c 'PYTHONPATH=src pytest ...'`.
+
+| Run | Files | Result |
+| --- | --- | --- |
+| Whole suite | `tests/` | **580 passed**, 0 failed, 698 seconds |
+| Focused set | `test_streaming.py`, `test_gemini_eligibility.py`, `test_question_context.py`, `test_eligibility_span_contract.py`, `test_chapter2_corpus.py`, `test_eligibility_geography_v7.py`, `test_geography_correction.py`, `test_corpus_viewer.py`, `test_project_progress_viewer.py`, `test_source_pass.py`, `test_metadata_prefilter.py`, `test_pipeline_trace.py`, `test_cli_integration.py` | **324 passed**, 0 failed, 584 seconds |
+| Lint | `ruff check src/ tests/` | clean |
+| Format | `ruff format --check` on every file of this slice | clean |
+
+The brief names `test_streaming.py`, `test_gemini_eligibility.py`, `test_question_context.py` and `test_eligibility_span_contract.py`.
+All four ran in both runs and all passed.
+No streaming test stalled in a broker rate-limit sleep, so no run needed a bound.
+
+New test files:
+
+- `tests/test_chapter2_corpus.py`, 18 tests. Extraction, chunking, locators, the corpus root, frozen-parse reuse, the freeze, the access run contract, legacy isolation, and the quality measures.
+- `tests/test_eligibility_geography_v7.py`, 16 tests. Prompt v7, the re-screen prompt, phrase binding, the bounded repair, the unresolved record, the re-screen selector, and the viewer state.
+- `tests/pdf_fixture.py`. Builds a real two-column PDF, so the column tests run against page geometry and not against a string.
 
 ## The red test on the base commit
 
