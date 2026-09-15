@@ -460,7 +460,7 @@
         <div class="field search"><label for="trace-q">Paper title, DOI, or ID</label><input id="trace-q" name="q" maxlength="200" placeholder="Search retained pipeline papers"></div>
         <div class="field"><label for="trace-paper-state">Final state</label><select id="trace-paper-state" name="state"><option value="">All states</option><option value="machine_accepted_unverified">Machine accepted, unverified</option><option value="incomplete_non_mcq">Incomplete MCQ</option><option value="generation_rejected">Generation rejected</option><option value="eligibility_rejected">Eligibility rejected</option><option value="eligibility_unresolved">Eligibility unresolved</option><option value="eligible">Eligible</option><option value="ambiguous_charge">Ambiguous charge</option><option value="in_progress">In progress</option><option value="not_started">Not started</option></select></div>
         <div class="field"><label for="trace-stage-filter">Current stage</label><select id="trace-stage-filter" name="stage"><option value="">All stages</option><option value="eligibility">Scientific eligibility</option><option value="finding_answer_extraction">Finding extraction</option><option value="question_generation">Question generation</option><option value="blinded_reconstruction">Blinded reconstruction</option><option value="answer_verification">Answer verification</option><option value="distractor_generation">Distractor generation</option><option value="option_verification">Option verification</option><option value="repair">Repair</option></select></div>
-        <div class="field"><label for="trace-run-filter">Run ID</label><input id="trace-run-filter" name="run_id" maxlength="200" placeholder="All runs"></div>
+        <div class="field"><label>Run scope</label><span class="meta">Latest invocation selected automatically</span></div>
         <div class="field"><label for="trace-limit">Rows</label><select id="trace-limit" name="limit"><option>10</option><option selected>25</option><option>50</option><option>100</option></select></div>
         <button class="filter-action" type="submit">Apply</button>
       </form>
@@ -658,7 +658,8 @@
         selectedPaper: initialParameters.get('trace_paper'),
         selectedStage: initialParameters.get('trace_stage'),
         detailRevision: null,
-        detailController: null
+        detailController: null,
+        scopeRunId: null
       }
     };
     const $ = (id) => document.getElementById(id);
@@ -901,7 +902,7 @@
         ['working full text', access.full_text_ready],
         ['not ready', accessNotReady],
         ['submissions', metrics.generation_submissions],
-        ['accepted QA (historical campaign total)', metrics.accepted_qa],
+        ['accepted QA (latest invocation)', metrics.accepted_qa],
         ['spent', money(metrics.spent_usd)],
         ['unsettled', money(unsettled)],
         ['in flight', metrics.inflight]
@@ -2018,12 +2019,16 @@
       wrap.append(rawJsonDetails('selected stage', payload));
       return wrap;
     }
+    function traceRunQuery() {
+      const runId = $('trace-run-filter')?.value.trim();
+      return runId ? `&run_id=${encodeURIComponent(runId)}` : '';
+    }
     async function loadTraceStage(paperKey, stageKey, body, button) {
       if (!paperKey || !stageKey) return;
       button.disabled = true;
       button.textContent = 'Loading...';
       try {
-        const payload = await fetchJson(`/api/pipeline-trace/stage?paper_key=${encodeURIComponent(paperKey)}&stage_key=${encodeURIComponent(stageKey)}`);
+        const payload = await fetchJson(`/api/pipeline-trace/stage?paper_key=${encodeURIComponent(paperKey)}&stage_key=${encodeURIComponent(stageKey)}${traceRunQuery()}`);
         state.trace.selectedStage = stageKey;
         updateTraceLocation();
         body.querySelectorAll('.trace-readable, .trace-raw, .trace-error').forEach((node) => node.remove());
@@ -2044,7 +2049,7 @@
       updateTraceLocation();
       $('trace-detail-body').replaceChildren(text('div', 'Loading retained paper detail...', 'loading'));
       try {
-        const payload = await fetchJson(`/api/pipeline-trace/paper?paper_key=${encodeURIComponent(paperKey)}`, { signal: controller.signal });
+        const payload = await fetchJson(`/api/pipeline-trace/paper?paper_key=${encodeURIComponent(paperKey)}${traceRunQuery()}`, { signal: controller.signal });
         if (state.trace.detailController !== controller || state.trace.selectedPaper !== paperKey) return;
         state.trace.detailRevision = traceRevision(payload);
         renderTraceDetail(payload);
@@ -2064,7 +2069,7 @@
       const controller = new AbortController();
       state.trace.detailController = controller;
       try {
-        const payload = await fetchJson(`/api/pipeline-trace/paper?paper_key=${encodeURIComponent(paperKey)}`, { signal: controller.signal });
+        const payload = await fetchJson(`/api/pipeline-trace/paper?paper_key=${encodeURIComponent(paperKey)}${traceRunQuery()}`, { signal: controller.signal });
         if (state.trace.detailController !== controller || state.trace.selectedPaper !== paperKey) return;
         const revision = traceRevision(payload);
         if (revision !== state.trace.detailRevision) {
@@ -2092,6 +2097,14 @@
         const freshness = payload.freshness || {};
         const pipeline = freshness.pipeline || {};
         const ledger = freshness.ledger || {};
+        const scopeRunId = pipeline.invocation_run_id || null;
+        if (state.trace.scopeRunId !== scopeRunId) {
+          state.trace.scopeRunId = scopeRunId;
+          state.trace.detailRevision = null;
+          if (state.trace.selectedPaper) {
+            $('trace-detail-body').replaceChildren(text('div', 'Loading the latest invocation detail...', 'loading'));
+          }
+        }
         const active = pipeline.state === 'running' || Number(ledger.inflight || 0) > 0;
         const traceState = active ? 'running' : pipeline.availability === 'observed' || ledger.availability === 'observed' ? 'not_running' : 'unavailable';
         $('trace-state').textContent = active ? 'Active run observed' : traceState === 'not_running' ? 'No active run' : 'State unavailable';
@@ -2101,6 +2114,13 @@
         $('trace-previous').disabled = state.trace.page <= 1;
         $('trace-next').disabled = !state.trace.nextCursor;
         const keys = new Set((payload.items || []).map((item) => item.paper_key));
+        if (state.trace.selectedPaper && !keys.has(state.trace.selectedPaper)) {
+          state.trace.selectedPaper = null;
+          state.trace.selectedStage = null;
+          state.trace.detailRevision = null;
+          $('trace-detail-body').replaceChildren(text('div', 'No paper is selected in this run scope.', 'trace-empty'));
+          $('trace-detail-summary').textContent = 'Select a paper to inspect its retained work.';
+        }
         if (!state.trace.selectedPaper && payload.items?.length) await selectTracePaper(payload.items[0].paper_key, true);
         else if (state.trace.selectedPaper) await refreshSelectedTrace();
       } catch (error) {

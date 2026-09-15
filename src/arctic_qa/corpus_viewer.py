@@ -1036,6 +1036,14 @@ class CorpusArtifacts:
                         else {}
                     ),
                 }
+            if self.pipeline_trace_store and result.get("telemetry") == "observed":
+                latest_counts = self.pipeline_trace_store.latest_run_counts()
+                if latest_counts is not None:
+                    result["counts"] = {
+                        **dict(result.get("counts") or {}),
+                        "accepted_qa": latest_counts["accepted_qa"],
+                        "generation_rejected": latest_counts["generation_rejected"],
+                    }
             return result
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
             if (
@@ -1401,7 +1409,12 @@ class CorpusArtifacts:
         if self.pipeline_trace_store is None:
             raise RuntimeError("pipeline trace data is not configured")
         paper_key = self._trace_parameter(parameters, "paper_key", required=True)
-        result = self.pipeline_trace_store.paper_detail(paper_key)
+        run_id = self._trace_parameter(parameters, "run_id")
+        result = (
+            self.pipeline_trace_store.paper_detail(paper_key, run_id=run_id)
+            if run_id
+            else self.pipeline_trace_store.paper_detail(paper_key)
+        )
         if (
             not isinstance(result, dict)
             or result.get("schema") != "pipeline-trace-paper-v1"
@@ -1414,7 +1427,12 @@ class CorpusArtifacts:
             raise RuntimeError("pipeline trace data is not configured")
         paper_key = self._trace_parameter(parameters, "paper_key", required=True)
         stage_key = self._trace_parameter(parameters, "stage_key", required=True)
-        result = self.pipeline_trace_store.stage_payload(paper_key, stage_key)
+        run_id = self._trace_parameter(parameters, "run_id")
+        result = (
+            self.pipeline_trace_store.stage_payload(paper_key, stage_key, run_id=run_id)
+            if run_id
+            else self.pipeline_trace_store.stage_payload(paper_key, stage_key)
+        )
         if (
             not isinstance(result, dict)
             or result.get("schema") != "pipeline-trace-stage-v1"
@@ -1710,7 +1728,7 @@ class CorpusArtifacts:
             "source": "viewer_validated_pipeline_records",
             "telemetry": streaming.get("telemetry", "absent"),
             "scientific_count_scope": "current_incremental_invocation",
-            "accepted_qa_scope": "shared_ledger_cumulative",
+            "accepted_qa_scope": "current_incremental_invocation",
             "spent_usd": broker.get("spent_usd") if observed else None,
             "reserved_usd": broker.get("reserved_usd") if observed else None,
             "ambiguous_reserved_usd": (
@@ -1721,7 +1739,7 @@ class CorpusArtifacts:
             "eligible": integer(counts, "eligible"),
             "excluded": integer(counts, "excluded"),
             "unresolved": integer(counts, "unresolved"),
-            "accepted_qa": integer(broker, "accepted_question_count"),
+            "accepted_qa": integer(counts, "accepted_qa"),
         }
 
     def _apply_source_overlay(

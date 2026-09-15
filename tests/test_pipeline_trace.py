@@ -315,6 +315,16 @@ def fixture_namespace(tmp_path: Path) -> tuple[Path, str, str]:
     return namespace, old_key, new_key
 
 
+def set_active_invocation(
+    namespace: Path, invocation_run_id: str, recent_papers: list[dict[str, object]]
+) -> None:
+    progress_path = namespace / "streaming-dataset-r1" / "progress.json"
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    progress["invocation_run_id"] = invocation_run_id
+    progress["recent_papers"] = recent_papers
+    write_json(progress_path, progress)
+
+
 def test_trace_list_filters_and_pages_without_exposing_paths(tmp_path: Path) -> None:
     namespace, _, _ = fixture_namespace(tmp_path)
     store = PipelineTraceStore(namespace)
@@ -380,9 +390,10 @@ def test_trace_counts_calls_candidates_and_findings_separately(
         new_key,
     ]
     assert [stage["transport_attempt"] for stage in detail["stages"]] == [1, 1]
-    assert store.stage_payload(paper["paper_key"], new_key)["receipt"][
-        "request_key"
-    ] == new_key
+    assert (
+        store.stage_payload(paper["paper_key"], new_key)["receipt"]["request_key"]
+        == new_key
+    )
 
     database = Database(namespace / "state.sqlite3")
     with database.transaction():
@@ -424,8 +435,7 @@ def test_trace_counts_calls_candidates_and_findings_separately(
     assert paper["qa_candidate_count"] == 2
     assert paper["finding_attempt_count"] == 2
     runs = {
-        run["run_id"]: run
-        for run in refreshed.paper_detail(paper["paper_key"])["runs"]
+        run["run_id"]: run for run in refreshed.paper_detail(paper["paper_key"])["runs"]
     }
     assert runs["campaign-fixture"]["model_call_count"] == 2
     assert runs["campaign-fixture"]["qa_candidate_count"] == 1
@@ -605,6 +615,12 @@ def test_progress_reason_overlays_list_and_builds_plain_evidence(
         }
     ]
     write_json(progress_path, progress)
+    database = Database(namespace / "state.sqlite3")
+    with database.transaction():
+        database.connection.execute(
+            "UPDATE candidates SET status='rejected' WHERE item_id='aqa-fixture'"
+        )
+    database.close()
     store = PipelineTraceStore(namespace)
 
     item = store.list_papers(run_id="campaign-fixture", query="Arctic fixture")[
@@ -903,6 +919,292 @@ def test_new_submitted_run_does_not_inherit_historical_acceptance(
         "campaign-fixture",
         "future-run",
     }
+
+
+def test_latest_invocation_hides_historical_acceptance_and_keeps_current_evidence(
+    tmp_path: Path,
+) -> None:
+    namespace, _, _ = fixture_namespace(tmp_path)
+    candidate = {
+        "item_id": "aqa-latest-rejected",
+        "finding_id": "finding-fixture",
+        "question": "What happened in the latest attempt?",
+        "answer": {"text": "It was rejected."},
+        "source": {"source_id": "src-fixture"},
+    }
+    candidate_hash = stable_id("candidate-payload", canonical_json(candidate))
+    database = Database(namespace / "state.sqlite3")
+    with database.transaction():
+        database.connection.execute(
+            """INSERT INTO candidates
+            (item_id,run_id,source_id,paper_family_id,generation_arm,candidate_json,
+             status,created_at,updated_at)
+            VALUES ('aqa-latest-rejected','latest-rejected-run',?,?,'answer_first',?,
+                    'rejected',?,?)""",
+            (
+                "src-fixture",
+                "family-fixture",
+                canonical_json(candidate),
+                "2026-09-14T00:00:08Z",
+                "2026-09-14T00:00:08Z",
+            ),
+        )
+        database.connection.execute(
+            """INSERT INTO validation_events
+            (event_id,item_id,stage,label,reason_codes_json,details_json,created_at)
+            VALUES ('validation-latest','aqa-latest-rejected','automated_acceptance',
+                    'rejected',?,?,?)""",
+            (
+                canonical_json(["latest_attempt_rejected"]),
+                canonical_json({"candidate_hash": candidate_hash}),
+                "2026-09-14T00:00:08Z",
+            ),
+        )
+        database.connection.execute(
+            """INSERT INTO rejection_ledger
+            (rejection_id,item_id,source_id,stage,reason_code,detail_json,created_at)
+            VALUES ('rejection-latest','aqa-latest-rejected',?,
+                    'automated_acceptance','latest_attempt_rejected',?,?)""",
+            (
+                "src-fixture",
+                canonical_json({"attempt": "latest"}),
+                "2026-09-14T00:00:08Z",
+            ),
+        )
+    database.close()
+    set_active_invocation(
+        namespace,
+        "latest-rejected-run",
+        [
+            {
+                "paper_id": "src-fixture",
+                "title": "Arctic fixture paper",
+                "current_stage": "completed",
+                "final_state": "generation_rejected",
+                "final_reason": "latest_attempt_rejected",
+            }
+        ],
+    )
+
+    store = PipelineTraceStore(namespace)
+    items = store.list_papers()["items"]
+
+    assert len(items) == 1
+    assert items[0]["state"] == "generation_rejected"
+    assert items[0]["run_ids"] == ["latest-rejected-run"]
+    assert store.latest_run_counts() == {
+        "accepted_qa": 0,
+        "generation_rejected": 1,
+        "incomplete_non_mcq": 0,
+        "in_progress": 0,
+        "eligibility_rejected": 0,
+        "eligibility_unresolved": 0,
+        "eligible": 0,
+    }
+
+    detail = store.paper_detail(items[0]["paper_key"])
+    assert [row["item_id"] for row in detail["candidates"]] == ["aqa-latest-rejected"]
+    assert [row["finding_id"] for row in detail["findings"]] == ["finding-fixture"]
+    assert detail["candidates"][0]["rejection_reasons"][0]["reason_code"] == (
+        "latest_attempt_rejected"
+    )
+
+
+def test_same_invocation_acceptance_wins_over_later_rejection(tmp_path: Path) -> None:
+    namespace, _, _ = fixture_namespace(tmp_path)
+    accepted = {
+        "item_id": "aqa-same-accepted",
+        "finding_id": "finding-fixture",
+        "question": "What happened?",
+        "answer": {"text": "It increased."},
+        "source": {"source_id": "src-fixture"},
+    }
+    rejected = {
+        "item_id": "aqa-same-rejected",
+        "finding_id": "finding-fixture",
+        "question": "What happened in the revision?",
+        "answer": {"text": "It decreased."},
+        "source": {"source_id": "src-fixture"},
+    }
+    database = Database(namespace / "state.sqlite3")
+    with database.transaction():
+        for item_id, candidate, status in (
+            ("aqa-same-accepted", accepted, "machine_accepted_unverified"),
+            ("aqa-same-rejected", rejected, "rejected"),
+        ):
+            database.connection.execute(
+                """INSERT INTO candidates
+                (item_id,run_id,source_id,paper_family_id,generation_arm,candidate_json,
+                 status,created_at,updated_at)
+                    VALUES (?, 'same-run', ?, ?, 'answer_first', ?, ?, ?, ?)""",
+                (
+                    item_id,
+                    "src-fixture",
+                    "family-fixture",
+                    canonical_json(candidate),
+                    status,
+                    "2026-09-14T00:00:08Z"
+                    if status == "machine_accepted_unverified"
+                    else "2026-09-14T00:00:09Z",
+                    "2026-09-14T00:00:08Z"
+                    if status == "machine_accepted_unverified"
+                    else "2026-09-14T00:00:09Z",
+                ),
+            )
+        database.connection.execute(
+            """INSERT INTO rejection_ledger
+            (rejection_id,item_id,source_id,stage,reason_code,detail_json,created_at)
+            VALUES ('rejection-same','aqa-same-rejected',?,
+                    'automated_acceptance','revision_rejected',?,?)""",
+            (
+                "src-fixture",
+                canonical_json({"attempt": "revision"}),
+                "2026-09-14T00:00:09Z",
+            ),
+        )
+    database.close()
+    set_active_invocation(
+        namespace,
+        "same-run",
+        [
+            {
+                "paper_id": "src-fixture",
+                "title": "Arctic fixture paper",
+                "current_stage": "completed",
+                "final_state": "generation_rejected",
+                "final_reason": "revision_rejected",
+            }
+        ],
+    )
+
+    store = PipelineTraceStore(namespace)
+    item = store.list_papers()["items"][0]
+
+    assert item["state"] == "machine_accepted_unverified"
+    detail = store.paper_detail(item["paper_key"])
+    assert {row["item_id"] for row in detail["candidates"]} == {
+        "aqa-same-accepted",
+        "aqa-same-rejected",
+    }
+    assert detail["rejections"][0]["reason_code"] == "revision_rejected"
+
+
+def test_latest_scope_links_campaign_candidates_through_receipts(
+    tmp_path: Path,
+) -> None:
+    namespace, _, _ = fixture_namespace(tmp_path)
+    receipts = namespace / "streaming-dataset-r1" / "model-receipts"
+    accepted_key = "8" * 64
+    rejected_key = "9" * 64
+    for request_key, response_id, completed in (
+        (accepted_key, "latest-accepted-response", "2026-09-14T00:00:08Z"),
+        (rejected_key, "latest-rejected-response", "2026-09-14T00:00:09Z"),
+    ):
+        write_json(
+            receipts / f"{request_key}.json",
+            {
+                "request_key": request_key,
+                "run_id": "latest-real-shape-run",
+                "stage": "option_verification",
+                "paper_id": "10.1234/fixture",
+                "family_id": "family-fixture",
+                "state": "completed",
+                "submitted_at_utc": completed,
+                "completed_at_utc": completed,
+                "response": {"responseId": response_id},
+            },
+        )
+    database = Database(namespace / "state.sqlite3")
+    with database.transaction():
+        for item_id, status, response_id, updated_at in (
+            (
+                "aqa-real-accepted",
+                "machine_accepted_unverified",
+                "latest-accepted-response",
+                "2026-09-14T00:00:08Z",
+            ),
+            (
+                "aqa-real-rejected",
+                "rejected",
+                "latest-rejected-response",
+                "2026-09-14T00:00:09Z",
+            ),
+        ):
+            candidate = {
+                "item_id": item_id,
+                "finding_id": "finding-fixture",
+                "question": item_id,
+                "answer": {"text": "It increased."},
+                "source": {"source_id": "src-fixture"},
+                "provenance": {"verification_calls": [{"request_id": response_id}]},
+            }
+            database.connection.execute(
+                """INSERT INTO candidates
+                (item_id,run_id,source_id,paper_family_id,generation_arm,candidate_json,
+                 status,created_at,updated_at)
+                    VALUES (?, 'campaign-fixture', ?, ?, 'answer_first', ?, ?, ?, ?)""",
+                (
+                    item_id,
+                    "src-fixture",
+                    "family-fixture",
+                    canonical_json(candidate),
+                    status,
+                    updated_at,
+                    updated_at,
+                ),
+            )
+        database.connection.execute(
+            """INSERT INTO rejection_ledger
+            (rejection_id,item_id,source_id,stage,reason_code,detail_json,created_at)
+            VALUES ('rejection-real-shape','aqa-real-rejected',?,
+                    'automated_acceptance','real_shape_revision_rejected',?,?)""",
+            (
+                "src-fixture",
+                canonical_json({"attempt": "latest"}),
+                "2026-09-14T00:00:09Z",
+            ),
+        )
+    database.close()
+    set_active_invocation(
+        namespace,
+        "latest-real-shape-run",
+        [
+            {
+                "paper_id": "src-fixture",
+                "title": "Arctic fixture paper",
+                "current_stage": "completed",
+                "final_state": "generation_rejected",
+                "final_reason": "real_shape_revision_rejected",
+            }
+        ],
+    )
+
+    store = PipelineTraceStore(namespace)
+    item = store.list_papers()["items"][0]
+    detail = store.paper_detail(item["paper_key"])
+
+    assert item["state"] == "machine_accepted_unverified"
+    assert item["run_ids"] == ["latest-real-shape-run"]
+    assert {row["item_id"] for row in detail["candidates"]} == {
+        "aqa-real-accepted",
+        "aqa-real-rejected",
+    }
+    assert [row["finding_id"] for row in detail["findings"]] == ["finding-fixture"]
+    assert [stage["request_key"] for stage in detail["stages"]] == [
+        accepted_key,
+        rejected_key,
+    ]
+    assert detail["rejections"][0]["reason_code"] == ("real_shape_revision_rejected")
+
+
+def test_empty_newest_invocation_does_not_fall_back_to_history(tmp_path: Path) -> None:
+    namespace, _, _ = fixture_namespace(tmp_path)
+    set_active_invocation(namespace, "empty-newest-run", [])
+    store = PipelineTraceStore(namespace)
+
+    assert store.list_papers()["items"] == []
+    with pytest.raises(KeyError, match="unknown pipeline paper key"):
+        store.paper_detail(stable_id("pipeline-paper", "family-fixture"))
 
 
 @pytest.mark.parametrize(

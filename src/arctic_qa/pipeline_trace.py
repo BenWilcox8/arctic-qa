@@ -58,6 +58,21 @@ def _stored_ids(rows: list[dict[str, Any]], key: str) -> list[str]:
     return sorted({str(row[key]) for row in rows if row.get(key)})
 
 
+def _request_ids(value: Any) -> set[str]:
+    found: set[str] = set()
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            normalized = str(key).casefold()
+            if normalized == "request_id" or normalized.endswith("_request_id"):
+                if nested:
+                    found.add(str(nested))
+            found.update(_request_ids(nested))
+    elif isinstance(value, list):
+        for nested in value:
+            found.update(_request_ids(nested))
+    return found
+
+
 def _plain_reason(
     final_reason: str | None, state: str, current_stage: str
 ) -> dict[str, Any] | None:
@@ -316,14 +331,15 @@ class PipelineTraceStore:
             raise ValueError("limit must be between 1 and 500")
         eligibility_jobs = self._all_eligibility_jobs()
         records = self._paper_records(eligibility_jobs)
+        scope_run_id = run_id or self.active_run_id()
         needle = (query or "").strip().casefold()
         filtered = []
         for record in records.values():
-            if run_id and run_id not in record["run_ids"]:
+            if scope_run_id and scope_run_id not in record["run_ids"]:
                 continue
             visible = (
-                self._project_run(record, run_id, eligibility_jobs)
-                if run_id
+                self._project_run(record, scope_run_id, eligibility_jobs)
+                if scope_run_id
                 else record
             )
             searchable = " ".join(
@@ -356,19 +372,39 @@ class PipelineTraceStore:
             ),
         }
 
-    def paper_detail(self, paper_key: str) -> dict[str, Any]:
+    def paper_detail(self, paper_key: str, run_id: str | None = None) -> dict[str, Any]:
         eligibility_jobs = self._all_eligibility_jobs()
-        record = self._paper_records(eligibility_jobs).get(paper_key)
-        if record is None:
-            raise KeyError("unknown pipeline paper key")
+        record, scope_run_id = self._scoped_record(paper_key, run_id, eligibility_jobs)
         source_ids = record["source_ids"]
         sources = [self._source_detail(source_id) for source_id in source_ids]
         stages = self._stage_summaries(record)
-        findings = self._table_json_rows("findings", "source_id", source_ids)
-        candidates = self._table_json_rows("candidates", "source_id", source_ids)
-        rejections = self._rejection_rows(source_ids, record, eligibility_jobs)
-        eligibility = self._eligibility_jobs(record, eligibility_jobs)
+        all_findings = self._table_json_rows("findings", "source_id", source_ids)
+        all_candidates = self._table_json_rows("candidates", "source_id", source_ids)
+        candidate_ids = {
+            str(value) for value in _stored_ids(record["candidate_rows"], "item_id")
+        }
+        finding_ids = {
+            str(value) for value in _stored_ids(record["finding_rows"], "finding_id")
+        }
+        candidates = [
+            row for row in all_candidates if str(row.get("item_id")) in candidate_ids
+        ]
+        findings = [
+            row for row in all_findings if str(row.get("finding_id")) in finding_ids
+        ]
+        rejections = self._rejection_rows(
+            source_ids, record, eligibility_jobs, run_id=scope_run_id
+        )
+        eligibility = self._eligibility_jobs(
+            record, eligibility_jobs, run_id=scope_run_id
+        )
         validation_events = self._validation_rows(source_ids)
+        if scope_run_id:
+            validation_events = [
+                event
+                for event in validation_events
+                if str(event.get("item_id")) in candidate_ids
+            ]
         self._project_candidate_reasons(candidates, validation_events, rejections)
         self._project_exit_reasons(rejections)
         return {
@@ -389,11 +425,11 @@ class PipelineTraceStore:
             "stages": stages,
         }
 
-    def stage_payload(self, paper_key: str, stage_key: str) -> dict[str, Any]:
+    def stage_payload(
+        self, paper_key: str, stage_key: str, run_id: str | None = None
+    ) -> dict[str, Any]:
         eligibility_jobs = self._all_eligibility_jobs()
-        record = self._paper_records(eligibility_jobs).get(paper_key)
-        if record is None:
-            raise KeyError("unknown pipeline paper key")
+        record, scope_run_id = self._scoped_record(paper_key, run_id, eligibility_jobs)
         stage = next(
             (
                 item
@@ -404,6 +440,9 @@ class PipelineTraceStore:
         )
         if stage is None:
             raise KeyError("unknown pipeline stage key")
+        candidate_ids = {
+            str(value) for value in _stored_ids(record["candidate_rows"], "item_id")
+        }
         receipt = None
         request_trace = None
         if stage.get("receipt_stem"):
@@ -452,15 +491,87 @@ class PipelineTraceStore:
             "journal": self._safe_call(call),
             "receipt": self._safe_receipt(receipt),
             "eligibility": self._eligibility_for_request(
-                stage.get("request_key"), eligibility_jobs
+                stage.get("request_key"), eligibility_jobs, run_id=scope_run_id
             ),
             "source_context": [
                 self._source_context(source_id) for source_id in record["source_ids"]
             ],
-            "candidates": self._table_json_rows(
-                "candidates", "source_id", record["source_ids"]
-            ),
+            "candidates": [
+                row
+                for row in self._table_json_rows(
+                    "candidates", "source_id", record["source_ids"]
+                )
+                if str(row.get("item_id")) in candidate_ids
+            ],
         }
+
+    def active_run_id(self) -> str | None:
+        value = self._progress_snapshot().get("invocation_run_id")
+        if value is None:
+            return None
+        value = str(value).strip()
+        return value or None
+
+    @staticmethod
+    def _candidate_run_ids(
+        candidate: dict[str, Any], receipts: list[dict[str, Any]]
+    ) -> set[str]:
+        run_ids = {str(candidate["run_id"])} if candidate.get("run_id") else set()
+        request_ids = _request_ids(candidate.get("candidate"))
+        for receipt in receipts:
+            response_id = (receipt.get("response") or {}).get("responseId")
+            if (
+                response_id
+                and str(response_id) in request_ids
+                and receipt.get("run_id")
+            ):
+                run_ids.add(str(receipt["run_id"]))
+        return run_ids
+
+    def latest_run_counts(self) -> dict[str, int] | None:
+        """Return paper-state counts for the active invocation, if one exists."""
+
+        run_id = self.active_run_id()
+        if not run_id:
+            return None
+        jobs = self._all_eligibility_jobs()
+        records = self._paper_records(jobs)
+        counts = {
+            "accepted_qa": 0,
+            "generation_rejected": 0,
+            "incomplete_non_mcq": 0,
+            "in_progress": 0,
+            "eligibility_rejected": 0,
+            "eligibility_unresolved": 0,
+            "eligible": 0,
+        }
+        for record in records.values():
+            if run_id not in record["run_ids"]:
+                continue
+            state = self._project_run(record, run_id, jobs)["state"]
+            if state == "machine_accepted_unverified":
+                counts["accepted_qa"] += 1
+            elif state in counts:
+                counts[state] += 1
+        return counts
+
+    def _scoped_record(
+        self,
+        paper_key: str,
+        requested_run_id: str | None,
+        eligibility_jobs: list[tuple[Path, dict[str, Any]]],
+    ) -> tuple[dict[str, Any], str | None]:
+        record = self._paper_records(eligibility_jobs).get(paper_key)
+        if record is None:
+            raise KeyError("unknown pipeline paper key")
+        scope_run_id = requested_run_id or self.active_run_id()
+        if scope_run_id:
+            if scope_run_id not in record["run_ids"]:
+                raise KeyError("unknown pipeline paper key")
+            return self._project_run(
+                record, scope_run_id, eligibility_jobs
+            ), scope_run_id
+        return record, None
 
     def _inside_namespace(self, path: Path) -> bool:
         return path == self.namespace or self.namespace in path.parents
@@ -481,7 +592,7 @@ class PipelineTraceStore:
             candidates = [
                 dict(row)
                 for row in connection.execute(
-                    "SELECT item_id,source_id,run_id,status,updated_at FROM candidates"
+                    "SELECT item_id,source_id,run_id,status,updated_at,candidate_json FROM candidates"
                 )
             ]
             findings = [
@@ -490,6 +601,8 @@ class PipelineTraceStore:
                     "SELECT finding_id,source_id,run_id,status,created_at FROM findings"
                 )
             ]
+        for row in candidates:
+            row["candidate"] = self._json_value(row.pop("candidate_json"))
         source_by_family: dict[str, list[dict[str, Any]]] = {}
         for source in sources:
             source_by_family.setdefault(source["paper_family_id"], []).append(source)
@@ -530,6 +643,23 @@ class PipelineTraceStore:
             relevant_findings = [
                 row for row in findings if row["source_id"] in source_ids
             ]
+            candidate_run_ids = {
+                str(row["item_id"]): self._candidate_run_ids(row, family_receipts)
+                for row in relevant_candidates
+                if row.get("item_id")
+            }
+            finding_run_ids = {
+                str(row["finding_id"]): {str(row["run_id"])}
+                for row in relevant_findings
+                if row.get("finding_id") and row.get("run_id")
+            }
+            for candidate in relevant_candidates:
+                finding_id = (candidate.get("candidate") or {}).get("finding_id")
+                if not finding_id:
+                    continue
+                finding_run_ids.setdefault(str(finding_id), set()).update(
+                    candidate_run_ids.get(str(candidate.get("item_id")), set())
+                )
             candidate_item_ids = _stored_ids(relevant_candidates, "item_id")
             finding_ids = _stored_ids(relevant_findings, "finding_id")
             run_ids = sorted(
@@ -627,9 +757,16 @@ class PipelineTraceStore:
                 "receipts": family_receipts,
                 "candidate_rows": relevant_candidates,
                 "finding_rows": relevant_findings,
+                "_candidate_run_ids": candidate_run_ids,
+                "_finding_run_ids": finding_run_ids,
             }
             progress_row = self._matching_progress_row(record, progress)
             if progress_row:
+                invocation_run_id = progress.get("invocation_run_id")
+                if invocation_run_id:
+                    record["run_ids"] = sorted(
+                        {*record["run_ids"], str(invocation_run_id)}
+                    )
                 record["progress_row"] = progress_row
                 record["progress_snapshot"] = {
                     "run_id": progress.get("run_id"),
@@ -656,10 +793,19 @@ class PipelineTraceStore:
     ) -> dict[str, Any]:
         receipts = [item for item in record["receipts"] if item.get("run_id") == run_id]
         candidates = [
-            item for item in record["candidate_rows"] if item.get("run_id") == run_id
+            item
+            for item in record["candidate_rows"]
+            if run_id
+            in record.get("_candidate_run_ids", {}).get(str(item.get("item_id")), set())
         ]
         findings = [
-            item for item in record["finding_rows"] if item.get("run_id") == run_id
+            item
+            for item in record["finding_rows"]
+            if run_id
+            in record.get("_finding_run_ids", {}).get(
+                str(item.get("finding_id")),
+                {str(item.get("run_id"))} if item.get("run_id") else set(),
+            )
         ]
         stages = sorted(
             {str(item.get("stage")) for item in receipts if item.get("stage")}
@@ -700,7 +846,10 @@ class PipelineTraceStore:
             "state": self._paper_state(
                 candidates,
                 receipts,
-                self._eligibility_state(request_keys, candidate_ids, eligibility_jobs),
+                self._eligibility_state(
+                    request_keys, candidate_ids, eligibility_jobs, run_id=run_id
+                ),
+                accepted_wins=True,
             ),
             "current_stage": (
                 latest_receipt.get("stage")
@@ -721,14 +870,19 @@ class PipelineTraceStore:
                     candidates,
                     receipts,
                     self._eligibility_state(
-                        request_keys, candidate_ids, eligibility_jobs
+                        request_keys,
+                        candidate_ids,
+                        eligibility_jobs,
+                        run_id=run_id,
                     ),
+                    accepted_wins=True,
                 ),
                 candidates,
                 receipts,
                 request_keys,
                 candidate_ids,
                 eligibility_jobs,
+                run_id=run_id,
             ),
             "receipts": receipts,
             "candidate_rows": candidates,
@@ -741,13 +895,19 @@ class PipelineTraceStore:
             snapshot.get("invocation_run_id"),
         }:
             projection = self._progress_projection(progress)
-            if projection["state"] != projected["state"]:
-                projection["state_entered_at_utc"] = progress.get(
-                    "state_changed_at_utc"
-                )
-            elif progress.get("state_changed_at_utc"):
-                projection["state_entered_at_utc"] = progress["state_changed_at_utc"]
-            projected.update(projection)
+            if projected["state"] != "machine_accepted_unverified":
+                if projection["state"] != projected["state"]:
+                    projection["state_entered_at_utc"] = progress.get(
+                        "state_changed_at_utc"
+                    )
+                elif progress.get("state_changed_at_utc"):
+                    projection["state_entered_at_utc"] = progress[
+                        "state_changed_at_utc"
+                    ]
+                projected.update(projection)
+            else:
+                projected.pop("final_reason", None)
+                projected.pop("reason", None)
         return projected
 
     def _receipt_events(self) -> list[dict[str, Any]]:
@@ -959,6 +1119,8 @@ class PipelineTraceStore:
         source_ids: list[str],
         record: dict[str, Any],
         eligibility_jobs: list[tuple[Path, dict[str, Any]]],
+        *,
+        run_id: str | None = None,
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         if source_ids:
@@ -971,9 +1133,14 @@ class PipelineTraceStore:
                         (*source_ids, *source_ids),
                     )
                 ]
+        if run_id:
+            candidate_ids = {
+                str(value) for value in _stored_ids(record["candidate_rows"], "item_id")
+            }
+            rows = [row for row in rows if str(row.get("item_id")) in candidate_ids]
         for row in rows:
             row["detail"] = self._json_value(row.pop("detail_json"))
-        for job in self._eligibility_jobs(record, eligibility_jobs):
+        for job in self._eligibility_jobs(record, eligibility_jobs, run_id=run_id):
             validation = job.get("validation") or {}
             if validation.get("decision") not in {None, "eligible"}:
                 rows.append(
@@ -1119,6 +1286,8 @@ class PipelineTraceStore:
         self,
         record: dict[str, Any],
         eligibility_jobs: list[tuple[Path, dict[str, Any]]],
+        *,
+        run_id: str | None = None,
     ) -> list[dict[str, Any]]:
         request_keys = {
             str(item.get("request_key"))
@@ -1136,6 +1305,10 @@ class PipelineTraceStore:
         }
         jobs = []
         for path, job in eligibility_jobs:
+            if run_id and not self._eligibility_job_belongs_to_run(
+                path, job, run_id, request_keys
+            ):
+                continue
             if (
                 job.get("broker_request_key") not in request_keys
                 and str(job.get("candidate_key")) not in candidate_ids
@@ -1157,11 +1330,18 @@ class PipelineTraceStore:
         self,
         request_key: str | None,
         eligibility_jobs: list[tuple[Path, dict[str, Any]]],
+        *,
+        run_id: str | None = None,
     ) -> dict[str, Any] | None:
         if not request_key:
             return None
         for path, job in eligibility_jobs:
-            if job.get("broker_request_key") == request_key:
+            if job.get("broker_request_key") == request_key and (
+                not run_id
+                or self._eligibility_job_belongs_to_run(
+                    path, job, run_id, {request_key}
+                )
+            ):
                 safe = self._safe_value(job)
                 manifest = (
                     path.parent.parent / "span-manifests" / f"{job.get('job_key')}.json"
@@ -1173,6 +1353,21 @@ class PipelineTraceStore:
                 )
                 return safe
         return None
+
+    @staticmethod
+    def _eligibility_job_belongs_to_run(
+        path: Path,
+        job: dict[str, Any],
+        run_id: str,
+        request_keys: set[str],
+    ) -> bool:
+        if str(job.get("run_id") or "") == run_id:
+            return True
+        if str(job.get("invocation_run_id") or "") == run_id:
+            return True
+        if str(job.get("broker_request_key") or "") in request_keys:
+            return True
+        return path.parent.parent.name == run_id
 
     def _job_paths(self) -> list[Path]:
         return sorted(
@@ -1203,9 +1398,11 @@ class PipelineTraceStore:
         request_keys: set[str],
         candidate_ids: set[str],
         eligibility_jobs: list[tuple[Path, dict[str, Any]]],
+        *,
+        run_id: str | None = None,
     ) -> str | None:
         latest = self._latest_eligibility_job(
-            request_keys, candidate_ids, eligibility_jobs
+            request_keys, candidate_ids, eligibility_jobs, run_id=run_id
         )
         if latest is None:
             return None
@@ -1226,19 +1423,28 @@ class PipelineTraceStore:
         request_keys: set[str],
         candidate_ids: set[str],
         eligibility_jobs: list[tuple[Path, dict[str, Any]]],
+        *,
+        run_id: str | None = None,
     ) -> dict[str, Any] | None:
         matching = [
-            job
-            for _, job in eligibility_jobs
+            (path, job)
+            for path, job in eligibility_jobs
             if (
                 job.get("broker_request_key") in request_keys
                 if request_keys
                 else str(job.get("candidate_key")) in candidate_ids
             )
+            and (
+                not run_id
+                or self._eligibility_job_belongs_to_run(path, job, run_id, request_keys)
+            )
         ]
         if not matching:
             return None
-        return max(matching, key=lambda job: str(job.get("completed_at_utc") or ""))
+        return max(
+            (job for _, job in matching),
+            key=lambda job: str(job.get("completed_at_utc") or ""),
+        )
 
     def _state_entered_at(
         self,
@@ -1248,6 +1454,8 @@ class PipelineTraceStore:
         request_keys: set[str],
         candidate_ids: set[str],
         eligibility_jobs: list[tuple[Path, dict[str, Any]]],
+        *,
+        run_id: str | None = None,
     ) -> str | None:
         candidate_status = {
             "machine_accepted_unverified": "machine_accepted_unverified",
@@ -1284,7 +1492,7 @@ class PipelineTraceStore:
             )
         if state.startswith("eligibility_") or state == "eligible":
             job = self._latest_eligibility_job(
-                request_keys, candidate_ids, eligibility_jobs
+                request_keys, candidate_ids, eligibility_jobs, run_id=run_id
             )
             return (
                 str(job.get("completed_at_utc"))
@@ -1310,14 +1518,21 @@ class PipelineTraceStore:
             return []
         item_ids = {
             row["item_id"]
-            for row in self._table_json_rows("candidates", "source_id", source_ids)
+            for row in record.get("candidate_rows", [])
+            if row.get("item_id")
         }
+        export_run_ids = set(record.get("run_ids", []))
+        export_run_ids.update(
+            str(row["run_id"])
+            for row in record.get("candidate_rows", [])
+            if row.get("run_id")
+        )
         rows = []
         for manifest_path in sorted(exports_dir.glob("*/manifest.json")):
             manifest = self._read_json(manifest_path)
             if (
                 not isinstance(manifest, dict)
-                or manifest.get("run_id") not in record["run_ids"]
+                or manifest.get("run_id") not in export_run_ids
             ):
                 continue
             for kind in (
@@ -1368,9 +1583,7 @@ class PipelineTraceStore:
                     "candidate_item_ids": _stored_ids(
                         projected["candidate_rows"], "item_id"
                     ),
-                    "finding_ids": _stored_ids(
-                        projected["finding_rows"], "finding_id"
-                    ),
+                    "finding_ids": _stored_ids(projected["finding_rows"], "finding_id"),
                     "stages": [
                         item["stage_key"] for item in stages if item["run_id"] == run_id
                     ],
@@ -1469,8 +1682,7 @@ class PipelineTraceStore:
                     {
                         "label": "Unresolved displayed phrases",
                         "text": ", ".join(
-                            str(value)
-                            for value in standalone["unresolved_phrases"]
+                            str(value) for value in standalone["unresolved_phrases"]
                         ),
                     }
                 )
@@ -1501,9 +1713,7 @@ class PipelineTraceStore:
                             "agreement_confidence_category": agreement.get(
                                 "confidence_category"
                             ),
-                            "deterministic_match": agreement.get(
-                                "deterministic_match"
-                            ),
+                            "deterministic_match": agreement.get("deterministic_match"),
                             "judge_result": (agreement.get("judge") or {}).get(
                                 "verdict"
                             ),
@@ -1588,13 +1798,17 @@ class PipelineTraceStore:
         candidates: list[dict[str, Any]],
         receipts: list[dict[str, Any]],
         eligibility_state: str | None,
+        *,
+        accepted_wins: bool = False,
     ) -> str:
         states = {str(row.get("state")) for row in receipts}
+        candidate_states = {str(row.get("status")) for row in candidates}
+        if accepted_wins and "machine_accepted_unverified" in candidate_states:
+            return "machine_accepted_unverified"
         if "submitted" in states or "response_received" in states:
             return "in_progress"
         if "ambiguous_charge" in states:
             return "ambiguous_charge"
-        candidate_states = {str(row.get("status")) for row in candidates}
         if "machine_accepted_unverified" in candidate_states:
             return "machine_accepted_unverified"
         if "incomplete_non_mcq" in candidate_states:
@@ -1682,6 +1896,7 @@ class PipelineTraceStore:
                     "availability": "observed",
                     "state": progress.get("state"),
                     "run_id": progress.get("run_id"),
+                    "invocation_run_id": progress.get("invocation_run_id"),
                     "current_stage": progress.get("current_stage"),
                     "updated_at_utc": progress.get("updated_at_utc"),
                 }
