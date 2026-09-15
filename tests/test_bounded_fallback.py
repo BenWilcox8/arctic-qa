@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -560,6 +561,134 @@ def test_existing_findings_seed_alternative_exclusions(tmp_path: Path) -> None:
     assert paths[(2, 0)]["attempt"]["excluded_finding_span_ids"] == [
         "frozen-primary"
     ]
+
+
+def test_existing_findings_restore_primary_before_alternative_parent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = _database(tmp_path)
+    campaign_id = "arctic-qa-production-campaign-001"
+    family_id = "family-17e0f0a4909fdaed6d59"
+    source_id = "src-17e0f0a4909fdaed6d59"
+    with database.transaction():
+        for finding_id, finding_index, span_id in (
+            ("finding-909ca59694ed5085a475", 1, "frozen-primary"),
+            ("finding-6ad815d8ce5278267308", 2, "frozen-alternative"),
+        ):
+            database.connection.execute(
+                """INSERT INTO findings
+                (finding_id,run_id,source_id,paper_family_id,chunk_id,
+                 selection_policy_version,answer_json,status,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?)""",
+                (
+                    finding_id,
+                    campaign_id,
+                    source_id,
+                    family_id,
+                    "chunk-1",
+                    f"{generation_contract.SCOPE_ROLE_FINDING_POLICY_VERSION}:finding-"
+                    f"{finding_index}",
+                    canonical_json({"source_span_id": span_id}),
+                    "frozen",
+                    now(),
+                ),
+            )
+
+    paths = streaming_module._generation_paths(
+        database,
+        campaign_id=campaign_id,
+        source_id=source_id,
+        family_id=family_id,
+    )
+
+    assert paths[(2, 0)]["attempt"]["parent_attempt_id"] == paths[(1, 0)][
+        "attempt"
+    ]["attempt_id"]
+
+    namespace = tmp_path / "namespace"
+    namespace.mkdir()
+    manifest = namespace / "run-manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    progress = _Progress(
+        namespace / "progress.json",
+        run_id=campaign_id,
+        invocation_run_id="saved-transition-offline",
+        run_manifest_file=manifest,
+        counts={},
+    )
+
+    attempted: list[dict] = []
+
+    def stop_before_provider_call(*args, **kwargs):
+        attempted.append(kwargs["attempt"])
+        raise RuntimeError("offline provider boundary")
+
+    monkeypatch.setattr(
+        streaming_module, "_generate_candidate_attempt", stop_before_provider_call
+    )
+
+    with pytest.raises(RuntimeError, match="offline provider boundary"):
+        _progress_generation(
+            database,
+            namespace,
+            progress,
+            campaign_id=campaign_id,
+            candidate_key="10.1007/s00382-018-4279-z",
+            source_id=source_id,
+            family_id=family_id,
+            selected={},
+            title="Summers with low Arctic sea ice",
+            author=object(),
+            verifier=object(),
+        )
+
+    assert attempted == [paths[(1, 0)]["attempt"]]
+
+
+def test_generation_path_restore_error_stops_running_progress(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = _database(tmp_path)
+    namespace = tmp_path / "namespace"
+    namespace.mkdir()
+    manifest = namespace / "run-manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    progress_file = namespace / "progress.json"
+    progress = _Progress(
+        progress_file,
+        run_id="campaign",
+        invocation_run_id="invocation",
+        run_manifest_file=manifest,
+        counts={},
+    )
+    progress.write("running", "eligibility", "Streaming pipeline started.")
+
+    def fail_to_restore_paths(*args, **kwargs):
+        raise ValueError("the generation attempt parent is missing")
+
+    monkeypatch.setattr(
+        streaming_module, "_generation_paths", fail_to_restore_paths
+    )
+
+    with pytest.raises(ValueError, match="generation attempt parent is missing"):
+        _progress_generation(
+            database,
+            namespace,
+            progress,
+            campaign_id="campaign",
+            candidate_key="candidate-key",
+            source_id="source",
+            family_id="family",
+            selected={},
+            title="Fixture",
+            author=object(),
+            verifier=object(),
+        )
+
+    persisted = json.loads(progress_file.read_text(encoding="utf-8"))
+    assert persisted["state"] == "error"
+    assert persisted["current_stage"] == "generation"
+    assert persisted["recent_papers"][-1]["final_state"] == "error"
 
 
 def test_malformed_alternative_state_becomes_a_paper_rejection(

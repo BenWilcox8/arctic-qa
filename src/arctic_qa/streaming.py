@@ -616,12 +616,16 @@ def _progress_generation(
     verifier: Provider,
     pending_handler: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    paths = _generation_paths(
-        db,
-        campaign_id=campaign_id,
-        source_id=source_id,
-        family_id=family_id,
-    )
+    try:
+        paths = _generation_paths(
+            db,
+            campaign_id=campaign_id,
+            source_id=source_id,
+            family_id=family_id,
+        )
+    except Exception as error:
+        progress.error(source_id, title, "generation", error)
+        raise
     resumed = bool(paths)
     generation_attempt_supported = _supports_generation_attempt()
 
@@ -1178,7 +1182,8 @@ def _generation_paths(
     finding_policy_prefix = generation_contract.SCOPE_ROLE_FINDING_POLICY_VERSION
     for row in db.rows(
         """SELECT finding_id,selection_policy_version,answer_json FROM findings
-        WHERE run_id=? AND paper_family_id=? AND source_id=? ORDER BY finding_id""",
+        WHERE run_id=? AND paper_family_id=? AND source_id=?
+        ORDER BY selection_policy_version,finding_id""",
         (campaign_id, family_id, source_id),
     ):
         policy = row["selection_policy_version"]
