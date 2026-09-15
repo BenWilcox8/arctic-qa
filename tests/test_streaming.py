@@ -212,7 +212,7 @@ def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
     assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v22"
     assert (
         generation_module.NUMERIC_RULE_CONTRACT_VERSION
-        == "numeric-rule-source-support-v2"
+        == "numeric-rule-source-support-v3"
     )
     assert (
         generation_module.SCOPE_CONTRACT_VERSION == "selected-evidence-literal-scope-v4"
@@ -239,7 +239,13 @@ def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
     assert "selected source span" in properties["canonical_value"]["description"]
     assert "selected source span" in properties["tolerance"]["description"]
     assert "Exact source text" in properties["tolerance_basis"]["description"]
-    assert "Do not invent" in properties["rounding_rule"]["description"]
+    assert "Do not invent another wording" in properties["rounding_rule"]["description"]
+    # One vocabulary: the strings the rule enforces are the strings the schema
+    # and the prompt state.
+    assert "same unit as the unit field" in properties["tolerance_basis"]["description"]
+    assert "decimal increment" in properties["reported_precision"]["description"]
+    assert "'<N> decimal places'" in properties["rounding_rule"]["description"]
+    assert "'direct source literal'" in properties["conversion_rule"]["description"]
 
 
 def test_generation_prompt_requires_atomic_answers_and_aligned_questions() -> None:
@@ -432,6 +438,9 @@ def test_position_1043_counterfactual_keeps_scope_rejection() -> None:
     verification = {
         "source_entailment_model_verified": True,
         "relation_scope_match": True,
+        "scope_value_contradicted_by_source": False,
+        "contradicted_scope_field": "",
+        "scope_representation_note": "",
         "ambiguity_resolved": True,
         "alternative_answer_search_passed": True,
         "question_context_required": False,

@@ -14,6 +14,7 @@ REPO = Path(__file__).resolve().parents[1]
 FIXTURES = REPO / "fixtures"
 sys.path.insert(0, str(REPO / "src"))
 
+from arctic_qa import validation as validation_module  # noqa: E402
 from arctic_qa.util import canonical_json, sha256_bytes, stable_id  # noqa: E402
 
 
@@ -515,8 +516,11 @@ def test_validation_requires_positive_source_entailment(tmp_path: Path) -> None:
 def test_true_distractors_and_equivalent_units_are_not_false(tmp_path: Path) -> None:
     smoke(tmp_path)
     item = candidate(tmp_path)
-    item["distractors"][0]["text"] = "2 m"
-    item["distractors"][0]["numeric"] = {"canonical_value": "200", "unit": "cm"}
+    # The metadata must describe the option's own display, so the equivalent
+    # unit is displayed too. A "2 m" display with "200 cm" metadata is now a
+    # display mismatch, which the case below covers.
+    item["distractors"][0]["text"] = "0.002 km"
+    item["distractors"][0]["numeric"] = {"canonical_value": "0.002", "unit": "km"}
     item["option_verdicts"][1]["question_admits_option_as_correct"] = True
     sync_option_receipt(tmp_path, item, 1)
     item["distractors"][2]["text"] = "2.0 m"
@@ -527,6 +531,12 @@ def test_true_distractors_and_equivalent_units_are_not_false(tmp_path: Path) -> 
     assert result["labels"]["mcq_eligible"] is False
     reasons = [reason for row in result["distractors"] for reason in row["reasons"]]
     assert "distractor_is_equivalent_numeric_answer" in reasons
+    assert (
+        validation_module._numeric_display_issue(
+            "2 m", {"canonical_value": "200", "unit": "cm"}
+        )
+        == "numeric_display_ambiguous"
+    )
     assert "option_correct_under_question_interpretation" in reasons
     assert "distractor_matches_answer" in reasons
     assert "forbidden_meta_option" in reasons
@@ -1343,7 +1353,7 @@ def test_generation_runs_qa_gates_before_exact_option_verification(
     assert roles[6:] == ["option_verifier"] * 4
     assert item["schema_version"] == "2.7.0"
     assert item["standalone_verification"] == {
-        "contract_version": "source-blind-scientific-referent-v2",
+        "contract_version": "source-blind-scientific-referent-v3",
         "pass": True,
         "answer_leakage_absent": True,
         "unresolved_phrases": [],
@@ -1434,7 +1444,7 @@ def test_controller_bound_standalone_version_preserves_receipt_and_exports(
 
     assert json.loads(raw).get("contract_version") == reported_version
     assert generated["standalone_verification"]["contract_version"] == (
-        "source-blind-scientific-referent-v2"
+        "source-blind-scientific-referent-v3"
     )
     assert validation["final_label"] == "machine_accepted_unverified"
     assert exported["short_answer_count"] == 1
@@ -1661,8 +1671,10 @@ def test_generation_binds_a_direct_value_to_verifier_provenance(
         "tolerance": "0",
         "tolerance_basis": "2.0 m",
         "reported_precision": "0.1",
-        "rounding_rule": "direct reporting without additional rounding",
-        "conversion_rule": "direct source reporting with no conversion",
+        # numeric-rule-source-support-v3 states one vocabulary for every
+        # scalar rule, including a directly published exact scalar.
+        "rounding_rule": "none",
+        "conversion_rule": "direct source literal",
     }
     author = tmp_path / "direct-value-author.jsonl"
     author.write_text(
@@ -1797,6 +1809,10 @@ def test_validation_refuses_a_v14_candidate_that_never_ran_the_standalone_gate(
     item["schema_version"] = "2.0.0"
     item["provenance"]["prompt_version"] = "arctic-qa-generation-v14"
     item["provenance"]["scope_contract_version"] = "selected-evidence-literal-scope-v2"
+    item["provenance"]["numeric_rule_contract_version"] = (
+        validation_module.PREDECESSOR_NUMERIC_RULE_CONTRACT_VERSION
+    )
+    item["provenance"].pop("option_display_contract_version", None)
     item["provenance"].pop("evidence_combination_contract_version")
     path = write_candidate(tmp_path, item, "legacy-evidence-candidate.json")
 
@@ -1814,6 +1830,10 @@ def test_validation_refuses_a_v15_candidate_that_never_ran_the_standalone_gate(
     item["schema_version"] = "2.1.0"
     item["provenance"]["prompt_version"] = "arctic-qa-generation-v15"
     item["provenance"]["scope_contract_version"] = "selected-evidence-literal-scope-v3"
+    item["provenance"]["numeric_rule_contract_version"] = (
+        validation_module.PREDECESSOR_NUMERIC_RULE_CONTRACT_VERSION
+    )
+    item["provenance"].pop("option_display_contract_version", None)
     item["provenance"].pop("scope_role_semantics_version")
     item["provenance"].pop("scope_role_binding_contract_version")
     path = write_candidate(tmp_path, item, "legacy-v15-candidate.json")
@@ -1853,7 +1873,7 @@ def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> No
     assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v22"
     assert (
         generated["provenance"]["numeric_rule_contract_version"]
-        == "numeric-rule-source-support-v2"
+        == "numeric-rule-source-support-v3"
     )
     assert (
         generated["provenance"]["scope_contract_version"]
@@ -1861,6 +1881,9 @@ def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> No
     )
     assert generated["distractors"] == []
     assert generated["qa_gate_reasons"] == [
+        # The injected alternative is a real competing answer, so the wired
+        # evidence-bearing check reports it alongside the scope defect.
+        "reconstruction_alternative_answer_present",
         "reconstruction_scope_not_source_bound",
     ]
     candidate_path = tmp_path / "qa-gate-failed-candidate.json"
@@ -2016,7 +2039,10 @@ def test_second_source_version_cannot_select_another_family_finding(
     ("mutation", "reason"),
     [
         ("fabricated_reconstruction_quote", "reconstruction_evidence_not_located"),
-        ("stated_alternative", "alternative_answer_unresolved"),
+        # r15 audit RECON-2: the evidence-bearing competing-alternatives check
+        # is wired as a hard reject, so it decides before the bare boolean.
+        ("stated_alternative", "reconstruction_alternative_answer_present"),
+        ("unresolved_alternative_search", "alternative_answer_unresolved"),
         ("causal_question", "causal_overclaim"),
     ],
 )
@@ -2029,6 +2055,8 @@ def test_reconstruction_and_independent_claim_type_are_enforced(
         item["reconstruction"]["evidence_quote"] = "A fabricated quotation."
     elif mutation == "stated_alternative":
         item["reconstruction"]["alternatives"] = ["another supported answer"]
+        item["answer_verification"]["alternative_answer_search_passed"] = False
+    elif mutation == "unresolved_alternative_search":
         item["answer_verification"]["alternative_answer_search_passed"] = False
     else:
         item["answer_verification"]["question_claim_type"] = "causal"
@@ -2112,7 +2140,13 @@ def test_negated_or_compound_numeric_options_fail_closed(
         value for value in result["distractors"] if value["text"] == displayed_text
     )
     assert row["accepted"] is False
-    assert "numeric_display_ambiguous" in row["reasons"]
+    # The display rule now runs on every option, so a negated or compound
+    # option carrying numeric metadata reports the same honest code as an
+    # atomic one instead of a numeric-parsing code.
+    assert row["reasons"][0] in {
+        "displayed_assertion_negated",
+        "displayed_assertion_compound",
+    }
     assert result["labels"]["mcq_eligible"] is False
 
 

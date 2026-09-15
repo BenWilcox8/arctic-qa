@@ -202,12 +202,11 @@ def _retained_direct_value_record() -> tuple[dict[str, object], dict[str, object
         ),
         "numeric_rule": {
             "canonical_value": "84.8",
-            "conversion_rule": "direct source reporting when no conversion occurs.",
+            # numeric-rule-source-support-v3 states one vocabulary. The free
+            # prose the predecessor accepted here is no longer a valid rule.
+            "conversion_rule": "direct source literal",
             "reported_precision": "0.1",
-            "rounding_rule": (
-                "Direct reporting from the source span without additional rounding "
-                "applied."
-            ),
+            "rounding_rule": "1 decimal place",
             "tolerance": "0",
             "tolerance_basis": "84.8%",
             "unit": "%",
@@ -589,6 +588,14 @@ def test_bound_direct_value_contract_accepts_the_retained_source_value() -> None
     provenance["direct_value_request_id"] = "6lemavaDKp7bz7IP_--l8AY"
 
     assert validation.numeric_rule_is_source_bound(answer, provenance)
+    free_prose = {
+        **answer,
+        "numeric_rule": {
+            **answer["numeric_rule"],  # type: ignore[dict-item]
+            "rounding_rule": "direct reporting without additional rounding",
+        },
+    }
+    assert not validation.numeric_rule_is_source_bound(free_prose, provenance)
     assert "direct_value_contract_version" not in numeric_rule
     assert "direct_value_request_id" not in numeric_rule
 

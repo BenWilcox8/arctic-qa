@@ -1,0 +1,496 @@
+{
+ "note": "Frozen option payloads named by the r15 audit. Every payload is recorded exactly as the pipeline stored it. Tests assert the option display contract against these payloads.",
+ "option_payloads": {
+  "aqa-247e683b6c742bae46fa": {
+   "answer": {
+    "claim_type": "observation",
+    "deterministic_rule": {
+     "kind": "closed_set",
+     "source_values": [
+      "Proteobacteria",
+      "Bacteroidetes",
+      "Epsilonbacteraeota"
+     ]
+    },
+    "evidence_quote": "Kongsfjorden using the high throughput sequencing analysis. Results revealed that bacterial community structure of Kongsfjorden\nsediments were dominated by phylum Proteobacteria followed by Bacteroidetes and Epsilonbacteraeota. While α- and γ- Proteobacterial\nclass were dominant in surface sediments; δ- Proteobacteria were found to be predominant in subsurface sediments. The bacterial\ncommunity structure in the surface and subsurface sediments showed significant variations (p ≤ 0.05). Total organic carbon could be one\n",
+    "numeric_rule": null,
+    "text": "phylum Proteobacteria followed by Bacteroidetes and Epsilonbacteraeota",
+    "variants": [
+     "Proteobacteria followed by Bacteroidetes and Epsilonbacteraeota",
+     "dominated by phylum Proteobacteria followed by Bacteroidetes and Epsilonbacteraeota"
+    ]
+   },
+   "audit_note": "DW-2 member parser: 'followed by' made a three-member answer parse as two members.",
+   "distractors": [
+    {
+     "deterministic": {
+      "candidate_relation": "order_permutation",
+      "candidate_value": "Proteobacteria followed by Epsilonbacteraeota and Bacteroidetes",
+      "kind": "closed_set"
+     },
+     "numeric": null,
+     "text": "Proteobacteria followed by Epsilonbacteraeota and Bacteroidetes",
+     "type": "categorical"
+    },
+    {
+     "deterministic": {
+      "candidate_relation": "class_substitution",
+      "candidate_value": "Proteobacteria followed by Bacteroidetes and Actinobacteria",
+      "kind": "closed_set"
+     },
+     "numeric": null,
+     "text": "Proteobacteria followed by Bacteroidetes and Actinobacteria",
+     "type": "categorical"
+    },
+    {
+     "deterministic": {
+      "candidate_relation": "class_substitution",
+      "candidate_value": "Proteobacteria followed by Firmicutes and Bacteroidetes",
+      "kind": "closed_set"
+     },
+     "numeric": null,
+     "text": "Proteobacteria followed by Firmicutes and Bacteroidetes",
+     "type": "categorical"
+    },
+    {
+     "deterministic": {
+      "candidate_relation": "class_substitution",
+      "candidate_value": "Proteobacteria followed by Planctomycetes and Chloroflexi",
+      "kind": "closed_set"
+     },
+     "numeric": null,
+     "text": "Proteobacteria followed by Planctomycetes and Chloroflexi",
+     "type": "categorical"
+    }
+   ],
+   "family_id": "family-df2e6f6707d9844328f8",
+   "question": "According to high throughput sequencing analysis of Kongsfjorden sediments, which bacterial phyla dominated the community structure, in order of prevalence starting with phylum Proteobacteria?"
+  },
+  "aqa-2af2b346d30478f68400": {
+   "answer": {
+    "claim_type": "observation",
+    "deterministic_rule": {
+     "kind": "directional_relation",
+     "source_value": "consistently stronger and more persistent"
+    },
+    "evidence_quote": "the Kara Sea into the eastern Arctic Ocean. However, differences between years with low and high September SIC appear\nnot to be due to different spring circulation patterns; instead it is the persistence and intensity of processes associated with\nthese patterns that distinguish the two groups of anomalous years: Years with low September SIC feature episodes that are\nconsistently stronger and more persistent than years with high SIC.\n",
+    "numeric_rule": null,
+    "text": "consistently stronger and more persistent",
+    "variants": [
+     "stronger and more persistent"
+    ]
+   },
+   "audit_note": "DW-1 structural parallelism: a two-part directional answer lost every two-part option to displayed_assertion_compound.",
+   "distractors": [
+    {
+     "deterministic": {
+      "candidate_relation": "consistently weaker and less persistent",
+      "candidate_value": "consistently weaker and less persistent",
+      "kind": "directional_relation"
+     },
+     "numeric": null,
+     "text": "consistently weaker and less persistent",
+     "type": "directional_opposite"
+    },
+    {
+     "deterministic": {
+      "candidate_relation": "consistently stronger but less persistent",
+      "candidate_value": "consistently stronger but less persistent",
+      "kind": "directional_relation"
+     },
+     "numeric": null,
+     "text": "consistently stronger but less persistent",
+     "type": "partial_opposite"
+    },
+    {
+     "deterministic": {
+      "candidate_relation": "consistently weaker but more persistent",
+      "candidate_value": "consistently weaker but more persistent",
+      "kind": "directional_relation"
+     },
+     "numeric": null,
+     "text": "consistently weaker but more persistent",
+     "type": "partial_opposite"
+    },
+    {
+     "deterministic": {
+      "candidate_relation": "equivalent in both strength and persistence",
+      "candidate_value": "equivalent in both strength and persistence",
+      "kind": "directional_relation"
+     },
+     "numeric": null,
+     "text": "equivalent in both strength and persistence",
+     "type": "null_difference"
+    }
+   ],
+   "family_id": "family-17e0f0a4909fdaed6d59",
+   "question": "Compared to years with high SIC, how do the episodes associated with spring atmospheric circulation patterns in Years with low September SIC differ in strength and persistence?"
+  },
+  "aqa-3e74c2c169f63d6686e4": {
+   "answer": {
+    "claim_type": "observation",
+    "deterministic_rule": {
+     "kind": "closed_set",
+     "source_values": [
+      "four sites"
+     ]
+    },
+    "evidence_quote": "     Data are means ⫾ standard deviations. The data represent values measured at four sites in the Beaufort Sea and the Chukchi Sea in summer 2007 and at three\nsites in the Chukchi Sea in winter 2008. psu, practical salinity units.\n",
+    "numeric_rule": {
+     "canonical_value": "4",
+     "conversion_rule": "direct count of sites reported",
+     "reported_precision": "exact integer",
+     "rounding_rule": "none",
+     "tolerance": "0",
+     "tolerance_basis": "count",
+     "unit": "sites"
+    },
+    "text": "four sites",
+    "variants": [
+     "4 sites",
+     "four"
+    ]
+   },
+   "audit_note": "DW-1/DW-2/B: a single-member closed set hard-failed every option, and word integers failed the numeric display rule.",
+   "distractors": [
+    {
+     "deterministic": {
+      "candidate_relation": "contradicts",
+      "candidate_value": "3 sites",
+      "kind": "closed_set"
+     },
+     "numeric": {
+      "canonical_value": "3",
+      "unit": "sites"
+     },
+     "text": "three sites",
+     "type": "numeric"
+    },
+    {
+     "deterministic": {
+      "candidate_relation": "contradicts",
+      "candidate_value": "7 sites",
+      "kind": "closed_set"
+     },
+     "numeric": {
+      "canonical_value": "7",
+      "unit": "sites"
+     },
+     "text": "seven sites",
+     "type": "numeric"
+    },
+    {
+     "deterministic": {
+      "candidate_relation": "contradicts",
+      "candidate_value": "2 sites",
+      "kind": "closed_set"
+     },
+     "numeric": {
+      "canonical_value": "2",
+      "unit": "sites"
+     },
+     "text": "two sites",
+     "type": "numeric"
+    },
+    {
+     "deterministic": {
+      "candidate_relation": "contradicts",
+      "candidate_value": "5 sites",
+      "kind": "closed_set"
+     },
+     "numeric": {
+      "canonical_value": "5",
+      "unit": "sites"
+     },
+     "text": "five sites",
+     "type": "numeric"
+    }
+   ],
+   "family_id": "family-b3593e6bffdf5fff1d7c",
+   "question": "At how many sites were values measured in the Beaufort Sea and the Chukchi Sea in summer 2007?"
+  },
+  "aqa-a3843bad70b6db3f6bf0": {
+   "answer": {
+    "claim_type": "observation",
+    "deterministic_rule": {
+     "kind": "closed_set",
+     "source_values": [
+      "glycans",
+      "glycosaminoglycans",
+      "polycyclic aromatic hydrocarbons"
+     ]
+    },
+    "evidence_quote": "of the major parameters controlling the bacterial diversity in the surface and subsurface sediments. Functional prediction analysis\nindicated that the bacterial community could be involved in the degradation of complex organic compounds such as glycans,\nglycosaminoglycans, polycyclic aromatic hydrocarbons and also in the biosynthesis of secondary metabolites.\n",
+    "numeric_rule": null,
+    "text": "glycans, glycosaminoglycans, polycyclic aromatic hydrocarbons",
+    "variants": [
+     "glycans, glycosaminoglycans, and polycyclic aromatic hydrocarbons"
+    ]
+   },
+   "audit_note": "DW-2 option kind mismatch: categorical options against a closed_set answer stay compound-rejected.",
+   "distractors": [
+    {
+     "deterministic": {
+      "candidate_relation": "contradiction",
+      "candidate_value": "biosynthesis of secondary metabolites",
+      "kind": "categorical"
+     },
+     "numeric": null,
+     "text": "biosynthesis of secondary metabolites",
+     "type": "categorical"
+    },
+    {
+     "deterministic": {
+      "candidate_relation": "contradiction",
+      "candidate_value": "total organic carbon",
+      "kind": "categorical"
+     },
+     "numeric": null,
+     "text": "total organic carbon",
+     "type": "categorical"
+    },
+    {
+     "deterministic": {
+      "candidate_relation": "contradiction",
+      "candidate_value": "Proteobacteria, Bacteroidetes, and Epsilonbacteraeota",
+      "kind": "categorical"
+     },
+     "numeric": null,
+     "text": "Proteobacteria, Bacteroidetes, and Epsilonbacteraeota",
+     "type": "categorical"
+    },
+    {
+     "deterministic": {
+      "candidate_relation": "contradiction",
+      "candidate_value": "lipids, peptides, and humic substances",
+      "kind": "categorical"
+     },
+     "numeric": null,
+     "text": "lipids, peptides, and humic substances",
+     "type": "categorical"
+    }
+   ],
+   "family_id": "family-df2e6f6707d9844328f8",
+   "question": "In the analysis of bacterial communities in Kongsfjorden sediments, what specific examples were given when functional prediction analysis indicated that the bacterial community could be involved in the degradation of complex organic compounds?"
+  },
+  "aqa-a4a455748ac2480b2650": {
+   "answer": {
+    "claim_type": "observation",
+    "deterministic_rule": {
+     "kind": "closed_scope",
+     "source_value": "5.5 to 6.9 nM"
+    },
+    "evidence_quote": " Acetone concentrations in selected surface seawater are reported in Table 2, and range from 5.5 to 6.9 nM. These\n are the first acetone concentrations reported for far North Atlantic and Arctic waters (Fig. 7). They are lower than\n",
+    "numeric_rule": null,
+    "text": "5.5 to 6.9 nM",
+    "variants": [
+     "from 5.5 to 6.9 nM"
+    ]
+   },
+   "audit_note": "B: a range in canonical_value is not a scalar.",
+   "distractors": [
+    {
+     "deterministic": {
+      "candidate_relation": "contradicts_range",
+      "candidate_value": "3.5 to 4.9 nM",
+      "kind": "range_shift"
+     },
+     "numeric": {
+      "canonical_value": "3.5 to 4.9",
+      "unit": "nM"
+     },
+     "text": "3.5 to 4.9 nM",
+     "type": "numeric_range"
+    },
+    {
+     "deterministic": {
+      "candidate_relation": "contradicts_range",
+      "candidate_value": "7.5 to 8.9 nM",
+      "kind": "range_shift"
+     },
+     "numeric": {
+      "canonical_value": "7.5 to 8.9",
+      "unit": "nM"
+     },
+     "text": "7.5 to 8.9 nM",
+     "type": "numeric_range"
+    },
+    {
+     "deterministic": {
+      "candidate_relation": "contradicts_range",
+      "candidate_value": "5.5 to 6.9 μM",
+      "kind": "unit_substitution"
+     },
+     "numeric": {
+      "canonical_value": "5.5 to 6.9",
+      "unit": "μM"
+     },
+     "text": "5.5 to 6.9 μM",
+     "type": "numeric_range"
+    },
+    {
+     "deterministic": {
+      "candidate_relation": "contradicts_range",
+      "candidate_value": "1.5 to 2.9 nM",
+      "kind": "range_shift"
+     },
+     "numeric": {
+      "canonical_value": "1.5 to 2.9",
+      "unit": "nM"
+     },
+     "text": "1.5 to 2.9 nM",
+     "type": "numeric_range"
+    }
+   ],
+   "family_id": "family-1ac103b51a854ee56d4a",
+   "question": "What range is indicated in the text regarding acetone: \"Acetone concentrations in selected surface seawater are reported in Table 2, and range from 5.5 to 6.9 nM.\", specifically for selected surface seawater?"
+  },
+  "aqa-a8ac70980059cdfd7001": {
+   "answer": {
+    "claim_type": "observation",
+    "deterministic_rule": {
+     "kind": "closed_scope",
+     "source_value": "−1.3 (−46 %)"
+    },
+    "evidence_quote": "  Year           Arctic        40–50° N         30–40° N               SH            MLO      Fossil Emissions   ENSO Condition\n  2011   −1.3 (−46 %)     −0.6 (−27 %)                 –                –     −0.2 (−9 %)             +3.1 %     strong La Niña\n",
+    "numeric_rule": {
+     "canonical_value": "-46",
+     "conversion_rule": "direct source reporting with no conversion",
+     "reported_precision": "1",
+     "rounding_rule": "direct reporting without additional rounding",
+     "tolerance": "0",
+     "tolerance_basis": "-46 %",
+     "unit": "%"
+    },
+    "text": "−1.3 (−46 %)",
+    "variants": [
+     "-1.3 (-46 %)",
+     "-46 %",
+     "−46 %"
+    ]
+   },
+   "audit_note": "B: three of four options were removed by a U+2212 minus sign.",
+   "distractors": [
+    {
+     "deterministic": {
+      "candidate_relation": "exact_match",
+      "candidate_value": "−1.3 (−45 %)",
+      "kind": "closed_scope"
+     },
+     "numeric": {
+      "canonical_value": "-45",
+      "unit": "%"
+     },
+     "text": "−1.3 (−45 %)",
+     "type": "numeric"
+    },
+    {
+     "deterministic": {
+      "candidate_relation": "exact_match",
+      "candidate_value": "−0.6 (−27 %)",
+      "kind": "closed_scope"
+     },
+     "numeric": {
+      "canonical_value": "-27",
+      "unit": "%"
+     },
+     "text": "−0.6 (−27 %)",
+     "type": "numeric"
+    },
+    {
+     "deterministic": {
+      "candidate_relation": "exact_match",
+      "candidate_value": "+0.9 (+60 %)",
+      "kind": "closed_scope"
+     },
+     "numeric": {
+      "canonical_value": "60",
+      "unit": "%"
+     },
+     "text": "+0.9 (+60 %)",
+     "type": "numeric"
+    },
+    {
+     "deterministic": {
+      "candidate_relation": "exact_match",
+      "candidate_value": "−0.2 (−9 %)",
+      "kind": "closed_scope"
+     },
+     "numeric": {
+      "canonical_value": "-9",
+      "unit": "%"
+     },
+     "text": "−0.2 (−9 %)",
+     "type": "numeric"
+    }
+   ],
+   "family_id": "family-4e86162fd6a677f7c3f7",
+   "question": "In the table reporting regional atmospheric anomalies across different latitudes and years alongside Fossil Emissions and ENSO Condition, what value (including the absolute value and percentage in parentheses) is listed for the Arctic in the Year 2011?"
+  },
+  "aqa-aa01612494c63919f347": {
+   "answer": {
+    "claim_type": "observation",
+    "deterministic_rule": {
+     "kind": "closed_set",
+     "source_values": [
+      "denitriﬁers",
+      "sulfate reducers",
+      "methanogenic Archaea"
+     ]
+    },
+    "evidence_quote": "    annually. Using high throughput small subunit ribosomal RNA sequencing, we found more taxonomic richness in Bacteria, Archaea\n    and microbial eukaryotes in the perennially unfrozen bioﬁlms compared to moat communities. The deep communities contained\n    both aerobic and anaerobic taxa including denitriﬁers, sulfate reducers, and methanogenic Archaea. The water overlying the deep\n    bioﬁlms was well oxygenated in mid-summer but almost devoid of oxygen in spring, indicating anoxia during winter. Seasonally\n",
+    "numeric_rule": null,
+    "text": "denitriﬁers, sulfate reducers, and methanogenic Archaea",
+    "variants": [
+     "denitrifiers, sulfate reducers, and methanogenic Archaea"
+    ]
+   },
+   "audit_note": "D5 'including' enumeration: the completeness contract still refuses it, by design.",
+   "distractors": [
+    {
+     "deterministic": {
+      "candidate_relation": "contradicts",
+      "candidate_value": "iron oxidizers, nitrifiers, and aerobic methanotrophs",
+      "kind": "closed_set"
+     },
+     "numeric": null,
+     "text": "iron oxidizers, nitrifiers, and aerobic methanotrophs",
+     "type": "functional_group_substitution"
+    },
+    {
+     "deterministic": {
+      "candidate_relation": "contradicts",
+      "candidate_value": "denitrifiers and sulfate reducers only",
+      "kind": "closed_set"
+     },
+     "numeric": null,
+     "text": "denitrifiers and sulfate reducers only",
+     "type": "partial_list"
+    },
+    {
+     "deterministic": {
+      "candidate_relation": "contradicts",
+      "candidate_value": "methanotrophic Archaea, anammox bacteria, and sulfur oxidizers",
+      "kind": "closed_set"
+     },
+     "numeric": null,
+     "text": "methanotrophic Archaea, anammox bacteria, and sulfur oxidizers",
+     "type": "functional_group_substitution"
+    },
+    {
+     "deterministic": {
+      "candidate_relation": "contradicts",
+      "candidate_value": "fermentative Clostridia, acetogens, and sulfate oxidizers",
+      "kind": "closed_set"
+     },
+     "numeric": null,
+     "text": "fermentative Clostridia, acetogens, and sulfate oxidizers",
+     "type": "functional_group_substitution"
+    }
+   ],
+   "family_id": "family-e1db30b5126fd3244fa4",
+   "question": "What anaerobic taxa were specifically identified as being contained within the deep communities of the perennially unfrozen biofilms?"
+  }
+ },
+ "source": "data/arctic-r15-holistic-audit-r1 evidence bundles"
+}

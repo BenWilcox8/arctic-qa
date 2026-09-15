@@ -291,6 +291,9 @@ def test_answer_verifier_schema_rejects_omitted_question_verdicts() -> None:
     response = {
         "source_entailment_model_verified": True,
         "relation_scope_match": True,
+        "scope_value_contradicted_by_source": False,
+        "contradicted_scope_field": "",
+        "scope_representation_note": "",
         "ambiguity_resolved": True,
         "alternative_answer_search_passed": True,
         "question_context_required": False,
@@ -356,13 +359,20 @@ def test_standalone_wording_instructions_cover_scope_and_otu_context() -> None:
 def test_standalone_contract_requires_referent_not_study_identity() -> None:
     system = generation.STANDALONE_SYSTEM
 
-    assert "self-contained scientific referent" in system
-    assert "Do not require a study, publication" in system
+    assert "interpretable without the source paper" in system
+    assert "NECESSITY TEST" in system
+    assert "These tasks pass." in system
+    assert "These tasks fail." in system
+    assert "choose the correct option from the displayed text alone" in system
+    assert (
+        "A named campaign, cruise, core, or project code does not resolve a referent"
+        in system
+    )
+    assert "study, publication, author, journal, dataset, or campaign identity is "
     assert "DOI, paper title" in system
-    assert "specific missing scientific detail" in system
-    assert "source-derived empirical fact is permitted" in system
+    assert "Do not treat an empirical observation as a universal claim" in system
     assert generation.STANDALONE_VERIFICATION_CONTRACT_VERSION == (
-        "source-blind-scientific-referent-v2"
+        "source-blind-scientific-referent-v3"
     )
     assert "study_local_referent" not in str(
         generation.ROLE_SCHEMAS["standalone_verifier"]

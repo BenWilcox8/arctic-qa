@@ -80,3 +80,33 @@ A separable Arctic component keeps its span restriction, and receives only the s
 
 The writer fills a `referent_slots` record with one entry for each of the ten referent slots.
 The record is a diagnostic. No gate reads it, and it never supplies a slot that the displayed task leaves unfixed.
+## Chapter 2 gate contracts
+
+The r15 holistic acceptance audit replaced four gate contracts.
+The version strings are `source-blind-scientific-referent-v3`, `question-verification-v2`, `numeric-rule-source-support-v3`, and `displayed-option-structure-v1`.
+Candidate provenance records all four.
+
+The source-blind gate applies an interpretability test, not an identification test.
+The judge states the task, names the answer type, and applies a necessity test to each missing detail.
+A missing detail is necessary only when two readers can defend different answers, or when the reader cannot tell what kind of fact the task asks for.
+The judge still reads only the question and the question context.
+A study, publication, author, journal, dataset, or campaign identity is never a necessary detail.
+A named campaign, cruise, core, or project code does not resolve a referent.
+
+A deterministic screen runs beside the judge.
+It rejects garbled benchmark text, a source pointer, a publication-relative period, and an acronym that the displayed text never expands.
+The file `fixtures/standalone-calibration-v1.jsonl` holds the labeled calibration set for this contract.
+Two human labelers must agree on each must-pass row before the set gates a production release.
+
+The numeric contract states one metadata vocabulary in the writer prompt and in the schema field descriptions.
+The `tolerance_basis` field carries the unit of the rule.
+The `reported_precision` field is the decimal increment of the literal, or exact span text.
+The `rounding_rule` field is `none` or `<N> decimal places`.
+The `conversion_rule` field is `direct source literal`.
+An exact integer count keeps its own separate vocabulary.
+
+The answer verifier reports four separate results.
+The field `relation_scope_match` carries relation and scope entailment only.
+The field `scope_value_contradicted_by_source` carries a contradicted scope value, with the field name in `contradicted_scope_field`.
+The field `scope_representation_note` records a wording or field-role difference and never changes a verdict.
+Referent resolution and answer leakage keep their own fields.
