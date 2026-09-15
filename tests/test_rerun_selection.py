@@ -201,11 +201,19 @@ def test_rerun_selection_puts_every_prior_paper_before_ranked_unseen(
         "all_prior_evaluated_included": True,
         "prior_set_precedes_unseen": True,
     }
-    assert manifest["accounting_before"]["unresolved_request_keys"] == ["request-three"]
-    assert manifest["prior_papers"][0]["prior_candidates"][0]["item_id"] == ("old-item")
-    assert manifest["prior_papers"][0]["new_attempt"]["state"] == ("selected_pending")
+    assert manifest["accounting_before"]["unresolved_request_keys"] == [
+        "request-three"
+    ]
+    assert manifest["prior_papers"][0]["prior_candidates"][0]["item_id"] == (
+        "old-item"
+    )
+    assert manifest["prior_papers"][0]["new_attempt"]["state"] == (
+        "selected_pending"
+    )
     access_dir = Path(first["access_run"]["access_run_dir"])
     access_manifest = json.loads(
         (access_dir / "run-manifest.json").read_text(encoding="utf-8")
     )
-    assert access_manifest["selection"][0]["paper_family_id"] == ("family-prior-one")
+    assert access_manifest["selection"][0]["paper_family_id"] == (
+        "family-prior-one"
+    )

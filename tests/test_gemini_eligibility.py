@@ -659,7 +659,9 @@ def test_config_requires_low_thinking_for_bounded_structured_output(
     config = _config(config_path)
     assert config["thinking_level"] == "low"
     assert config["config_id"] == "arctic-gemini-eligibility-r1-config-v5"
-    assert config["stage_models"]["answer_agreement"]["maximum_output_tokens"] == 128
+    assert config["stage_models"]["answer_agreement"][
+        "maximum_output_tokens"
+    ] == 128
     assert value["maximum_output_tokens"] == 8192
 
     legacy = json.loads(config_path.read_text())

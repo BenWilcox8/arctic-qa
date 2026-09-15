@@ -101,7 +101,9 @@ class EmptyMaxTokensThenSuccess(Http500ThenSuccess):
                 ],
                 "usageMetadata": {
                     "promptTokenCount": 171,
-                    "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 171}],
+                    "promptTokensDetails": [
+                        {"modality": "TEXT", "tokenCount": 171}
+                    ],
                     "serviceTier": "standard",
                     "totalTokenCount": 171,
                 },
@@ -315,14 +317,9 @@ def test_dead_owner_continuation_retains_reserve_releases_only_concurrency(
     with pytest.raises(ValueError, match="request key already exists"):
         execute(broker, paper="orphaned", run_id="run-old")
     broker.policy["away_session_total_ceiling_usd"] = request["reserved_usd"]
-    assert (
-        execute(broker, paper="budget-check", run_id="run-current")["state"]
-        == "not_submitted"
-    )
+    assert execute(broker, paper="budget-check", run_id="run-current")["state"] == "not_submitted"
     broker.policy["away_session_total_ceiling_usd"] = "25.00"
-    assert (
-        execute(broker, paper="unrelated", run_id="run-current")["state"] == "completed"
-    )
+    assert execute(broker, paper="unrelated", run_id="run-current")["state"] == "completed"
     assert transport.methods == [
         "countTokens",
         "generateContent",
@@ -356,9 +353,7 @@ def test_unknown_charge_continuation_retains_cap_and_never_replays(tmp_path: Pat
     assert near_cap["state"] == "not_submitted"
     assert "authorized away cap" in near_cap["reason"]
     broker.policy["away_session_total_ceiling_usd"] = "25.00"
-    assert (
-        execute(broker, paper="unrelated", run_id="run-current")["state"] == "completed"
-    )
+    assert execute(broker, paper="unrelated", run_id="run-current")["state"] == "completed"
     assert transport.methods == [
         "countTokens",
         "generateContent",
@@ -368,15 +363,10 @@ def test_unknown_charge_continuation_retains_cap_and_never_replays(tmp_path: Pat
     ]
     repeated = authorize(values, first)
     assert repeated["applied"] is False
-    assert (
-        repeated["continuation_receipt_sha256"] == result["continuation_receipt_sha256"]
-    )
-    assert (
-        json.loads(values["ledger"].read_text(encoding="utf-8"))[
-            "ambiguous_reserved_usd"
-        ]
-        == first["reserved_usd"]
-    )
+    assert repeated["continuation_receipt_sha256"] == result["continuation_receipt_sha256"]
+    assert json.loads(values["ledger"].read_text(encoding="utf-8"))["ambiguous_reserved_usd"] == first[
+        "reserved_usd"
+    ]
 
 
 def test_received_max_tokens_continuation_preserves_response_and_never_replays(
@@ -398,7 +388,10 @@ def test_received_max_tokens_continuation_preserves_response_and_never_replays(
     write_json(
         evidence,
         {
-            "schema": ("shared-paid-call-received-max-tokens-continuation-evidence-v1"),
+            "schema": (
+                "shared-paid-call-received-max-tokens-"
+                "continuation-evidence-v1"
+            ),
             "request_key": first["request_key"],
             "error_class": "received_max_tokens_usage_unknown",
             "finish_reason": "MAX_TOKENS",
@@ -428,11 +421,12 @@ def test_received_max_tokens_continuation_preserves_response_and_never_replays(
         first["family_id"]: first["request_key"]
     }
     with pytest.raises(ValueError, match="request key already exists"):
-        execute_answer_judge(broker, paper="affected-max-tokens", run_id="run-current")
-    assert (
-        execute(broker, paper="unrelated-max-tokens", run_id="run-current")["state"]
-        == "completed"
-    )
+        execute_answer_judge(
+            broker, paper="affected-max-tokens", run_id="run-current"
+        )
+    assert execute(
+        broker, paper="unrelated-max-tokens", run_id="run-current"
+    )["state"] == "completed"
     assert transport.generation_calls == 2
 
 
@@ -464,6 +458,4 @@ def test_integrity_failure_still_halts_after_continuation(tmp_path: Path):
     event_path.write_text(canonical_json(event), encoding="utf-8")
     with pytest.raises(ValueError, match="integrity"):
         values["broker"].status()
-    assert (
-        values["ledger"].parent / ".shared-ledger.json.integrity-halt.json"
-    ).is_file()
+    assert (values["ledger"].parent / ".shared-ledger.json.integrity-halt.json").is_file()
