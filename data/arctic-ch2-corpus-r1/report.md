@@ -12,6 +12,7 @@ The owned set is extraction, source pass, screening, prefilter, the eligibility 
 | --- | --- | --- |
 | `src/arctic_qa/cli.py` | Added the `chapter2-corpus` command, two `gemini-eligibility` actions, and `--prior-run-dir`. | A new owned module needs an entry point. No other command changed. |
 | `tests/test_project_progress_viewer.py` | Corrected two stale expectations. | The test was already red on the base commit. See "The red test on the base commit". |
+| `src/arctic_qa/corpus_viewer.py`, `src/arctic_qa/corpus_viewer.html` | Added `unresolved_rescreenable` to the accepted overlay states, the filter list, and the display order. | The viewer refuses an overlay row whose status it does not know, so the new non-terminal state would have stopped the read-only monitor. Three lines, no logic changed. |
 
 `generation.py`, `validation.py` and `streaming.py` are unchanged.
 The chapter 2 access run directory uses the existing `article-access-manifest-v1` and `article-access-item-v1` schemas, so `--access-run-dir` needed no code change at all.
@@ -32,6 +33,13 @@ The chapter 2 access run directory uses the existing `article-access-manifest-v1
 | 4.7 | The separable-component rule was not stated for results on both sides of the boundary. | Prompt v7 states it. | `test_v7_states_the_separable_component_rule` |
 | E5 | A scope window that ended mid-clause truncated the writer's source and then rejected the item for the truncation. | Prompt v7 asks for sentence-complete result spans. Chunks start and end on a sentence. | `test_v7_asks_for_sentence_complete_result_spans`, `test_chunks_start_and_end_on_a_sentence` |
 
+Two defects of the new code were found while building it and are pinned by their own tests.
+
+| Defect | Found by | Change | Regression test |
+| --- | --- | --- | --- |
+| A heading block became the name of its section and left the document. A paper with many short lines lost up to a quarter of its words, and a section that held only a heading disappeared. | Comparing word counts against the chapter 1 extraction: median retention 0.943, with 41 of 250 papers below 0.8. | The heading block opens its section and stays among its blocks. Median retention is now 0.982, with 1 of 100 papers below 0.8. | `test_no_block_is_lost_between_the_pages_and_the_sections` |
+| Reading order was decided on poppler's block grouping, and poppler merges two narrow columns into one block. | The two-column fixture. | The recursive XY cut runs over the lines of a page, and it looks for a column gutter before a horizontal band. | `test_two_column_page_is_read_one_column_at_a_time` |
+
 ## Files changed
 
 New:
@@ -39,7 +47,7 @@ New:
 - `src/arctic_qa/pdf_layout.py` - reading-order PDF extraction over poppler word geometry.
 - `src/arctic_qa/text_structure.py` - sections, headings, running-head removal, the sentence splitter.
 - `src/arctic_qa/chapter2_corpus.py` - the chapter 2 root, the re-extraction pass, and the re-freeze.
-- `src/arctic_qa/extraction_quality.py` - the four extraction-defect measures and the comparison report.
+- `src/arctic_qa/extraction_quality.py` - the five extraction measures and the comparison report.
 - `config/gemini-eligibility-prompt-v7.txt`
 - `config/gemini-eligibility-geography-rescreen-v1.txt`
 - `docs/CHAPTER2_CORPUS.md`
@@ -49,11 +57,13 @@ Changed:
 
 - `src/arctic_qa/extraction.py` - the new PDF path, section and chunk records with page and heading locators, sentence-complete chunking, the chapter 2 corpus root, and reuse of a frozen chapter 2 parse.
 - `src/arctic_qa/gemini_eligibility.py` - the binding normalization, the non-terminal unresolved record, the bounded repair note, and the geography re-screen selector and action.
-- `src/arctic_qa/cli.py`, `AGENTS.md`, `docs/METHODS.md`, `docs/SOURCE_SCREENING_PASS.md`, `docs/STREAMING_DATASET.md`.
+- `src/arctic_qa/cli.py`, `src/arctic_qa/corpus_viewer.py`, `src/arctic_qa/corpus_viewer.html`, `AGENTS.md`, `docs/METHODS.md`, `docs/SOURCE_SCREENING_PASS.md`, `docs/STREAMING_DATASET.md`.
 
 `source_pass.py`, `screening.py` and `metadata_prefilter.py` are unchanged.
-The source pass keeps `pdftotext -layout`, because its job is identity checking on the retrieved bytes and its output is chapter 1 history.
-`docs/SOURCE_SCREENING_PASS.md` now records that difference.
+
+- The source pass keeps `pdftotext -layout`. Its job is identity checking on the retrieved bytes, and its output is chapter 1 history. `docs/SOURCE_SCREENING_PASS.md` now records that difference.
+- `screening.py` reads its chunks through `extraction.load_chunks`, so it reads the chapter 2 chunks with no change.
+- `metadata_prefilter.py` reads metadata only and never touches extracted text.
 
 ## New version strings
 
