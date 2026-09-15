@@ -22,8 +22,9 @@ UNIT_FACTORS: dict[tuple[str, str], Decimal] = {
 }
 SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v3"
 LEGACY_SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v2"
-GENERATION_PROMPT_VERSION = "arctic-qa-generation-v20"
-STANDALONE_VERIFICATION_CONTRACT_VERSION = "source-blind-standalone-gate-v1"
+GENERATION_PROMPT_VERSION = "arctic-qa-generation-v21"
+LEGACY_STANDALONE_VERIFICATION_CONTRACT_VERSION = "source-blind-standalone-gate-v1"
+STANDALONE_VERIFICATION_CONTRACT_VERSION = "source-blind-scientific-referent-v2"
 ANSWER_AGREEMENT_CONTRACT_VERSION = "deterministic-first-answer-agreement-v1"
 ANSWER_AGREEMENT_PROMPT_VERSION = "answer-agreement-judge-v1"
 ANSWER_AGREEMENT_SYSTEM = """Decide whether two texts give the same answer to one question.
@@ -58,8 +59,17 @@ _BENCHMARK_REFERENT_PATTERN = re.compile(
     r"\bsampled\s+group\b",
     re.IGNORECASE,
 )
-_SCIENTIFIC_ABBREVIATION_PATTERN = re.compile(
-    r"\b[A-Z]\.\s*[a-z][a-z-]+\b"
+_SCIENTIFIC_ABBREVIATION_PATTERN = re.compile(r"\b[A-Z]\.\s*[a-z][a-z-]+\b")
+_UNFAMILIAR_ACRONYM_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]{1,7}\b")
+_NON_ACRONYM_TOKENS = frozenset(
+    {"CH4", "CO2", "DNA", "II", "III", "IV", "N2O", "O2", "RNA", "VI"}
+)
+_SOURCE_IDENTITY_SHORTCUT_PATTERN = re.compile(
+    r"\bdoi\b|\baccording to (?:(?:the|this|a) )?(?:study|paper|article|publication)\b|"
+    r"\b(?:study|paper|article|publication) (?:titled|entitled)\b|"
+    r"\b(?:reported )?table(?:\s+(?:on\s+page\s+)?\d+|\s+row\b)|"
+    r"\bfig(?:ure)?\.?\s*\d+\b",
+    re.IGNORECASE,
 )
 _REFERENT_CONTEXT_FILLER = frozenset(
     {
@@ -137,7 +147,7 @@ CANDIDATE_CONTRACTS = {
         ),
     },
     "2.3.0": {
-        "prompt_version": GENERATION_PROMPT_VERSION,
+        "prompt_version": "arctic-qa-generation-v20",
         "generation_attempt_contract_version": "bounded-paper-progression-v2",
         "question_verification_contract_version": (
             QUESTION_VERIFICATION_CONTRACT_VERSION
@@ -154,7 +164,7 @@ CANDIDATE_CONTRACTS = {
         ),
     },
     "2.4.0": {
-        "prompt_version": GENERATION_PROMPT_VERSION,
+        "prompt_version": "arctic-qa-generation-v20",
         "generation_attempt_contract_version": "bounded-paper-progression-v2",
         "answer_agreement_contract_version": ANSWER_AGREEMENT_CONTRACT_VERSION,
         "question_verification_contract_version": (
@@ -172,8 +182,29 @@ CANDIDATE_CONTRACTS = {
         ),
     },
     "2.5.0": {
-        "prompt_version": GENERATION_PROMPT_VERSION,
+        "prompt_version": "arctic-qa-generation-v20",
         "generation_attempt_contract_version": "bounded-paper-progression-v2",
+        "answer_agreement_contract_version": ANSWER_AGREEMENT_CONTRACT_VERSION,
+        "standalone_verification_contract_version": (
+            LEGACY_STANDALONE_VERIFICATION_CONTRACT_VERSION
+        ),
+        "question_verification_contract_version": (
+            QUESTION_VERIFICATION_CONTRACT_VERSION
+        ),
+        "numeric_rule_contract_version": NUMERIC_RULE_CONTRACT_VERSION,
+        "direct_value_contract_version": DIRECT_SOURCE_VALUE_CONTRACT_VERSION,
+        "scope_contract_version": SCOPE_CONTRACT_VERSION,
+        "scope_role_semantics_version": "scope-role-semantics-v2",
+        "scope_role_binding_contract_version": (
+            "scope-role-question-context-binding-v1"
+        ),
+        "evidence_combination_contract_version": (
+            EVIDENCE_COMBINATION_CONTRACT_VERSION
+        ),
+    },
+    "2.6.0": {
+        "prompt_version": GENERATION_PROMPT_VERSION,
+        "generation_attempt_contract_version": "bounded-failure-routing-v3",
         "answer_agreement_contract_version": ANSWER_AGREEMENT_CONTRACT_VERSION,
         "standalone_verification_contract_version": (
             STANDALONE_VERIFICATION_CONTRACT_VERSION
@@ -193,6 +224,15 @@ CANDIDATE_CONTRACTS = {
         ),
     },
 }
+
+
+def expected_standalone_contract(schema_version: object) -> str | None:
+    """Return the standalone contract declared by one candidate schema."""
+    contract = CANDIDATE_CONTRACTS.get(str(schema_version), {}).get(
+        "standalone_verification_contract_version"
+    )
+    return str(contract) if contract else None
+
 
 DIRECTION_PAIRS = {
     ("increased", "decreased"),
@@ -385,7 +425,7 @@ def _eligible_arctic_scope_error(
         eligibility_ids = (candidate.get("answer") or {}).get("eligibility_span_ids")
         if (
             candidate.get("schema_version")
-            not in {"2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0"}
+            not in {"2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0", "2.6.0"}
             or not isinstance(components, list)
             or not isinstance(eligibility_ids, list)
             or not eligibility_ids
@@ -450,7 +490,9 @@ def validate_candidate(
         reasons.append("unsafe_legacy_candidate_schema")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     required_item_keys = REQUIRED_ITEM_KEYS | (
-        {"standalone_verification"} if schema_version == "2.5.0" else set()
+        {"standalone_verification"}
+        if expected_standalone_contract(schema_version)
+        else set()
     )
     if required_item_keys - candidate.keys() or not isinstance(
         candidate.get("answer"), dict
@@ -521,7 +563,7 @@ def validate_candidate(
     ):
         reasons.append("generation_contract_version_mismatch")
         return _finish(db, candidate, labels, reasons, [], "rejected")
-    if schema_version == "2.5.0":
+    if expected_standalone_contract(schema_version):
         standalone = candidate.get("standalone_verification")
         if not standalone_verification_resolves(candidate, standalone):
             reasons.append("standalone_verification_unresolved")
@@ -629,7 +671,7 @@ def validate_candidate(
         labels["unresolved"] = True
         return _finish(db, candidate, labels, reasons, [], "unresolved")
     agreement = candidate.get("answer_agreement")
-    if schema_version in {"2.4.0", "2.5.0"}:
+    if schema_version in {"2.4.0", "2.5.0", "2.6.0"}:
         if not answer_agreement_resolves(db, candidate, agreement):
             reasons.append("answer_agreement_unresolved")
             labels["unresolved"] = True
@@ -658,8 +700,8 @@ def validate_candidate(
     )
     verdicts = candidate.get("option_verdicts") or []
     distractor_results = []
-    normalized_options = [
-        normalize_text(str(row.get("text", "")))
+    option_equivalence_keys = [
+        _option_equivalence_key(candidate["answer"], row)
         for row in candidate.get("distractors", [])
     ]
     for distractor in candidate.get("distractors", []):
@@ -678,8 +720,8 @@ def validate_candidate(
                 verdict,
                 qa_hash,
                 option_hash,
-                normalized_options.count(
-                    normalize_text(str(distractor.get("text", "")))
+                option_equivalence_keys.count(
+                    _option_equivalence_key(candidate["answer"], distractor)
                 )
                 > 1,
             )
@@ -845,9 +887,7 @@ def reconstruction_matches(
         ):
             return False
     if _reconstruction_text_matches(answer, str(rebuilt)):
-        if _reconstruction_numeric_metadata_conflicts_with_text(
-            reconstruction, answer
-        ):
+        if _reconstruction_numeric_metadata_conflicts_with_text(reconstruction, answer):
             return False
         if _reconstruction_numeric_metadata_is_incomplete(reconstruction, answer):
             return True
@@ -936,13 +976,50 @@ def benchmark_text_requires_context(value: str) -> bool:
     return bool(
         _BENCHMARK_REFERENT_PATTERN.search(value)
         or _SCIENTIFIC_ABBREVIATION_PATTERN.search(value)
+        or _unresolved_acronym_tokens(value)
     )
+
+
+def _unresolved_acronym_tokens(value: str) -> list[str]:
+    unresolved = []
+    for token in _UNFAMILIAR_ACRONYM_PATTERN.findall(value):
+        if token in _NON_ACRONYM_TOKENS:
+            continue
+        if _acronym_has_expansion(value, token):
+            continue
+        escaped = re.escape(token)
+        if re.search(
+            rf"(?<!\w){escaped}(?!\w)\s+(?:means|denotes|is short for)\b",
+            value,
+            re.IGNORECASE,
+        ):
+            continue
+        unresolved.append(token)
+    return unresolved
+
+
+def _acronym_has_expansion(value: str, token: str) -> bool:
+    letters = "".join(character for character in token if character.isalpha())
+    if len(letters) < 2:
+        return False
+    match = re.search(rf"\(\s*{re.escape(token)}\s*\)", value)
+    if match is None:
+        return False
+    words = re.findall(r"[A-Za-z][A-Za-z-]*", value[: match.start()])
+    if len(words) < len(letters):
+        return False
+    expanded_words = words[-len(letters) :]
+    return "".join(word[0] for word in expanded_words).casefold() == letters.casefold()
 
 
 def benchmark_context_verification_reason(
     benchmark_text: str, question_context: str
 ) -> str | None:
     """Return a deterministic failure for an unresolved benchmark referent."""
+    if _SOURCE_IDENTITY_SHORTCUT_PATTERN.search(
+        f"{benchmark_text}\n{question_context}"
+    ):
+        return "source_dependent_locator"
     if not benchmark_text_requires_context(benchmark_text):
         return None
     if not isinstance(question_context, str) or not question_context.strip():
@@ -979,7 +1056,11 @@ def question_answer_leaks_answer(question: str, answer: dict[str, Any]) -> bool:
         return False
     values = [
         answer.get("text", ""),
-        *(answer.get("variants", []) if isinstance(answer.get("variants"), list) else []),
+        *(
+            answer.get("variants", [])
+            if isinstance(answer.get("variants"), list)
+            else []
+        ),
     ]
     return any(
         normalized not in {"yes", "no"}
@@ -996,7 +1077,11 @@ def required_question_phrases_contain_answer(answer: dict[str, Any]) -> bool:
         return False
     answer_values = [
         answer.get("text", ""),
-        *(answer.get("variants", []) if isinstance(answer.get("variants"), list) else []),
+        *(
+            answer.get("variants", [])
+            if isinstance(answer.get("variants"), list)
+            else []
+        ),
     ]
     normalized_answers = [
         _answer_match_text(str(value))
@@ -1222,10 +1307,9 @@ def _reconstruction_numeric_metadata_matches_text(
     try:
         return convert(literal_value, literal_unit, expected_unit) == expected_value
     except ValueError:
-        return (
-            literal_value == expected_value
-            and normalize_text(literal_unit) == normalize_text(expected_unit)
-        )
+        return literal_value == expected_value and normalize_text(
+            literal_unit
+        ) == normalize_text(expected_unit)
 
 
 def _single_numeric_text_quantity(
@@ -1355,14 +1439,12 @@ def _bare_integer_count_reconstruction_matches(
 ) -> bool:
     """Accept a bare integer when its separate count metadata supplies the unit."""
     answer_text = str(reconstruction.get("answer", "")).strip()
-    if not re.fullmatch(
-        r"[+\-\u2212]?(?:\d{1,3}(?:,\d{3})+|\d+)", answer_text
-    ):
+    if not re.fullmatch(r"[+\-\u2212]?(?:\d{1,3}(?:,\d{3})+|\d+)", answer_text):
         return False
     try:
-        return Decimal(answer_text.replace(",", "").replace("−", "-")) == value and bool(
-            normalize_text(unit)
-        )
+        return Decimal(
+            answer_text.replace(",", "").replace("−", "-")
+        ) == value and bool(normalize_text(unit))
     except (InvalidOperation, ValueError):
         return False
 
@@ -1547,7 +1629,7 @@ def validate_distractor(
     }
     answer = candidate["answer"]
     if duplicate_text:
-        result["reasons"].append("duplicate_distractor_text")
+        result["reasons"].append("duplicate_or_equivalent_distractor")
         return result
     answers = [answer.get("text", ""), *answer.get("variants", [])]
     if any(
@@ -1556,6 +1638,20 @@ def validate_distractor(
     ):
         result["reasons"].append("distractor_matches_answer")
         return result
+    answer_rule = answer.get("deterministic_rule") or {}
+    option_rule = distractor.get("deterministic") or {}
+    if (
+        answer_rule.get("kind") == "closed_set"
+        and option_rule.get("kind") == "closed_set"
+    ):
+        closed_set = _closed_set_contract(answer, distractor)
+        if closed_set is None:
+            result["reasons"].append("closed_set_contract_invalid")
+            return result
+        answer_values, option_values, ordering = closed_set
+        if _closed_set_values_equal(answer_values, option_values, ordering):
+            result["reasons"].append("distractor_matches_answer")
+            return result
     normalized_option = normalize_text(str(distractor.get("text", "")))
     if normalized_option in {"all of the above", "none of the above"}:
         result["reasons"].append("forbidden_meta_option")
@@ -1765,9 +1861,11 @@ def answer_agreement_resolves(
     db: Database, candidate: dict[str, Any], agreement: Any
 ) -> bool:
     """Validate the deterministic result and an optional LLM fallback receipt."""
-    if candidate.get("schema_version") not in {"2.4.0", "2.5.0"} or not isinstance(
-        agreement, dict
-    ):
+    if candidate.get("schema_version") not in {
+        "2.4.0",
+        "2.5.0",
+        "2.6.0",
+    } or not isinstance(agreement, dict):
         return False
     deterministic_match = reconstruction_matches(
         candidate.get("answer") or {}, candidate.get("reconstruction") or {}
@@ -1816,11 +1914,7 @@ def answer_agreement_resolves(
         or output not in {"yes", "no"}
         or agreement.get("agreement") is not (output == "yes")
         or agreement.get("confidence_category")
-        != (
-            "lower_confidence_llm_equivalent"
-            if output == "yes"
-            else "disagreement"
-        )
+        != ("lower_confidence_llm_equivalent" if output == "yes" else "disagreement")
         or not all(
             isinstance(judge.get(field), str) and judge[field]
             for field in (
@@ -1908,7 +2002,9 @@ def _qa_verification_receipts_match(db: Database, candidate: dict[str, Any]) -> 
     records = {
         **(
             {"standalone_verifier": candidate.get("standalone_verification")}
-            if candidate.get("schema_version") == "2.5.0"
+            if CANDIDATE_CONTRACTS.get(str(candidate.get("schema_version")), {}).get(
+                "standalone_verification_contract_version"
+            )
             else {}
         ),
         "reconstructor": candidate.get("reconstruction"),
@@ -1954,9 +2050,7 @@ def _qa_verification_receipts_match(db: Database, candidate: dict[str, Any]) -> 
 
 
 def _standalone_reason_codes(verification: dict[str, Any]) -> list[str]:
-    reasons = [
-        f"standalone_{reason}" for reason in verification.get("reasons", [])
-    ]
+    reasons = [f"standalone_{reason}" for reason in verification.get("reasons", [])]
     if verification.get("answer_leakage_absent") is not True:
         reasons.append("standalone_answer_leakage")
     return list(dict.fromkeys(reasons or ["standalone_gate_failed"]))
@@ -1976,11 +2070,15 @@ def standalone_verification_resolves(
         "review_rationale",
     }:
         return False
-    if verification.get("contract_version") != STANDALONE_VERIFICATION_CONTRACT_VERSION:
+    contract = CANDIDATE_CONTRACTS.get(str(candidate.get("schema_version")), {}).get(
+        "standalone_verification_contract_version"
+    )
+    if not contract or verification.get("contract_version") != contract:
         return False
-    if type(verification.get("pass")) is not bool or type(
-        verification.get("answer_leakage_absent")
-    ) is not bool:
+    if (
+        type(verification.get("pass")) is not bool
+        or type(verification.get("answer_leakage_absent")) is not bool
+    ):
         return False
     for field in ("unresolved_phrases", "missing_detail_types", "reasons"):
         values = verification.get(field)
@@ -1988,9 +2086,10 @@ def standalone_verification_resolves(
             not isinstance(value, str) or not value for value in values
         ):
             return False
-    if not isinstance(verification.get("review_rationale"), str) or not verification[
-        "review_rationale"
-    ]:
+    if (
+        not isinstance(verification.get("review_rationale"), str)
+        or not verification["review_rationale"]
+    ):
         return False
     if verification["pass"] is True and (
         verification["answer_leakage_absent"] is not True
@@ -2009,15 +2108,17 @@ def standalone_verification_resolves(
     return True
 
 
-def _standalone_response_matches_resolved_record(
-    response: Any, record: Any
-) -> bool:
+def _standalone_response_matches_resolved_record(response: Any, record: Any) -> bool:
     """Match every verdict field while allowing controller-owned version metadata."""
     if not isinstance(response, dict) or not isinstance(record, dict):
         return False
     substantive_fields = set(record) - {"contract_version"}
     if (
-        record.get("contract_version") != STANDALONE_VERIFICATION_CONTRACT_VERSION
+        record.get("contract_version")
+        not in {
+            LEGACY_STANDALONE_VERIFICATION_CONTRACT_VERSION,
+            STANDALONE_VERIFICATION_CONTRACT_VERSION,
+        }
         or set(response) - {"contract_version"} != substantive_fields
         or any(response.get(field) != record.get(field) for field in substantive_fields)
     ):
@@ -2084,8 +2185,10 @@ def _text_display_issue(
     if re.search(
         r"\b(?:or|either|and|but|although|though|while|whereas|if)\b", normalized
     ):
-        if answer is not None and distractor is not None and _closed_set_tuple_contract(
-            answer, distractor
+        if (
+            answer is not None
+            and distractor is not None
+            and _closed_set_contract(answer, distractor)
         ):
             return None
         return "displayed_assertion_compound"
@@ -2168,6 +2271,219 @@ def _closed_set_tuple_contract(
     return answer_tuple, option_tuple
 
 
+_CARDINALITY_WORDS = {
+    2: "two",
+    3: "three",
+    4: "four",
+    5: "five",
+    6: "six",
+    7: "seven",
+    8: "eight",
+    9: "nine",
+    10: "ten",
+}
+
+
+def _displayed_categorical_members(value: object) -> list[str] | None:
+    text = normalize_text(str(value)).strip(" .")
+    if ";" in text or re.search(
+        r"\b(?:or|either|but|although|though|while|whereas|if)\b", text
+    ):
+        return None
+    text = re.sub(r",\s+and\s+", ", ", text)
+    parts = [part.strip(" .") for part in re.split(r"\s*,\s*|\s+and\s+", text)]
+    if len(parts) < 2 or any(not part for part in parts):
+        return None
+    return parts
+
+
+def _categorical_member_keys(values: list[str]) -> list[str] | None:
+    genus_by_initial: dict[str, str] = {}
+    for value in values:
+        match = re.fullmatch(r"([a-z][a-z-]+)\s+([a-z][a-z-]+)", value)
+        if match:
+            initial = match.group(1)[0]
+            genus = match.group(1)
+            if initial in genus_by_initial and genus_by_initial[initial] != genus:
+                return None
+            genus_by_initial[initial] = genus
+    keys = []
+    for value in values:
+        abbreviated = re.fullmatch(r"([a-z])\.\s*([a-z][a-z-]+)", value)
+        if abbreviated and abbreviated.group(1) in genus_by_initial:
+            value = f"{genus_by_initial[abbreviated.group(1)]} {abbreviated.group(2)}"
+        keys.append(value)
+    return keys
+
+
+def _source_establishes_complete_set(
+    source_text: str, source_values: list[str]
+) -> bool:
+    text = normalize_text(source_text)
+    normalized_values = [normalize_text(value) for value in source_values]
+    positions = [text.find(value) for value in normalized_values]
+    if any(position < 0 for position in positions):
+        return False
+    first_member = min(positions)
+    last_member = max(
+        position + len(value)
+        for position, value in zip(positions, normalized_values, strict=True)
+    )
+    start = text.rfind(";", 0, first_member)
+    ends = [
+        position
+        for delimiter in (";",)
+        if (position := text.find(delimiter, last_member)) >= 0
+    ]
+    clause = text[start + 1 : min(ends) if ends else len(text)]
+    if not all(value in clause for value in normalized_values):
+        return False
+    if re.search(r"\b(?:consists? of|comprises?|complete set)\b", clause):
+        return True
+    if re.search(r"\b(?:examples?|including|included|such as|among)\b", clause):
+        return False
+    cardinality = len(source_values)
+    count_terms = [str(cardinality)]
+    if cardinality in _CARDINALITY_WORDS:
+        count_terms.append(_CARDINALITY_WORDS[cardinality])
+    count = "(?:" + "|".join(re.escape(term) for term in count_terms) + ")"
+    if re.search(rf"\bexactly\s+{count}\b", clause):
+        return True
+    return bool(
+        re.search(
+            rf"\b(?:exactly\s+)?{count}\b.*(?:i\.?e\.?|namely|following)\b",
+            clause,
+        )
+    )
+
+
+def _categorical_closed_set_contract(
+    answer: dict[str, Any], distractor: dict[str, Any]
+) -> tuple[list[str], list[str], str] | None:
+    answer_rule = answer.get("deterministic_rule")
+    option_rule = distractor.get("deterministic") or {}
+    if (
+        not isinstance(answer_rule, dict)
+        or answer_rule.get("kind") != "closed_set"
+        or not isinstance(option_rule, dict)
+        or option_rule.get("kind") != "closed_set"
+        or answer_rule.get("member_type", "categorical_entity") == "quantity"
+    ):
+        return None
+    source_values = answer_rule.get("source_values")
+    if (
+        not isinstance(source_values, list)
+        or len(source_values) < 2
+        or any(
+            not isinstance(value, str) or not normalize_text(value)
+            for value in source_values
+        )
+    ):
+        return None
+    answer_values = _displayed_categorical_members(answer.get("text", ""))
+    option_values = option_rule.get("candidate_values")
+    if option_values is None:
+        option_values = _displayed_categorical_members(distractor.get("text", ""))
+    displayed_option_values = _displayed_categorical_members(distractor.get("text", ""))
+    if (
+        answer_values is None
+        or not isinstance(option_values, list)
+        or displayed_option_values is None
+        or any(
+            not isinstance(value, str) or not normalize_text(value)
+            for value in option_values
+        )
+        or len(answer_values) != len(source_values)
+        or len(option_values) != len(source_values)
+        or len(displayed_option_values) != len(source_values)
+    ):
+        return None
+    normalized = [
+        normalize_text(value).strip(" .")
+        for value in [
+            *source_values,
+            *answer_values,
+            *option_values,
+            *displayed_option_values,
+        ]
+    ]
+    keys = _categorical_member_keys(normalized)
+    if keys is None:
+        return None
+    size = len(source_values)
+    source_keys = keys[:size]
+    answer_keys = keys[size : size * 2]
+    option_keys = keys[size * 2 : size * 3]
+    displayed_option_keys = keys[size * 3 :]
+    ordering = str(answer_rule.get("ordering", "unordered"))
+    if ordering not in {"ordered", "unordered"}:
+        return None
+    if option_rule.get("ordering", ordering) != ordering:
+        return None
+    if option_rule.get(
+        "member_type", answer_rule.get("member_type", "categorical_entity")
+    ) != answer_rule.get("member_type", "categorical_entity"):
+        return None
+    if (
+        len(set(source_keys)) != size
+        or len(set(answer_keys)) != size
+        or len(set(option_keys)) != size
+    ):
+        return None
+    equal = (
+        list.__eq__
+        if ordering == "ordered"
+        else lambda left, right: set(left) == set(right)
+    )
+    if not equal(source_keys, answer_keys) or not equal(
+        option_keys, displayed_option_keys
+    ):
+        return None
+    source_text = str(answer.get("evidence_quote", ""))
+    if not _source_establishes_complete_set(source_text, source_values):
+        return None
+    if any(
+        normalize_text(value) not in normalize_text(source_text)
+        for value in source_values
+    ):
+        return None
+    if normalize_text(str(option_rule.get("candidate_value", ""))) != normalize_text(
+        str(distractor.get("text", ""))
+    ):
+        return None
+    return answer_keys, option_keys, ordering
+
+
+def _closed_set_contract(
+    answer: dict[str, Any], distractor: dict[str, Any]
+) -> tuple[list[object], list[object], str] | None:
+    numeric = _closed_set_tuple_contract(answer, distractor)
+    if numeric is not None:
+        return numeric[0], numeric[1], "ordered"
+    return _categorical_closed_set_contract(answer, distractor)
+
+
+def _closed_set_values_equal(
+    answer_values: list[object], option_values: list[object], ordering: str
+) -> bool:
+    if ordering == "ordered":
+        return answer_values == option_values
+    return set(answer_values) == set(option_values)
+
+
+def _option_equivalence_key(
+    answer: dict[str, Any], distractor: dict[str, Any]
+) -> tuple[object, ...]:
+    contract = _closed_set_contract(answer, distractor)
+    if contract is None:
+        return ("text", normalize_text(str(distractor.get("text", ""))))
+    _, option_values, ordering = contract
+    comparable = tuple(
+        option_values if ordering == "ordered" else sorted(option_values)
+    )
+    return ("closed_set", ordering, *comparable)
+
+
 def _numeric_display_issue(text: str, numeric: dict[str, Any]) -> str | None:
     try:
         value = Decimal(str(numeric["canonical_value"]))
@@ -2228,16 +2544,11 @@ def _source_bound_typed_incompatibility(
             and ((correct, proposed) in DIRECTION_PAIRS)
         )
     if kind == "closed_set":
-        tuple_contract = _closed_set_tuple_contract(answer, distractor)
-        if tuple_contract is None:
+        set_contract = _closed_set_contract(answer, distractor)
+        if set_contract is None:
             return False
-        answer_tuple, proposed_tuple = tuple_contract
-        source_values = rule.get("source_values")
-        if not isinstance(source_values, list) or not all(
-            normalize_text(str(value)) in source_text for value in source_values
-        ):
-            return False
-        return answer_tuple != proposed_tuple
+        answer_values, proposed_values, ordering = set_contract
+        return not _closed_set_values_equal(answer_values, proposed_values, ordering)
     if kind not in {"unique_categorical", "scope_excluded", "unique_entity"}:
         return False
     required_rule_kind = "closed_scope" if kind == "scope_excluded" else "closed_set"
@@ -2387,7 +2698,8 @@ def scope_is_source_bound(
         return False
     source_text = " ".join(str(chunk.get("text", "")) for chunk in chunks)
     return bool(
-        source_text and all(_scope_phrase_in_text(value, source_text) for value in values)
+        source_text
+        and all(_scope_phrase_in_text(value, source_text) for value in values)
     )
 
 

@@ -215,7 +215,7 @@ def bind_qa_verification_receipts(root: Path, item: dict) -> None:
     entity_id = stable_id(
         "unit", item["finding_id"], item["provenance"]["generation_arm"]
     )
-    calls = {}
+    calls = dict(item["provenance"].get("verification_calls") or {})
     for role, record in (
         ("reconstructor", item["reconstruction"]),
         ("answer_verifier", item["answer_verification"]),
@@ -322,11 +322,7 @@ def agreement_fallback_script(
             f'"reconstructed_answer":"{reconstructed_answer}"',
         ],
         "forbid_prompt_contains": ["SOURCE_DATA", "ANSWER_RECORD"],
-        **(
-            {"response": verdict}
-            if verdict is not None
-            else {"kind": "malformed"}
-        ),
+        **({"response": verdict} if verdict is not None else {"kind": "malformed"}),
     }
     events.insert(3, judge)
     path = tmp_path / f"agreement-{verdict or 'malformed'}.jsonl"
@@ -1234,7 +1230,7 @@ def test_smoke_resume_does_not_duplicate_calls(tmp_path: Path) -> None:
         count = connection.execute(
             "SELECT COUNT(*) FROM calls WHERE run_id='resume-run'"
         ).fetchone()[0]
-    assert count == 9
+    assert count == 10
 
 
 def test_shared_content_keeps_per_source_provenance(tmp_path: Path) -> None:
@@ -1345,9 +1341,9 @@ def test_generation_runs_qa_gates_before_exact_option_verification(
         "distractor_writer",
     ]
     assert roles[6:] == ["option_verifier"] * 4
-    assert item["schema_version"] == "2.5.0"
+    assert item["schema_version"] == "2.6.0"
     assert item["standalone_verification"] == {
-        "contract_version": "source-blind-standalone-gate-v1",
+        "contract_version": "source-blind-scientific-referent-v2",
         "pass": True,
         "answer_leakage_absent": True,
         "unresolved_phrases": [],
@@ -1423,9 +1419,7 @@ def test_controller_bound_standalone_version_preserves_receipt_and_exports(
             FIXTURES / "fake-author.jsonl",
         )
     )
-    command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(
-        verifier_path
-    )
+    command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(verifier_path)
 
     generated = json.loads(cli(tmp_path, *command).stdout)
     validation = json.loads(
@@ -1440,7 +1434,7 @@ def test_controller_bound_standalone_version_preserves_receipt_and_exports(
 
     assert json.loads(raw).get("contract_version") == reported_version
     assert generated["standalone_verification"]["contract_version"] == (
-        "source-blind-standalone-gate-v1"
+        "source-blind-scientific-referent-v2"
     )
     assert validation["final_label"] == "machine_accepted_unverified"
     assert exported["short_answer_count"] == 1
@@ -1520,9 +1514,7 @@ def test_source_blind_gate_rejects_undefined_metric_acronym_and_event(
     command = list(
         generate_command(receipt["screen"]["source_id"], "standalone-gate", author_path)
     )
-    command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(
-        verifier_path
-    )
+    command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(verifier_path)
 
     generated = json.loads(cli(tmp_path, *command).stdout)
 
@@ -1584,9 +1576,9 @@ def test_answer_agreement_fallback_accepts_historical_false_disagreement(
     assert unresolved["reasons"] == ["answer_agreement_unresolved"]
 
     failed_source_gate = json.loads(json.dumps(generated))
-    failed_source_gate["answer_verification"][
-        "source_entailment_model_verified"
-    ] = False
+    failed_source_gate["answer_verification"]["source_entailment_model_verified"] = (
+        False
+    )
     failed_path = write_candidate(
         tmp_path, failed_source_gate, "agreement-source-gate.json"
     )
@@ -1609,9 +1601,7 @@ def test_answer_agreement_fallback_no_rejects_clear_contradiction(
         )
     )
     command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(
-        agreement_fallback_script(
-            tmp_path, verdict="no", reconstructed_answer="5.0 m"
-        )
+        agreement_fallback_script(tmp_path, verdict="no", reconstructed_answer="5.0 m")
     )
 
     generated = json.loads(cli(tmp_path, *command).stdout)
@@ -1855,7 +1845,7 @@ def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> No
     command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(verifier)
     generated = json.loads(cli(tmp_path, *command).stdout)
     assert generated["status"] == "qa_gate_failed"
-    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v20"
+    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v21"
     assert (
         generated["provenance"]["numeric_rule_contract_version"]
         == "numeric-rule-source-support-v2"

@@ -62,6 +62,18 @@ def _records(
     return answer, reconstruction, verification
 
 
+def _standalone() -> dict[str, object]:
+    return {
+        "contract_version": generation.STANDALONE_VERIFICATION_CONTRACT_VERSION,
+        "pass": True,
+        "answer_leakage_absent": True,
+        "unresolved_phrases": [],
+        "missing_detail_types": [],
+        "reasons": [],
+        "review_rationale": "The scientific referent is complete.",
+    }
+
+
 @pytest.mark.parametrize(
     ("evidence", "question", "answer_text", "scope"),
     [
@@ -115,6 +127,16 @@ def test_scope_roles_keep_answer_targets_out_of_independent_qualifiers(
     scope: dict[str, str | None],
 ) -> None:
     answer, reconstruction, verification = _records(evidence, answer_text, scope)
+    question_context = ""
+    if "NWP01" in question:
+        question_context = "NWP01 identifies the named Arctic fjord-mouth station."
+    elif "DCM" in question:
+        question_context = (
+            "DCM means deep chlorophyll maximum. IMAC-SPE is the stated "
+            "metal-affinity extraction method."
+        )
+    if question_context:
+        verification["question_context_required"] = True
 
     assert (
         generation._qa_gate_reasons(
@@ -123,6 +145,8 @@ def test_scope_roles_keep_answer_targets_out_of_independent_qualifiers(
             answer,
             reconstruction,
             verification,
+            question_context,
+            standalone_verification=_standalone(),
         )
         == []
     )
@@ -160,6 +184,7 @@ def test_scope_binding_rejects_missing_or_changed_independent_qualifiers(
         answer,
         reconstruction,
         verification,
+        standalone_verification=_standalone(),
     )
 
     assert reasons == ["scope_qualifier_missing"]
@@ -208,9 +233,13 @@ def test_semantic_referent_failure_routes_as_one_revision_root() -> None:
         reconstruction,
         verification,
         "Arctic samples were collected during the spring survey.",
+        standalone_verification=_standalone(),
     )
 
-    assert reasons == ["relation_scope_mismatch", "question_context_referent_unresolved"]
+    assert reasons == [
+        "relation_scope_mismatch",
+        "question_context_referent_unresolved",
+    ]
     primary = streaming._generation_attempt(
         campaign_id="campaign",
         family_id="family",
@@ -277,6 +306,7 @@ def test_frozen_answer_phrase_routes_alternative_after_raw_leak_reason() -> None
         answer,
         reconstruction,
         verification,
+        standalone_verification=_standalone(),
     )
 
     assert "question_answer_leakage" in reasons

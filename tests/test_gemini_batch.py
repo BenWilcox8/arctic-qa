@@ -637,6 +637,15 @@ def test_continuation_ignores_legacy_terminal_candidates(
 
     current_provenance = {
         "prompt_version": generation_contract.PROMPT_VERSION,
+        "generation_attempt_contract_version": (
+            generation_contract.GENERATION_ATTEMPT_CONTRACT_VERSION
+        ),
+        "answer_agreement_contract_version": (
+            generation_contract.ANSWER_AGREEMENT_CONTRACT_VERSION
+        ),
+        "standalone_verification_contract_version": (
+            generation_contract.STANDALONE_VERIFICATION_CONTRACT_VERSION
+        ),
         "question_verification_contract_version": (
             generation_contract.QUESTION_VERIFICATION_CONTRACT_VERSION
         ),
@@ -648,6 +657,9 @@ def test_continuation_ignores_legacy_terminal_candidates(
         "scope_role_semantics_version": generation_contract.SCOPE_ROLE_SEMANTICS_VERSION,
         "scope_role_binding_contract_version": (
             generation_contract.SCOPE_ROLE_BINDING_CONTRACT_VERSION
+        ),
+        "evidence_combination_contract_version": (
+            generation_contract.EVIDENCE_COMBINATION_CONTRACT_VERSION
         ),
     }
     for stable_id, candidate in (
@@ -980,9 +992,7 @@ def test_batch_pipeline_reuses_bounded_question_revision_contract(
         else:
             payload = scripted_payload(record)
         if record["role"] == "question_writer" and "QUESTION_REVISION" not in prompt:
-            payload["question"] = (
-                "What reported water depth was documented as 2.0 m?"
-            )
+            payload["question"] = "What reported water depth was documented as 2.0 m?"
         return {
             "responseId": f"batch-{record['request_key'][:12]}",
             "modelVersion": "gemini-3.8-flash",
@@ -1053,11 +1063,14 @@ def test_batch_pipeline_reuses_bounded_question_revision_contract(
         "distractor_generation": 1,
         "option_verification": 4,
     }
-    assert database.one(
-        "SELECT COUNT(*) AS count FROM candidates "
-        "WHERE run_id=? AND status='machine_accepted_unverified'",
-        ("scientific-campaign-revision-r1",),
-    )["count"] == 1
+    assert (
+        database.one(
+            "SELECT COUNT(*) AS count FROM candidates "
+            "WHERE run_id=? AND status='machine_accepted_unverified'",
+            ("scientific-campaign-revision-r1",),
+        )["count"]
+        == 1
+    )
 
 
 def test_batch_allocation_is_separate_from_shared_live_spend(tmp_path: Path) -> None:
@@ -1145,7 +1158,9 @@ def test_batch_allows_covered_recovery_liability_and_retains_its_cost(
     )
     assert manifest is not None
     manifest_path = Path(manifest["manifest_path"])
-    authorization_path = authorization(manifest_path, ledger_path, tmp_path / "auth.json")
+    authorization_path = authorization(
+        manifest_path, ledger_path, tmp_path / "auth.json"
+    )
     preview = store.budget_preview(manifest["request_keys"])
     expected_shared = Decimal(ambiguous["reserved_usd"])
     assert Decimal(preview["shared_used_usd"]) == expected_shared

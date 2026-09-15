@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -9,12 +10,17 @@ from arctic_qa import validation
 from arctic_qa.util import sha256_bytes, stable_id
 
 
+R14_FIXTURE = json.loads(
+    (Path(__file__).parents[1] / "fixtures" / "r14-audit-priorities-r1.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+
 def _depth_tuple_answer() -> dict[str, object]:
     return {
         "text": "15 m, 75 m, and 155 m",
-        "evidence_quote": (
-            "at 15 m (left), 75 m (middle), and 155 m (right) depths"
-        ),
+        "evidence_quote": ("at 15 m (left), 75 m (middle), and 155 m (right) depths"),
         "deterministic_rule": {
             "kind": "closed_set",
             "source_values": ["15 m (left)", "75 m (middle)", "155 m (right)"],
@@ -140,9 +146,7 @@ def test_closed_set_conjunction_guard_rejects_non_tuple_compounds(text: str) -> 
     distractor = _depth_tuple_distractor(text)
 
     assert (
-        validation._text_display_issue(
-            text, answer=answer, distractor=distractor
-        )
+        validation._text_display_issue(text, answer=answer, distractor=distractor)
         == "displayed_assertion_compound"
     )
 
@@ -160,4 +164,117 @@ def test_conjunction_guard_requires_the_declared_closed_set_contract() -> None:
             distractor["text"], answer=answer, distractor=distractor
         )
         == "displayed_assertion_compound"
+    )
+
+
+def test_r14_bumblebee_attempts_satisfy_categorical_closed_set_contract() -> None:
+    answer = {
+        "text": R14_FIXTURE["closed_set_answer"],
+        "evidence_quote": R14_FIXTURE["closed_set_evidence"],
+        "deterministic_rule": {
+            "kind": "closed_set",
+            "source_values": R14_FIXTURE["closed_set_source_values"],
+            "member_type": "categorical_entity",
+            "ordering": "unordered",
+        },
+    }
+
+    for attempt in R14_FIXTURE["bumblebee_attempts"]:
+        assert len(attempt) == 3
+        for text in attempt:
+            distractor = {
+                "text": text,
+                "deterministic": {
+                    "kind": "closed_set",
+                    "candidate_value": text,
+                    "candidate_values": [
+                        part.strip()
+                        for part in text.replace(", and ", ", ").split(", ")
+                    ],
+                    "member_type": "categorical_entity",
+                    "ordering": "unordered",
+                },
+            }
+            assert (
+                validation._text_display_issue(
+                    text, answer=answer, distractor=distractor
+                )
+                is None
+            )
+            assert validation._source_bound_typed_incompatibility(answer, distractor)
+
+
+def test_categorical_closed_set_rejects_non_exhaustive_and_mixed_claims() -> None:
+    answer = {
+        "text": "alpha, beta, and gamma",
+        "evidence_quote": "Observed taxa included alpha, beta, and gamma.",
+        "deterministic_rule": {
+            "kind": "closed_set",
+            "source_values": ["alpha", "beta", "gamma"],
+            "member_type": "categorical_value",
+            "ordering": "unordered",
+        },
+    }
+    mixed = _depth_tuple_distractor("alpha, beta, and abundance increased")
+
+    assert validation._categorical_closed_set_contract(answer, mixed) is None
+    assert (
+        validation._text_display_issue(mixed["text"], answer=answer, distractor=mixed)
+        == "displayed_assertion_compound"
+    )
+
+    for non_exhaustive in (
+        "Samples were only measured in summer. Examples include alpha, beta, and gamma.",
+        "Observed taxa included alpha, beta, and gamma.",
+    ):
+        answer["evidence_quote"] = non_exhaustive
+        assert validation._categorical_closed_set_contract(answer, mixed) is None
+
+    answer["evidence_quote"] = "Exactly three taxa were alpha, beta, and gamma."
+    for invalid_text in (
+        "alpha and beta",
+        "alpha, alpha, and delta",
+    ):
+        invalid = {
+            "text": invalid_text,
+            "deterministic": {
+                "kind": "closed_set",
+                "candidate_value": invalid_text,
+            },
+        }
+        assert validation._categorical_closed_set_contract(answer, invalid) is None
+
+
+def test_categorical_closed_set_honors_order_and_equivalent_membership() -> None:
+    answer = {
+        "text": "alpha, beta, and gamma",
+        "evidence_quote": "The ordered sequence consists of alpha, beta, and gamma.",
+        "deterministic_rule": {
+            "kind": "closed_set",
+            "source_values": ["alpha", "beta", "gamma"],
+            "member_type": "categorical_value",
+            "ordering": "ordered",
+        },
+    }
+    swapped = {
+        "text": "beta, alpha, and gamma",
+        "deterministic": {
+            "kind": "closed_set",
+            "candidate_value": "beta, alpha, and gamma",
+            "candidate_values": ["beta", "alpha", "gamma"],
+            "member_type": "categorical_value",
+            "ordering": "ordered",
+        },
+    }
+
+    assert validation._source_bound_typed_incompatibility(answer, swapped)
+    answer["deterministic_rule"]["ordering"] = "unordered"
+    swapped["deterministic"]["ordering"] = "unordered"
+    assert not validation._source_bound_typed_incompatibility(answer, swapped)
+    assert validation._option_equivalence_key(answer, swapped) == (
+        "closed_set",
+        "unordered",
+        "alpha",
+        "beta",
+        "gamma",
     )

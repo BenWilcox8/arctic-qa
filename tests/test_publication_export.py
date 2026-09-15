@@ -27,17 +27,20 @@ def _live_candidate(item_id: str, question: str, *, prompt: str) -> dict:
         }
         for index, letter in enumerate("ABC", start=2)
     ]
-    current = prompt == "arctic-qa-generation-v20"
+    current = prompt == "arctic-qa-generation-v21"
     agreement_contract = prompt in {
         "arctic-qa-generation-v19",
         "arctic-qa-generation-v20",
+        "arctic-qa-generation-v21",
     }
     return {
         "schema_version": (
-            "2.5.0"
+            "2.6.0"
             if current
+            else "2.5.0"
+            if prompt == "arctic-qa-generation-v20"
             else "2.4.0"
-            if current
+            if prompt == "arctic-qa-generation-v19"
             else "2.3.0"
         ),
         "item_id": item_id,
@@ -73,7 +76,11 @@ def _live_candidate(item_id: str, question: str, *, prompt: str) -> dict:
         **(
             {
                 "standalone_verification": {
-                    "contract_version": "source-blind-standalone-gate-v1",
+                    "contract_version": (
+                        "source-blind-scientific-referent-v2"
+                        if current
+                        else "source-blind-standalone-gate-v1"
+                    ),
                     "pass": True,
                     "answer_leakage_absent": True,
                     "unresolved_phrases": [],
@@ -117,7 +124,7 @@ def _live_candidate(item_id: str, question: str, *, prompt: str) -> dict:
             **(
                 {
                     "standalone_verification_contract_version": (
-                        "source-blind-standalone-gate-v1"
+                        "source-blind-scientific-referent-v2"
                     )
                 }
                 if current
@@ -156,7 +163,8 @@ def _insert_live_candidate(
         "candidate_hash": (
             stable_id("candidate-payload", stored) if bind_validation else "wrong"
         ),
-        "labels": validation_labels or {
+        "labels": validation_labels
+        or {
             "mcq_eligible": True,
             "machine_accepted_unverified": True,
             "schema_valid": True,
@@ -239,7 +247,7 @@ def test_live_snapshot_updates_atomically_and_excludes_stale_rows(
     _insert_live_candidate(
         connection,
         _live_candidate(
-            "rejected", "Rejected question?", prompt="arctic-qa-generation-v20"
+            "rejected", "Rejected question?", prompt="arctic-qa-generation-v21"
         ),
         family="rejected-family",
         status="rejected",
@@ -247,7 +255,7 @@ def test_live_snapshot_updates_atomically_and_excludes_stale_rows(
     _insert_live_candidate(
         connection,
         _live_candidate(
-            "unbound", "Unbound question?", prompt="arctic-qa-generation-v20"
+            "unbound", "Unbound question?", prompt="arctic-qa-generation-v21"
         ),
         family="unbound-family",
         bind_validation=False,
@@ -257,7 +265,7 @@ def test_live_snapshot_updates_atomically_and_excludes_stale_rows(
         _live_candidate(
             "current-old",
             "Earlier current question?",
-            prompt="arctic-qa-generation-v20",
+            prompt="arctic-qa-generation-v21",
         ),
         family="current-family",
         updated_at="2026-09-14T00:00:00Z",
@@ -265,7 +273,7 @@ def test_live_snapshot_updates_atomically_and_excludes_stale_rows(
     _insert_live_candidate(
         connection,
         _live_candidate(
-            "current-new", "Newest current question?", prompt="arctic-qa-generation-v20"
+            "current-new", "Newest current question?", prompt="arctic-qa-generation-v21"
         ),
         family="current-family",
         updated_at="2026-09-14T00:01:00Z",
@@ -317,9 +325,7 @@ def test_live_snapshot_updates_atomically_and_excludes_stale_rows(
         == "authoritative_deterministic"
     )
     assert (
-        reviewer["validation"][0]["details"]["answer_agreement"][
-            "confidence_category"
-        ]
+        reviewer["validation"][0]["details"]["answer_agreement"]["confidence_category"]
         == "authoritative_deterministic"
     )
     assert reviewer["answer_evidence"]["excerpt"] == "The value increased."
@@ -340,7 +346,7 @@ def test_live_snapshot_updates_atomically_and_excludes_stale_rows(
     _insert_live_candidate(
         connection,
         _live_candidate(
-            "second-family", "Second question?", prompt="arctic-qa-generation-v20"
+            "second-family", "Second question?", prompt="arctic-qa-generation-v21"
         ),
         family="second-family",
         updated_at="2026-09-14T00:02:00Z",
@@ -383,7 +389,7 @@ def test_live_preview_includes_retained_model_verified_distractors_only(
         ("source-1", "10.1/current", "Current paper"),
     )
     preview = _live_candidate(
-        "preview", "Preview question?", prompt="arctic-qa-generation-v20"
+        "preview", "Preview question?", prompt="arctic-qa-generation-v21"
     )
     preview_distractors = [
         {
@@ -403,7 +409,7 @@ def test_live_preview_includes_retained_model_verified_distractors_only(
         validation_distractors=preview_distractors,
     )
     rejected = _live_candidate(
-        "rejected", "Rejected question?", prompt="arctic-qa-generation-v20"
+        "rejected", "Rejected question?", prompt="arctic-qa-generation-v21"
     )
     _insert_live_candidate(
         connection,
@@ -417,7 +423,7 @@ def test_live_preview_includes_retained_model_verified_distractors_only(
     missing_model_verification = _live_candidate(
         "missing-model-verification",
         "Incomplete question?",
-        prompt="arctic-qa-generation-v20",
+        prompt="arctic-qa-generation-v21",
     )
     _insert_live_candidate(
         connection,

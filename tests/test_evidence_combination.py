@@ -60,9 +60,7 @@ def _role_record(chunk_id: str, text: str, start: int, end: int) -> dict[str, ob
             "start_offset": start,
             "end_offset": end,
         },
-        "source_span_id": stable_id(
-            contract, chunk_id, start, end, text_sha256
-        ),
+        "source_span_id": stable_id(contract, chunk_id, start, end, text_sha256),
         "evidence_text_sha256": text_sha256,
         "span_contract_version": contract,
     }
@@ -94,9 +92,10 @@ def test_adjacent_eligible_fragments_become_one_exact_source_interval() -> None:
     assert combined[0]["start_offset"] == 0
     assert combined[0]["end_offset"] == len(text)
     assert combined[0]["eligibility_span_ids"] == ["s000028", "s000029"]
-    assert [
-        row["source_span_id"] for row in combined[0]["evidence_components"]
-    ] == [spans[0]["span_id"], spans[1]["span_id"]]
+    assert [row["source_span_id"] for row in combined[0]["evidence_components"]] == [
+        spans[0]["span_id"],
+        spans[1]["span_id"],
+    ]
     assert combined[0]["text_sha256"] == sha256_bytes(text.encode())
     resolved = generation._resolve_source_span(
         {"source_span_id": combined[0]["span_id"]},
@@ -150,9 +149,7 @@ def test_role_evidence_unifies_adjacent_intervals_but_keeps_distant_passages() -
     evidence = generation._decision_evidence(
         {
             "answer": _role_record("chunk-1", text, 0, first_end),
-            "reconstruction": _role_record(
-                "chunk-1", text, first_end, adjacent_end
-            ),
+            "reconstruction": _role_record("chunk-1", text, first_end, adjacent_end),
             "answer_verification": _role_record(
                 "chunk-1", text, distant_start, len(text)
             ),
@@ -227,6 +224,15 @@ def test_matching_answer_can_use_a_different_valid_passage() -> None:
         answer,
         reconstruction,
         verifier,
+        standalone_verification={
+            "contract_version": generation.STANDALONE_VERIFICATION_CONTRACT_VERSION,
+            "pass": True,
+            "answer_leakage_absent": True,
+            "unresolved_phrases": [],
+            "missing_detail_types": [],
+            "reasons": [],
+            "review_rationale": "The scientific referent is complete.",
+        },
     )
 
     assert reasons == []
@@ -402,9 +408,7 @@ def test_model_contexts_expose_only_selectable_combined_span_ids() -> None:
     combined_span = combined[0]
 
     role_context = generation._context(chunk, combined)
-    finding_context, resolver_spans = generation._finding_context(
-        [chunk], combined
-    )
+    finding_context, resolver_spans = generation._finding_context([chunk], combined)
     serialized_contexts = [role_context, finding_context]
 
     for context in serialized_contexts:
@@ -432,8 +436,9 @@ def test_model_contexts_expose_only_selectable_combined_span_ids() -> None:
         for component in combined_span["evidence_components"]:
             assert component["source_span_id"] not in serialized
 
-    assert resolver_spans[combined_span["span_id"]]["evidence_components"] == (
-        combined_span["evidence_components"]
+    assert (
+        resolver_spans[combined_span["span_id"]]["evidence_components"]
+        == (combined_span["evidence_components"])
     )
 
 

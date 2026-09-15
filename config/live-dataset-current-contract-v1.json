@@ -1,6 +1,6 @@
 {
-  "candidate_schema_version": "2.5.0",
-  "generation_prompt_version": "arctic-qa-generation-v20",
+  "candidate_schema_version": "2.6.0",
+  "generation_prompt_version": "arctic-qa-generation-v21",
   "minimum_model_verified_distractors": 3,
   "schema": "arctic-qa-live-dataset-selection-v1",
   "selection_mode": "machine_validated_preview",
