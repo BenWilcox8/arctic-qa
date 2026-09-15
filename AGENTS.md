@@ -5,6 +5,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Read `docs/CORPUS_VIEWER.md` before you operate the read-only corpus-stage monitor.
 - Read `docs/PUBLICATION_EXPORT.md` before you operate the live publication snapshot service.
 - Read `docs/SOURCE_SCREENING_PASS.md` before you operate a bounded source pass.
+- Read `docs/CHAPTER2_CORPUS.md` before you extract, freeze, or read the chapter 2 corpus.
 
 ## Maintaining this file
 

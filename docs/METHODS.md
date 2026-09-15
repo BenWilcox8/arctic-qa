@@ -20,6 +20,7 @@ No cited paper establishes that the complete design is optimal.
 | Alternative-evidence search limits | [SciFact-Open](https://aclanthology.org/2022.findings-emnlp.347.pdf), sections 3.1, 5, and 8 | An incomplete pool cannot prove absence. | Reject unresolved alternatives |
 | No target-adaptive retention | [AutoBencher](https://arxiv.org/html/2407.08351v1), section 4.1 and appendix A | Adaptive search can select model-specific weaknesses. | Fixed corpus eligibility before generation |
 | Structured article preference | [NISO JATS 1.4](https://www.niso.org/standards-committees/jats) | JATS availability varies by publisher. | JATS, then HTML, then PDF |
+| Column-aware PDF reading order | Recursive XY cut, the standard page segmentation method; no locator is recorded here because the implementation was written from the page geometry, not from a paper | The cut needs a visible gutter and fails on an irregular layout. | Reading order over poppler word geometry, with sentence-complete chunks |
 
 The geography rule uses 66.56 degrees north and a reviewed marine allowlist.
 This rule comes from the captain requirement and project configuration.
@@ -28,6 +29,10 @@ The implementation binds each geographic decision to a stored content hash and a
 Each latitude and named region must occur in the quoted study-setting text.
 The quote must also state complete scope.
 The implementation rejects invalid coordinates and computes mixed site scope.
+
+The chapter 2 corpus applies this preference again over the same stored objects.
+Every stored original of the frozen corpus is a PDF, so the JATS and HTML paths are unused there.
+The [chapter 2 corpus document](CHAPTER2_CORPUS.md) records the extractor and its measured effect.
 
 The source manifest freezes identities, versions, hashes, geography decisions, and rights fields.
 This control adapts the frozen-manifest method in the project study.

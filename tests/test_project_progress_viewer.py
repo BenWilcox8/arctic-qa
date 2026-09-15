@@ -225,7 +225,7 @@ def test_project_overview_uses_streaming_counts_as_separate_live_metrics(
         "source": "viewer_validated_pipeline_records",
         "telemetry": "observed",
         "scientific_count_scope": "current_incremental_invocation",
-        "accepted_qa_scope": "shared_ledger_cumulative",
+        "accepted_qa_scope": "current_incremental_invocation",
         "spent_usd": None,
         "reserved_usd": None,
         "ambiguous_reserved_usd": None,
@@ -234,7 +234,7 @@ def test_project_overview_uses_streaming_counts_as_separate_live_metrics(
         "eligible": 0,
         "excluded": 1,
         "unresolved": 3,
-        "accepted_qa": None,
+        "accepted_qa": 0,
     }
 
 

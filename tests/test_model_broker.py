@@ -844,9 +844,7 @@ def test_count_error_is_durable_and_never_generates(tmp_path: Path):
 def test_reviewed_count_error_continuation_clears_halt_without_replay(
     tmp_path: Path,
 ) -> None:
-    legacy = json.loads(
-        (ROOT / "config" / "gemini-eligibility-v1.json").read_text()
-    )
+    legacy = json.loads((ROOT / "config" / "gemini-eligibility-v1.json").read_text())
     legacy["config_id"] = "arctic-gemini-eligibility-r1-config-v3"
     legacy["stage_models"]["answer_agreement"] = {
         "model": "gemini-2.5-flash-lite",
@@ -879,6 +877,7 @@ def test_reviewed_count_error_continuation_clears_halt_without_replay(
     }
     legacy_path = tmp_path / "legacy-price.json"
     write_json(legacy_path, legacy)
+
     class Count404Transport(Transport):
         def post(self, model: str, method: str, body: dict) -> dict:
             self.methods.append(method)
@@ -943,9 +942,12 @@ def test_reviewed_count_error_continuation_clears_halt_without_replay(
     assert result["applied"] is True
     assert values["broker"].status()["halted"] is False
     assert transport.methods == ["countTokens"]
-    assert json.loads(values["ledger"].read_text())["requests"][key][
-        "count_error_continuation_sha256"
-    ] == result["continuation_receipt_sha256"]
+    assert (
+        json.loads(values["ledger"].read_text())["requests"][key][
+            "count_error_continuation_sha256"
+        ]
+        == result["continuation_receipt_sha256"]
+    )
 
 
 def test_request_key_and_payload_features_fail_closed(tmp_path: Path):
@@ -1216,7 +1218,9 @@ def test_pretransport_settlement_recovers_only_a_reviewed_interrupted_reservatio
     review = tmp_path / "independent-review.md"
     evidence = tmp_path / "interruption-evidence.md"
     review.write_text("No transport occurred.\n", encoding="utf-8")
-    evidence.write_text("Reservation fsync completed before interruption.\n", encoding="utf-8")
+    evidence.write_text(
+        "Reservation fsync completed before interruption.\n", encoding="utf-8"
+    )
 
     result = broker.settle_pretransport_reservation(
         request_key=request_key,

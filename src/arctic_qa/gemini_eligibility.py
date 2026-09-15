@@ -6,6 +6,7 @@ import os
 import re
 import stat
 import time
+import unicodedata
 import urllib.parse
 import urllib.error
 import urllib.request
@@ -28,6 +29,46 @@ CRITERIA = (
 ELIGIBILITY_RESPONSE_V2 = "eligibility-response-v2"
 ELIGIBILITY_RESPONSE_V3 = "eligibility-response-v3"
 ELIGIBILITY_STATUS_MAPPING_VERSION = "eligibility-criterion-status-map-v1"
+
+# A formatting mistake is a mistake about how the answer is written, never about
+# the science. It must not end the paper and it must not halt the batch. The
+# paper is re-asked once and then left unresolved and re-screenable.
+#
+# The set holds only the scope-shape codes. A provider envelope error, a refusal
+# and a malformed response stay terminal, because those are not the classifier
+# writing the span fields in the wrong shape.
+FORMAT_ERROR_CODES = frozenset(
+    {
+        "eligible_arctic_scope_activity_unbound",
+        "eligible_arctic_scope_missing",
+        "eligible_arctic_scope_phrase_missing",
+        "eligible_arctic_scope_phrase_unbound",
+        "eligible_arctic_scope_span_unknown",
+    }
+)
+MAXIMUM_FORMAT_ATTEMPTS = 2
+UNRESOLVED_STATE = "unresolved_rescreenable"
+
+
+def _normalize_for_binding(text: str) -> str:
+    """Fold only the presentation differences that text extraction introduces.
+
+    NFKC folds the fi and ffi ligatures. The soft hyphen and a hyphen at a line
+    wrap carry no meaning. Whitespace collapses. A phrase is compared through
+    this projection; the stored span bytes never change.
+    """
+    folded = unicodedata.normalize("NFKC", text.replace(chr(0x00AD), ""))
+    return " ".join(_WRAPPED_WORD.sub("", folded).split())
+
+
+_WRAPPED_WORD = re.compile(r"(?<=[^\W\d_])[-" + chr(0x2010) + r"]\s*\n\s*")
+
+
+def format_repairable(errors: Any) -> bool:
+    """Say whether every validation error is a formatting mistake."""
+    if not isinstance(errors, list) or not errors:
+        return False
+    return set(errors) <= FORMAT_ERROR_CODES
 
 
 def _now() -> str:
@@ -135,8 +176,7 @@ def _validate_answer_agreement_config(value: Any) -> None:
         "output_usd_per_million_tokens_including_thinking": "1.50",
         "price_source": "https://ai.google.dev/gemini-api/docs/pricing",
         "model_source": (
-            "https://ai.google.dev/gemini-api/docs/models/"
-            "gemini-3.1-flash-lite"
+            "https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite"
         ),
         "thinking_source": (
             "https://ai.google.dev/gemini-api/docs/generate-content/thinking"
@@ -195,8 +235,7 @@ def _validate_legacy_flash_lite_answer_agreement_config(value: Any) -> None:
         "output_usd_per_million_tokens_including_thinking": "1.50",
         "price_source": "https://ai.google.dev/gemini-api/docs/pricing",
         "model_source": (
-            "https://ai.google.dev/gemini-api/docs/models/"
-            "gemini-3.1-flash-lite"
+            "https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite"
         ),
         "thinking_source": (
             "https://ai.google.dev/gemini-api/docs/generate-content/thinking"
@@ -536,6 +575,85 @@ def _identity(
     }
 
 
+def _repair_note(prior: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Build the one bounded re-ask for a formatting mistake.
+
+    The note repeats the failing codes and freezes every criterion status of the
+    first response. It repairs the shape of the answer, never its science.
+    """
+    if not prior:
+        return None
+    parsed = prior.get("parsed_response") or {}
+    statuses = {
+        str(row.get("criterion_id")): row.get("status")
+        for row in parsed.get("criteria", [])
+        if isinstance(row, dict)
+    }
+    return {
+        "attempt": int(prior.get("attempts") or 0) + 1,
+        "format_errors": list(prior.get("format_errors") or []),
+        "frozen_criterion_statuses": statuses,
+        "instruction": (
+            "Your last answer had a formatting mistake, listed in format_errors. "
+            "Answer again with the same criterion statuses, listed in "
+            "frozen_criterion_statuses, and correct only the span and phrase "
+            "fields. Do not change any criterion status."
+        ),
+    }
+
+
+def _repair_moved_a_status(prior: dict[str, Any] | None, parsed: Any) -> bool:
+    """Say whether a repair answer changed a criterion status it had to keep."""
+    note = _repair_note(prior)
+    if note is None or not isinstance(parsed, dict):
+        return False
+    frozen = note["frozen_criterion_statuses"]
+    if not frozen:
+        return False
+    current = {
+        str(row.get("criterion_id")): row.get("status")
+        for row in parsed.get("criteria", [])
+        if isinstance(row, dict)
+    }
+    return current != frozen
+
+
+def geography_rescreen_keys(prior_run_dir: Path) -> set[str]:
+    """Return the papers a bounded geography re-screen may ask about again.
+
+    A paper qualifies only when the first screening decided uncertain and
+    study_geography is its one unsatisfied criterion. A failed geography is a
+    decision, not an unresolved criterion, so a correct exclusion never returns.
+    """
+    keys: set[str] = set()
+    for directory in ("jobs", "unresolved"):
+        for path in (prior_run_dir / directory).glob("*.json"):
+            row = _read(path)
+            if str(row.get("state")) not in {"completed", UNRESOLVED_STATE}:
+                continue
+            if (row.get("validation") or {}).get("decision") not in {
+                "uncertain",
+                None,
+            }:
+                continue
+            statuses = {
+                str(item.get("criterion_id")): item.get("status")
+                for item in (row.get("parsed_response") or {}).get("criteria", [])
+                if isinstance(item, dict)
+            }
+            if statuses.get("study_geography") != "uncertain":
+                continue
+            others = [
+                name
+                for name, status in statuses.items()
+                if name != "study_geography" and status != "satisfied"
+            ]
+            if others:
+                continue
+            keys.add(str(row.get("candidate_key")))
+    return keys
+
+
 def _job_key(
     source: dict[str, Any],
     config: dict[str, Any],
@@ -560,6 +678,7 @@ def _request_payload(
     config: dict[str, Any],
     request_id: str,
     policy_sha256: str,
+    repair: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     metadata = {
         key: source.get(key)
@@ -601,6 +720,11 @@ def _request_payload(
                 f"policy: {canonical_json(policy)}",
                 f"metadata: {canonical_json(metadata)}",
                 f"correction_metadata: {canonical_json(correction)}",
+                *(
+                    [f"repair_request: {canonical_json(repair)}"]
+                    if repair is not None
+                    else []
+                ),
                 "ARTICLE_SPANS_BEGIN",
                 _render_span_blocks_v2(span_blocks),
                 "ARTICLE_SPANS_END",
@@ -1423,9 +1547,7 @@ def _span_catalog_v2(
         errors.append("evidence_catalog_changed")
     try:
         manifest_sha256 = sha256_bytes(
-            canonical_json(
-                _span_manifest_v2(blocks, response_schema_version)
-            ).encode()
+            canonical_json(_span_manifest_v2(blocks, response_schema_version)).encode()
         )
     except (KeyError, TypeError):
         manifest_sha256 = None
@@ -1635,12 +1757,18 @@ def _validate_response_span_contract(
                     errors.append("eligible_arctic_scope_activity_unbound")
                 if component == "separable_arctic_component" and not phrases:
                     errors.append("eligible_arctic_scope_phrase_missing")
-                finding_text = "\n".join(
+                # The spans already carry their own line break, so joining them
+                # with another one would insert a break the model never saw.
+                finding_text = "".join(
                     catalog[span_id]["text"]
                     for span_id in finding_ids
                     if span_id in catalog
                 )
-                if any(phrase not in finding_text for phrase in phrases):
+                haystack = _normalize_for_binding(finding_text)
+                normalized_phrases = [
+                    _normalize_for_binding(phrase) for phrase in phrases
+                ]
+                if any(phrase not in haystack for phrase in normalized_phrases):
                     errors.append("eligible_arctic_scope_phrase_unbound")
                 if not unknown and trusted_catalog:
                     resolved_scope = {
@@ -1653,7 +1781,8 @@ def _validate_response_span_contract(
                             _resolved_scope_span(catalog[span_id])
                             for span_id in finding_ids
                         ],
-                        "question_scope_phrases": list(phrases),
+                        "question_scope_phrases": normalized_phrases,
+                        "question_scope_phrases_source": list(phrases),
                     }
             elif component != "none" or activity_ids or finding_ids or phrases:
                 errors.append("eligible_arctic_scope_must_be_empty")
@@ -1765,7 +1894,44 @@ def _terminal_index(run_dir: Path) -> dict[str, str]:
         for path in (run_dir / directory).glob("*.json"):
             row = _read(path)
             result[path.stem] = state or str(row.get("state") or "screening_error")
+    for path in (run_dir / "unresolved").glob("*.json"):
+        row = _read(path)
+        # A paper left unresolved by a formatting mistake keeps its paid attempts
+        # bounded in this run directory. It is not a screening error, and a later
+        # prompt, schema or policy version gives it a new job key and a new
+        # screening.
+        if int(row.get("attempts") or 0) >= MAXIMUM_FORMAT_ATTEMPTS:
+            result.setdefault(path.stem, UNRESOLVED_STATE)
     return result
+
+
+def _unresolved_index(run_dir: Path) -> dict[str, dict[str, Any]]:
+    return {path.stem: _read(path) for path in (run_dir / "unresolved").glob("*.json")}
+
+
+def _record_unresolved(
+    run_dir: Path,
+    job_key: str,
+    record: dict[str, Any],
+    validation: dict[str, Any],
+) -> None:
+    """Keep a paper re-screenable after a formatting mistake.
+
+    The row goes to ``unresolved``, never to ``jobs``, so no terminal
+    screening_error is written and the batch is not stopped.
+    """
+    path = run_dir / "unresolved" / f"{job_key}.json"
+    attempts = int(_read(path).get("attempts") or 0) if path.is_file() else 0
+    atomic_json(
+        path,
+        {
+            **record,
+            "state": UNRESOLVED_STATE,
+            "attempts": attempts + 1,
+            "format_errors": list(validation.get("errors") or []),
+            "recorded_at_utc": _now(),
+        },
+    )
 
 
 def _prepare_run_manifest(
@@ -2021,9 +2187,24 @@ def run_gemini_eligibility(
     max_cost_usd: Decimal,
     credential_file: Path | None = None,
     transport: GeminiTransport | Any | None = None,
+    prior_run_dir: Path | None = None,
 ) -> dict[str, Any]:
-    if action not in {"doctor", "dry-run", "run", "resume", "pause", "status"}:
+    if action not in {
+        "doctor",
+        "dry-run",
+        "run",
+        "resume",
+        "pause",
+        "status",
+        "geography-rescreen",
+        "geography-rescreen-dry-run",
+    }:
         raise ValueError("Gemini eligibility action is not supported")
+    # A geography re-screen is an ordinary bounded run over a filtered source
+    # list, with the geography-only prompt and its own run directory.
+    geography_rescreen = action.startswith("geography-rescreen")
+    if geography_rescreen:
+        action = "dry-run" if action.endswith("dry-run") else "run"
     if action in {"run", "resume"} and transport is None:
         raise ValueError(
             "standalone Gemini execution is disabled; use the shared streaming broker"
@@ -2102,7 +2283,14 @@ def run_gemini_eligibility(
             raise ValueError("a ready source extraction is not verifiable")
         sources.append(row)
 
+    if geography_rescreen:
+        if prior_run_dir is None:
+            raise ValueError("a geography re-screen needs the prior run directory")
+        eligible = geography_rescreen_keys(prior_run_dir)
+        sources = [row for row in sources if str(row["candidate_key"]) in eligible]
+
     terminals = _terminal_index(run_dir)
+    unresolved = _unresolved_index(run_dir)
     planned: list[tuple[str, dict[str, Any], str, dict[str, Any], dict[str, str]]] = []
     estimated = Decimal("0")
     for source in sources:
@@ -2117,6 +2305,7 @@ def run_gemini_eligibility(
             config=config,
             request_id=job_key,
             policy_sha256=sha256_file(policy_file),
+            repair=_repair_note(unresolved.get(job_key)),
         )
         estimate = (len(canonical_json(payload).encode()) + 3) // 4
         if job_key not in terminals:
@@ -2492,19 +2681,39 @@ def run_gemini_eligibility(
                         "resolved_evidence": [],
                         "decision": "uncertain",
                     }
+            record = {
+                **submission,
+                "completed_at_utc": _now(),
+                "model_version": raw.get("modelVersion"),
+                "response_id": raw.get("responseId"),
+                "raw_response": raw,
+                "parsed_response": parsed,
+                "validation": validation,
+                "usage": usage,
+                "actual_cost_usd": str(actual),
+            }
+            prior = unresolved.get(job_key)
+            if validation["valid"] and _repair_moved_a_status(prior, parsed):
+                # A repair corrects the shape of an answer. A repair that moves a
+                # criterion status is a new scientific judgment, so refuse it.
+                validation = {
+                    **validation,
+                    "valid": False,
+                    "errors": ["repair_changed_criterion_status"],
+                    "decision": "uncertain",
+                }
+                _record_unresolved(run_dir, job_key, record, validation)
+                continue
+            if not validation["valid"] and format_repairable(validation["errors"]):
+                # A formatting mistake is not a scientific decision. Keep the
+                # paper re-screenable and let the batch continue.
+                _record_unresolved(run_dir, job_key, record, validation)
+                continue
             atomic_json(
                 run_dir / "jobs" / f"{job_key}.json",
                 {
-                    **submission,
+                    **record,
                     "state": "completed" if validation["valid"] else "screening_error",
-                    "completed_at_utc": _now(),
-                    "model_version": raw.get("modelVersion"),
-                    "response_id": raw.get("responseId"),
-                    "raw_response": raw,
-                    "parsed_response": parsed,
-                    "validation": validation,
-                    "usage": usage,
-                    "actual_cost_usd": str(actual),
                 },
                 immutable=True,
             )

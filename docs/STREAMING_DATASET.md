@@ -42,6 +42,11 @@ These checks reduce accidental agreement and nearby-scope errors, but they do no
 
 Use fake scripts for an offline integration run:
 
+`--access-run-dir` accepts a chapter 1 article-access run directory.
+It also accepts the chapter 2 directory that the corpus freeze writes.
+Both use the same `article-access-manifest-v1` and `article-access-item-v1` schemas.
+Read [the chapter 2 corpus document](CHAPTER2_CORPUS.md) before you use the chapter 2 directory.
+
 ```bash
 PYTHONPATH=src python -m arctic_qa --json stream \
   --phase offline \
