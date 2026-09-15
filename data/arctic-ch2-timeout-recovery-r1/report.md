@@ -155,3 +155,56 @@ The upper bound is 900 seconds, which keeps a misconfiguration from stranding th
 
 The cost is one price config transition in the activation half.
 The gain is that the Pro judge is no longer cut off mid-answer, and that every future timed-out receipt names its own timeout.
+
+## 5. Activation, commit 0a636d3
+
+Firstmate landed the branch on local `main` by fast-forward, `00a6762` to `0a636d3`.
+The activation set is at `/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-ch2-timeout-recovery-r1/`.
+It was built by `build-activation.py` in that directory, which follows the integration crew's script for `arctic-ch2-integration-run-r1`.
+The run id `chapter2-e8d4cad-r1`, the campaign `arctic-qa-production-campaign-002`, the streaming input, the frozen order of 4420 families and the two applied chapter 2 transitions are unchanged.
+Completed receipts are reused by request key and nothing is replayed.
+
+### Order of operations
+
+A configuration transition needs a settled ledger, and the ledger was halted on the ambiguous charge.
+The reviewed continuation therefore ran first, under the price configuration that was in force when the charge happened.
+The price transition then moved the configuration forward on the settled ledger.
+
+1. `prepare` - source archive, runtime snapshot, review record, execution gate, launcher.
+2. `continuation` - the timeout evidence and `authorize-ambiguous-continuation`, bound to the predecessor gate `3a0fa128...` and the v6 price config `cb9a3fd2...` that the halted receipt names.
+3. `apply-price-transition` - one `shared-paid-call-config-transition-v3` for price config v7.
+4. `launch` - the producer in tmux session `arctic-ch2-production-r1`.
+
+### The continuation
+
+Evidence file `ambiguous-continuation-evidence-daf405de-ch2.json`, sha256 `64af8d23ca6c937dd93c1c079c08d6f99b45b92f525ff25e2e34975d5ad28e70`.
+It names `timeout_seconds` 120, which is the timeout the call actually ran under.
+Review file `ambiguous-continuation-review-daf405de-ch2.md`, sha256 `20a9a493a543f75b71c5eec5fd2030be1d2d888faef36937860ab5329348136e`.
+Operator `secondmate-research-c40011`.
+
+The continuation applied.
+Event `ambiguous-continuation-daf405de...json`, schema `shared-paid-call-provider-timeout-continuation-v1`, sha256 `22f88c9d5b94e5212806b1c76bfe4701d582fedde732407d2a0f9167b93f89a7`.
+`reserved_usd_retained` USD 0.035124.
+The ledger left the halt with `spent_usd` unchanged at USD 40.261208 and `ambiguous_reserved_usd` unchanged at USD 0.092648.
+The family `family-aeed4bfe62a1e1028954` stays in operational custody with reason code `operational_ambiguous_charge_provider_timeout`.
+Seven no-replay holds now validate together: four ambiguous HTTP or max-tokens cases, this timeout case, and two orphaned requests.
+
+### The price transition
+
+`price-config-transition-0a636d3-ch2.json`, sha256 `de26f16a76709481ffb8c057a910c37ed9e255b9810ad53bde714e2111941b57`.
+From price config `cb9a3fd2...` (v6) to `3f14a663efe85f72609483d53a157fd535c21b274e4f71e2539609c7e1402240` (v7).
+Predecessor transition event `8f2984c8...`, the chapter 2 ceiling transition.
+The policy is unchanged on both sides: `streaming-dataset-budget-policy-v8-chapter2.json`, sha256 `c2b5a29e...`.
+Applied event `config-transition-8d5355a4...json`, sha256 `4c5523e2fda97cd07a7e04b6d1aa4fa169d379d4c1a97d22479ce627b0a5f239`.
+No money field changed.
+The ceiling stays USD 108.994972 and the allocation stays USD 75.00.
+
+### The relaunch
+
+Execution gate `live-execution-gate-0a636d3-ch2.json`, sha256 `ee84e70855ea5605a842991f78c2ae9234c1e4693295a927e06dfefc19913ad6`.
+It is the predecessor gate with the new commit, review record, price config sha256 and id, roles file sha256, source archive sha256, runtime snapshot and its sha256, and the `supersedes_config_transition_review` block that names the predecessor gate.
+Launcher `launcher-0a636d3-ch2.sh`, which names the new runtime, the new gate and the new price transition, with `--max-papers 800`.
+
+The producer started in tmux session `arctic-ch2-production-r1`, pane `%28`, PID 1006980.
+Fresh progress was observed at 2026-09-15T18:13:34Z: state `running`, invocation run id `chapter2-e8d4cad-r1`.
+Activation receipt `activation-receipt-0a636d3-ch2.json`.
