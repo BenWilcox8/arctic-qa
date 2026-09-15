@@ -1,0 +1,57 @@
+{
+ "chapter2": {
+  "documents": 50,
+  "gutter_lines": 0,
+  "gutter_rate": 0.0,
+  "lines": 26959,
+  "mid_word_break_rate": 0.02051845286815205,
+  "mid_word_breaks": 84,
+  "presentation_marks": 0,
+  "presentation_rate": 0.0
+ },
+ "chapter2_chunks": {
+  "chunks": 4915,
+  "documents": 50,
+  "gutter_chunk_rate": 0.0,
+  "gutter_chunks": 0,
+  "sentence_complete_chunks": 1484,
+  "sentence_complete_rate": 0.401547414316348
+ },
+ "documents_with_any_gutter_line": {
+  "chapter2": 0,
+  "legacy": 50
+ },
+ "legacy": {
+  "documents": 50,
+  "gutter_lines": 13512,
+  "gutter_rate": 0.3559451377567987,
+  "lines": 39491,
+  "mid_word_break_rate": 0.43334803441861014,
+  "mid_word_breaks": 2056,
+  "presentation_marks": 774,
+  "presentation_rate": 0.19430312575374897
+ },
+ "legacy_chunks": {
+  "chunks": 1257,
+  "documents": 50,
+  "gutter_chunk_rate": 0.7982841449900048,
+  "gutter_chunks": 983,
+  "sentence_complete_chunks": 266,
+  "sentence_complete_rate": 0.20858524358818287
+ },
+ "measures": {
+  "gutter_rate": "share of non-empty text lines that glue two columns",
+  "mid_word_break_rate": "mid-word line breaks per thousand characters",
+  "presentation_rate": "ligatures and soft hyphens per thousand characters",
+  "sentence_complete_rate": "share of chunks ending on a sentence",
+  "word_retention": "chapter 2 words for each chapter 1 word"
+ },
+ "sample_rule": "Papers whose chapter 2 parse recorded at least one multi-column page, in the chapter 1 access order.",
+ "sample_size": 50,
+ "schema": "arctic-qa-extraction-quality-v1",
+ "word_retention": {
+  "documents_below_0_9": 0,
+  "median": 0.9710338239809018,
+  "minimum": 0.9442761962447002
+ }
+}

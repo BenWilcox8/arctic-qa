@@ -267,6 +267,56 @@ This measure is what found the lost-heading defect described above, so it is now
 | Extraction failures | 0 |
 | Chapter 2 corpus size on disk | 1.5 GB |
 
+## The chapter 2 freeze, and one duplicate launch
+
+Freeze id `chapter2-full-text-4420-r1`, run id `chapter2-20260915`, producer commit `680ab9f7a469b0a8a6e0403d5e826456737a37d4`.
+
+| Output | Path under the chapter 2 root |
+| --- | --- |
+| Manifest | `corpus-freeze/chapter2-full-text-4420-r1/chapter2-corpus-manifest.jsonl` |
+| Descriptor | `corpus-freeze/chapter2-full-text-4420-r1/manifest-descriptor.json` |
+| Receipt | `corpus-freeze/chapter2-full-text-4420-r1/freeze-receipt.json` |
+| Access run | `article-access/chapter2-full-text-4420-r1/` |
+
+| Hash | Value |
+| --- | --- |
+| Manifest sha256 | `32af3636cdee90dbb99935df78d90e4565e2e2376ac44d9bfc38047d6439faf8` |
+| Order sha256 | `cc89bca5c3ed11155adc5d122bc659016e0016ca04261af15a8f5183796e8c09` |
+| Chapter 1 manifest it derives from | `c6b68c87a5bacd6eb50d84c67b4c8eca03fee2f5031dd15741e7631dcd36950d` |
+| Chapter 1 freeze receipt it derives from | `1b70ad277a5ea176d9e1558a02652f5dd0845998276a18cd13aebab2fd00e4a7` |
+
+Counts: 4,420 manifest records, 4,420 unique candidate keys, 4,420 unique source hashes, 474,113 chunks, 3,643 documents with at least one multi-column page.
+
+### The duplicate launch
+
+The first freeze was launched at 13:21:54 UTC.
+A check with `pgrep -f "action freeze" | tail -1` matched the shell that ran the check itself and returned a process that had already exited, and the log file was empty because the nix shell had not flushed it.
+That reading was wrong, and a second freeze started at 13:23:05 UTC with the same freeze id and the same arguments.
+Both processes then wrote under `corpus-freeze` and `article-access` at the same time, so their output could not be trusted.
+
+The correction, after the supervisor's note:
+
+1. Both processes were stopped, found with `ps -eo pid=,lstart=,cmd=` instead of a `pgrep` that can match its own shell.
+2. Only `corpus-freeze` and `article-access` were removed, 2,460 files. `extracted`, `parsed`, `chunks`, `index`, `progress` and the quality report were kept and counted again afterwards: 4,420 of each.
+3. The freeze ran once more, as a single background task, waited on by that task's own notification.
+
+### Verification after the single run
+
+The freeze receipt reports its own checks. They were not taken on trust.
+`data/arctic-ch2-corpus-r1/verify-freeze.py` recomputed the following from the stored files, and all 16 checks passed:
+
+- The manifest holds 4,420 records, and its sha256 recomputes to the value in the receipt and in the descriptor.
+- Positions run 1 to 4,420 with no gap and no repeat, and every candidate key is unique.
+- The order hash recomputes from the ordered candidate keys.
+- The order is equal to the chapter 1 frozen order, and the chapter 1 manifest sha256 recomputes.
+- 60 randomly sampled documents verify all three of their hashes: the extracted text, the parse, and the chunk file.
+- The access run has 4,420 items, `target_total` equal to the selection length, a completed progress record, and a receipt.
+- Every access item matches its manifest position, run id, subgroup, candidate key, `identity_verified` and `access_state`.
+- Every sampled access `extraction_path` points inside the chapter 2 root.
+
+No chapter 1 directory was written.
+Every file under `article-access-r1`, `corpus-freeze-r1` and `source-screening-r1` is unchanged, and the newest write anywhere else in the data root is from 01:15 UTC, before this task began.
+
 ## Rigor safeguard for every change
 
 **Reading-order extraction.** The extractor changes only how the stored bytes are read into text. Every downstream gate is unchanged. A question can only become easier to support, never easier to accept: the standalone gate, the reconstructor, the answer verifier and every deterministic contract still run without change. Removing a column gutter from a quote does not make a paper-dependent question pass any of them.
