@@ -413,3 +413,14 @@ def test_the_status_reports_an_exhausted_paper_as_unresolved_not_queued(
     ]
     assert [row["gemini_status"] for row in rows] == ["unresolved_rescreenable"]
     assert rows[0]["gemini_decision"] is None
+
+
+def test_the_corpus_viewer_knows_the_unresolved_state() -> None:
+    """The read-only monitor refuses an overlay status it does not know."""
+    from arctic_qa.corpus_viewer import GEMINI_FILTERS
+
+    assert eligibility.UNRESOLVED_STATE in GEMINI_FILTERS
+    page = (ROOT / "src" / "arctic_qa" / "corpus_viewer.html").read_text(
+        encoding="utf-8"
+    )
+    assert f'value="{eligibility.UNRESOLVED_STATE}"' in page
