@@ -171,7 +171,11 @@ def drop_running_heads(
 
 
 def sections_from_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Group reading-order blocks into heading-delimited sections."""
+    """Group reading-order blocks into heading-delimited sections.
+
+    Every block reaches exactly one section, so no text is lost. A heading block
+    opens its section and stays inside it.
+    """
     body_height = _median(
         [
             _line_height(block)
@@ -193,7 +197,10 @@ def sections_from_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "heading_level": level,
                 "heading_path": list(stack),
                 "page": int(block["page"]),
-                "blocks": [],
+                # The heading is the first block of its own section. A heading
+                # that only named the section would drop its text from the
+                # document, and the reader needs that line.
+                "blocks": [block],
             }
             sections.append(current)
             continue

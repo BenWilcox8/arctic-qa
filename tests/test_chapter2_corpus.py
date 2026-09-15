@@ -178,6 +178,37 @@ def test_chunks_keep_page_and_heading_locators(tmp_path: Path) -> None:
         assert isinstance(chunk["heading_path"], list)
 
 
+def test_no_block_is_lost_between_the_pages_and_the_sections(tmp_path: Path) -> None:
+    """A heading block must stay in the text, not become metadata only."""
+    path = tmp_path / "headings.pdf"
+    path.write_bytes(
+        two_column_pdf(
+            [
+                "Methods",
+                "We sampled the Chukchi Sea in 2019.",
+                "Results",
+                "The mean was 12.4 mg per litre.",
+                "Discussion",
+                "The mean is higher than the earlier survey.",
+            ],
+            [],
+        )
+    )
+    sections, _, coverage = extract_document(path, "application/pdf")
+    assert sum(len(section["blocks"]) for section in sections) == coverage["blocks"]
+    text = "\n".join(
+        block["text"] for section in sections for block in section["blocks"]
+    )
+    assert len(text) == coverage["characters"]
+    for heading in ("Methods", "Results", "Discussion"):
+        assert heading in text
+    assert [section["heading"] for section in sections][-3:] == [
+        "Methods",
+        "Results",
+        "Discussion",
+    ]
+
+
 def _namespace(tmp_path: Path) -> tuple[Path, Database]:
     namespace = tmp_path / "arctic-qa"
     for name in ("originals", "parsed", "chunks", "manifests", "backups"):
