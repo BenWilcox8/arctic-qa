@@ -189,6 +189,7 @@ def test_the_rule_labels_one_paper_per_outcome_class_and_no_mid_family_paper(
     )
     assert capped["outcome_class"] == "paper_cost_cap_reached"
     assert capped["eligibility_decision"] is None
+    assert capped["source_id"] is None
 
     # The generation outcomes, through the producer's own ladder.
     def terminal(disposition: str, reasons: list[str]):
@@ -350,9 +351,9 @@ def test_the_batch_labels_every_finished_paper_once_in_one_transaction(
         for key in ("p-excluded", "p-capped", "p-unscreened", "p-eligible")
     }
     access_items["p-pending"] = {"candidate_key": "p-pending", "access_state": "x"}
+    # `p-capped` reached the cap before it was screened, so it has no job.
     eligibility_jobs = {
         "p-excluded": _job("excluded"),
-        "p-capped": _job("eligible"),
         "p-eligible": _job("eligible"),
     }
     _insert_source(database, candidate_key="p-eligible", family_id="f-eligible")
@@ -719,3 +720,58 @@ def test_the_label_table_joins_the_schema_without_a_version_bump(
         database.one("SELECT version FROM schema_info")["version"]
         == db_module.SCHEMA_VERSION
     )
+
+
+def test_the_cost_cap_is_read_in_the_producer_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The producer reads the accepted path before it meets the cost cap.
+
+    A family that holds a cap row and an accepted candidate is an accepted
+    family: `_progress_generation` returns on the accepted path and never pays
+    again, so the cap never stopped it. A family that holds a cap row and a
+    ladder that wants another paid call is the family the cap stopped.
+    """
+    _, database = _open_database(tmp_path)
+    _insert_rejection(
+        database,
+        stage="paper_cost_cap",
+        reason_code=streaming.PAPER_COST_CAP_REASON_CODE,
+        detail={"campaign_id": CAMPAIGN_ID, "candidate_key": "p-both"},
+    )
+    source_id = _insert_source(database, candidate_key="p-both", family_id="f-both")
+
+    monkeypatch.setattr(
+        streaming,
+        "_stored_generation_outcome",
+        lambda *a, **k: {
+            "kind": streaming.STORED_OUTCOME_TERMINAL,
+            "disposition": "accepted",
+            "reason_codes": ["all_checks_passed"],
+        },
+    )
+    accepted = _classify(
+        database,
+        candidate_key="p-both",
+        family_id="f-both",
+        eligibility=_job("eligible"),
+    )
+
+    assert accepted["outcome_class"] == "generation_accepted"
+    assert accepted["source_id"] == source_id
+
+    monkeypatch.setattr(
+        streaming,
+        "_stored_generation_outcome",
+        lambda *a, **k: {"kind": streaming.STORED_OUTCOME_ATTEMPT, "attempt": {}},
+    )
+    stopped = _classify(
+        database,
+        candidate_key="p-both",
+        family_id="f-both",
+        eligibility=_job("eligible"),
+    )
+
+    assert stopped["outcome_class"] == "paper_cost_cap_reached"
+    assert stopped["eligibility_decision"] == "eligible"
+    assert stopped["source_id"] == source_id

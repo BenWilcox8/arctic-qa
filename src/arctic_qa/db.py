@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -215,9 +216,23 @@ def now() -> str:
 
 
 class Database:
+    """One sqlite connection, serialised across the threads that share it.
+
+    The paper-concurrent producer runs several papers on one database. All of
+    them use this one connection, so every statement and every transaction is
+    taken under ``lock``: a commit on a shared connection is connection-wide,
+    and two interleaved transactions would commit each other's half-written
+    work. The lock is reentrant, so a method that reads and then writes under
+    it stays one unit.
+
+    ``lock`` is public: a caller that must read and then write atomically,
+    such as a claim over a shared row, holds it across both.
+    """
+
     def __init__(self, path: Path):
         self.path = path
-        self.connection = sqlite3.connect(path)
+        self.lock = threading.RLock()
+        self.connection = sqlite3.connect(path, check_same_thread=False)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
 
@@ -384,23 +399,30 @@ class Database:
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
-        try:
-            yield
-            self.connection.commit()
-        except Exception:
-            self.connection.rollback()
-            raise
+        with self.lock:
+            try:
+                yield
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
 
     def rows(self, sql: str, parameters: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
-        return [
-            dict(row) for row in self.connection.execute(sql, parameters).fetchall()
-        ]
+        with self.lock:
+            return [
+                dict(row) for row in self.connection.execute(sql, parameters).fetchall()
+            ]
 
     def one(self, sql: str, parameters: tuple[Any, ...] = ()) -> dict[str, Any] | None:
-        row = self.connection.execute(sql, parameters).fetchone()
+        with self.lock:
+            row = self.connection.execute(sql, parameters).fetchone()
         return dict(row) if row else None
 
     def upsert_source(self, source: dict[str, Any]) -> bool:
+        with self.lock:
+            return self._upsert_source(source)
+
+    def _upsert_source(self, source: dict[str, Any]) -> bool:
         existing = None
         if source.get("doi"):
             existing = self.one("SELECT * FROM sources WHERE doi = ?", (source["doi"],))
@@ -495,6 +517,12 @@ class Database:
         return True
 
     def begin_stage(self, receipt: dict[str, str]) -> tuple[str, dict[str, Any] | None]:
+        with self.lock:
+            return self._begin_stage(receipt)
+
+    def _begin_stage(
+        self, receipt: dict[str, str]
+    ) -> tuple[str, dict[str, Any] | None]:
         existing = self.one(
             "SELECT * FROM stage_receipts WHERE run_id=? AND entity_id=? AND stage=? AND input_hash=?",
             (
