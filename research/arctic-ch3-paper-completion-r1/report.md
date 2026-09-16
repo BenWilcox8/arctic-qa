@@ -207,6 +207,47 @@ The launch waits for a settled window before every broker construction and
 retries a start that loses it.
 This is the same wall the concurrency activation met at 22:59 UTC.
 
+**A refused construction is not a quiet failure.** It writes an integrity halt
+file, and a halt blocks every broker start on that ledger, the evaluator's
+included. The 23:39:44 UTC halt came from this task's own start attempt, and it
+deadlocked both units: the producer could not start under the halt, the
+evaluator could not start under the halt, and only a broker start runs the
+orphan recovery that would settle the evaluator's stranded request. Retrying a
+start into a busy shared ledger therefore makes the problem worse. The starts
+must be serialised instead.
+
+### The launch that worked
+
+Firstmate serialised them (order of 2026-09-16 23:46 UTC): the evaluator worker
+stopped the evaluator unit, superseded the halt and settled the in-flight
+evaluation request; the producer then started alone; the evaluator restarts
+after the producer's first paid construction call closes the
+transition-validation window for good.
+
+| Measure | Value |
+| --- | --- |
+| Launched | 2026-09-16 23:52:40 UTC |
+| Producer PID | 2239101 |
+| tmux session | `arctic-ch3-production-r1` |
+| Commit | `6fa9163`, 4 paper workers, 4 option workers |
+| Broker construction | passed on attempt 1 |
+| First paid construction call | 2026-09-16 23:53:59 UTC |
+| **Launch to first paid call** | **79.6 seconds** |
+| This run's submissions | 923 before, 924 after |
+
+### Startup before and after
+
+| Launch | Startup to first paid call |
+| --- | --- |
+| 18:28 UTC, before the label | about 20 minutes |
+| 18:58 UTC, before the label | about 21 minutes |
+| 21:53 UTC, before the label | about 22 minutes |
+| **23:52 UTC, with 208 papers labelled** | **79.6 seconds** |
+
+The 80 seconds are not all replay: they include the process start, the `nix
+develop` shell, the broker construction and the walk over the 4,212 unlabelled
+papers of the frozen order, which are cheap because they were never screened.
+
 
 ## 9. Tests
 
