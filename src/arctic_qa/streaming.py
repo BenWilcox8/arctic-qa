@@ -37,6 +37,7 @@ from .model_roles import (
     JUDGE_ROLES,
     MODEL_ROLES_CONTRACT_VERSION,
     WRITER_ROLE,
+    assert_profile_allowed_for_phase,
     assert_role_separation,
     load_role_contract,
     resolve_roles,
@@ -98,10 +99,20 @@ REPAIRABLE_QUESTION_REASONS = frozenset(
         "standalone_answer_leakage",
         "standalone_multiple_interpretations",
         "standalone_malformed_text",
+        # Cost slice (audit 4.4): the writer's own slot record said the source
+        # does not state a slot, so no judge was called. Routed like the
+        # matching standalone_undefined_* code; the routing slice owns the logic.
+        *generation_contract.WRITER_SLOT_UNAVAILABLE_REASONS,
     }
 )
+# Cost slice (audit 4.9 C2): the eligible finding context exceeded the
+# measured payload budget before any paid call. Terminal, contract layer.
+TERMINAL_GENERATION_REASONS = frozenset({"finding_context_over_budget"})
 ALTERNATIVE_FINDING_REASONS = frozenset(
     {
+        # Cost slice (audit 4.5 b, c): freeze-time codes that leave the finding.
+        "no_admissible_finding",
+        "finding_required_phrase_artifact",
         "finding_answer_phrase_in_required_question_phrases",
         "finding_evidence_quote_excludes_finding",
         "insufficient_verified_distractors",
@@ -119,6 +130,9 @@ ALTERNATIVE_FINDING_REASONS = frozenset(
 )
 IMMEDIATE_ALTERNATIVE_FINDING_REASONS = frozenset(
     {
+        # Cost slice (audit 4.5 b, c): registered beside the other admission codes.
+        "no_admissible_finding",
+        "finding_required_phrase_artifact",
         "finding_answer_phrase_in_required_question_phrases",
         "finding_evidence_quote_excludes_finding",
         "eligible_arctic_scope_missing_from_finding",
@@ -158,6 +172,11 @@ _SLOT_REASON_TYPES = {
     "standalone_undefined_period_or_event": "period",
     "standalone_undefined_population_or_sample": "sample",
     "standalone_undefined_acronym": "acronym",
+    # Cost slice (audit 4.4): the writer-declared gaps demand the same slots.
+    "writer_slot_unavailable_location": "place",
+    "writer_slot_unavailable_period_or_event": "period",
+    "writer_slot_unavailable_population_or_sample": "sample",
+    "writer_slot_unavailable_acronym": "acronym",
 }
 _STANDALONE_DEPENDENT_REASONS = frozenset(
     {
@@ -1557,6 +1576,9 @@ def _reason_family(reason: str) -> str:
     """Collapse a reason code to the demand a repair would answer."""
     if reason.startswith(("standalone_undefined_", "standalone_unresolved_")):
         return "referent_slot"
+    # Cost slice (audit 4.4): a writer-declared slot gap is the same demand.
+    if reason in generation_contract.WRITER_SLOT_UNAVAILABLE_REASONS:
+        return "referent_slot"
     if reason.startswith("standalone_"):
         return "standalone"
     if reason.startswith("question_context_"):
@@ -1800,6 +1822,14 @@ def _failure_layer(reason: str) -> str:
         return "options"
     if reason.startswith("standalone_") or reason.startswith("question_context_"):
         return "context"
+    # Cost slice (audit 4.4): the writer-declared slot gap is a context defect.
+    if reason in generation_contract.WRITER_SLOT_UNAVAILABLE_REASONS:
+        return "context"
+    # Cost slice (audit 4.5 b): the extractor found only a study-internal index.
+    if reason == "no_admissible_finding":
+        return "finding"
+    if reason in TERMINAL_GENERATION_REASONS:
+        return "contract"
     if reason in {
         "relation_scope_mismatch",
         "scope_qualifier_missing",
@@ -2307,6 +2337,9 @@ def _resolve_model_roles(
     """
     contract = load_role_contract(roles_file)
     phase = str(getattr(author, "phase", "offline"))
+    # Chapter 2 yield audit, section 4.9 C9 (cost slice): a production run
+    # never selects the cost_aware profile.
+    assert_profile_allowed_for_phase(role_profile, phase)
     effective = {
         WRITER_ROLE: provider_model(author, WRITER_ROLE),
         **{role: provider_model(verifier, role) for role in JUDGE_ROLES},

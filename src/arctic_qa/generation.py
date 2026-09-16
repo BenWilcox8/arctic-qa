@@ -39,6 +39,8 @@ from .validation import (
     context_only_span_records,
     interpretation_spans_contain_answer,
     numeric_rule_is_source_bound,
+    _option_equivalence_key,
+    _option_needs_independent_support,
     option_display_issue,
     phrase_in_source_text,
     question_answer_leaks_answer,
@@ -51,6 +53,7 @@ from .validation import (
     scope_phrase_in_text,
     scope_phrase_is_displayed,
     scope_qualifier_not_displayed,
+    validate_distractor,
 )
 
 
@@ -66,8 +69,47 @@ FINDING_ADMISSION_REASK_REASONS = frozenset(
         "finding_answer_phrase_in_required_question_phrases",
         "finding_span_is_table_or_caption",
         "finding_span_figure_defined_referent",
+        "finding_required_phrase_artifact",
+        "no_admissible_finding",
     }
 )
+# Chapter 2 yield audit, section 4.5 (a) and (b): the ranked candidates the
+# extractor returns are persisted per family and served to the
+# alternative-finding rung, so a second finding no longer buys a second
+# whole-paper extraction. The key binds the bank to the extractor prompt, the
+# admission contract and the Arctic scope custody state.
+FINDING_BANK_CONTRACT_VERSION = "ranked-finding-bank-v1"
+FINDING_BANK_SERVABLE_STATUS = "admissible"
+ANSWER_BASIS_CLASSES = (
+    "physical_magnitude",
+    "direction_or_comparison",
+    "category_identity",
+    "study_internal_index",
+)
+STUDY_INTERNAL_INDEX_BASIS = "study_internal_index"
+# Section 4.5 (e): the structural pre-screen runs in shadow mode only. It
+# records a verdict per paper and never blocks an extractor call.
+FINDING_PRESCREEN_CONTRACT_VERSION = "structural-finding-prescreen-shadow-v1"
+# Section 4.4: the judge call plan. Free checks run right after the writer,
+# the standalone call is kept for every candidate because routing reads its
+# codes, and the two later Pro calls are skipped once a free check or the
+# standalone gate has failed. A seeded random cohort still runs the full
+# suite so the judge's recall stays measurable.
+JUDGE_CALL_PLAN_CONTRACT_VERSION = "judge-call-plan-v1"
+SHADOW_COHORT_POLICY_VERSION = "judge-short-circuit-shadow-cohort-v1"
+SHADOW_COHORT_RATE = 0.05
+SKIPPED_AFTER_FREE_CHECK_FAILURE = "skipped_after_free_check_failure"
+SKIPPED_AFTER_STANDALONE_FAILURE = "skipped_after_standalone_failure"
+SKIPPED_ON_UNAVAILABLE_SLOT = "skipped_on_unavailable_slot"
+# Section 4.8 and cost plan step 6: options are verified in rank order and
+# verification stops once the export need is met. The audit wrote "three",
+# the acceptance floor, but exporting._absent_mcq builds the answer-absent
+# MCQ from a fourth accepted distractor, so a stop at three would drop that
+# export form from every item. The target is therefore four: the floor of
+# three for the present MCQ plus the one the absent form needs. The rest of
+# the proposals stay as an unverified reserve for the option-repair rung.
+OPTION_VERIFICATION_CALL_PLAN_VERSION = "rank-order-option-verification-v1"
+OPTION_VERIFIED_TARGET = 4
 QUESTION_REPAIR_KINDS = frozenset(
     {"question_revision", "context_widened_revision", "surgical_correction"}
 )
@@ -118,7 +160,12 @@ _FIGURE_REFERENT_PATTERN = re.compile(
     r"see\s+fig(?:ure)?s?\.?\s*\d+)",
     re.IGNORECASE,
 )
-MAX_FINDING_CONTEXT_CHARS = 3_000_000
+# Measured on the 252 chapter 2 extractor payloads: the largest was 393,094
+# characters with the evidence emitted twice, and 257,607 characters once the
+# duplicate chunk text is dropped. The budget covers that with headroom and
+# stays far below the model's input limit. A paper above it is rejected to
+# the operator before any paid call (chapter 2 yield audit, section 4.9 C2).
+MAX_FINDING_CONTEXT_CHARS = 400_000
 MAX_FINDING_SPAN_CHARS = 1_600
 FINDING_SPAN_OVERLAP_CHARS = 400
 MAX_COMBINED_EVIDENCE_CHARS = 3_200
@@ -359,6 +406,225 @@ RECONSTRUCTION_NUMERIC_INSTRUCTIONS = (
 CLOSED_SET_INSTRUCTIONS = """Use deterministic_rule.kind closed_set only when SOURCE_DATA explicitly establishes a complete typed set. Put each set member in source_values. Set member_type to categorical_entity, categorical_value, or quantity. Set ordering to ordered only when sequence or position changes meaning. Otherwise, set ordering to unordered. The displayed answer must contain every source member exactly once. Do not convert a sampled or example list into a complete set."""
 DISTRACTOR_WRITER_INSTRUCTIONS = """Treat QUESTION and QUESTION_CONTEXT as the complete benchmark task. Do not use SOURCE_DATA to resolve a missing system, location, sample, period, condition, or referent. If the displayed task needs SOURCE_DATA to identify a referent or interpret scope, do not propose distractors. Apply this rule to each option. A study-local definite description such as 'the southern station', 'the identified OTUs', or 'this experiment' needs source-supported identifying context. A latitude alone does not identify a station or event. SOURCE_DATA can still determine the answer. Propose 4 to 6 typed distractors so that at least three can survive independent verification. Do not self-verify them. Each option must be a concise positive assertion with one interpretation. Avoid explicit negation and compound assertions. A conjunction is permitted only to display one typed closed set. For each closed-set option, provide candidate_values, member_type, and ordering. Keep the answer cardinality and member type. Preserve meaningful order. Change at least one member. Do not repeat an option or provide an option equivalent to the answer. Each option must be understandable with QUESTION and QUESTION_CONTEXT alone. For a numeric option, display exactly one displayed number and unit, and provide numeric canonical_value and unit metadata that match that display. Prefer nonnumeric categorical or directional contradictions when the answer lacks a source-bound numeric tolerance rule. Select source_span_id for each evidence record. For each option, provide a concise generation_rationale that explains why the option is plausible and how it differs from the source-supported answer. This is a model-generated justification, not proof and not hidden reasoning."""
 
+# Chapter 2 yield audit, section 4.9 C2: the static instruction block of each
+# judge and of the extractor rides in systemInstruction, exactly as
+# STANDALONE_SYSTEM already does, so the user prompt carries only the evidence
+# and the per-call records. The model reads the same sentences either way.
+EXTRACTOR_INSTRUCTIONS = (
+    "Extract up to three bounded answer records in candidate_findings, ranked "
+    "best first, each from a different result or discussion sentence. Set rank "
+    "to 1 for the best candidate. Rank first the finding whose place, period, "
+    "population, and measured variable are all stated in the supplied spans. "
+    "Rank last a finding that needs a figure, a table layout, or a "
+    "study-internal code name that no supplied span defines. Set "
+    "ranking_rationale for each candidate. When you return fewer than three "
+    "candidates, state in ranking_rationale why the paper offers no more. Set "
+    "admissible to true only when the candidate meets every selection rule "
+    "below. For each candidate, state in source_blind_answer_basis what a "
+    "scientist who cannot see this paper could use to tell the true value "
+    "apart from three plausible wrong ones, using only domain knowledge and "
+    "the scope you will supply. Set answer_basis_class to study_internal_index "
+    "when the answer is a value of a study-defined index, a score on a "
+    "study-defined axis, a label the authors assigned, a layout convention of "
+    "a table, or a mean pooled over unlike samples with unstated weights. Rank "
+    "every study_internal_index candidate last, whatever its scope quality. "
+    "Select one source_span_id for each candidate. "
+    + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS
+    + " "
+    "SOURCE_DATA contains two kinds of span. A finding span is selectable "
+    "evidence for the answer. An interpretation span in CONTEXT_ONLY_SOURCE "
+    "is study context that identifies the place, the period, the population, "
+    "the instrument, or an acronym expansion. Do not select an interpretation "
+    "span as the finding. Use an interpretation span only to set a scope value "
+    "and to judge whether a reader without the paper can interpret the "
+    "finding. "
+    "Select a complete prose finding sentence. Select one atomic claim from a "
+    "complete prose finding sentence "
+    "in the results or discussion. Do not select a title, heading, caption, "
+    "legend, axis label, methods-only description, or sentence fragment as the "
+    "finding by itself. For a selected numerical row, include its adjacent caption "
+    "or definition when that text defines the metric, unit, percentage basis, acronym, "
+    "location, or period needed to interpret the finding. "
+    "If the finding is a numerical row, a cell, or a figure value, put the "
+    "caption span, the column-header span, and the metric-definition span in "
+    "interpretation_span_ids. If those spans are not available, do not select "
+    "this finding. Select a prose finding sentence instead. "
+    "The selected span must contain exact, sufficient evidence for the "
+    "entire answer and every required question phrase. Evidence spans are "
+    "bounded source paragraphs or overlapping windows and can contain PDF "
+    "line wraps. The pipeline can combine adjacent eligible fragments into "
+    "one exact selectable interval. Do not combine span IDs yourself. "
+    "Set each non-null scope value to exact SOURCE_DATA text, from a finding "
+    "span or from an interpretation span. Do not use an alias or a paraphrase. "
+    "Keep at least one value non-null. Populate every scope qualifier that a "
+    "reader without the paper needs to interpret the result. This always "
+    "includes geography and period when any supplied span states them. "
+    "Uniqueness inside the paper is not sufficient. "
+    "Put a scope value in required_question_phrases only when the question "
+    "must repeat it word for word. A scope value that comes from an "
+    "interpretation span belongs in question_context, not in "
+    "required_question_phrases. Every required_question_phrases entry must "
+    "be exact selected-span text and must not contain answer.text or any "
+    "answer variant. Prefer a non-numeric finding unless the "
+    "selected span supports the complete numeric contract. Add numeric_rule "
+    "only for one scalar value when the same selected span explicitly "
+    "supports its value, unit, tolerance, tolerance basis, precision, "
+    "rounding, and conversion. The tolerance_basis must be exact text "
+    "from that span. Emit numeric_rule only when answer.text displays "
+    "exactly one number with its unit. Never emit numeric_rule for a "
+    "non-scalar answer: never for a categorical, directional, "
+    "multi-value, range, or descriptive answer, and never set "
+    "canonical_value to a placeholder such as 0 or 1. Omit numeric_rule "
+    "when any field is unsupported or when the answer contains multiple "
+    "values. "
+    "NUMERIC_METADATA_VOCABULARY " + NUMERIC_RULE_CONTRACT_VERSION + ". "
+    "Use exactly these strings and no others. "
+    "Set unit to the unit token that follows the value in the span, not a "
+    "gloss and not an expanded name. "
+    "Set tolerance_basis to exact span text that states the tolerance, and "
+    "it must contain that same unit. When the span reports an uncertainty, "
+    "copy the uncertainty text with its unit, such as '+/-0.3 t'. When the "
+    "value is a directly published exact scalar with zero tolerance, copy "
+    "its displayed quantity with its unit, such as '1.8 cm'. "
+    "Set reported_precision to the decimal increment of the literal value, "
+    "such as '0.1' for '1.0', or to exact span text that states the "
+    "precision. "
+    "Set rounding_rule to 'none' when the value is reported without further "
+    "rounding, or to '<N> decimal places' matching the literal, such as "
+    "'1 decimal place'. "
+    "Set conversion_rule to exactly 'direct source literal' when no unit "
+    "conversion was applied. "
+    "The only separate vocabulary is a literal exact integer count: use "
+    "tolerance_basis 'count', reported_precision 'exact integer', "
+    "rounding_rule 'none', and a conversion_rule that starts with "
+    "'direct count'. The pipeline binds this "
+    "rule to the answer-verifier request in candidate provenance. "
+    + ANSWER_FORMAT_INSTRUCTIONS
+    + " "
+    + CLOSED_SET_INSTRUCTIONS
+    + " Set selection_rationale to a concise evidence-grounded justification "
+    "for selecting this finding. Do not provide hidden reasoning."
+)
+RECONSTRUCTOR_INSTRUCTIONS = (
+    BENCHMARK_STANDALONE_INSTRUCTIONS
+    + " Read QUESTION and QUESTION_CONTEXT alone before you read SOURCE_DATA. "
+    + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS
+    + " "
+    "Do not use SOURCE_DATA to repair a missing system, location, sample, period, "
+    "condition, or referent. If the displayed task is incomplete, report ambiguity "
+    "instead of resolving it from SOURCE_DATA. SOURCE_DATA can still determine the "
+    "answer. Reconstruct the answer. The proposed answer is hidden. "
+    + CONTEXT_ONLY_SOURCE_INSTRUCTIONS
+    + " Select one source_span_id for the evidence. A selectable span can be an "
+    "exact combined interval from adjacent eligible fragments. Copy each non-null scope "
+    "value exactly from its selected SOURCE_DATA span, without aliases or "
+    "paraphrases. Populate only scope qualifiers stated verbatim in the "
+    "QUESTION and supported by the selected span. Use null for every other "
+    "scope dimension, even when the source contains additional context. "
+    "Leave every scope value null when the QUESTION states no qualifier that "
+    "the selected span supports. Return alternatives only when "
+    "the source supports a distinct answer that also correctly answers this "
+    "question. Do not list paraphrases, spelling or unit variants, or false "
+    "and negated answer choices as alternatives. "
+    + RECONSTRUCTION_NUMERIC_INSTRUCTIONS
+    + " Set reconstruction_rationale "
+    "to a concise evidence-grounded justification for the reconstructed "
+    "answer and ambiguity label. Do not provide hidden reasoning."
+)
+ANSWER_VERIFIER_INSTRUCTIONS = (
+    BENCHMARK_STANDALONE_INSTRUCTIONS
+    + " Read QUESTION and QUESTION_CONTEXT alone before you use SOURCE_DATA or "
+    "ANSWER_RECORD. " + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS + " "
+    "Do not use those records to repair a missing system, location, "
+    "sample, period, condition, or referent. SOURCE_DATA "
+    "can still determine or verify the answer. Verify entailment, relation, scope, ambiguity, "
+    "alternatives, evidence, and the question claim type. Label the question claim "
+    "type from QUESTION and SOURCE_DATA alone. "
+    "Set relation_scope_match to false only when the selected span does not "
+    "support the ANSWER_RECORD answer as the answer to this QUESTION. Judge "
+    "the scientific relation, not the wording. "
+    "Set scope_value_contradicted_by_source to true only when a non-null "
+    "ANSWER_RECORD scope value states a place, period, population, method, "
+    "comparison, or condition that the selected span contradicts. Name that "
+    "field in contradicted_scope_field. A value that is worded differently, "
+    "held under a different scope field, absent from the QUESTION, or absent "
+    "from the selected span is not a contradiction. "
+    "Record every wording, field-role, or span-containment difference in "
+    "scope_representation_note. That note never changes a verdict. "
+    "Do not use relation_scope_match or scope_value_contradicted_by_source "
+    "for a referent, self-containment, or answer-leakage defect. Report those "
+    "only in question_context_referent_resolved, "
+    "question_context_missing_detail, and question_answer_leakage_absent. "
+    "Treat QUESTION and QUESTION_CONTEXT as the complete model-facing task. "
+    + REFERENT_SLOT_DEFINITION
+    + " Set question_context_required to true when the question alone leaves any "
+    "applicable slot unfixed. Set it to false only when the question alone fixes "
+    "every applicable slot. "
+    + CONTEXT_ONLY_SOURCE_INSTRUCTIONS
+    + " Set question_context_source_supported to true only when every context "
+    "statement is supported by SOURCE_DATA or by CONTEXT_ONLY_SOURCE, and is "
+    "applicable to the selected finding. Set it to false for any statement "
+    "supported by neither. Set interpretation_scope_applies_to_finding to false "
+    "when a place or a period taken from CONTEXT_ONLY_SOURCE does not apply to "
+    "the selected finding. Set it to true when no context statement rests on "
+    "CONTEXT_ONLY_SOURCE. Set "
+    "question_context_answer_leakage_absent to false when the context gives the "
+    "answer, a result, a conclusion, a relationship, an answer-bearing number, "
+    "or an answer-choice eliminator. "
+    "Set question_verification_contract_version to "
+    f"{QUESTION_VERIFICATION_CONTRACT_VERSION!r}. "
+    "Reject study-local definite descriptions or abbreviated species names when "
+    "QUESTION and QUESTION_CONTEXT do not identify the subject, place, time, sample, "
+    "or event. A latitude alone does not identify a station or event. "
+    "Set question_context_referent_resolved to false when QUESTION and "
+    "QUESTION_CONTEXT leave a study-local referent or scope unresolved, and set "
+    "question_context_missing_detail to name the missing subject, place, time, "
+    "sample, or event. Name the leaked answer or answer cue when the question "
+    "leakage verdict is false. Leave the detail empty only when both semantic "
+    "verdicts pass. "
+    "Set question_answer_leakage_absent to false when QUESTION itself states the "
+    "proposed answer or an explicit answer cue such as 'the correct answer is'. "
+    "Do not accept an answer merely because QUESTION, QUESTION_CONTEXT, and "
+    "SOURCE_DATA agree. "
+    "Independently verify every non-null ANSWER_RECORD.scope value against the "
+    "selected SOURCE_DATA span and the QUESTION. Do not assume any proposed "
+    "scope value is true. Select one source_span_id for the evidence. A selectable "
+    "span can be an exact combined interval from adjacent eligible fragments. It must "
+    "contain the answer and every verified scope value that SOURCE_DATA states. "
+    "Return the exact proposed scope only when each value occurs verbatim in that "
+    "span or in a CONTEXT_ONLY_SOURCE span, and the QUESTION or the "
+    "QUESTION_CONTEXT states it. Record any other case in "
+    "scope_representation_note. Do not add scope merely "
+    "because it appears elsewhere in the source. Copy each non-null scope "
+    "value exactly from its selected SOURCE_DATA span, without aliases or "
+    "paraphrases. At least one scope value must be non-null. Set "
+    "verification_rationale to a concise evidence-grounded justification for "
+    "the verdict fields. Do not provide hidden reasoning."
+)
+OPTION_VERIFIER_INSTRUCTIONS = (
+    BENCHMARK_STANDALONE_INSTRUCTIONS
+    + " Read QUESTION, QUESTION_CONTEXT, and the displayed option before you use "
+    "SOURCE_DATA or ANSWER_RECORD. " + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS + " "
+    "Do not use those records to repair a missing "
+    "system, location, sample, period, condition, or referent. If the displayed task "
+    "or option needs SOURCE_DATA to identify a referent or interpret scope, set "
+    "alternative_answer_search_passed to false. SOURCE_DATA can still determine or "
+    "verify the answer. Establish a unique contradiction for this exact displayed option. "
+    "Absence of mention is not falsity. Set question_admits_option_as_correct only when "
+    "a reasonable reading of THIS question admits the option. Truth at another location "
+    "or time alone does not make a scoped substitution correct."
+    " Reject an option with a study-local definite description or abbreviated species "
+    "name when QUESTION and QUESTION_CONTEXT do not identify its subject, place, "
+    "time, sample, or event. A latitude alone does not identify a station or event. "
+    + CONTEXT_ONLY_SOURCE_INSTRUCTIONS
+    + " Select one source_span_id for the evidence. Set rationale to a "
+    "concise evidence-grounded justification for the verdict fields. "
+    "Do not provide hidden reasoning."
+)
+EXTRACTOR_SYSTEM = SYSTEM + "\n" + EXTRACTOR_INSTRUCTIONS
+RECONSTRUCTOR_SYSTEM = SYSTEM + "\n" + RECONSTRUCTOR_INSTRUCTIONS
+ANSWER_VERIFIER_SYSTEM = SYSTEM + "\n" + ANSWER_VERIFIER_INSTRUCTIONS
+OPTION_VERIFIER_SYSTEM = SYSTEM + "\n" + OPTION_VERIFIER_INSTRUCTIONS
 JUSTIFICATION_SCHEMA = {
     "type": "string",
     "minLength": 1,
@@ -580,6 +846,12 @@ REFERENT_SLOT_NAMES = (
     "treatment_or_condition",
     "comparison_basis",
 )
+# Chapter 2 yield audit, section 4.5 (c): when the writer's own slot record
+# says a slot is unavailable in the source, no Pro judge is called. One code
+# per slot keeps the routing input as specific as the judge's own codes.
+WRITER_SLOT_UNAVAILABLE_REASONS = frozenset(
+    f"writer_slot_unavailable_{slot}" for slot in REFERENT_SLOT_NAMES
+)
 REFERENT_SLOTS_SCHEMA = {
     "type": "array",
     "minItems": len(REFERENT_SLOT_NAMES),
@@ -624,11 +896,45 @@ EXTRACTOR_ANSWER_SCHEMA = {
 }
 CANDIDATE_FINDING_SCHEMA = {
     "type": "object",
-    "required": ["rank", "answer", "ranking_rationale"],
+    "required": [
+        "rank",
+        "answer",
+        "ranking_rationale",
+        "admissible",
+        "answer_basis_class",
+        "source_blind_answer_basis",
+    ],
     "properties": {
         "rank": {"type": "integer", "minimum": 1},
         "answer": EXTRACTOR_ANSWER_SCHEMA,
         "ranking_rationale": JUSTIFICATION_SCHEMA,
+        "admissible": {
+            "type": "boolean",
+            "description": (
+                "True when this candidate meets every selection rule above. A "
+                "false value keeps the candidate in the ranked list as a fallback."
+            ),
+        },
+        "answer_basis_class": {
+            "enum": list(ANSWER_BASIS_CLASSES),
+            "description": (
+                "What a scientist without this paper could use to tell the true "
+                "value apart from plausible wrong ones. study_internal_index "
+                "marks a value of a study-defined index, a score on a "
+                "study-defined axis, a label the authors assigned, a layout "
+                "convention of a table, or a mean pooled over unlike samples "
+                "with unstated weights."
+            ),
+        },
+        "source_blind_answer_basis": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "One sentence: what a scientist who cannot see this paper could "
+                "use to tell the true value apart from three plausible wrong "
+                "ones, using only domain knowledge and the supplied scope."
+            ),
+        },
     },
     "additionalProperties": False,
 }
@@ -1358,10 +1664,34 @@ def generate_candidate(
             finding_policy_version,
             attempt["attempt_id"] if attempt is not None else "",
         )
+        bank_identity = {
+            "run_id": run_id,
+            "source_id": source_id,
+            "paper_family_id": source["paper_family_id"],
+            "bank_key": _finding_bank_key(arctic_scope),
+        }
         admission_exclusions: list[str] = []
         answer = None
         chunk = None
-        for admission_pass in range(FINDING_ADMISSION_PASSES):
+        # Chapter 2 yield audit, section 4.5 (a): the ranked candidates of an
+        # earlier extraction serve this attempt first. The extractor is called
+        # again only when the bank holds no servable candidate.
+        served = _serve_banked_finding(
+            db,
+            bank_identity,
+            finding_spans=finding_spans,
+            chunks=chunks,
+            arctic_scope=arctic_scope,
+            interpretation_spans=interpretation_spans,
+            excluded_span_ids=routed_exclusions,
+        )
+        if served is not None:
+            answer, chunk, admission = served
+        else:
+            _record_prescreen_shadow(
+                db, bank_identity, _structural_prescreen(finding_spans, chunks)
+            )
+        for admission_pass in range(FINDING_ADMISSION_PASSES if served is None else 0):
             excluded_span_ids = sorted(
                 set(routed_exclusions) | set(admission_exclusions)
             )
@@ -1387,114 +1717,52 @@ def generate_candidate(
                 context
                 + _context_only_source(interpretation_spans)
                 + scope_instruction
-                + exclusion_instruction
-                + "\nExtract one to three bounded answer records in candidate_findings, "
-                "ranked best first. Set rank to 1 for the best candidate. Rank first the "
-                "finding whose place, period, population, and measured variable are all "
-                "stated in the supplied spans. Rank last a finding that needs a figure, a "
-                "table layout, or a study-internal code name that no supplied span "
-                "defines. Set ranking_rationale for each candidate. Select one "
-                "source_span_id for each candidate. "
-                + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS
-                + " "
-                "SOURCE_DATA contains two kinds of span. A finding span is selectable "
-                "evidence for the answer. An interpretation span in CONTEXT_ONLY_SOURCE "
-                "is study context that identifies the place, the period, the population, "
-                "the instrument, or an acronym expansion. Do not select an interpretation "
-                "span as the finding. Use an interpretation span only to set a scope value "
-                "and to judge whether a reader without the paper can interpret the "
-                "finding. "
-                "Select a complete prose finding sentence. Select one atomic claim from a complete prose finding sentence "
-                "in the results or discussion. Do not select a title, heading, caption, "
-                "legend, axis label, methods-only description, or sentence fragment as the "
-                "finding by itself. For a selected numerical row, include its adjacent caption "
-                "or definition when that text defines the metric, unit, percentage basis, acronym, "
-                "location, or period needed to interpret the finding. "
-                "If the finding is a numerical row, a cell, or a figure value, put the "
-                "caption span, the column-header span, and the metric-definition span in "
-                "interpretation_span_ids. If those spans are not available, do not select "
-                "this finding. Select a prose finding sentence instead. "
-                "The selected span must contain exact, sufficient evidence for the "
-                "entire answer and every required question phrase. Evidence spans are "
-                "bounded source paragraphs or overlapping windows and can contain PDF "
-                "line wraps. The pipeline can combine adjacent eligible fragments into "
-                "one exact selectable interval. Do not combine span IDs yourself. "
-                "Set each non-null scope value to exact SOURCE_DATA text, from a finding "
-                "span or from an interpretation span. Do not use an alias or a paraphrase. "
-                "Keep at least one value non-null. Populate every scope qualifier that a "
-                "reader without the paper needs to interpret the result. This always "
-                "includes geography and period when any supplied span states them. "
-                "Uniqueness inside the paper is not sufficient. "
-                "Put a scope value in required_question_phrases only when the question "
-                "must repeat it word for word. A scope value that comes from an "
-                "interpretation span belongs in question_context, not in "
-                "required_question_phrases. Every required_question_phrases entry must "
-                "be exact selected-span text and must not contain answer.text or any "
-                "answer variant. Prefer a non-numeric finding unless the "
-                "selected span supports the complete numeric contract. Add numeric_rule "
-                "only for one scalar value when the same selected span explicitly "
-                "supports its value, unit, tolerance, tolerance basis, precision, "
-                "rounding, and conversion. The tolerance_basis must be exact text "
-                "from that span. Emit numeric_rule only when answer.text displays "
-                "exactly one number with its unit. Never emit numeric_rule for a "
-                "non-scalar answer: never for a categorical, directional, "
-                "multi-value, range, or descriptive answer, and never set "
-                "canonical_value to a placeholder such as 0 or 1. Omit numeric_rule "
-                "when any field is unsupported or when the answer contains multiple "
-                "values. "
-                "NUMERIC_METADATA_VOCABULARY " + NUMERIC_RULE_CONTRACT_VERSION + ". "
-                "Use exactly these strings and no others. "
-                "Set unit to the unit token that follows the value in the span, not a "
-                "gloss and not an expanded name. "
-                "Set tolerance_basis to exact span text that states the tolerance, and "
-                "it must contain that same unit. When the span reports an uncertainty, "
-                "copy the uncertainty text with its unit, such as '+/-0.3 t'. When the "
-                "value is a directly published exact scalar with zero tolerance, copy "
-                "its displayed quantity with its unit, such as '1.8 cm'. "
-                "Set reported_precision to the decimal increment of the literal value, "
-                "such as '0.1' for '1.0', or to exact span text that states the "
-                "precision. "
-                "Set rounding_rule to 'none' when the value is reported without further "
-                "rounding, or to '<N> decimal places' matching the literal, such as "
-                "'1 decimal place'. "
-                "Set conversion_rule to exactly 'direct source literal' when no unit "
-                "conversion was applied. "
-                "The only separate vocabulary is a literal exact integer count: use "
-                "tolerance_basis 'count', reported_precision 'exact integer', "
-                "rounding_rule 'none', and a conversion_rule that starts with "
-                "'direct count'. The pipeline binds this "
-                "rule to the answer-verifier request in candidate provenance. "
-                + ANSWER_FORMAT_INSTRUCTIONS
-                + " "
-                + CLOSED_SET_INSTRUCTIONS
-                + " Set selection_rationale to a concise evidence-grounded justification "
-                "for selecting this finding. Do not provide hidden reasoning.",
+                + exclusion_instruction,
                 parameters,
                 reservation,
                 timeout,
                 retries,
                 rate_limit_seconds,
+                system=EXTRACTOR_SYSTEM,
             )["candidate_findings"]
+            evaluations = _evaluate_ranked_findings(
+                candidate_findings,
+                finding_spans,
+                chunks,
+                arctic_scope,
+                interpretation_spans,
+                excluded_span_ids=excluded_span_ids,
+                admission_exclusions=admission_exclusions,
+            )
+            bank_rows = _persist_finding_bank(
+                db,
+                bank_identity,
+                extraction_entity_id=pass_entity_id,
+                evaluations=evaluations,
+            )
             try:
-                answer, chunk, admission = _admit_ranked_finding(
-                    candidate_findings,
-                    finding_spans,
-                    chunks,
-                    arctic_scope,
-                    interpretation_spans,
-                    excluded_span_ids=excluded_span_ids,
-                    admission_exclusions=admission_exclusions,
-                )
+                answer, chunk, admission = _select_admitted_finding(evaluations)
             except CandidateRejectedError as error:
                 # r15 audit section 4.5: one free re-ask when every ranked
                 # candidate failed freeze-time admission. The rejected spans join
                 # the excluded set, and the re-ask spends no family retry path.
+                # Chapter 2 yield audit, section 4.5 (a): the re-ask is spent
+                # only when an unexcluded eligible span remains.
                 if (
                     error.reason_code in FINDING_ADMISSION_REASK_REASONS
                     and admission_pass + 1 < FINDING_ADMISSION_PASSES
                 ):
-                    continue
+                    if _unexcluded_finding_spans(
+                        finding_spans, routed_exclusions, admission_exclusions
+                    ):
+                        continue
+                    raise CandidateRejectedError(
+                        error.reason_code,
+                        f"{error}; the second admission pass was skipped because "
+                        "every eligible finding span is excluded",
+                    ) from error
                 raise
+            admission["bank_row_id"] = bank_rows.get(admission["admitted_rank"])
             break
         if answer is None or chunk is None:
             raise ValueError("the finding admission loop produced no finding")
@@ -1522,7 +1790,9 @@ def generate_candidate(
                     now(),
                 ),
             )
+            _mark_bank_row_frozen(db, admission.get("bank_row_id"), finding_id)
     _require_arctic_scope_custody(answer, arctic_scope)
+    # A finding frozen before this contract    _require_arctic_scope_custody(answer, arctic_scope)
     # A finding frozen before this contract never ran the admission gate, so
     # the same checks still report at the QA gate for an inherited finding.
     frozen_admission = finding_admission_reason(answer, chunk)
@@ -1758,75 +2028,63 @@ def generate_candidate(
             "revision_unchanged_payload",
             "question revision repeated its parent question and context",
         )
+    # Chapter 2 yield audit, section 4.4: the free checks run here, right after
+    # the writer, and their codes are recorded exactly as the QA gate records
+    # them. The standalone call is still made for every candidate, because
+    # routing reads its codes. Reconstruction and answer verification are
+    # skipped once a free check or the standalone gate has failed, and every
+    # Pro call is skipped when the writer's own slot record says the source
+    # does not state a slot. A seeded random cohort runs the full suite and
+    # records what the skipped calls would have said.
+    pre_judge_reasons = _pre_judge_gate_reasons(
+        chunk,
+        question,
+        answer,
+        question_context,
+        interpretation_spans=forwarded_interpretation_spans,
+    )
+    for reason in (finding_quality_reason, creation_context_reason):
+        if reason and reason not in pre_judge_reasons:
+            pre_judge_reasons.insert(0, reason)
+    unavailable_slots = _unavailable_referent_slots(referent_slots)
+    shadow_cohort = _in_shadow_cohort(run_id, entity_id)
+    skip_reason: str | None = None
+    if unavailable_slots:
+        skip_reason = SKIPPED_ON_UNAVAILABLE_SLOT
+    elif pre_judge_reasons:
+        skip_reason = SKIPPED_AFTER_FREE_CHECK_FAILURE
     standalone_prompt = "DISPLAYED_TASK\n" + canonical_json(
         {"question": str(question), "question_context": question_context}
     )
-    standalone_result = _call_result(
-        db,
-        verifier,
-        run_id,
-        entity_id,
-        "standalone_verifier",
-        standalone_prompt,
-        parameters,
-        reservation,
-        timeout,
-        retries,
-        rate_limit_seconds,
-        system=STANDALONE_SYSTEM,
-    )
-    standalone_verification = _bind_standalone_contract_version(
-        standalone_result.payload
-    )
+    standalone_result: ProviderResult | None = None
+    standalone_verification: dict[str, Any] | None = None
+    if skip_reason != SKIPPED_ON_UNAVAILABLE_SLOT or shadow_cohort:
+        standalone_result = _call_result(
+            db,
+            verifier,
+            run_id,
+            entity_id,
+            "standalone_verifier",
+            standalone_prompt,
+            parameters,
+            reservation,
+            timeout,
+            retries,
+            rate_limit_seconds,
+            system=STANDALONE_SYSTEM,
+        )
+        standalone_verification = _bind_standalone_contract_version(
+            standalone_result.payload
+        )
+        if skip_reason is None and _standalone_gate_reasons(standalone_verification):
+            skip_reason = SKIPPED_AFTER_STANDALONE_FAILURE
+    run_downstream = skip_reason is None or shadow_cohort
     reconstruction_prompt = (
         context
         + "\nQUESTION\n"
         + str(question)
         + "\nQUESTION_CONTEXT\n"
         + question_context
-        + "\n"
-        + BENCHMARK_STANDALONE_INSTRUCTIONS
-        + " Read QUESTION and QUESTION_CONTEXT alone before you read SOURCE_DATA. "
-        + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS
-        + " "
-        "Do not use SOURCE_DATA to repair a missing system, location, sample, period, "
-        "condition, or referent. If the displayed task is incomplete, report ambiguity "
-        "instead of resolving it from SOURCE_DATA. SOURCE_DATA can still determine the "
-        "answer. Reconstruct the answer. The proposed answer is hidden. "
-        + CONTEXT_ONLY_SOURCE_INSTRUCTIONS
-        + " Select one source_span_id for the evidence. A selectable span can be an "
-        "exact combined interval from adjacent eligible fragments. Copy each non-null scope "
-        "value exactly from its selected SOURCE_DATA span, without aliases or "
-        "paraphrases. Populate only scope qualifiers stated verbatim in the "
-        "QUESTION and supported by the selected span. Use null for every other "
-        "scope dimension, even when the source contains additional context. "
-        "Leave every scope value null when the QUESTION states no qualifier that "
-        "the selected span supports. Return alternatives only when "
-        "the source supports a distinct answer that also correctly answers this "
-        "question. Do not list paraphrases, spelling or unit variants, or false "
-        "and negated answer choices as alternatives. "
-        + RECONSTRUCTION_NUMERIC_INSTRUCTIONS
-        + " Set reconstruction_rationale "
-        "to a concise evidence-grounded justification for the reconstructed "
-        "answer and ambiguity label. Do not provide hidden reasoning."
-    )
-    reconstruction_result = _call_result(
-        db,
-        verifier,
-        run_id,
-        entity_id,
-        "reconstructor",
-        reconstruction_prompt,
-        parameters,
-        reservation,
-        timeout,
-        retries,
-        rate_limit_seconds,
-    )
-    reconstruction = _resolve_source_span(
-        reconstruction_result.payload,
-        context_spans,
-        reason_code="reconstruction_evidence_span_not_found",
     )
     answer_verification_prompt = (
         context
@@ -1836,276 +2094,307 @@ def generate_candidate(
         + question_context
         + "\nANSWER_RECORD\n"
         + canonical_json(answer)
-        + "\n"
-        + BENCHMARK_STANDALONE_INSTRUCTIONS
-        + " Read QUESTION and QUESTION_CONTEXT alone before you use SOURCE_DATA or "
-        "ANSWER_RECORD. " + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS + " "
-        "Do not use those records to repair a missing system, location, "
-        "sample, period, condition, or referent. SOURCE_DATA "
-        "can still determine or verify the answer. Verify entailment, relation, scope, ambiguity, "
-        "alternatives, evidence, and the question claim type. Label the question claim "
-        "type from QUESTION and SOURCE_DATA alone. "
-        "alternatives, evidence, and the question claim type. "
-        "Set relation_scope_match to false only when the selected span does not "
-        "support the ANSWER_RECORD answer as the answer to this QUESTION. Judge "
-        "the scientific relation, not the wording. "
-        "Set scope_value_contradicted_by_source to true only when a non-null "
-        "ANSWER_RECORD scope value states a place, period, population, method, "
-        "comparison, or condition that the selected span contradicts. Name that "
-        "field in contradicted_scope_field. A value that is worded differently, "
-        "held under a different scope field, absent from the QUESTION, or absent "
-        "from the selected span is not a contradiction. "
-        "Record every wording, field-role, or span-containment difference in "
-        "scope_representation_note. That note never changes a verdict. "
-        "Do not use relation_scope_match or scope_value_contradicted_by_source "
-        "for a referent, self-containment, or answer-leakage defect. Report those "
-        "only in question_context_referent_resolved, "
-        "question_context_missing_detail, and question_answer_leakage_absent. "
-        "Treat QUESTION and QUESTION_CONTEXT as the complete model-facing task. "
-        + REFERENT_SLOT_DEFINITION
-        + " Set question_context_required to true when the question alone leaves any "
-        "applicable slot unfixed. Set it to false only when the question alone fixes "
-        "every applicable slot. "
-        + CONTEXT_ONLY_SOURCE_INSTRUCTIONS
-        + " Set question_context_source_supported to true only when every context "
-        "statement is supported by SOURCE_DATA or by CONTEXT_ONLY_SOURCE, and is "
-        "applicable to the selected finding. Set it to false for any statement "
-        "supported by neither. Set interpretation_scope_applies_to_finding to false "
-        "when a place or a period taken from CONTEXT_ONLY_SOURCE does not apply to "
-        "the selected finding. Set it to true when no context statement rests on "
-        "CONTEXT_ONLY_SOURCE. Set "
-        "question_context_answer_leakage_absent to false when the context gives the "
-        "answer, a result, a conclusion, a relationship, an answer-bearing number, "
-        "or an answer-choice eliminator. "
-        "Set question_verification_contract_version to "
-        f"{QUESTION_VERIFICATION_CONTRACT_VERSION!r}. "
-        "Reject study-local definite descriptions or abbreviated species names when "
-        "QUESTION and QUESTION_CONTEXT do not identify the subject, place, time, sample, "
-        "or event. A latitude alone does not identify a station or event. "
-        "Set question_context_referent_resolved to false when QUESTION and "
-        "QUESTION_CONTEXT leave a study-local referent or scope unresolved, and set "
-        "question_context_missing_detail to name the missing subject, place, time, "
-        "sample, or event. Name the leaked answer or answer cue when the question "
-        "leakage verdict is false. Leave the detail empty only when both semantic "
-        "verdicts pass. "
-        "Set question_answer_leakage_absent to false when QUESTION itself states the "
-        "proposed answer or an explicit answer cue such as 'the correct answer is'. "
-        "Do not accept an answer merely because QUESTION, QUESTION_CONTEXT, and "
-        "SOURCE_DATA agree. "
-        "Independently verify every non-null ANSWER_RECORD.scope value against the "
-        "selected SOURCE_DATA span and the QUESTION. Do not assume any proposed "
-        "scope value is true. Select one source_span_id for the evidence. A selectable "
-        "span can be an exact combined interval from adjacent eligible fragments. It must "
-        "contain the answer and every verified scope value that SOURCE_DATA states. "
-        "Return the exact proposed scope only when each value occurs verbatim in that "
-        "span or in a CONTEXT_ONLY_SOURCE span, and the QUESTION or the "
-        "QUESTION_CONTEXT states it. Record any other case in "
-        "scope_representation_note. Do not add scope merely "
-        "because it appears elsewhere in the source. Copy each non-null scope "
-        "value exactly from its selected SOURCE_DATA span, without aliases or "
-        "paraphrases. At least one scope value must be non-null. Set "
-        "verification_rationale to a concise evidence-grounded justification for "
-        "the verdict fields. Do not provide hidden reasoning."
     )
-    answer_verification_result = _call_result(
-        db,
-        verifier,
-        run_id,
-        entity_id,
-        "answer_verifier",
-        answer_verification_prompt,
-        parameters,
-        reservation,
-        timeout,
-        retries,
-        rate_limit_seconds,
-    )
-    answer_verification = _resolve_source_span(
-        answer_verification_result.payload,
-        context_spans,
-        reason_code="answer_verifier_evidence_span_not_found",
-    )
-    deterministic_match = reconstruction_matches(answer, reconstruction)
-    answer_agreement: dict[str, Any] = {
-        "contract_version": ANSWER_AGREEMENT_CONTRACT_VERSION,
-        "method": "deterministic",
-        "confidence_category": "authoritative_deterministic",
-        "deterministic_match": deterministic_match,
-        "agreement": True,
-        "judge": None,
-    }
-    agreement_call: dict[str, Any] | None = None
-    if not deterministic_match:
-        agreement_input = {
-            "question": str(question),
-            **({"additional_context": question_context} if question_context else {}),
-            "proposed_answer": str(answer.get("text", "")),
-            "reconstructed_answer": str(reconstruction.get("answer", "")),
-        }
-        agreement_prompt = "DATA\n" + canonical_json(agreement_input)
-        agreement_parameters = {
-            "temperature": 0,
-            "max_tokens": 128,
-            "response_mime_type": "text/x.enum",
-        }
-        agreement_result = _call_result(
+    reconstruction_result: ProviderResult | None = None
+    reconstruction: dict[str, Any] | None = None
+    answer_verification_result: ProviderResult | None = None
+    answer_verification: dict[str, Any] | None = None
+    if run_downstream:
+        reconstruction_result = _call_result(
             db,
             verifier,
             run_id,
             entity_id,
-            "answer_judge",
-            agreement_prompt,
-            agreement_parameters,
+            "reconstructor",
+            reconstruction_prompt,
+            parameters,
             reservation,
             timeout,
             retries,
             rate_limit_seconds,
-            system=ANSWER_AGREEMENT_SYSTEM,
-            prompt_version=ANSWER_AGREEMENT_PROMPT_VERSION,
+            system=RECONSTRUCTOR_SYSTEM,
         )
-        verdict = agreement_result.payload
+        reconstruction = _resolve_source_span(
+            reconstruction_result.payload,
+            context_spans,
+            reason_code="reconstruction_evidence_span_not_found",
+        )
+        answer_verification_result = _call_result(
+            db,
+            verifier,
+            run_id,
+            entity_id,
+            "answer_verifier",
+            answer_verification_prompt,
+            parameters,
+            reservation,
+            timeout,
+            retries,
+            rate_limit_seconds,
+            system=ANSWER_VERIFIER_SYSTEM,
+        )
+        answer_verification = _resolve_source_span(
+            answer_verification_result.payload,
+            context_spans,
+            reason_code="answer_verifier_evidence_span_not_found",
+        )
+    answer_agreement: dict[str, Any] | None = None
+    agreement_call: dict[str, Any] | None = None
+    if reconstruction is not None:
+        deterministic_match = reconstruction_matches(answer, reconstruction)
         answer_agreement = {
             "contract_version": ANSWER_AGREEMENT_CONTRACT_VERSION,
-            "method": "llm_judge",
-            "confidence_category": (
-                "lower_confidence_llm_equivalent"
-                if verdict == "yes"
-                else "disagreement"
-            ),
-            "deterministic_match": False,
-            "agreement": verdict == "yes",
-            "judge": {
-                "prompt_version": ANSWER_AGREEMENT_PROMPT_VERSION,
-                "system_prompt": ANSWER_AGREEMENT_SYSTEM,
-                "input": agreement_input,
-                "verdict": verdict,
-                "provider": verifier.name,
-                "requested_model": provider_model(verifier, "answer_judge"),
-                "returned_model": agreement_result.returned_model,
-                "request_id": agreement_result.request_id,
-                "prompt_hash": provider_prompt_hash(
-                    verifier,
-                    ANSWER_AGREEMENT_SYSTEM,
-                    agreement_prompt,
-                    ANSWER_AGREEMENT_PROMPT_VERSION,
-                    {
-                        **agreement_parameters,
-                        "json_schema": ROLE_SCHEMAS["answer_judge"],
-                    },
-                    role="answer_judge",
-                ),
-                "receipt": _call_receipt_reference(
-                    db,
-                    verifier,
-                    run_id=run_id,
-                    entity_id=entity_id,
-                    role="answer_judge",
-                    system=ANSWER_AGREEMENT_SYSTEM,
-                    prompt=agreement_prompt,
-                    prompt_version=ANSWER_AGREEMENT_PROMPT_VERSION,
-                    parameters={
-                        **agreement_parameters,
-                        "json_schema": ROLE_SCHEMAS["answer_judge"],
-                    },
-                ),
-            },
+            "method": "deterministic",
+            "confidence_category": "authoritative_deterministic",
+            "deterministic_match": deterministic_match,
+            "agreement": True,
+            "judge": None,
         }
-        agreement_call = _call_provenance(
-            verifier,
-            agreement_result,
-            "answer_judge",
-            agreement_prompt,
-            agreement_parameters,
-            system=ANSWER_AGREEMENT_SYSTEM,
-            prompt_version=ANSWER_AGREEMENT_PROMPT_VERSION,
-        )
-    verification_calls = {
-        "standalone_verifier": _call_provenance(
+        if not deterministic_match:
+            agreement_input = {
+                "question": str(question),
+                **({"additional_context": question_context} if question_context else {}),
+                "proposed_answer": str(answer.get("text", "")),
+                "reconstructed_answer": str(reconstruction.get("answer", "")),
+            }
+            agreement_prompt = "DATA\n" + canonical_json(agreement_input)
+            agreement_parameters = {
+                "temperature": 0,
+                "max_tokens": 128,
+                "response_mime_type": "text/x.enum",
+            }
+            agreement_result = _call_result(
+                db,
+                verifier,
+                run_id,
+                entity_id,
+                "answer_judge",
+                agreement_prompt,
+                agreement_parameters,
+                reservation,
+                timeout,
+                retries,
+                rate_limit_seconds,
+                system=ANSWER_AGREEMENT_SYSTEM,
+                prompt_version=ANSWER_AGREEMENT_PROMPT_VERSION,
+            )
+            verdict = agreement_result.payload
+            answer_agreement = {
+                "contract_version": ANSWER_AGREEMENT_CONTRACT_VERSION,
+                "method": "llm_judge",
+                "confidence_category": (
+                    "lower_confidence_llm_equivalent"
+                    if verdict == "yes"
+                    else "disagreement"
+                ),
+                "deterministic_match": False,
+                "agreement": verdict == "yes",
+                "judge": {
+                    "prompt_version": ANSWER_AGREEMENT_PROMPT_VERSION,
+                    "system_prompt": ANSWER_AGREEMENT_SYSTEM,
+                    "input": agreement_input,
+                    "verdict": verdict,
+                    "provider": verifier.name,
+                    "requested_model": provider_model(verifier, "answer_judge"),
+                    "returned_model": agreement_result.returned_model,
+                    "request_id": agreement_result.request_id,
+                    "prompt_hash": provider_prompt_hash(
+                        verifier,
+                        ANSWER_AGREEMENT_SYSTEM,
+                        agreement_prompt,
+                        ANSWER_AGREEMENT_PROMPT_VERSION,
+                        {
+                            **agreement_parameters,
+                            "json_schema": ROLE_SCHEMAS["answer_judge"],
+                        },
+                        role="answer_judge",
+                    ),
+                    "receipt": _call_receipt_reference(
+                        db,
+                        verifier,
+                        run_id=run_id,
+                        entity_id=entity_id,
+                        role="answer_judge",
+                        system=ANSWER_AGREEMENT_SYSTEM,
+                        prompt=agreement_prompt,
+                        prompt_version=ANSWER_AGREEMENT_PROMPT_VERSION,
+                        parameters={
+                            **agreement_parameters,
+                            "json_schema": ROLE_SCHEMAS["answer_judge"],
+                        },
+                    ),
+                },
+            }
+            agreement_call = _call_provenance(
+                verifier,
+                agreement_result,
+                "answer_judge",
+                agreement_prompt,
+                agreement_parameters,
+                system=ANSWER_AGREEMENT_SYSTEM,
+                prompt_version=ANSWER_AGREEMENT_PROMPT_VERSION,
+            )
+    verification_calls: dict[str, Any] = {}
+    if standalone_result is not None:
+        verification_calls["standalone_verifier"] = _call_provenance(
             verifier,
             standalone_result,
             "standalone_verifier",
             standalone_prompt,
             parameters,
             system=STANDALONE_SYSTEM,
-        ),
-        "reconstructor": _call_provenance(
+        )
+    if reconstruction_result is not None and answer_verification_result is not None:
+        verification_calls["reconstructor"] = _call_provenance(
             verifier,
             reconstruction_result,
             "reconstructor",
             reconstruction_prompt,
             parameters,
-        ),
-        "answer_verifier": _call_provenance(
+            system=RECONSTRUCTOR_SYSTEM,
+        )
+        verification_calls["answer_verifier"] = _call_provenance(
             verifier,
             answer_verification_result,
             "answer_verifier",
             answer_verification_prompt,
             parameters,
-        ),
-    }
+            system=ANSWER_VERIFIER_SYSTEM,
+        )
     if agreement_call is not None:
         verification_calls["answer_judge"] = agreement_call
+    direct_value_request_id = (
+        answer_verification_result.request_id
+        if answer_verification_result is not None
+        else None
+    )
     direct_value_provenance = {
         "direct_value_contract_version": DIRECT_SOURCE_VALUE_CONTRACT_VERSION,
-        "direct_value_request_id": answer_verification_result.request_id,
+        "direct_value_request_id": direct_value_request_id,
         "verification_calls": verification_calls,
     }
     decision_evidence = _decision_evidence(
         {
-            "answer": answer,
-            "reconstruction": reconstruction,
-            "answer_verification": answer_verification,
-            "answer_agreement": answer_agreement,
+            role: record
+            for role, record in (
+                ("answer", answer),
+                ("reconstruction", reconstruction),
+                ("answer_verification", answer_verification),
+            )
+            if record is not None
         },
         {chunk["chunk_id"]: chunk},
     )
-    qa_gate_reasons = _qa_gate_reasons(
-        chunk,
-        question,
-        answer,
-        reconstruction,
-        answer_verification,
-        question_context,
-        direct_value_provenance,
-        answer_agreement=answer_agreement,
-        standalone_verification=standalone_verification,
-        interpretation_spans=forwarded_interpretation_spans,
+    full_gate_reasons: list[str] | None = None
+    if reconstruction is not None and answer_verification is not None:
+        full_gate_reasons = _qa_gate_reasons(
+            chunk,
+            question,
+            answer,
+            reconstruction,
+            answer_verification,
+            question_context,
+            direct_value_provenance,
+            answer_agreement=answer_agreement,
+            standalone_verification=standalone_verification,
+            interpretation_spans=forwarded_interpretation_spans,
+        )
+        _insert_construction_reasons(
+            full_gate_reasons, finding_quality_reason, creation_context_reason
+        )
+        if canonical_json(arm_answer_proposal) != canonical_json(answer):
+            full_gate_reasons.append("generation_arm_finding_mismatch")
+    if skip_reason is None:
+        assert full_gate_reasons is not None
+        qa_gate_reasons = full_gate_reasons
+    else:
+        # The persisted list holds the codes routing reads for every
+        # candidate, cohort member or not. The standalone codes are absent
+        # only when the writer's slot record skipped the call.
+        qa_gate_reasons = _short_circuit_gate_reasons(
+            chunk,
+            question,
+            answer,
+            question_context,
+            standalone_verification=(
+                None
+                if skip_reason == SKIPPED_ON_UNAVAILABLE_SLOT
+                else standalone_verification
+            ),
+            interpretation_spans=forwarded_interpretation_spans,
+        )
+        _insert_construction_reasons(
+            qa_gate_reasons, finding_quality_reason, creation_context_reason
+        )
+        if skip_reason == SKIPPED_ON_UNAVAILABLE_SLOT:
+            qa_gate_reasons = [
+                f"writer_slot_unavailable_{slot}" for slot in unavailable_slots
+            ] + [
+                reason
+                for reason in qa_gate_reasons
+                if reason not in WRITER_SLOT_UNAVAILABLE_REASONS
+            ]
+        if canonical_json(arm_answer_proposal) != canonical_json(answer):
+            qa_gate_reasons.append("generation_arm_finding_mismatch")
+    skipped_calls = (
+        ["reconstructor", "answer_verifier"]
+        if skip_reason in {
+            SKIPPED_AFTER_FREE_CHECK_FAILURE,
+            SKIPPED_AFTER_STANDALONE_FAILURE,
+        }
+        else ["standalone_verifier", "reconstructor", "answer_verifier"]
+        if skip_reason == SKIPPED_ON_UNAVAILABLE_SLOT
+        else []
     )
-    if finding_quality_reason and finding_quality_reason not in qa_gate_reasons:
-        qa_gate_reasons.insert(0, finding_quality_reason)
-    if creation_context_reason and creation_context_reason not in qa_gate_reasons:
-        qa_gate_reasons.insert(0, creation_context_reason)
-    if canonical_json(arm_answer_proposal) != canonical_json(answer):
-        qa_gate_reasons.append("generation_arm_finding_mismatch")
+    judge_call_plan = {
+        "contract_version": JUDGE_CALL_PLAN_CONTRACT_VERSION,
+        "shadow_cohort_policy_version": SHADOW_COHORT_POLICY_VERSION,
+        "shadow_cohort_rate": SHADOW_COHORT_RATE,
+        "pre_judge_gate_reasons": pre_judge_reasons,
+        "unavailable_slots": unavailable_slots,
+        "skip_reason": skip_reason,
+        "shadow_cohort": shadow_cohort,
+        # The calls the plan skips for this candidate. In the shadow cohort
+        # they were made anyway and their verdicts are recorded below.
+        "skipped_calls": skipped_calls,
+        "calls_made_for_shadow": skipped_calls if shadow_cohort else [],
+        "shadow_gate_reasons": (
+            full_gate_reasons if shadow_cohort and skip_reason is not None else None
+        ),
+    }
     distractors: list[dict[str, Any]] = []
     option_verdicts: list[dict[str, Any]] = []
     prefiltered_options: list[dict[str, Any]] = []
+    option_call_plan: dict[str, Any] | None = None
     qa_hash = stable_id("qa", question, question_context, canonical_json(answer))
     if not qa_gate_reasons:
-        distractors, option_verdicts, prefiltered_options = _generate_distractors(
-            db=db,
-            source=source,
-            context=context,
-            context_spans=context_spans,
-            question=question,
-            question_context=question_context,
-            answer=answer,
-            qa_hash=qa_hash,
-            entity_id=entity_id,
-            author=author,
-            verifier=verifier,
-            run_id=run_id,
-            parameters=parameters,
-            reservation=reservation,
-            timeout=timeout,
-            retries=retries,
-            rate_limit_seconds=rate_limit_seconds,
-            attempt_id=(attempt["attempt_id"] if distractor_only_retry else None),
-            option_feedback=(
-                _rejected_option_feedback(db, revision_parent)
-                if distractor_only_retry
-                else None
-            ),
+        distractors, option_verdicts, prefiltered_options, option_call_plan = (
+            _generate_distractors(
+                db=db,
+                source=source,
+                context=context,
+                context_spans=context_spans,
+                question=question,
+                question_context=question_context,
+                answer=answer,
+                qa_hash=qa_hash,
+                entity_id=entity_id,
+                author=author,
+                verifier=verifier,
+                run_id=run_id,
+                parameters=parameters,
+                reservation=reservation,
+                timeout=timeout,
+                retries=retries,
+                rate_limit_seconds=rate_limit_seconds,
+                attempt_id=(attempt["attempt_id"] if distractor_only_retry else None),
+                option_feedback=(
+                    _rejected_option_feedback(db, revision_parent)
+                    if distractor_only_retry
+                    else None
+                ),
+                chunks={chunk["chunk_id"]: chunk},
+            )
         )
     item_id = stable_id(
         "aqa",
@@ -2135,7 +2424,11 @@ def generate_candidate(
         "finding_policy_version": finding_policy_version,
         "status": "candidate" if not qa_gate_reasons else "qa_gate_failed",
         "task_type": "short_answer",
-        "question_claim_type": answer_verification.get("question_claim_type"),
+        "question_claim_type": (
+            answer_verification.get("question_claim_type")
+            if answer_verification is not None
+            else None
+        ),
         "source": {
             "source_id": source_id,
             "paper_family_id": source["paper_family_id"],
@@ -2175,7 +2468,7 @@ def generate_candidate(
             "prompt_version": PROMPT_VERSION,
             "numeric_rule_contract_version": NUMERIC_RULE_CONTRACT_VERSION,
             "direct_value_contract_version": DIRECT_SOURCE_VALUE_CONTRACT_VERSION,
-            "direct_value_request_id": answer_verification_result.request_id,
+            "direct_value_request_id": direct_value_request_id,
             "scope_contract_version": SCOPE_CONTRACT_VERSION,
             "scope_role_semantics_version": SCOPE_ROLE_SEMANTICS_VERSION,
             "scope_role_binding_contract_version": (
@@ -2233,6 +2526,8 @@ def generate_candidate(
             "method_status": "proposed_unvalidated",
             "distractor_only_retry": distractor_only_retry,
             "option_display_prefilter": prefiltered_options,
+            "judge_call_plan": judge_call_plan,
+            "option_verification_call_plan": option_call_plan,
             "policy_ablation_metadata": {
                 "V0": "base_checks_without_reconstruction_retention",
                 "V1": "same_checks_with_reconstruction_retention",
@@ -2503,7 +2798,10 @@ def _generate_distractors(
     rate_limit_seconds: float,
     attempt_id: str | None = None,
     option_feedback: list[dict[str, Any]] | None = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    chunks: dict[str, dict[str, Any]] | None = None,
+) -> tuple[
+    list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]
+]:
     attempt_context = (
         f"\nTARGETED_REGRESSION_ATTEMPT\n{attempt_id}" if attempt_id else ""
     )
@@ -2564,8 +2862,60 @@ def _generate_distractors(
         prefiltered.append(
             {"option_text": str(proposal.get("text", "")), "reason_code": display_issue}
         )
+    if chunks is not None:
+        # Cost plan step 6: the validator's own model-free option checks run
+        # before any paid call, so a verdict is never bought for an option the
+        # option gate rejects on free grounds. They admit nothing.
+        checked: list[dict[str, Any]] = []
+        equivalence_keys = [
+            _option_equivalence_key(answer, row) for row in distractors
+        ]
+        for proposal, key in zip(distractors, equivalence_keys):
+            option_hash = stable_id(
+                "option", qa_hash, proposal.get("text"), proposal.get("type")
+            )
+            free_result = validate_distractor(
+                db,
+                {
+                    "answer": answer,
+                    "question_context": question_context,
+                    "source": {"content_hash": source["content_hash"]},
+                },
+                proposal,
+                chunks,
+                None,
+                qa_hash,
+                option_hash,
+                equivalence_keys.count(key) > 1,
+            )
+            free_reasons = [
+                reason
+                for reason in free_result["reasons"]
+                if reason != "option_verdict_missing_or_stale"
+            ]
+            if free_reasons:
+                prefiltered.append(
+                    {
+                        "option_text": str(proposal.get("text", "")),
+                        "reason_code": free_reasons[0],
+                    }
+                )
+                continue
+            checked.append(proposal)
+        distractors = checked
     verdicts: list[dict[str, Any]] = []
+    attempted: list[dict[str, Any]] = []
+    reserve: list[dict[str, Any]] = []
+    verified_option_hashes: list[str] = []
+    # Cost plan step 6: options are verified in the writer's rank order and
+    # verification stops at the third verified distractor. The rest stay as an
+    # unverified reserve for the option-repair rung. One call, one hash-bound
+    # verdict and one receipt per verified option are unchanged.
+    independent_verdict = provider_model(verifier, "option_verifier") != author.model
     for distractor in distractors:
+        if len(verified_option_hashes) >= OPTION_VERIFIED_TARGET:
+            reserve.append(distractor)
+            continue
         option_hash = stable_id(
             "option", qa_hash, distractor.get("text"), distractor.get("type")
         )
@@ -2588,25 +2938,6 @@ def _generate_distractors(
             + "\nVERIFICATION_BINDING\n"
             + canonical_json(binding)
             + attempt_context
-            + "\n"
-            + BENCHMARK_STANDALONE_INSTRUCTIONS
-            + " Read QUESTION, QUESTION_CONTEXT, and the displayed option before you use "
-            "SOURCE_DATA or ANSWER_RECORD. " + SCOPE_ROLE_SEMANTICS_INSTRUCTIONS + " "
-            "Do not use those records to repair a missing "
-            "system, location, sample, period, condition, or referent. If the displayed task "
-            "or option needs SOURCE_DATA to identify a referent or interpret scope, set "
-            "alternative_answer_search_passed to false. SOURCE_DATA can still determine or "
-            "verify the answer. Establish a unique contradiction for this exact displayed option. "
-            "Absence of mention is not falsity. Set question_admits_option_as_correct only when "
-            "a reasonable reading of THIS question admits the option. Truth at another location "
-            "or time alone does not make a scoped substitution correct."
-            " Reject an option with a study-local definite description or abbreviated species "
-            "name when QUESTION and QUESTION_CONTEXT do not identify its subject, place, "
-            "time, sample, or event. A latitude alone does not identify a station or event. "
-            + CONTEXT_ONLY_SOURCE_INSTRUCTIONS
-            + " Select one source_span_id for the evidence. Set rationale to a "
-            "concise evidence-grounded justification for the verdict fields. "
-            "Do not provide hidden reasoning."
         )
         result = _call_result(
             db,
@@ -2620,22 +2951,63 @@ def _generate_distractors(
             timeout,
             retries,
             rate_limit_seconds,
+            system=OPTION_VERIFIER_SYSTEM,
         )
         resolved = _resolve_source_span(
             result.payload,
             context_spans,
             reason_code="option_verifier_evidence_span_not_found",
         )
-        verdicts.append(
-            {
-                **binding,
-                **resolved,
-                "provenance": _call_provenance(
-                    verifier, result, "option_verifier", prompt, parameters
-                ),
-            }
-        )
-    return distractors, verdicts, prefiltered
+        verdict = {
+            **binding,
+            **resolved,
+            "provenance": _call_provenance(
+                verifier,
+                result,
+                "option_verifier",
+                prompt,
+                parameters,
+                system=OPTION_VERIFIER_SYSTEM,
+            ),
+        }
+        verdicts.append(verdict)
+        attempted.append(distractor)
+        if _option_verdict_verified(distractor, verdict, independent=independent_verdict):
+            verified_option_hashes.append(option_hash)
+    call_plan = {
+        "contract_version": OPTION_VERIFICATION_CALL_PLAN_VERSION,
+        "verified_target": OPTION_VERIFIED_TARGET,
+        "proposed": len(resolved_proposals),
+        "prefiltered": len(prefiltered),
+        "verified": len(attempted),
+        "verified_option_hashes": verified_option_hashes,
+        "reserve": [
+            {"option_text": str(row.get("text", "")), "type": row.get("type")}
+            for row in reserve
+        ],
+    }
+    return attempted, verdicts, prefiltered, call_plan
+
+
+def _option_verdict_verified(
+    distractor: dict[str, Any], verdict: dict[str, Any], *, independent: bool
+) -> bool:
+    """Say whether one verdict counts toward the verified-distractor target.
+
+    The test mirrors the model-verdict preconditions of ``validate_distractor``
+    so the stop rule never counts an option the validator would refuse. A
+    compound or negated option counts only when the verdict comes from a model
+    other than the writer (r15 audit section 4.8 item 3).
+    """
+    if not verdict.get("contradiction_established"):
+        return False
+    if not verdict.get("alternative_answer_search_passed"):
+        return False
+    if verdict.get("question_admits_option_as_correct"):
+        return False
+    if _option_needs_independent_support(distractor) and not independent:
+        return False
+    return True
 
 
 def resume_candidate_distractors(
@@ -2711,7 +3083,7 @@ def resume_candidate_distractors(
         if isinstance(generation_attempt, dict)
         else stable_id("unit", base["finding_id"], row["generation_arm"])
     )
-    distractors, verdicts, _prefiltered = _generate_distractors(
+    distractors, verdicts, _prefiltered, option_call_plan = _generate_distractors(
         db=db,
         source=source,
         context=_context(chunk) + _context_only_source(stored_context_only),
@@ -2730,6 +3102,7 @@ def resume_candidate_distractors(
         retries=0,
         rate_limit_seconds=0,
         attempt_id=attempt_id,
+        chunks={row["chunk_id"]: row for row in chunks},
     )
     candidate = json.loads(canonical_json(base))
     candidate["item_id"] = stable_id("aqa-targeted", item_id, PROMPT_VERSION)
@@ -2751,6 +3124,7 @@ def resume_candidate_distractors(
         "targeted_regression": True,
         "source_item_id": item_id,
         "attempt_id": attempt_id,
+        "option_verification_call_plan": option_call_plan,
     }
     with db.transaction():
         db.connection.execute(
@@ -2907,6 +3281,8 @@ def _call(
     timeout: float,
     retries: int,
     rate_limit_seconds: float,
+    *,
+    system: str = SYSTEM,
 ) -> dict[str, Any]:
     return _call_result(
         db,
@@ -2920,6 +3296,7 @@ def _call(
         timeout,
         retries,
         rate_limit_seconds,
+        system=system,
     ).payload
 
 
@@ -2980,89 +3357,232 @@ def _qa_gate_reasons(
     standalone_verification: dict[str, Any] | None = None,
     interpretation_spans: list[dict[str, Any]] | None = None,
 ) -> list[str]:
+    """Run the whole QA gate on a candidate that carries every judge record.
+
+    The free checks of ``_pre_judge_gate_reasons`` run again here, in their
+    original position, so the persisted list keeps its shape (chapter 2 yield
+    audit, section 4.4).
+    """
+    return _gate_reasons(
+        chunk,
+        question,
+        answer,
+        reconstruction,
+        verification,
+        question_context,
+        provenance,
+        answer_agreement=answer_agreement,
+        standalone_verification=standalone_verification,
+        interpretation_spans=interpretation_spans,
+        judged=True,
+    )
+
+
+def _pre_judge_gate_reasons(
+    chunk: dict[str, Any],
+    question: str,
+    answer: dict[str, Any],
+    question_context: str = "",
+    *,
+    interpretation_spans: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    """Run the checks that need no judge record, right after the writer.
+
+    Every code here is emitted by ``_qa_gate_reasons`` under the same name and
+    from the same inputs, so its verdict cannot differ between the two
+    positions. A check whose result depends on a judge record, such as the
+    qualifier binding that may be satisfied by the verifier's span, or the
+    numeric rule binding that reads the verifier's request id, stays in the
+    judged pass only.
+    """
+    return _gate_reasons(
+        chunk,
+        question,
+        answer,
+        None,
+        None,
+        question_context,
+        None,
+        answer_agreement=None,
+        standalone_verification=None,
+        interpretation_spans=interpretation_spans,
+        judged=False,
+    )
+
+
+def _short_circuit_gate_reasons(
+    chunk: dict[str, Any],
+    question: str,
+    answer: dict[str, Any],
+    question_context: str = "",
+    *,
+    standalone_verification: dict[str, Any] | None,
+    interpretation_spans: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    """Return the persisted reason list of a candidate whose judges were skipped."""
+    return _gate_reasons(
+        chunk,
+        question,
+        answer,
+        None,
+        None,
+        question_context,
+        None,
+        answer_agreement=None,
+        standalone_verification=standalone_verification,
+        interpretation_spans=interpretation_spans,
+        judged=False,
+    )
+
+
+def _insert_construction_reasons(
+    reasons: list[str],
+    finding_quality_reason: str | None,
+    creation_context_reason: str | None,
+) -> None:
+    if finding_quality_reason and finding_quality_reason not in reasons:
+        reasons.insert(0, finding_quality_reason)
+    if creation_context_reason and creation_context_reason not in reasons:
+        reasons.insert(0, creation_context_reason)
+
+
+def _unavailable_referent_slots(referent_slots: Any) -> list[str]:
+    """Return the slots the writer's own record marks unavailable in the source."""
+    if not isinstance(referent_slots, list):
+        return []
+    return [
+        str(slot["slot"])
+        for slot in referent_slots
+        if isinstance(slot, dict)
+        and slot.get("state") == "unavailable_in_source"
+        and slot.get("slot") in REFERENT_SLOT_NAMES
+    ]
+
+
+def _in_shadow_cohort(run_id: str, entity_id: str) -> bool:
+    """Select the seeded random cohort that runs every judge call.
+
+    The draw is a hash of the policy version, the run and the candidate
+    entity, so the cohort is reproducible from the persisted candidate alone
+    and a replay of the same run selects the same members.
+    """
+    digest = sha256_bytes(
+        canonical_json([SHADOW_COHORT_POLICY_VERSION, run_id, entity_id]).encode()
+    )
+    draw = int(digest[:12], 16) / float(16**12)
+    return draw < SHADOW_COHORT_RATE
+
+
+def _gate_reasons(
+    chunk: dict[str, Any],
+    question: str,
+    answer: dict[str, Any],
+    reconstruction: dict[str, Any] | None,
+    verification: dict[str, Any] | None,
+    question_context: str = "",
+    provenance: dict[str, Any] | None = None,
+    *,
+    answer_agreement: dict[str, Any] | None = None,
+    standalone_verification: dict[str, Any] | None = None,
+    interpretation_spans: list[dict[str, Any]] | None = None,
+    judged: bool,
+) -> list[str]:
     reasons: list[str] = []
     interpretation_spans = interpretation_spans or []
     interpretation_texts = [str(span.get("text", "")) for span in interpretation_spans]
-    if standalone_verification is None:
-        reasons.append("standalone_verification_unresolved")
-    else:
-        reasons.extend(_standalone_gate_reasons(standalone_verification))
+    if judged or standalone_verification is not None:
+        if standalone_verification is None:
+            reasons.append("standalone_verification_unresolved")
+        else:
+            reasons.extend(_standalone_gate_reasons(standalone_verification))
+    if judged:
+        reconstruction = reconstruction or {}
+        verification = verification or {}
     if not _record_resolves(answer, chunk):
         reasons.append("answer_evidence_not_located")
-    if not _record_resolves(reconstruction, chunk):
-        reasons.append("reconstruction_evidence_not_located")
-    if not _record_resolves(verification, chunk):
-        reasons.append("answer_verifier_evidence_not_located")
-    if reconstruction.get("ambiguity_label") != "one_answer":
-        reasons.append("answer_ambiguous")
-    if reconstruction_has_competing_alternatives(answer, reconstruction):
-        reasons.append("reconstruction_alternative_answer_present")
-    deterministic_match = reconstruction_matches(answer, reconstruction)
-    if deterministic_match:
-        if answer_agreement is not None and answer_agreement != {
-            "contract_version": ANSWER_AGREEMENT_CONTRACT_VERSION,
-            "method": "deterministic",
-            "confidence_category": "authoritative_deterministic",
-            "deterministic_match": True,
-            "agreement": True,
-            "judge": None,
-        }:
+    if judged:
+        assert reconstruction is not None and verification is not None
+        if not _record_resolves(reconstruction, chunk):
+            reasons.append("reconstruction_evidence_not_located")
+        if not _record_resolves(verification, chunk):
+            reasons.append("answer_verifier_evidence_not_located")
+        if reconstruction.get("ambiguity_label") != "one_answer":
+            reasons.append("answer_ambiguous")
+        if reconstruction_has_competing_alternatives(answer, reconstruction):
+            reasons.append("reconstruction_alternative_answer_present")
+        deterministic_match = reconstruction_matches(answer, reconstruction)
+        if deterministic_match:
+            if answer_agreement is not None and answer_agreement != {
+                "contract_version": ANSWER_AGREEMENT_CONTRACT_VERSION,
+                "method": "deterministic",
+                "confidence_category": "authoritative_deterministic",
+                "deterministic_match": True,
+                "agreement": True,
+                "judge": None,
+            }:
+                reasons.append("answer_agreement_unresolved")
+        elif answer_agreement is None:
+            reasons.append("reconstruction_disagreement")
+        elif answer_agreement.get("method") != "llm_judge" or not isinstance(
+            answer_agreement.get("judge"), dict
+        ):
             reasons.append("answer_agreement_unresolved")
-    elif answer_agreement is None:
-        reasons.append("reconstruction_disagreement")
-    elif answer_agreement.get("method") != "llm_judge" or not isinstance(
-        answer_agreement.get("judge"), dict
-    ):
-        reasons.append("answer_agreement_unresolved")
-    elif answer_agreement["judge"].get("verdict") == "no":
-        reasons.append("reconstruction_disagreement")
-    elif answer_agreement["judge"].get("verdict") != "yes":
-        reasons.append("answer_agreement_unresolved")
-    if answer.get("numeric_rule") and not numeric_rule_is_source_bound(
-        answer, provenance
-    ):
-        reasons.append("source_bound_numeric_rule_missing")
+        elif answer_agreement["judge"].get("verdict") == "no":
+            reasons.append("reconstruction_disagreement")
+        elif answer_agreement["judge"].get("verdict") != "yes":
+            reasons.append("answer_agreement_unresolved")
+        if answer.get("numeric_rule") and not numeric_rule_is_source_bound(
+            answer, provenance
+        ):
+            reasons.append("source_bound_numeric_rule_missing")
     if not scope_is_evidence_bound(answer.get("scope"), answer, interpretation_texts):
         reasons.append("answer_scope_not_source_bound")
-    if not scope_is_evidence_bound(
-        reconstruction.get("scope"), reconstruction, interpretation_texts
-    ):
-        reasons.append("reconstruction_scope_not_source_bound")
-    if not scope_is_evidence_bound(
-        verification.get("scope"), verification, interpretation_texts
-    ):
-        reasons.append("answer_verifier_scope_not_source_bound")
+    if judged:
+        assert reconstruction is not None and verification is not None
+        if not scope_is_evidence_bound(
+            reconstruction.get("scope"), reconstruction, interpretation_texts
+        ):
+            reasons.append("reconstruction_scope_not_source_bound")
+        if not scope_is_evidence_bound(
+            verification.get("scope"), verification, interpretation_texts
+        ):
+            reasons.append("answer_verifier_scope_not_source_bound")
     if interpretation_spans and interpretation_spans_contain_answer(
         interpretation_spans, answer
     ):
         reasons.append("interpretation_span_contains_answer")
-    if interpretation_spans and (
-        verification.get("interpretation_scope_applies_to_finding") is not True
-    ):
-        reasons.append("interpretation_scope_not_applicable_to_finding")
+    if judged:
+        assert verification is not None
+        if interpretation_spans and (
+            verification.get("interpretation_scope_applies_to_finding") is not True
+        ):
+            reasons.append("interpretation_scope_not_applicable_to_finding")
     if benchmark_text_raw_source_artifact(str(question), question_context):
         reasons.append("benchmark_text_raw_source_artifact")
     if scope_qualifier_not_displayed(answer, str(question), question_context):
         reasons.append("scope_qualifier_not_displayed")
-    if not verification.get("source_entailment_model_verified"):
-        reasons.append("source_entailment_not_verified")
-    if not verification.get("relation_scope_match"):
-        reasons.append("relation_scope_mismatch")
-    reasons.extend(answer_verifier_scope_reasons(verification))
-    qualifier_reason = question_qualifier_binding_reason(
-        question, answer, reconstruction, verification
-    )
-    if qualifier_reason:
-        reasons.append(qualifier_reason)
-    if not verification.get("ambiguity_resolved"):
-        reasons.append("answer_ambiguous")
-    if not verification.get("alternative_answer_search_passed"):
-        reasons.append("alternative_answer_unresolved")
+    if judged:
+        assert reconstruction is not None and verification is not None
+        if not verification.get("source_entailment_model_verified"):
+            reasons.append("source_entailment_not_verified")
+        if not verification.get("relation_scope_match"):
+            reasons.append("relation_scope_mismatch")
+        reasons.extend(answer_verifier_scope_reasons(verification))
+        qualifier_reason = question_qualifier_binding_reason(
+            question, answer, reconstruction, verification
+        )
+        if qualifier_reason:
+            reasons.append(qualifier_reason)
+        if not verification.get("ambiguity_resolved"):
+            reasons.append("answer_ambiguous")
+        if not verification.get("alternative_answer_search_passed"):
+            reasons.append("alternative_answer_unresolved")
     if not isinstance(question_context, str) or (
         question_context and not question_context.strip()
     ):
         reasons.append("question_context_invalid")
-    else:
+    elif judged:
+        assert verification is not None
         context_reason = question_context_verification_reason(
             question_context,
             answer,
@@ -3072,18 +3592,20 @@ def _qa_gate_reasons(
         )
         if context_reason:
             reasons.append(context_reason)
-    claim_types = {
-        reconstruction.get("question_claim_type"),
-        verification.get("question_claim_type"),
-    }
-    if len(claim_types) != 1:
-        reasons.append("question_claim_type_disagreement")
-    question_claim_type = verification.get("question_claim_type")
-    if (
-        answer.get("claim_type") in {"observation", "association"}
-        and question_claim_type == "causal"
-    ):
-        reasons.append("causal_overclaim")
+    if judged:
+        assert reconstruction is not None and verification is not None
+        claim_types = {
+            reconstruction.get("question_claim_type"),
+            verification.get("question_claim_type"),
+        }
+        if len(claim_types) != 1:
+            reasons.append("question_claim_type_disagreement")
+        question_claim_type = verification.get("question_claim_type")
+        if (
+            answer.get("claim_type") in {"observation", "association"}
+            and question_claim_type == "causal"
+        ):
+            reasons.append("causal_overclaim")
     required_phrases = answer.get("required_question_phrases")
     if (
         not isinstance(required_phrases, list)
@@ -3131,6 +3653,10 @@ def _record_resolves(record: dict[str, Any], chunk: dict[str, Any]) -> bool:
 def _context(
     chunk: dict[str, Any], evidence_spans: list[dict[str, Any]] | None = None
 ) -> str:
+    # Chapter 2 yield audit, section 4.9 C2: the chunk text used to ride
+    # beside the tiled spans of the same text, so every role read the source
+    # about twice. The spans alone carry every byte, every span id and every
+    # hash, and they are the only text a role can select.
     selected_spans = evidence_spans or _finding_spans(chunk)
     model_spans = [_model_source_span(span) for span in selected_spans]
     return (
@@ -3141,11 +3667,6 @@ def _context(
                 "section_id": chunk["section_id"],
                 "heading": chunk["heading"],
                 "page": chunk.get("page"),
-                "text": (
-                    "\n".join(span["text"] for span in selected_spans)
-                    if evidence_spans is not None
-                    else chunk["text"]
-                ),
                 "scope_restricted": evidence_spans is not None,
                 "span_contract_version": FINDING_SPAN_CONTRACT_VERSION,
                 "evidence_spans": model_spans,
@@ -3155,7 +3676,39 @@ def _context(
     )
 
 
-def _admit_ranked_finding(
+def _ordered_candidate_findings(
+    candidate_findings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Order the ranked candidates: scope completeness first, then answer basis.
+
+    The model's rank is its scope-completeness ranking. A study-internal index
+    goes last whatever its scope quality, and a candidate the model itself
+    marked inadmissible goes behind the ones it marked admissible (chapter 2
+    yield audit, section 4.5 (b)). Ordering only reorders; every candidate
+    still passes the same admission checks.
+    """
+    return sorted(
+        (row for row in candidate_findings if isinstance(row, dict)),
+        key=lambda row: (
+            row.get("answer_basis_class") == STUDY_INTERNAL_INDEX_BASIS,
+            row.get("admissible") is False,
+            int(row.get("rank") or 0) or MAX_RANKED_CANDIDATE_FINDINGS,
+        ),
+    )
+
+
+def _proposal_span_ids(proposal: dict[str, Any]) -> list[str]:
+    return [
+        span_id
+        for span_id in (
+            proposal.get("source_span_id"),
+            *(proposal.get("source_span_ids") or []),
+        )
+        if isinstance(span_id, str) and span_id
+    ]
+
+
+def _evaluate_ranked_findings(
     candidate_findings: list[dict[str, Any]],
     finding_spans: dict[str, dict[str, Any]],
     chunks: list[dict[str, Any]],
@@ -3164,30 +3717,35 @@ def _admit_ranked_finding(
     *,
     excluded_span_ids: list[str],
     admission_exclusions: list[str] | None = None,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    """Freeze the highest-ranked candidate finding that passes admission.
+) -> list[dict[str, Any]]:
+    """Run freeze-time admission on every ranked candidate and keep the results.
 
-    ``admission_exclusions`` collects the span ids of every candidate that the
-    freeze-time admission checks rejected, so the caller's one free re-ask can
-    exclude them (r15 audit section 4.5).
-
-    Every check below only rejects. Ranking decides which surviving candidate is
-    frozen; it never admits a finding that a later gate would refuse.
-    The recorded ``admitted_rank`` and each rejection ``rank`` are 1-based
-    positions in the sorted order, so they stay meaningful when the model
-    returns a duplicate or absent rank value.
+    Every check only rejects. ``admission_exclusions`` collects the span ids of
+    every candidate a re-askable check rejected, so the caller's one free
+    re-ask can exclude them (r15 audit section 4.5). The ``position`` of an
+    evaluation is its 1-based place in the sorted order, so it stays
+    meaningful when the model returns a duplicate or absent rank value.
     """
-    ordered = sorted(
-        (row for row in candidate_findings if isinstance(row, dict)),
-        key=lambda row: int(row.get("rank") or 0) or MAX_RANKED_CANDIDATE_FINDINGS,
-    )
+    ordered = _ordered_candidate_findings(candidate_findings)
     excluded = set(excluded_span_ids)
-    rejections: list[dict[str, Any]] = []
-    last_error: CandidateRejectedError | None = None
+    evaluations: list[dict[str, Any]] = []
     for index, row in enumerate(ordered):
         proposal = row.get("answer")
         if not isinstance(proposal, dict):
             continue
+        evaluation: dict[str, Any] = {
+            "position": index + 1,
+            "model_rank": row.get("rank"),
+            "row": row,
+            "span_ids": _proposal_span_ids(proposal),
+            "answer_basis_class": row.get("answer_basis_class"),
+            "source_blind_answer_basis": row.get("source_blind_answer_basis"),
+            "admissible_flag": row.get("admissible"),
+            "answer": None,
+            "chunk": None,
+            "reason_code": None,
+            "message": None,
+        }
         try:
             answer = _resolve_source_span(
                 proposal,
@@ -3238,41 +3796,424 @@ def _admit_ranked_finding(
             if frozen_admission is not None:
                 raise CandidateRejectedError(*frozen_admission)
         except CandidateRejectedError as error:
-            last_error = error
-            rejections.append({"rank": index + 1, "reason_code": error.reason_code})
+            evaluation["reason_code"] = error.reason_code
+            evaluation["message"] = str(error)
             if (
                 admission_exclusions is not None
                 and error.reason_code in FINDING_ADMISSION_REASK_REASONS
-                and isinstance(proposal, dict)
             ):
                 admission_exclusions.extend(
                     span_id
-                    for span_id in (
-                        proposal.get("source_span_id"),
-                        *(proposal.get("source_span_ids") or []),
-                    )
-                    if isinstance(span_id, str)
-                    and span_id
-                    and span_id not in admission_exclusions
+                    for span_id in evaluation["span_ids"]
+                    if span_id not in admission_exclusions
                 )
+        else:
+            evaluation["answer"] = answer
+            evaluation["chunk"] = chunk
+        evaluations.append(evaluation)
+    return evaluations
+
+
+def _evaluation_summary(evaluation: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "rank": evaluation["position"],
+        "model_rank": evaluation["model_rank"],
+        "status": "rejected" if evaluation["reason_code"] else "admissible",
+        "reason_code": evaluation["reason_code"],
+        "span_ids": evaluation["span_ids"],
+        "answer_basis_class": evaluation["answer_basis_class"],
+        "admissible_flag": evaluation["admissible_flag"],
+    }
+
+
+def _select_admitted_finding(
+    evaluations: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Freeze the first admissible candidate that is not a study-internal index.
+
+    Raises the last admission failure when nothing is admissible, and
+    ``no_admissible_finding`` when every admissible candidate is a
+    study-internal index (chapter 2 yield audit, section 4.5 (b)).
+    """
+    admissible = [row for row in evaluations if row["reason_code"] is None]
+    rejected = [row for row in evaluations if row["reason_code"] is not None]
+    if not admissible:
+        if rejected:
+            last = rejected[-1]
+            raise CandidateRejectedError(last["reason_code"], last["message"])
+        raise CandidateRejectedError(
+            "finding_evidence_span_not_found",
+            "the extractor returned no usable candidate finding",
+        )
+    chosen = next(
+        (
+            row
+            for row in admissible
+            if row["answer_basis_class"] != STUDY_INTERNAL_INDEX_BASIS
+        ),
+        None,
+    )
+    if chosen is None:
+        raise CandidateRejectedError(
+            "no_admissible_finding",
+            "every admissible candidate finding is a study-internal index",
+        )
+    answer, chunk = chosen["answer"], chosen["chunk"]
+    return (
+        answer,
+        chunk,
+        {
+            "contract_version": FINDING_ADMISSION_CONTRACT_VERSION,
+            "candidate_count": len(evaluations),
+            "admitted_rank": chosen["position"],
+            "rejected_candidates": [
+                {"rank": row["position"], "reason_code": row["reason_code"]}
+                for row in rejected
+                if row["position"] < chosen["position"]
+            ],
+            "coherence_shadow_reason": _finding_coherence_shadow(answer),
+            "finding_bank_contract_version": FINDING_BANK_CONTRACT_VERSION,
+            "served_from_bank": False,
+            "answer_basis_class": chosen["answer_basis_class"],
+            "source_blind_answer_basis": chosen["source_blind_answer_basis"],
+            "candidate_evaluations": [_evaluation_summary(row) for row in evaluations],
+        },
+    )
+
+
+def _admit_ranked_finding(
+    candidate_findings: list[dict[str, Any]],
+    finding_spans: dict[str, dict[str, Any]],
+    chunks: list[dict[str, Any]],
+    arctic_scope: dict[str, Any] | None,
+    interpretation_spans: list[dict[str, Any]] | None,
+    *,
+    excluded_span_ids: list[str],
+    admission_exclusions: list[str] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Freeze the highest-ranked candidate finding that passes admission.
+
+    Ranking decides which surviving candidate is frozen; it never admits a
+    finding that a later gate would refuse.
+    """
+    return _select_admitted_finding(
+        _evaluate_ranked_findings(
+            candidate_findings,
+            finding_spans,
+            chunks,
+            arctic_scope,
+            interpretation_spans,
+            excluded_span_ids=excluded_span_ids,
+            admission_exclusions=admission_exclusions,
+        )
+    )
+
+
+def _finding_bank_key(arctic_scope: dict[str, Any] | None) -> str:
+    """Bind the bank to the extractor prompt, the admission contract and the scope."""
+    return stable_id(
+        "finding-bank",
+        FINDING_BANK_CONTRACT_VERSION,
+        PROMPT_VERSION,
+        sha256_bytes(EXTRACTOR_INSTRUCTIONS.encode()),
+        FINDING_ADMISSION_CONTRACT_VERSION,
+        FINDING_SPAN_CONTRACT_VERSION,
+        ARCTIC_SCOPE_CONTRACT_VERSION,
+        arctic_scope,
+    )
+
+
+def _persist_finding_bank(
+    db: Database,
+    identity: dict[str, str],
+    *,
+    extraction_entity_id: str,
+    evaluations: list[dict[str, Any]],
+) -> dict[int, str]:
+    """Persist every returned candidate with its admission result and span ids."""
+    row_ids: dict[int, str] = {}
+    stamp = now()
+    with db.transaction():
+        for evaluation in evaluations:
+            row_id = stable_id(
+                "finding-bank-row",
+                identity,
+                extraction_entity_id,
+                evaluation["position"],
+            )
+            row_ids[evaluation["position"]] = row_id
+            db.connection.execute(
+                """INSERT OR IGNORE INTO finding_bank
+                (bank_row_id,run_id,source_id,paper_family_id,bank_key,
+                 extraction_entity_id,rank,span_ids_json,candidate_json,
+                 admission_status,admission_reason_code,frozen_finding_id,
+                 created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL,?,?)""",
+                (
+                    row_id,
+                    identity["run_id"],
+                    identity["source_id"],
+                    identity["paper_family_id"],
+                    identity["bank_key"],
+                    extraction_entity_id,
+                    evaluation["position"],
+                    canonical_json(evaluation["span_ids"]),
+                    canonical_json(evaluation["row"]),
+                    "rejected" if evaluation["reason_code"] else FINDING_BANK_SERVABLE_STATUS,
+                    evaluation["reason_code"],
+                    stamp,
+                    stamp,
+                ),
+            )
+    return row_ids
+
+
+def _update_bank_row(
+    db: Database,
+    row_id: str | None,
+    *,
+    status: str,
+    reason_code: str | None = None,
+    frozen_finding_id: str | None = None,
+) -> None:
+    if not row_id:
+        return
+    with db.transaction():
+        db.connection.execute(
+            """UPDATE finding_bank
+            SET admission_status=?,admission_reason_code=?,frozen_finding_id=?,
+                updated_at=?
+            WHERE bank_row_id=?""",
+            (status, reason_code, frozen_finding_id, now(), row_id),
+        )
+
+
+def _mark_bank_row_frozen(db: Database, row_id: str | None, finding_id: str) -> None:
+    _update_bank_row(db, row_id, status="frozen", frozen_finding_id=finding_id)
+
+
+def _serve_banked_finding(
+    db: Database,
+    identity: dict[str, str],
+    *,
+    finding_spans: dict[str, dict[str, Any]],
+    chunks: list[dict[str, Any]],
+    arctic_scope: dict[str, Any] | None,
+    interpretation_spans: list[dict[str, Any]] | None,
+    excluded_span_ids: list[str],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
+    """Serve the next banked candidate that passes admission today, or None.
+
+    A banked candidate is re-validated against the current scope, the current
+    interpretation spans and the full admission path, exactly as a fresh one.
+    A candidate whose spans are excluded is left in the bank. When only
+    study-internal index candidates remain, the family records
+    ``no_admissible_finding`` and buys no extraction.
+    """
+    rows = db.rows(
+        """SELECT * FROM finding_bank
+        WHERE run_id=? AND paper_family_id=? AND bank_key=? AND admission_status=?
+        ORDER BY created_at, rank, bank_row_id""",
+        (
+            identity["run_id"],
+            identity["paper_family_id"],
+            identity["bank_key"],
+            FINDING_BANK_SERVABLE_STATUS,
+        ),
+    )
+    excluded = set(excluded_span_ids)
+    internal_only = False
+    for row in rows:
+        span_ids = json.loads(row["span_ids_json"])
+        if excluded and excluded.intersection(span_ids):
+            continue
+        proposal = json.loads(row["candidate_json"])
+        evaluation = _evaluate_ranked_findings(
+            [proposal],
+            finding_spans,
+            chunks,
+            arctic_scope,
+            interpretation_spans,
+            excluded_span_ids=sorted(excluded),
+        )
+        if not evaluation or evaluation[0]["reason_code"] is not None:
+            _update_bank_row(
+                db,
+                row["bank_row_id"],
+                status="rejected",
+                reason_code=(
+                    evaluation[0]["reason_code"]
+                    if evaluation
+                    else "finding_evidence_span_not_found"
+                ),
+            )
+            continue
+        chosen = evaluation[0]
+        if chosen["answer_basis_class"] == STUDY_INTERNAL_INDEX_BASIS:
+            internal_only = True
             continue
         return (
-            answer,
-            chunk,
+            chosen["answer"],
+            chosen["chunk"],
             {
                 "contract_version": FINDING_ADMISSION_CONTRACT_VERSION,
-                "candidate_count": len(ordered),
-                "admitted_rank": index + 1,
-                "rejected_candidates": rejections,
-                "coherence_shadow_reason": _finding_coherence_shadow(answer),
+                "candidate_count": 1,
+                "admitted_rank": 1,
+                "rejected_candidates": [],
+                "coherence_shadow_reason": _finding_coherence_shadow(chosen["answer"]),
+                "finding_bank_contract_version": FINDING_BANK_CONTRACT_VERSION,
+                "served_from_bank": True,
+                "bank_row_id": row["bank_row_id"],
+                "bank_rank": int(row["rank"]),
+                "bank_extraction_entity_id": row["extraction_entity_id"],
+                "answer_basis_class": chosen["answer_basis_class"],
+                "source_blind_answer_basis": chosen["source_blind_answer_basis"],
+                "candidate_evaluations": [_evaluation_summary(chosen)],
             },
         )
-    if last_error is not None:
-        raise last_error
-    raise CandidateRejectedError(
-        "finding_evidence_span_not_found",
-        "the extractor returned no usable candidate finding",
-    )
+    if internal_only:
+        raise CandidateRejectedError(
+            "no_admissible_finding",
+            "the finding bank holds only study-internal index candidates",
+        )
+    return None
+
+
+def _unexcluded_finding_spans(
+    finding_spans: dict[str, dict[str, Any]], *exclusions: list[str]
+) -> bool:
+    """Say whether an eligible finding span remains outside every exclusion."""
+    excluded: set[str] = set()
+    for values in exclusions:
+        excluded.update(values)
+    return any(span_id not in excluded for span_id in finding_spans)
+
+
+_PRESCREEN_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+_PRESCREEN_QUANTIFIED = re.compile(
+    r"\d[\d.,]*\s*(?:%|percent|per\s+cent|‰|°C|°|[A-Za-zµμ][A-Za-z0-9/·^\-]{0,7}\b)"
+)
+_PRESCREEN_DIRECTIONAL = re.compile(
+    r"\b(?:increas|decreas|declin|higher|lower|greater|less(?:er)?|larger|"
+    r"smaller|rose|fell|grew|reduc|enhanc|positive|negative|correlat|trend|"
+    r"exceed|dominat)\w*",
+    re.IGNORECASE,
+)
+_PRESCREEN_CATEGORICAL = re.compile(
+    r"\b(?:dominated by|dominant|consisted of|composed of|identified as|"
+    r"were present|was present|belong(?:s|ed)? to|classified as|detected|"
+    r"observed|found|recorded|characteri[sz]ed by)\b",
+    re.IGNORECASE,
+)
+_PRESCREEN_RESULT_HEADING = ("result", "discussion", "finding", "conclusion")
+_PRESCREEN_MIN_SENTENCE_WORDS = 8
+_CYRILLIC = re.compile("[Ѐ-ӿ]")
+
+
+def _structural_prescreen(
+    finding_spans: dict[str, dict[str, Any]], chunks: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Measure, in shadow mode, whether the eligible spans hold a result sentence.
+
+    Chapter 2 yield audit, section 4.5 (e). The verdict is recorded and never
+    acted on. A qualifying span holds a complete prose sentence that states a
+    quantified, directional or categorical claim. The finite-verb test is
+    English only, so a Cyrillic sentence of full length counts as prose and
+    the verdict carries the script share for the measurement.
+    """
+    headings = {
+        row["chunk_id"]: str(row.get("heading") or "").casefold() for row in chunks
+    }
+    result_chunks = {
+        chunk_id
+        for chunk_id, heading in headings.items()
+        if any(term in heading for term in _PRESCREEN_RESULT_HEADING)
+    }
+    counts = {
+        "span_count": 0,
+        "result_section_spans": 0,
+        "prose_sentence_spans": 0,
+        "quantified_spans": 0,
+        "directional_spans": 0,
+        "categorical_spans": 0,
+        "qualifying_spans": 0,
+    }
+    cyrillic_chars = 0
+    total_chars = 0
+    for span in finding_spans.values():
+        text = str(span.get("text") or "")
+        counts["span_count"] += 1
+        total_chars += len(text)
+        cyrillic_chars += len(_CYRILLIC.findall(text))
+        in_results = not result_chunks or span.get("chunk_id") in result_chunks
+        if span.get("chunk_id") in result_chunks:
+            counts["result_section_spans"] += 1
+        prose = False
+        quantified = directional = categorical = False
+        for sentence in _PRESCREEN_SENTENCE_SPLIT.split(text):
+            words = sentence.split()
+            if len(words) < _PRESCREEN_MIN_SENTENCE_WORDS:
+                continue
+            if not (
+                _FINITE_VERB_PATTERN.search(sentence) or _CYRILLIC.search(sentence)
+            ):
+                continue
+            prose = True
+            quantified = quantified or bool(_PRESCREEN_QUANTIFIED.search(sentence))
+            directional = directional or bool(_PRESCREEN_DIRECTIONAL.search(sentence))
+            categorical = categorical or bool(_PRESCREEN_CATEGORICAL.search(sentence))
+        if prose:
+            counts["prose_sentence_spans"] += 1
+        if quantified:
+            counts["quantified_spans"] += 1
+        if directional:
+            counts["directional_spans"] += 1
+        if categorical:
+            counts["categorical_spans"] += 1
+        if in_results and prose and (quantified or directional or categorical):
+            counts["qualifying_spans"] += 1
+    return {
+        "contract_version": FINDING_PRESCREEN_CONTRACT_VERSION,
+        "mode": "shadow",
+        **counts,
+        "result_section_present": bool(result_chunks),
+        "cyrillic_share": round(cyrillic_chars / total_chars, 3) if total_chars else 0.0,
+        "would_reject": counts["qualifying_spans"] == 0,
+    }
+
+
+def _record_prescreen_shadow(
+    db: Database, identity: dict[str, str], verdict: dict[str, Any]
+) -> None:
+    with db.transaction():
+        db.connection.execute(
+            """INSERT OR IGNORE INTO finding_prescreen_shadow
+            (prescreen_id,run_id,source_id,paper_family_id,contract_version,
+             verdict_json,created_at)
+            VALUES (?,?,?,?,?,?,?)""",
+            (
+                stable_id(
+                    "finding-prescreen",
+                    identity["run_id"],
+                    identity["source_id"],
+                    verdict["contract_version"],
+                ),
+                identity["run_id"],
+                identity["source_id"],
+                identity["paper_family_id"],
+                verdict["contract_version"],
+                canonical_json(verdict),
+                now(),
+            ),
+        )
+
+
+# Measured on the 81 chapter 2 frozen quotes: the two bare table rows the
+# audit names hold 5 and 7 words with no finite verb, while the shortest
+# accepted prose quote holds far more. The lost-space artifact pattern fired
+# on exactly the one phrase the audit names ("SMLcoupled") and on no other.
+MAX_TABLE_FRAGMENT_WORDS = 8
+_CASE_BOUNDARY_ARTIFACT_PATTERN = re.compile(r"\b[A-Z]{2,}[a-z]{3,}\b")
 
 
 def _finding_admission_reason(
@@ -3290,14 +4231,22 @@ def _finding_admission_reason(
     labelled = bool(interpretation_span_ids)
     cells = [cell for cell in re.split(r"[ \t]{2,}", text) if cell.strip()]
     numeric_cells = [cell for cell in cells if _NUMERIC_CELL_PATTERN.search(cell)]
+    has_finite_verb = bool(_FINITE_VERB_PATTERN.search(text))
+    if len(numeric_cells) >= 3 and not has_finite_verb and not labelled:
+        return "finding_span_is_table_or_caption"
+    # Chapter 2 yield audit, section 4.5 (c): a short quote with no finite verb
+    # and no interpretation span is a table row or a list entry.
     if (
-        len(numeric_cells) >= 3
-        and not _FINITE_VERB_PATTERN.search(text)
+        not has_finite_verb
         and not labelled
+        and len(text.split()) <= MAX_TABLE_FRAGMENT_WORDS
     ):
         return "finding_span_is_table_or_caption"
     if _FIGURE_REFERENT_PATTERN.search(text) and not labelled:
         return "finding_span_figure_defined_referent"
+    for phrase in answer.get("required_question_phrases") or []:
+        if isinstance(phrase, str) and _CASE_BOUNDARY_ARTIFACT_PATTERN.search(phrase):
+            return "finding_required_phrase_artifact"
     return None
 
 
@@ -3391,17 +4340,13 @@ def _finding_context(
             continue
         spans_by_id.update((span["span_id"], span) for span in evidence_spans)
         model_evidence_spans = [_model_source_span(span) for span in evidence_spans]
+        # The span set carries every byte once (section 4.9 C2); see _context.
         rendered_chunks.append(
             {
                 "chunk_id": row["chunk_id"],
                 "section_id": row["section_id"],
                 "heading": row["heading"],
                 "page": row.get("page"),
-                "text": (
-                    "\n".join(span["text"] for span in evidence_spans)
-                    if eligible_spans is not None
-                    else row["text"]
-                ),
                 "evidence_spans": model_evidence_spans,
             }
         )
@@ -3421,7 +4366,13 @@ def _finding_context(
         }
     )
     if len(payload) > MAX_FINDING_CONTEXT_CHARS:
-        raise ValueError("the complete finding context exceeds the configured limit")
+        # The paper fails to the operator through the rejection ledger; no
+        # paid call is made and the family closes on a terminal code.
+        raise CandidateRejectedError(
+            "finding_context_over_budget",
+            "the eligible finding context exceeds the measured payload budget: "
+            f"{len(payload)} characters against {MAX_FINDING_CONTEXT_CHARS}",
+        )
     return "SOURCE_DATA_BEGIN\n" + payload + "\nSOURCE_DATA_END", spans_by_id
 
 

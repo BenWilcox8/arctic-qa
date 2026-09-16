@@ -839,13 +839,22 @@ def scripted_payload(record: dict[str, Any]) -> dict[str, Any]:
             for line in (FIXTURES / fixture).read_text(encoding="utf-8").splitlines()
             if line.strip()
         )
+    # A role's static instructions ride in systemInstruction and its evidence
+    # in the user prompt, so a script marker may sit in either part.
+    request_text = (
+        record["request"]["systemInstruction"]["parts"][0]["text"] + "\n" + prompt
+    )
     event = next(
         item
         for item in events
         if item["role"] == record["role"]
-        and all(marker in prompt for marker in item.get("require_prompt_contains", []))
         and all(
-            marker not in prompt for marker in item.get("forbid_prompt_contains", [])
+            marker in request_text
+            for marker in item.get("require_prompt_contains", [])
+        )
+        and all(
+            marker not in request_text
+            for marker in item.get("forbid_prompt_contains", [])
         )
     )
     payload = json.loads(canonical_json(event["response"]))
@@ -1053,13 +1062,17 @@ def test_batch_pipeline_reuses_bounded_question_revision_contract(
     else:
         pytest.fail("the batch revision pipeline did not finish")
 
+    # The first question leaks its answer, so the free check and the standalone
+    # gate fail it and the judge call plan skips its reconstruction and answer
+    # verification (chapter 2 yield audit, section 4.4). Only the revision
+    # pays the two later Pro calls.
     assert seen_stage_counts == {
         "eligibility": 1,
         "question_generation": 2,
         "finding_answer_extraction": 1,
         "standalone_verification": 2,
-        "blinded_reconstruction": 2,
-        "answer_verification": 2,
+        "blinded_reconstruction": 1,
+        "answer_verification": 1,
         "distractor_generation": 1,
         "option_verification": 4,
     }

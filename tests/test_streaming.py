@@ -829,7 +829,16 @@ class ScriptedBrokerTransport:
         role = next(
             name for name, expected in ROLE_SCHEMAS.items() if schema == expected
         )
-        self.role_prompts.append((role, body["contents"][0]["parts"][0]["text"]))
+        # A role's static instructions ride in systemInstruction and its
+        # evidence in the user prompt, so the recorded request holds both.
+        self.role_prompts.append(
+            (
+                role,
+                body["systemInstruction"]["parts"][0]["text"]
+                + "\n"
+                + body["contents"][0]["parts"][0]["text"],
+            )
+        )
         provider = (
             self.author
             if role
