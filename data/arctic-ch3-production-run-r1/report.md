@@ -246,6 +246,7 @@ The watch ran and rule 5 fired.
 `build-activation.py c545cf8 watch-eligibility` read the last eligibility row of each of the first 20 papers of the frozen order, after the producer passed paper 20.
 It counted 9 papers in `screening_error`, above the limit of 5.
 It then sent SIGINT at 08:37:49 UTC at a zero-in-flight boundary, and the producer exited.
+The producer was the only command in the tmux pane, so the `arctic-ch3-production-r1` session closed with it.
 The ledger is not halted, `inflight` is 0, and the only ambiguous funds are the USD 0.092648 that chapter 2 carried in.
 The result is in `eligibility-watch-c545cf8-ch3.json` and in the activation receipt.
 
