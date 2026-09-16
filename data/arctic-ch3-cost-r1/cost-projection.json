@@ -1,0 +1,88 @@
+{
+ "basis": {
+  "chapter2_spent_usd": 19.995149,
+  "accepted_items": 6,
+  "families_in_bundles": 56,
+  "candidates": 139,
+  "note": "Acceptance held at 6 items. Codes as recorded by the chapter 2 gates; the gate corrections of the sibling slices change which candidates fail free checks, not the plan."
+ },
+ "step_1_judge_call_plan": {
+  "candidates_by_class": {
+   "standalone": 27,
+   "free_check": 71,
+   "slot": 17,
+   "full_suite": 24
+  },
+  "skipped_calls": {
+   "blinded_reconstruction": 115,
+   "answer_verification": 115,
+   "standalone_verification": 17
+  },
+  "skipped_usd_by_stage": {
+   "blinded_reconstruction": 1.4765,
+   "answer_verification": 1.8907,
+   "standalone_verification": 0.1277
+  },
+  "skipped_usd": 3.4949,
+  "shadow_cohort_rate": 0.05,
+  "shadow_cohort_usd": 0.1747,
+  "net_saving_usd": 3.3202,
+  "spend_after_usd": 16.675,
+  "usd_per_accepted_item": 2.7792,
+  "audit_expected_spend_after_usd": 16.49
+ },
+ "step_2_evidence_once": {
+  "method": "exact character delta of every recorded chapter 2 request trace, converted with the per-stage median characters-per-token ratio from the receipts, at the input price of the stage model; judge-stage savings scaled by the calls the plan keeps",
+  "input_saving_usd_by_stage": {
+   "finding_answer_extraction": 2.3982,
+   "question_generation": 0.1002,
+   "distractor_generation": 0.008,
+   "repair": 0.0014,
+   "blinded_reconstruction": 0.0526,
+   "answer_verification": 0.0514,
+   "option_verification": 0.0871
+  },
+  "saving_usd": 2.6989,
+  "spend_after_usd": 13.9761,
+  "usd_per_accepted_item": 2.3293,
+  "audit_expected_spend_after_usd": 13.99,
+  "unscaled_input_saving_usd": 3.0619
+ },
+ "step_3_finding_bank": {
+  "extraction_calls_after_first_candidate": 65,
+  "saving_usd": 2.6384,
+  "spend_after_usd": 11.3377,
+  "usd_per_accepted_item": 1.8896,
+  "audit_expected_spend_after_usd": 12.89,
+  "assumption": "the first extraction of a family returns the ranked candidates the new prompt asks for, so every later extraction of that family is served from the bank"
+ },
+ "step_4_second_pass_guard": {
+  "reask_calls_before_first_candidate_upper_bound": 14,
+  "upper_bound_saving_usd": 0.5026,
+  "reask_calls_in_separable_scope_families": 3,
+  "booked_saving_usd": 0.0134,
+  "spend_after_usd": 11.3244,
+  "usd_per_accepted_item": 1.8874,
+  "audit_expected_spend_after_usd": 12.69,
+  "note": "the rule fires only when every eligible finding span is excluded, which a whole-study paper never reaches; only the separable-scope families are booked"
+ },
+ "step_6_option_call_plan": {
+  "verified_target": 4,
+  "calls_saved_as_recorded": 0,
+  "saving_usd_as_recorded": 0.0,
+  "calls_saved_false_flag_fixed": 0,
+  "saving_usd_false_flag_fixed": 0.0,
+  "spend_after_usd": 11.3244,
+  "usd_per_accepted_item": 1.8874,
+  "audit_expected_spend_after_usd": 12.89,
+  "note": "chapter 2 proposed four options per candidate, so the stop at the export need saves nothing at that volume; it saves with the six proposals of the judge-options slice"
+ },
+ "total": {
+  "spend_after_steps_1_to_4_and_6_usd": 11.3244,
+  "usd_per_accepted_item_at_fixed_yield": 1.8874,
+  "audit_expected_range_usd": [
+   12.0,
+   13.0
+  ]
+ }
+}

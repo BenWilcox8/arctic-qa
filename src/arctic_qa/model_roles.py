@@ -45,6 +45,13 @@ STRONGEST_JUDGE_ROLES = (
     "option_set_verifier",
 )
 REQUIRED_ROLES = AUTHOR_ROLES + JUDGE_ROLES
+# Chapter 2 yield audit, section 4.9 C9: cost_aware moves the reconstructor
+# and the answer verifier to the writer's model family. It is a study profile
+# and a production run must never select it. The name ban is one guard; the
+# resolved-assignment assertion below is the other, because the live hazard
+# is an edit that moves one judge down to the writer's model.
+NON_PRODUCTION_PROFILES = frozenset({"cost_aware"})
+PRODUCTION_PHASES = frozenset({"away_production"})
 
 
 def _default_roles_file() -> Path:
@@ -124,6 +131,14 @@ def assert_role_separation(role_models: dict[str, str]) -> None:
     error = role_separation_error(role_models)
     if error is not None:
         raise ValueError(error)
+
+
+def assert_profile_allowed_for_phase(profile: str | None, phase: str) -> None:
+    """Fail at startup when a production run names a non-production profile."""
+    if phase in PRODUCTION_PHASES and profile in NON_PRODUCTION_PROFILES:
+        raise ValueError(
+            f"model role profile {profile} is not allowed for a production run"
+        )
 
 
 def _validate_profile(name: str, profile: Any, strength: dict[str, Any]) -> None:

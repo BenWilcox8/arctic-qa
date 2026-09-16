@@ -77,9 +77,7 @@ def _collapse_namespace(reason: str) -> str:
     return reason
 
 
-def replay_candidate(
-    bundle: dict[str, Any], row: dict[str, Any]
-) -> dict[str, Any]:
+def replay_candidate(bundle: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
     candidate = row["candidate"]
     chunk_id = candidate["source"]["chunk_id"]
     chunk_text = bundle.get("source_chunk_texts", {}).get(chunk_id)
@@ -105,7 +103,9 @@ def replay_candidate(
     )
     if agreement is None and "reconstruction_disagreement" in reasons:
         # Offline the judge cannot answer; record the open question, not a kill.
-        reasons = [reason for reason in reasons if reason != "reconstruction_disagreement"]
+        reasons = [
+            reason for reason in reasons if reason != "reconstruction_disagreement"
+        ]
         reasons.append("answer_agreement_judge_required")
     # generate_candidate inserts the writer-time context reason ahead of the
     # gate reasons; the replay does the same so the sets are comparable.
@@ -117,7 +117,9 @@ def replay_candidate(
     if creation_reason and creation_reason not in reasons:
         reasons.insert(0, creation_reason)
     recorded = [
-        reason for reason in (candidate.get("qa_gate_reasons") or []) if isinstance(reason, str)
+        reason
+        for reason in (candidate.get("qa_gate_reasons") or [])
+        if isinstance(reason, str)
     ]
     # Chapter 3 moved the free source-blind screen into its own
     # ``standalone_det_`` namespace (yield audit 4.2, F7). Chapter 2 recorded
@@ -137,7 +139,8 @@ def replay_candidate(
         "added": sorted(replayed_set - recorded_set),
         "agreement_path": agreement_path,
         "freed": not reasons and bool(recorded),
-        "accepted_before": row.get("status") in {"machine_accepted_unverified", "incomplete_non_mcq"},
+        "accepted_before": row.get("status")
+        in {"machine_accepted_unverified", "incomplete_non_mcq"},
         "regressed": not recorded and bool(reasons),
     }
 
@@ -182,7 +185,11 @@ def replay_chapter2_gates(evidence_dir: Path) -> dict[str, Any]:
             for row in freed
         ],
         "regressed": [
-            {"family_id": row["family_id"], "item_id": row["item_id"], "added": row["added"]}
+            {
+                "family_id": row["family_id"],
+                "item_id": row["item_id"],
+                "added": row["added"],
+            }
             for row in regressed
         ],
         "removed_reason_counts": dict(sorted(removed_counts.items())),

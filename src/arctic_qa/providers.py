@@ -75,13 +75,19 @@ class FakeProvider:
             raise ProviderError(
                 f"fake provider expected role {event.get('role')}, received {role}"
             )
+        # A role's static instructions ride in the system instruction and its
+        # evidence in the prompt, so a script marker may sit in either part.
+        request_text = f"{system}\n{prompt}"
         if any(
-            value not in prompt for value in event.get("require_prompt_contains", [])
+            value not in request_text
+            for value in event.get("require_prompt_contains", [])
         ):
             raise ProviderError(
                 f"fake provider prompt for {role} is missing required markers"
             )
-        if any(value in prompt for value in event.get("forbid_prompt_contains", [])):
+        if any(
+            value in request_text for value in event.get("forbid_prompt_contains", [])
+        ):
             raise ProviderError(
                 f"fake provider prompt for {role} contains a forbidden marker"
             )

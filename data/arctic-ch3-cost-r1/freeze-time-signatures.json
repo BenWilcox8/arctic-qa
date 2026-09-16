@@ -1,0 +1,55 @@
+{
+ "counts": {
+  "findings": 81,
+  "good_findings": 7,
+  "no_finite_verb": 12,
+  "no_finite_verb_unlabelled": 12,
+  "phrases": 179,
+  "line_wrap_hyphen": 5,
+  "cyrillic": 8,
+  "admission:finding_required_phrase_artifact": 1,
+  "phrase_case_boundary_artifact": 1,
+  "short_fragment_rule": 3,
+  "admission:finding_span_is_table_or_caption": 3,
+  "no_finite_verb_on_good_item": 1,
+  "no_finite_verb_unlabelled_on_good_item": 1,
+  "cyrillic_on_good_item": 1
+ },
+ "admission_hits": [
+  {
+   "family": "family-46dc170738e8831fb23d",
+   "good": false,
+   "reason": "finding_required_phrase_artifact",
+   "words": 255,
+   "quote": "cause of the observed phenomenon. For example, Ansmann et al. (2023) showed that the free tropospheric INP load at 2000 "
+  },
+  {
+   "family": "family-9c8ed5bd4621078e7814",
+   "good": false,
+   "reason": "finding_span_is_table_or_caption",
+   "words": 6,
+   "quote": "Herschel Island (104° at 69.6°N, 139.5°W).\n"
+  },
+  {
+   "family": "family-fdb38096b42d5e1949a1",
+   "good": false,
+   "reason": "finding_span_is_table_or_caption",
+   "words": 5,
+   "quote": "Iqaluit, Nanisivik Prochromadora sp. 3"
+  },
+  {
+   "family": "family-fdb38096b42d5e1949a1",
+   "good": false,
+   "reason": "finding_span_is_table_or_caption",
+   "words": 7,
+   "quote": "thalma\nIqaluit, Nanisivik, Resolute Geomonhystera sp. 1"
+  }
+ ],
+ "phrase_hits": [
+  {
+   "family": "family-46dc170738e8831fb23d",
+   "good": false,
+   "phrase": "SMLcoupled clouds"
+  }
+ ]
+}

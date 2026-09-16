@@ -10,7 +10,6 @@ state, a tolerance literal absent from the evidence, a changed quantity.
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 
@@ -47,7 +46,10 @@ def test_the_slice_bumps_exactly_its_own_contract_versions() -> None:
     assert validation.ANSWER_AGREEMENT_PROMPT_VERSION == "answer-agreement-judge-v2"
     # The rejection diagnostic records the rule versions a verdict rests on.
     detail = rejection_diagnostic_detail({})
-    assert detail["deterministic_context_rules_version"] == DETERMINISTIC_CONTEXT_RULES_VERSION
+    assert (
+        detail["deterministic_context_rules_version"]
+        == DETERMINISTIC_CONTEXT_RULES_VERSION
+    )
     assert detail["reconstruction_record_contract_version"] == (
         RECONSTRUCTION_RECORD_CONTRACT_VERSION
     )
@@ -87,7 +89,10 @@ def test_a_gloss_the_text_gives_resolves_the_acronym(text: str) -> None:
         ("the 2012 Chinese Arctic Research Expedition (CHINARE 2012)", ["CHINARE"]),
         ("scaling applied to the AKMA3 dataset", ["AKMA3"]),
         ("within CESM2, CNTL_SOM denotes the control run", ["CESM2"]),
-        ("site DBO3 in the Chukchi Sea. DBO refers to Distributed Biological Observatory sites", ["DBO3"]),
+        (
+            "site DBO3 in the Chukchi Sea. DBO refers to Distributed Biological Observatory sites",
+            ["DBO3"],
+        ),
         ("at the ARM NSA Facility", ["ARM", "NSA"]),
         ("type strain KMM 9724T", ["KMM"]),
         ("the CMP22 pyranometer", ["CMP22"]),
@@ -103,9 +108,36 @@ def test_an_unglossed_study_code_still_fails(text: str, unresolved: list[str]) -
 
 
 def test_the_allowlist_gains_only_units_statistics_phases_and_formulas() -> None:
-    for token in ("CFU", "RMS", "RMSD", "SE", "SEM", "CMIP5", "CMIP6", "PM10", "NH4", "SO42", "SW", "NE"):
+    for token in (
+        "CFU",
+        "RMS",
+        "RMSD",
+        "SE",
+        "SEM",
+        "CMIP5",
+        "CMIP6",
+        "PM10",
+        "NH4",
+        "SO42",
+        "SW",
+        "NE",
+    ):
         assert token in validation._NON_ACRONYM_TOKENS
-    for token in ("DBO3", "DBO4", "AKMA3", "CESM2", "CMP22", "T1", "ITP", "CTL", "KMM", "API", "ZYM", "LNG", "CO"):
+    for token in (
+        "DBO3",
+        "DBO4",
+        "AKMA3",
+        "CESM2",
+        "CMP22",
+        "T1",
+        "ITP",
+        "CTL",
+        "KMM",
+        "API",
+        "ZYM",
+        "LNG",
+        "CO",
+    ):
         assert token not in validation._NON_ACRONYM_TOKENS
 
 
@@ -117,16 +149,34 @@ def test_the_allowlist_gains_only_units_statistics_phases_and_formulas() -> None
     [
         ("2008–2018", "did the date shift from 2008 to 2018?", ""),
         ("PM 10 samples", "For PM10 samples collected near Ny-Ålesund", ""),
-        ("four chronosequences", "across the four glacier foreland chronosequences", ""),
-        ("amp r isolates from the rectal samples", "When 144 amp r isolates from polar bear rectal swab samples were screened", ""),
-        ("Profundicola chukchiensis sp.nov.", "", "Profundicola chukchiensis sp. nov. is a bacterium"),
+        (
+            "four chronosequences",
+            "across the four glacier foreland chronosequences",
+            "",
+        ),
+        (
+            "amp r isolates from the rectal samples",
+            "When 144 amp r isolates from polar bear rectal swab samples were screened",
+            "",
+        ),
+        (
+            "Profundicola chukchiensis sp.nov.",
+            "",
+            "Profundicola chukchiensis sp. nov. is a bacterium",
+        ),
         ("all the 903 realizations", "Across all 903 winter realizations,", ""),
         ("kg m −3", "a density contrast of ~ 1,024 kg m−3 between water and gas", ""),
         ("HELiPOD data set", "in the HELiPOD probe data set", ""),
-        ("summer APO", "the summer Asian-Pacific Oscillation (APO) towards its positive phase", ""),
+        (
+            "summer APO",
+            "the summer Asian-Pacific Oscillation (APO) towards its positive phase",
+            "",
+        ),
     ],
 )
-def test_the_display_rule_accepts_a_faithful_display(value: str, question: str, context: str) -> None:
+def test_the_display_rule_accepts_a_faithful_display(
+    value: str, question: str, context: str
+) -> None:
     assert scope_phrase_is_displayed(value, question, context)
 
 
@@ -144,7 +194,9 @@ def test_the_display_rule_accepts_a_faithful_display(value: str, question: str, 
         ("ringed seals", "in samples from Resolute Bay"),
     ],
 )
-def test_the_display_rule_rejects_an_absent_or_coordinated_value(value: str, question: str) -> None:
+def test_the_display_rule_rejects_an_absent_or_coordinated_value(
+    value: str, question: str
+) -> None:
     assert not scope_phrase_is_displayed(value, question, "")
     assert scope_qualifier_not_displayed({"scope": {"population": value}}, question, "")
 
@@ -152,7 +204,9 @@ def test_the_display_rule_rejects_an_absent_or_coordinated_value(value: str, que
 def test_source_binding_keeps_the_strict_projection() -> None:
     """Keep column: selected-evidence-literal-scope-v4 never gains gapped matching."""
     assert not validation._scope_phrase_in_text("15–20°N", "15-20°N")
-    assert not validation._scope_phrase_in_text("four chronosequences", "four glacier chronosequences")
+    assert not validation._scope_phrase_in_text(
+        "four chronosequences", "four glacier chronosequences"
+    )
     assert not validation.scope_is_evidence_bound(
         {"period": "2008–2018"}, {"evidence_quote": "from 2008 to 2018"}
     )
@@ -286,9 +340,18 @@ def test_causal_overclaim_fires_on_either_judge_label() -> None:
 def test_the_claim_type_definitions_reach_every_prompt_and_schema() -> None:
     definitions = validation.CLAIM_TYPE_DEFINITIONS
     schemas = generation.ROLE_SCHEMAS
-    assert schemas["reconstructor"]["properties"]["question_claim_type"]["description"] == definitions
-    assert schemas["answer_verifier"]["properties"]["question_claim_type"]["description"] == definitions
-    assert generation.ANSWER_SCHEMA["properties"]["claim_type"]["description"] == definitions
+    assert (
+        schemas["reconstructor"]["properties"]["question_claim_type"]["description"]
+        == definitions
+    )
+    assert (
+        schemas["answer_verifier"]["properties"]["question_claim_type"]["description"]
+        == definitions
+    )
+    assert (
+        generation.ANSWER_SCHEMA["properties"]["claim_type"]["description"]
+        == definitions
+    )
     for label in validation.CLAIM_TYPE_LABELS:
         assert f"{label} is" in definitions
 
@@ -297,9 +360,19 @@ def test_the_claim_type_definitions_reach_every_prompt_and_schema() -> None:
 
 
 def test_a_more_specific_reconstructor_paraphrase_is_not_a_kill() -> None:
-    answer = {"scope": {"population": "little auks", "geography": "Hornsund", "period": "2011"}}
+    answer = {
+        "scope": {
+            "population": "little auks",
+            "geography": "Hornsund",
+            "period": "2011",
+        }
+    }
     reconstruction = {
-        "scope": {"population": "chick-rearing little auks", "geography": "Hornsund", "period": "2011"},
+        "scope": {
+            "population": "chick-rearing little auks",
+            "geography": "Hornsund",
+            "period": "2011",
+        },
         "evidence_quote": "positions of little auks in 2011 at Hornsund",
     }
     assert reconstruction_scope_reasons(answer, reconstruction) == []
@@ -307,7 +380,10 @@ def test_a_more_specific_reconstructor_paraphrase_is_not_a_kill() -> None:
 
 def test_an_all_null_reconstructor_scope_is_allowed() -> None:
     answer = {"scope": {"period": "September 2016"}}
-    reconstruction = {"scope": {"geography": None, "period": None}, "evidence_quote": "x"}
+    reconstruction = {
+        "scope": {"geography": None, "period": None},
+        "evidence_quote": "x",
+    }
     assert reconstruction_scope_reasons(answer, reconstruction) == []
 
 
@@ -318,7 +394,9 @@ def test_disjoint_calendar_years_contradict_the_answer() -> None:
         "reconstruction_scope_contradicts_answer"
     ]
     inside = {"scope": {"period": "2011"}, "evidence_quote": "sampled in 2011"}
-    assert reconstruction_scope_reasons({"scope": {"period": "2008–2018"}}, inside) == []
+    assert (
+        reconstruction_scope_reasons({"scope": {"period": "2008–2018"}}, inside) == []
+    )
 
 
 def test_an_unpaired_reconstructor_value_keeps_the_verbatim_binding() -> None:
@@ -334,7 +412,10 @@ def test_an_unpaired_reconstructor_value_keeps_the_verbatim_binding() -> None:
 
 def test_a_paired_value_that_is_neither_entailed_nor_verbatim_still_fails() -> None:
     answer = {"scope": {"geography": "northern Sweden"}}
-    reconstruction = {"scope": {"geography": "arctic tundra"}, "evidence_quote": "soils in Abisko"}
+    reconstruction = {
+        "scope": {"geography": "arctic tundra"},
+        "evidence_quote": "soils in Abisko",
+    }
     assert reconstruction_scope_reasons(answer, reconstruction) == [
         "reconstruction_scope_not_source_bound"
     ]
@@ -369,7 +450,11 @@ def _count_answer(text: str = "24 species") -> dict[str, object]:
         ("24 species", "24", None),
         ("70 %", "70", {"canonical_value": "70", "unit": "%"}),
         ("15 W m −2", "15", {"canonical_value": "15", "unit": "W m −2"}),
-        ("1808 fin whale vocalizations", "1808", {"canonical_value": "1808", "unit": "fin whale vocalizations"}),
+        (
+            "1808 fin whale vocalizations",
+            "1808",
+            {"canonical_value": "1808", "unit": "fin whale vocalizations"},
+        ),
         ("0.030 km", "0.030 kilometres", {"canonical_value": "0.030", "unit": "km"}),
     ],
 )
@@ -379,7 +464,11 @@ def test_number_plus_unit_against_bare_number_is_settled_deterministically(
     answer = _count_answer(answer_text)
     if rule:
         answer["numeric_rule"] = {**answer["numeric_rule"], **rule}
-    reconstruction = {"answer": rebuilt, "alternatives": [], "ambiguity_label": "one_answer"}
+    reconstruction = {
+        "answer": rebuilt,
+        "alternatives": [],
+        "ambiguity_label": "one_answer",
+    }
     assert reconstruction_matches(answer, reconstruction)
 
 
@@ -401,14 +490,21 @@ def test_the_deterministic_tier_refuses_a_changed_quantity_or_dropped_uncertaint
     answer = _count_answer(answer_text)
     if rule:
         answer["numeric_rule"] = {**answer["numeric_rule"], **rule}
-    reconstruction = {"answer": rebuilt, "alternatives": [], "ambiguity_label": "one_answer"}
+    reconstruction = {
+        "answer": rebuilt,
+        "alternatives": [],
+        "ambiguity_label": "one_answer",
+    }
     assert not validation._answer_rule_quantity_matches_rebuilt(answer, rebuilt)
     assert not reconstruction_matches(answer, reconstruction)
 
 
 def test_the_deterministic_tier_defers_to_a_conflicting_typed_quantity() -> None:
     answer = _count_answer()
-    reconstruction = {"answer": "24", "numeric": {"canonical_value": "25", "unit": "species"}}
+    reconstruction = {
+        "answer": "24",
+        "numeric": {"canonical_value": "25", "unit": "species"},
+    }
     assert not reconstruction_matches(answer, reconstruction)
 
 
@@ -429,7 +525,9 @@ def _directional_answer() -> dict[str, object]:
 
 def test_a_multi_word_directional_rebuilt_answer_matches() -> None:
     answer = _directional_answer()
-    assert validation._source_bound_directional_answer_matches(answer, "higher krill production")
+    assert validation._source_bound_directional_answer_matches(
+        answer, "higher krill production"
+    )
     assert validation._source_bound_directional_answer_matches(answer, "higher")
     assert not validation.reconstruction_has_competing_alternatives(
         answer, {"answer": "higher", "alternatives": ["higher krill production"]}
@@ -438,9 +536,15 @@ def test_a_multi_word_directional_rebuilt_answer_matches() -> None:
 
 def test_the_must_fail_control_higher_krill_mortality() -> None:
     answer = _directional_answer()
-    assert not validation._source_bound_directional_answer_matches(answer, "higher krill mortality")
-    assert not validation._source_bound_directional_answer_matches(answer, "lower krill production")
-    assert not validation._source_bound_directional_answer_matches(answer, "not higher krill production")
+    assert not validation._source_bound_directional_answer_matches(
+        answer, "higher krill mortality"
+    )
+    assert not validation._source_bound_directional_answer_matches(
+        answer, "lower krill production"
+    )
+    assert not validation._source_bound_directional_answer_matches(
+        answer, "not higher krill production"
+    )
     assert validation.reconstruction_has_competing_alternatives(
         answer, {"answer": "higher", "alternatives": ["higher krill mortality"]}
     )
@@ -496,14 +600,20 @@ def _gate_records() -> tuple[dict, dict, dict, dict]:
     return chunk, answer, reconstruction, verification
 
 
-def test_qa_gate_reasons_pins_allow_empty_per_record(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_qa_gate_reasons_pins_allow_empty_per_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Site 1 of two: the generation-time gate."""
     chunk, answer, reconstruction, verification = _gate_records()
     seen: list[tuple[str, bool]] = []
     original = validation.scope_is_evidence_bound
 
     def spy(scope, record, interpretation_texts=(), *, allow_empty=False):
-        name = {id(answer): "answer", id(reconstruction): "reconstruction", id(verification): "verification"}[id(record)]
+        name = {
+            id(answer): "answer",
+            id(reconstruction): "reconstruction",
+            id(verification): "verification",
+        }[id(record)]
         seen.append((name, allow_empty))
         return original(scope, record, interpretation_texts, allow_empty=allow_empty)
 
@@ -516,10 +626,18 @@ def test_qa_gate_reasons_pins_allow_empty_per_record(monkeypatch: pytest.MonkeyP
         answer,
         reconstruction,
         verification,
-        standalone_verification={"pass": True, "answer_leakage_absent": True, "reasons": []},
+        standalone_verification={
+            "pass": True,
+            "answer_leakage_absent": True,
+            "reasons": [],
+        },
     )
 
-    assert dict(seen) == {"answer": False, "reconstruction": True, "verification": False}
+    assert dict(seen) == {
+        "answer": False,
+        "reconstruction": True,
+        "verification": False,
+    }
     assert "reconstruction_scope_not_source_bound" not in reasons
     assert "answer_scope_not_source_bound" not in reasons
 
@@ -534,7 +652,9 @@ def test_validate_candidate_pins_allow_empty_per_record(
 
     smoke(tmp_path)
     item = smoke_candidate(tmp_path)
-    item["reconstruction"]["scope"] = {key: None for key in item["reconstruction"]["scope"]}
+    item["reconstruction"]["scope"] = {
+        key: None for key in item["reconstruction"]["scope"]
+    }
     paths = DataPaths.open(tmp_path, test_mode=True)
     database = Database(paths.database)
     seen: dict[str, bool] = {}
@@ -551,7 +671,9 @@ def test_validate_candidate_pins_allow_empty_per_record(
 
     monkeypatch.setattr(validation, "scope_is_evidence_bound", spy)
     try:
-        result = validation.validate_candidate(database, paths.namespace, item, persist=False)
+        result = validation.validate_candidate(
+            database, paths.namespace, item, persist=False
+        )
     finally:
         database.close()
 
@@ -562,7 +684,9 @@ def test_validate_candidate_pins_allow_empty_per_record(
 # --- 4.5 R5: the fallback judge ---------------------------------------------
 
 
-def test_the_agreement_prompt_carries_three_worked_examples_and_the_judge_is_pro() -> None:
+def test_the_agreement_prompt_carries_three_worked_examples_and_the_judge_is_pro() -> (
+    None
+):
     system = validation.ANSWER_AGREEMENT_SYSTEM
     assert "'24 species' and '24' are the same answer" in system
     assert "restricted to the previous taxonomical category" in system
@@ -589,8 +713,13 @@ def test_a_stored_chapter_2_agreement_receipt_still_names_a_supported_prompt() -
 
 
 def test_the_new_reason_code_is_registered_in_the_routing_sets() -> None:
-    assert "reconstruction_scope_contradicts_answer" in streaming._STANDALONE_DEPENDENT_REASONS
-    assert streaming._reason_family("reconstruction_scope_contradicts_answer") == "scope"
+    assert (
+        "reconstruction_scope_contradicts_answer"
+        in streaming._STANDALONE_DEPENDENT_REASONS
+    )
+    assert (
+        streaming._reason_family("reconstruction_scope_contradicts_answer") == "scope"
+    )
 
 
 # --- the deterministic replay of the 139 chapter 2 candidates ---------------

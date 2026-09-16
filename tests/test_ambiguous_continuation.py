@@ -148,7 +148,8 @@ def fixture(
     credential.chmod(0o600)
     broker = SharedGeminiBroker(
         policy_file=ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
-        price_config_file=price_config_file or ROOT / "config" / "gemini-eligibility-v1.json",
+        price_config_file=price_config_file
+        or ROOT / "config" / "gemini-eligibility-v1.json",
         execution_gate_file=gate,
         ledger_file=tmp_path / "shared-ledger.json",
         receipts_dir=tmp_path / "receipts",
@@ -465,7 +466,9 @@ def test_received_max_tokens_continuation_preserves_response_and_never_replays(
     # The received-max-tokens case is the chapter 2 flash-lite incident, bound
     # to the v7 price configuration that ran it. v8 moves the fallback judge to
     # the Pro model, so the case is replayed under a v7-shaped configuration.
-    values = fixture(tmp_path, transport, price_config_file=chapter2_price_config(tmp_path))
+    values = fixture(
+        tmp_path, transport, price_config_file=chapter2_price_config(tmp_path)
+    )
     broker = values["broker"]
     first = execute_answer_judge(
         broker, paper="affected-max-tokens", run_id="run-current"

@@ -91,7 +91,10 @@ Return only yes or no."""
 # A stored chapter 2 receipt binds the v1 prompt; a new call binds v2.
 SUPPORTED_ANSWER_AGREEMENT_PROMPTS = frozenset(
     {
-        (PREDECESSOR_ANSWER_AGREEMENT_PROMPT_VERSION, PREDECESSOR_ANSWER_AGREEMENT_SYSTEM),
+        (
+            PREDECESSOR_ANSWER_AGREEMENT_PROMPT_VERSION,
+            PREDECESSOR_ANSWER_AGREEMENT_SYSTEM,
+        ),
         (ANSWER_AGREEMENT_PROMPT_VERSION, ANSWER_AGREEMENT_SYSTEM),
     }
 )
@@ -247,7 +250,9 @@ _NON_ACRONYM_TOKENS = frozenset(
 )
 # Words a gloss may skip between the expansion words: "North Slope of Alaska
 # (NSA)". Closed set; never a content word.
-_ACRONYM_GLUE_WORDS = frozenset({"of", "the", "and", "for", "in", "on", "at", "a", "an", "to"})
+_ACRONYM_GLUE_WORDS = frozenset(
+    {"of", "the", "and", "for", "in", "on", "at", "a", "an", "to"}
+)
 # A trailing version phrase before the gloss token: "Community Earth System
 # Model version 2 (CESM2)".
 _ACRONYM_VERSION_SUFFIX_PATTERN = re.compile(
@@ -761,17 +766,50 @@ _INTRA_TOKEN_SPACE_PATTERN = re.compile(
 )
 _DISPLAY_FUNCTION_WORDS = frozenset(
     {
-        "a", "an", "the", "of", "in", "on", "at", "to", "from", "for", "by",
-        "with", "within", "across", "during", "between", "over", "under",
-        "into", "near", "along", "per", "through", "among", "since", "until",
-        "all", "both", "each", "this", "that", "these", "those", "its",
-        "their", "s",
+        "a",
+        "an",
+        "the",
+        "of",
+        "in",
+        "on",
+        "at",
+        "to",
+        "from",
+        "for",
+        "by",
+        "with",
+        "within",
+        "across",
+        "during",
+        "between",
+        "over",
+        "under",
+        "into",
+        "near",
+        "along",
+        "per",
+        "through",
+        "among",
+        "since",
+        "until",
+        "all",
+        "both",
+        "each",
+        "this",
+        "that",
+        "these",
+        "those",
+        "its",
+        "their",
+        "s",
     }
 )
 # A coordinator ends the noun phrase: "adult males and females" never displays
 # "adult females".
 _DISPLAY_COORDINATORS = frozenset({"and", "or", "nor", "but", "versus", "vs", "than"})
-_DISPLAY_BREAK_PUNCTUATION = frozenset({",", ";", ":", "(", ")", "[", "]", "?", "!", "/"})
+_DISPLAY_BREAK_PUNCTUATION = frozenset(
+    {",", ";", ":", "(", ")", "[", "]", "?", "!", "/"}
+)
 _DISPLAY_TOKEN_PATTERN = re.compile(r"[^\W_]+|[^\w\s]")
 _SENTENCE_END_PATTERN = re.compile(r"\.\s+[A-Z\u0400-\u042f]|\.\s*$")
 
@@ -809,7 +847,9 @@ def _display_tokens(value: str) -> list[str | None]:
     belongs to the noun phrase it glosses, so its parentheses are not a
     boundary. Every other parenthesis is.
     """
-    projected = _PARENTHETICAL_GLOSS_PATTERN.sub(r" \1 ", _display_projection_text(value))
+    projected = _PARENTHETICAL_GLOSS_PATTERN.sub(
+        r" \1 ", _display_projection_text(value)
+    )
     tokens: list[str | None] = []
     for match in _DISPLAY_TOKEN_PATTERN.finditer(projected):
         token = match.group(0)
@@ -893,7 +933,8 @@ def scope_phrase_is_displayed(
     never uses this function.
     """
     return any(
-        _display_phrase_in_text(phrase, text) or _display_token_window_match(phrase, text)
+        _display_phrase_in_text(phrase, text)
+        or _display_token_window_match(phrase, text)
         for text in (question, question_context)
     )
 
@@ -1464,7 +1505,9 @@ def validate_candidate(
     if qualifier_reason:
         reasons.append(qualifier_reason)
         return _finish(db, candidate, labels, reasons, [], "rejected")
-    claim_reasons = claim_type_reasons(candidate["answer"], reconstruction, verification)
+    claim_reasons = claim_type_reasons(
+        candidate["answer"], reconstruction, verification
+    )
     if claim_reasons:
         reasons.extend(claim_reasons)
         return _finish(db, candidate, labels, reasons, [], "rejected")
@@ -1951,9 +1994,7 @@ def _acronym_has_expansion(value: str, token: str) -> bool:
             preceding = preceding.rstrip()[: -len(digits)]
         if _initials_match(_gloss_words(preceding), joined):
             return True
-    for match in re.finditer(
-        rf"(?<![\w-]){re.escape(token)}\s*\(([^()]+)\)", value
-    ):
+    for match in re.finditer(rf"(?<![\w-]){re.escape(token)}\s*\(([^()]+)\)", value):
         words = _gloss_words(match.group(1))
         if words and _initials_match(words, letters):
             return True
@@ -2387,7 +2428,11 @@ def _reconstruction_numeric_contradicts_rule(
         return False
     rebuilt_value = _literal_decimal(str(numeric.get("canonical_value", "")))
     rule_value = _literal_decimal(str(rule.get("canonical_value", "")))
-    if rebuilt_value is not None and rule_value is not None and rebuilt_value != rule_value:
+    if (
+        rebuilt_value is not None
+        and rule_value is not None
+        and rebuilt_value != rule_value
+    ):
         return True
     rebuilt_unit = _quantity_text(str(numeric.get("unit", "")))
     rule_unit = _quantity_text(str(rule.get("unit", "")))
@@ -4580,7 +4625,10 @@ def claim_type_note(
 ) -> dict[str, Any]:
     """Record both judge labels beside the answer label. Never gates."""
     labels = frozenset(
-        {reconstruction.get("question_claim_type"), verification.get("question_claim_type")}
+        {
+            reconstruction.get("question_claim_type"),
+            verification.get("question_claim_type"),
+        }
     )
     return {
         "answer": answer.get("claim_type"),
@@ -4611,7 +4659,10 @@ def claim_type_reasons(
     reasons: list[str] = []
     if frozenset(labels) in INCOMPATIBLE_CLAIM_TYPE_PAIRS:
         reasons.append("question_claim_type_disagreement")
-    if answer.get("claim_type") in {"observation", "association"} and "causal" in labels:
+    if (
+        answer.get("claim_type") in {"observation", "association"}
+        and "causal" in labels
+    ):
         reasons.append("causal_overclaim")
     return reasons
 
@@ -4651,7 +4702,9 @@ def _calendar_years(value: str) -> set[int]:
         first, last = int(match.group(1)), int(match.group(2))
         if first <= last <= first + 150:
             years.update(range(first, last + 1))
-    years.update(int(match.group(1)) for match in _CALENDAR_YEAR_PATTERN.finditer(projected))
+    years.update(
+        int(match.group(1)) for match in _CALENDAR_YEAR_PATTERN.finditer(projected)
+    )
     return years
 
 
@@ -4819,13 +4872,22 @@ _PLUS_MINUS_PATTERN = r"(?:±|\+/-|\+-|\+\s*/\s*-)"
 _STATISTIC_NAME_PATTERN = r"(?:sd|se|sem|s\.d\.|s\.e\.|σ)"
 _NUMERIC_LITERAL_SOURCE = NUMERIC_LITERAL_PATTERN.pattern.replace("(?P<value>", "(")
 _PLUS_MINUS_CLAUSE_PATTERN = re.compile(
-    r"(?P<value>" + _NUMERIC_LITERAL_SOURCE + r")\s*" + _PLUS_MINUS_PATTERN
-    + r"\s*(?P<tolerance>" + _NUMERIC_LITERAL_SOURCE + r")(?P<suffix>.*)$",
+    r"(?P<value>"
+    + _NUMERIC_LITERAL_SOURCE
+    + r")\s*"
+    + _PLUS_MINUS_PATTERN
+    + r"\s*(?P<tolerance>"
+    + _NUMERIC_LITERAL_SOURCE
+    + r")(?P<suffix>.*)$",
     re.DOTALL,
 )
 _STATISTIC_CLAUSE_PATTERN = re.compile(
-    r"(?P<value>" + _NUMERIC_LITERAL_SOURCE + r")(?P<unit>[^()\d]{1,40}?)\s*\(\s*"
-    + _STATISTIC_NAME_PATTERN + r"\s*=\s*(?P<tolerance>" + _NUMERIC_LITERAL_SOURCE
+    r"(?P<value>"
+    + _NUMERIC_LITERAL_SOURCE
+    + r")(?P<unit>[^()\d]{1,40}?)\s*\(\s*"
+    + _STATISTIC_NAME_PATTERN
+    + r"\s*=\s*(?P<tolerance>"
+    + _NUMERIC_LITERAL_SOURCE
     + r")\s*\)",
     re.IGNORECASE,
 )
@@ -4924,8 +4986,13 @@ def _numeric_metadata_is_source_bound(
 
 
 _BARE_UNCERTAINTY_BASIS_PATTERN = re.compile(
-    r"^\(?\s*(?:" + _PLUS_MINUS_PATTERN + r"|" + _STATISTIC_NAME_PATTERN
-    + r"\s*=)?\s*" + _NUMERIC_LITERAL_SOURCE + r"\s*\)?$",
+    r"^\(?\s*(?:"
+    + _PLUS_MINUS_PATTERN
+    + r"|"
+    + _STATISTIC_NAME_PATTERN
+    + r"\s*=)?\s*"
+    + _NUMERIC_LITERAL_SOURCE
+    + r"\s*\)?$",
     re.IGNORECASE,
 )
 

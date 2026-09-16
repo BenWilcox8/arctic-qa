@@ -276,7 +276,9 @@ class BatchStore:
             raise ValueError(
                 "the configured answer agreement model lacks batch support evidence"
             )
-        agreement_record = BATCH_AGREEMENT_PRICE_RECORDS.get(str(agreement_config["model"]))
+        agreement_record = BATCH_AGREEMENT_PRICE_RECORDS.get(
+            str(agreement_config["model"])
+        )
         if agreement_record is None:
             raise ValueError(
                 "the configured answer agreement model lacks batch support evidence"

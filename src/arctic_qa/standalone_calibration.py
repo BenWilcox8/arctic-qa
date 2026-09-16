@@ -161,7 +161,10 @@ def record_cassette(
     needs a paper identity per request). The cassette is written only after
     every call succeeded, so a partial recording never gates anything.
     """
-    parameters = {**CALIBRATION_PARAMETERS, "json_schema": ROLE_SCHEMAS[CALIBRATION_ROLE]}
+    parameters = {
+        **CALIBRATION_PARAMETERS,
+        "json_schema": ROLE_SCHEMAS[CALIBRATION_ROLE],
+    }
     rows_out: list[dict[str, Any]] = []
     for row in calibration.gating_rows:
         bound = bind_row(provider, row) if bind_row is not None else provider
@@ -182,7 +185,9 @@ def record_cassette(
                 "input_tokens": result.input_tokens,
                 "output_tokens": result.output_tokens,
                 "actual_cost_usd": (
-                    str(result.actual_cost_usd) if result.actual_cost_usd is not None else None
+                    str(result.actual_cost_usd)
+                    if result.actual_cost_usd is not None
+                    else None
                 ),
             }
         )
@@ -223,7 +228,9 @@ def load_cassette(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, Any]]
             "record a fresh cassette against the current prompt"
         )
     if header.get("calibration_set_version") != STANDALONE_CALIBRATION_SET_VERSION:
-        raise CalibrationError("the cassette was recorded against another calibration set")
+        raise CalibrationError(
+            "the cassette was recorded against another calibration set"
+        )
     rows: dict[str, dict[str, Any]] = {}
     for record in records[1:]:
         if record.get("record") != "cassette_row":
@@ -232,7 +239,9 @@ def load_cassette(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, Any]]
     return header, rows
 
 
-def evaluate_cassette(calibration: CalibrationSet, cassette_path: Path) -> dict[str, Any]:
+def evaluate_cassette(
+    calibration: CalibrationSet, cassette_path: Path
+) -> dict[str, Any]:
     """Apply the release rule to a recorded cassette. Makes no call."""
     header, recorded = load_cassette(cassette_path)
     results: list[dict[str, Any]] = []
@@ -247,7 +256,9 @@ def evaluate_cassette(calibration: CalibrationSet, cassette_path: Path) -> dict[
         if record.get("prompt_sha256") != sha256_bytes(
             calibration_prompt(row).encode("utf-8")
         ):
-            raise CalibrationError(f"the cassette prompt for {item_id} differs from the row")
+            raise CalibrationError(
+                f"the cassette prompt for {item_id} differs from the row"
+            )
         response = record["response"]
         _validate_schema(response, ROLE_SCHEMAS[CALIBRATION_ROLE])
         reasons = _row_decision(row, response)
@@ -275,7 +286,9 @@ def evaluate_cassette(calibration: CalibrationSet, cassette_path: Path) -> dict[
         if must_pass_total
         else Decimal(0)
     )
-    passed_rule = not must_fail_violations and rate >= STANDALONE_CALIBRATION_MUST_PASS_RATE
+    passed_rule = (
+        not must_fail_violations and rate >= STANDALONE_CALIBRATION_MUST_PASS_RATE
+    )
     return {
         "calibration_set_version": STANDALONE_CALIBRATION_SET_VERSION,
         "cassette": str(cassette_path),

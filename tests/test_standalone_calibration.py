@@ -116,9 +116,9 @@ def test_a_disputed_row_is_kept_but_never_gates() -> None:
 def test_every_row_keeps_the_typed_reason_codes() -> None:
     """Keep column of the audit: typed reason codes on every row."""
     enum = set(
-        generation.ROLE_SCHEMAS["standalone_verifier"]["properties"]["reasons"]["items"][
-            "enum"
-        ]
+        generation.ROLE_SCHEMAS["standalone_verifier"]["properties"]["reasons"][
+            "items"
+        ]["enum"]
     )
     for row in ROWS:
         assert isinstance(row["model_reasons"], list)
@@ -231,7 +231,9 @@ def test_calibration_prompt_is_the_pipeline_prompt() -> None:
 def test_record_and_replay_a_correct_judge_passes_the_release_rule(
     tmp_path: Path,
 ) -> None:
-    responses = {str(row["item_id"]): _judge_response(row) for row in CALIBRATION.gating_rows}
+    responses = {
+        str(row["item_id"]): _judge_response(row) for row in CALIBRATION.gating_rows
+    }
     script = _write_fake_script(tmp_path / "judge.jsonl", responses)
     provider = make_provider("fake", "fake-judge", script)
     cassette = tmp_path / "cassette.jsonl"
@@ -256,11 +258,15 @@ def test_record_and_replay_a_correct_judge_passes_the_release_rule(
 
 def test_replay_fails_when_a_must_fail_row_passes(tmp_path: Path) -> None:
     """The must-fail controls keep a prompt relaxation honest."""
-    responses = {str(row["item_id"]): _judge_response(row) for row in CALIBRATION.gating_rows}
+    responses = {
+        str(row["item_id"]): _judge_response(row) for row in CALIBRATION.gating_rows
+    }
     lenient = next(
         row for row in MUST_FAIL if row["deterministic_expectation"] == "defer"
     )
-    responses[str(lenient["item_id"])] = _judge_response({**lenient, "label": "must_pass"})
+    responses[str(lenient["item_id"])] = _judge_response(
+        {**lenient, "label": "must_pass"}
+    )
     script = _write_fake_script(tmp_path / "judge.jsonl", responses)
     cassette = tmp_path / "cassette.jsonl"
     record_cassette(CALIBRATION, make_provider("fake", "fake-judge", script), cassette)
@@ -272,7 +278,9 @@ def test_replay_fails_when_a_must_fail_row_passes(tmp_path: Path) -> None:
 
 
 def test_replay_fails_below_the_must_pass_rate(tmp_path: Path) -> None:
-    responses = {str(row["item_id"]): _judge_response(row) for row in CALIBRATION.gating_rows}
+    responses = {
+        str(row["item_id"]): _judge_response(row) for row in CALIBRATION.gating_rows
+    }
     strict = MUST_PASS[: len(MUST_PASS) // 2 + 1]
     for row in strict:
         responses[str(row["item_id"])] = _judge_response(
@@ -290,7 +298,9 @@ def test_replay_fails_below_the_must_pass_rate(tmp_path: Path) -> None:
 
 
 def test_a_cassette_recorded_under_another_prompt_is_stale(tmp_path: Path) -> None:
-    responses = {str(row["item_id"]): _judge_response(row) for row in CALIBRATION.gating_rows}
+    responses = {
+        str(row["item_id"]): _judge_response(row) for row in CALIBRATION.gating_rows
+    }
     script = _write_fake_script(tmp_path / "judge.jsonl", responses)
     cassette = tmp_path / "cassette.jsonl"
     record_cassette(CALIBRATION, make_provider("fake", "fake-judge", script), cassette)
@@ -304,7 +314,9 @@ def test_a_cassette_recorded_under_another_prompt_is_stale(tmp_path: Path) -> No
 
 
 def test_a_cassette_missing_a_gating_row_is_refused(tmp_path: Path) -> None:
-    responses = {str(row["item_id"]): _judge_response(row) for row in CALIBRATION.gating_rows}
+    responses = {
+        str(row["item_id"]): _judge_response(row) for row in CALIBRATION.gating_rows
+    }
     script = _write_fake_script(tmp_path / "judge.jsonl", responses)
     cassette = tmp_path / "cassette.jsonl"
     record_cassette(CALIBRATION, make_provider("fake", "fake-judge", script), cassette)
@@ -316,25 +328,35 @@ def test_a_cassette_missing_a_gating_row_is_refused(tmp_path: Path) -> None:
 
 
 def test_a_malformed_judge_response_never_enters_a_cassette(tmp_path: Path) -> None:
-    responses = {str(row["item_id"]): _judge_response(row) for row in CALIBRATION.gating_rows}
+    responses = {
+        str(row["item_id"]): _judge_response(row) for row in CALIBRATION.gating_rows
+    }
     first = str(CALIBRATION.gating_rows[0]["item_id"])
     responses[first] = {**responses[first], "reasons": ["not_a_code"]}
     script = _write_fake_script(tmp_path / "judge.jsonl", responses)
     cassette = tmp_path / "cassette.jsonl"
 
     with pytest.raises(Exception):
-        record_cassette(CALIBRATION, make_provider("fake", "fake-judge", script), cassette)
+        record_cassette(
+            CALIBRATION, make_provider("fake", "fake-judge", script), cassette
+        )
     assert not cassette.exists()
 
 
-def test_a_row_whose_labelers_disagree_must_be_labelled_disputed(tmp_path: Path) -> None:
+def test_a_row_whose_labelers_disagree_must_be_labelled_disputed(
+    tmp_path: Path,
+) -> None:
     lines = FIXTURE.read_text(encoding="utf-8").splitlines()
     row = json.loads(lines[1])
     row["labels"]["labeler_2"]["label"] = (
-        "must_fail" if row["labels"]["labeler_1"]["label"] == "must_pass" else "must_pass"
+        "must_fail"
+        if row["labels"]["labeler_1"]["label"] == "must_pass"
+        else "must_pass"
     )
     broken = tmp_path / "set.jsonl"
     broken.write_text("\n".join([lines[0], json.dumps(row), *lines[2:]]) + "\n")
 
-    with pytest.raises(CalibrationError, match="does not equal the labelers' agreement"):
+    with pytest.raises(
+        CalibrationError, match="does not equal the labelers' agreement"
+    ):
         load_calibration_set(broken)

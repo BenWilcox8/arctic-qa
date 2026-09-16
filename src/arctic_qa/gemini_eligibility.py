@@ -292,7 +292,9 @@ def _config(path: Path) -> dict[str, Any]:
         # 128-token enum output (yield audit 4.5 R5), and it registers a 300
         # second timeout for the writer stage, which was the last one still cut
         # off at 120 seconds (yield audit 4.9, C8).
-        chapter3_revision = value["config_id"] == "arctic-gemini-eligibility-r1-config-v8"
+        chapter3_revision = (
+            value["config_id"] == "arctic-gemini-eligibility-r1-config-v8"
+        )
         writer_timeout_stages = {WRITER_TIMEOUT_STAGE} if chapter3_revision else set()
         if not isinstance(stage_models, dict) or set(stage_models) != (
             {"answer_agreement"} | PRO_JUDGE_STAGES | writer_timeout_stages
@@ -412,7 +414,10 @@ def _validate_pro_answer_agreement_config(value: Any) -> None:
     if value.get("maximum_output_tokens") != 128:
         raise ValueError("the answer agreement output limit must stay 128 tokens")
     _validate_pro_judge_config(
-        {**value, "maximum_output_tokens": PRO_JUDGE_EXACT_CONFIG["maximum_output_tokens"]},
+        {
+            **value,
+            "maximum_output_tokens": PRO_JUDGE_EXACT_CONFIG["maximum_output_tokens"],
+        },
         pinned_timeout=True,
     )
 
