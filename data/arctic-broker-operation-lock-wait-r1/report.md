@@ -89,12 +89,88 @@ The first three tests fail on the unfixed code, because `hold_operation_lock` do
 
 ## 5. The release
 
-TBD
+This is a successor activation of `arctic-ch3-candidate-fault-containment-r1`.
+It adds no money and writes no ledger transition.
+The applied USD 200 expansion transition stands, and the successor gate names the gate that authorized it in `supersedes_config_transition_review`, so that immutable event stays valid under the new gate.
+
+`build-broker-operation-lock-wait.py` in the activation directory is the release script.
+It is the predecessor's script with a new predecessor, a new suffix and one new step, `stop`.
+
+| Artifact | Value |
+|---|---|
+| Commit | `f53e3e213fe270fc5149b4063e5b8a242091c421` |
+| Predecessor commit | `fdf5ea805a1d9a641e4b6e798baf84864418dec2` |
+| Source archive | `source-f53e3e2-arctic-broker-operation-lock-wait-r1.tar`, sha256 `0b7553f67298305dbb4a0d54654dcf9a7fc7f68a1d1276f0d27e5c4c6c7d2d36` |
+| Runtime snapshot | `runtime/app-f53e3e2-arctic-broker-operation-lock-wait-r1`, sha256 `70266a2b44a69a2bb853bc39b788e0d89cae3a61974f9305df522da3d7ae5d1e` |
+| Execution gate | `live-execution-gate-f53e3e2-lockwait.json`, sha256 `ef844c9f64bdd0ed40ea2ac07f056bc16fa0fcddc905a357bcd6dc8e9b669f7d` |
+| Review record | `implementation-review-f53e3e2-lockwait.md` |
+| Launcher | `launcher-f53e3e2-lockwait.sh` |
+| Activation receipt | `activation-receipt-f53e3e2-lockwait.json` |
+| Ledger transition | unchanged, `ledger-config-transition-09fd733-ch3x.json` of `arctic-ch3-expansion-200-r1` |
+
+The re-snapshot proved every binding before it wrote the gate.
+The price config, the eligibility prompt, the eligibility schema and the geography re-screen prompt are byte-identical to the predecessor runtime, so no price transition and no new eligibility identity are needed.
+`STANDALONE_SYSTEM`, the standalone verification contract, the generation prompt version and the candidate schema version are unchanged, so the calibration cassette carries over.
+The new runtime's own broker then read the shared ledger: `integrity_valid` true, `halted` false, `status_state` valid, the active `config_transition_sha256` unchanged at `b489a0d3...`, and the session ceiling still USD 253.990121.
+
+The launcher differs from its predecessor in the runtime snapshot path and the gate path, and in nothing else.
+
+The suite on the deployed commit, four bounded parts in parallel:
+
+| Part | Result |
+|---|---|
+| `tests/` without the three slow files | 1164 passed in 386s |
+| `tests/test_cli_integration.py` | 98 passed in 141s |
+| `tests/test_streaming.py` | 61 passed in 520s |
+| `tests/test_model_broker.py` | 88 passed in 164s |
+| `ruff check` and `ruff format --check` | clean |
+
+1411 tests passed.
+`suite-result.json` and `suite-f53e3e2.log` are in the activation directory.
 
 ## 6. The relaunch and the health observation
 
 TBD
 
-## 7. Open points
+## 7. The evaluator re-snapshot, and why it is not done
 
-TBD
+The brief asks for one more thing: re-snapshot the evaluator unit `arctic-abstention-stream-r3` onto the landed commit, with the same launcher and a new snapshot path, restart the unit, and repoint nothing else.
+That cannot be done safely with the same work directory, and the reason is a binding in the evaluator, not in this fix.
+
+The evaluator writes one immutable plan manifest per item, at `<work-dir>/runs/<item_id>/plan-manifest.json`, and that manifest holds `code_commit`.
+`abstention_plan.py` compares a new manifest with the stored one field by field and raises "the run directory holds a different plan manifest" when they differ.
+The launcher passes `--code-commit a0b9a82`, and the streaming authorization binds the same commit, so a snapshot of another commit also needs a new authorization.
+Section 8.2 of `data/arctic-abstention-streaming-eval-r1/report.md` states the rule: a restart from a new commit needs a new snapshot, a new run id prefix, a new work directory and a new reviewed authorization, together.
+
+The present state of the work directory `abstention-eval/streaming-r10` makes that expensive right now.
+
+| Fact | Value |
+|---|---|
+| Items with a run directory | 10 |
+| Items complete | 0 |
+| Missing trials per item | 6, all of `claude-fable-5-1` |
+| Gemini spend already recorded | USD 1.620107 |
+| `claude-fable-5-1` resumes at | 2026-09-16T23:00:00Z |
+
+The ten items are incomplete for one reason only: the captain paused `claude-fable-5-1` at 10:20 UTC because about 80 percent of the daily quota was used, and set the resume for the quota reset.
+While the model is paused the watcher holds those items and never revisits them.
+At 23:00 UTC the pause lifts, all ten leave the held set, and the watcher revisits them to run the last six trials of each.
+
+If the unit runs another commit at that moment, every one of the ten raises the manifest error instead.
+The error is journalled per item rather than raised, so the unit would stay up and look healthy while the captain's Fable window produced nothing.
+Starting a new work directory instead abandons the ten partial items and re-pays for their Gemini trials.
+
+The evaluator is not exposed to the fault this task repaired.
+An evaluation request runs under `EVALUATION_PHASE`, which takes the evaluation admission lock and never the exclusive operation lock, so `execute` on that path never reached the refusal that ended the producer.
+
+The options are in the task status file as a decision for firstmate.
+The recommendation is to let the unit finish the ten items after the 23:00 UTC resume on `a0b9a82`, and then restart it on the landed commit with the new snapshot, a new run id prefix, a new work directory and a new reviewed authorization.
+
+## 8. Open points
+
+| Point | Owner |
+|---|---|
+| The evaluator re-snapshot of section 7 waits on a decision. | firstmate, captain |
+| `arctic-eval-503-release-r1` holds an unmerged fix, `d64e8c4`, for the evaluation-phase ambiguous charge. This branch is off `cac4949` and does not carry it. The deployed producer does not need it, but the next re-snapshot should be taken after both land on `main`. | firstmate |
+| The bound is 120 seconds and the poll is one second. No reviewed operation of this ledger has ever held the lock for longer, so the bound has never been reached in production. It is a constant in `model_broker.py` if a future operation needs more. | this task |
+| A bound-exceeded fault settles the family's completed calls as `incomplete_infra` and skips the paper, so it discards paid work for that family. With a 120-second bound against operations that take milliseconds, that path should stay unused. | this task |
