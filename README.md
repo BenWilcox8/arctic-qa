@@ -80,7 +80,7 @@ The modules group into seven areas.
 
 ```bash
 nix develop -c bash -c 'PYTHONPATH=src python -m arctic_qa --version'
-export ARCTIC_QA_DATA_ROOT="$PWD/../arctic-qa-data" && mkdir -p "$ARCTIC_QA_DATA_ROOT"
+export ARCTIC_QA_DATA_ROOT="$HOME/arctic-qa-data" && mkdir -p "$ARCTIC_QA_DATA_ROOT"
 nix develop -c bash -c 'PYTHONPATH=src python -m arctic_qa --json doctor'
 nix develop -c bash -c 'PYTHONPATH=src python -m arctic_qa --json smoke --fixture-dir fixtures --run-id smoke-r1'
 ```
@@ -111,5 +111,6 @@ The built-in example root must be a mounted drive, and the CLI never falls back 
 
 ## License and citation
 
-The code is MIT licensed. See [LICENSE](LICENSE).
+The code is MIT licensed.
+See [LICENSE](LICENSE).
 [CITATION.cff](CITATION.cff) holds the citation record.
