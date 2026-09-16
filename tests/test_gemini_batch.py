@@ -994,8 +994,13 @@ def test_staged_batch_pipeline_uses_real_prompts_and_exports_accepted_output(
 
 
 def test_batch_pipeline_reuses_bounded_question_revision_contract(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The 5 percent shadow cohort is a deterministic hash of the entity id, so
+    # pin it off: this test counts the short-circuit calls, not the cohort.
+    monkeypatch.setattr(
+        generation_contract, "_in_shadow_cohort", lambda run_id, entity: False
+    )
     access, eligibility, policy = access_fixture(tmp_path)
     paths = DataPaths.open(tmp_path, test_mode=True)
     database = Database(paths.database)
