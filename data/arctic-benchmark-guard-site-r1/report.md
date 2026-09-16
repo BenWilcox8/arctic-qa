@@ -309,6 +309,8 @@ Fixtures:
 - `fixtures/quota-axi-2026-09-16T10-41Z.json` is the recorded live report.
 - Four derived files lower one window each, so that one rule fires. Each names its derivation in the `_derivation` field.
 
+The whole suite passes on the branch tip: `PYTHONPATH=src pytest tests/` reports `1305 passed in 1023.72s`, with the branch rebased onto `main` at `183779b`.
+
 `ruff check .` and `ruff format --check .` are clean.
 `data/` now leaves the linter through `extend-exclude` in `pyproject.toml`, because it holds the recorded evidence scripts of finished tasks, which must stay exactly as they ran.
 Those 16 pre-existing lint errors were not caused by this task.
