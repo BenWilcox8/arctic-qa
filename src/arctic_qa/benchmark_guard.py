@@ -103,6 +103,9 @@ CODEX_WEEKLY_FLOOR_PERCENT = Decimal("10")
 DEFAULT_INTERVAL_SECONDS = 300
 DEFAULT_EVALUATOR_STALE_SECONDS = 900
 QUOTA_COMMAND = ("quota-axi", "--json", "--full")
+# The nix devshell has no npm global bin on PATH, so a service passes the
+# absolute path of the binary with `--quota-binary`.
+QUOTA_ARGUMENTS = ("--json", "--full")
 QUOTA_TIMEOUT_SECONDS = 60
 CENT = Decimal("0.000001")
 
@@ -1563,6 +1566,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--status-file", type=Path)
     parser.add_argument("--gemini-budget-usd", default=str(GEMINI_BUDGET_USD))
     parser.add_argument("--recorded-quota-file", type=Path)
+    parser.add_argument("--quota-binary", default=QUOTA_COMMAND[0])
     parser.add_argument(
         "--interval-seconds", type=int, default=DEFAULT_INTERVAL_SECONDS
     )
@@ -1581,6 +1585,7 @@ def main(argv: list[str] | None = None) -> int:
         plan_file=args.plan_file,
         status_file=args.status_file,
         gemini_budget_usd=Decimal(str(args.gemini_budget_usd)),
+        quota_command=(str(args.quota_binary), *QUOTA_ARGUMENTS),
         recorded_quota_file=args.recorded_quota_file,
         evaluator_stale_seconds=args.evaluator_stale_seconds,
     )

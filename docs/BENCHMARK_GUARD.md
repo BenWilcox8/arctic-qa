@@ -181,6 +181,7 @@ systemd-run --user --unit=arctic-benchmark-guard-r1 \
     --shared-ledger-file <shared paid-call ledger> \
     --construction-policy-file <active chapter 3 budget policy> \
     --evaluation-policy-file <active benchmark evaluation policy> \
+    --quota-binary /home/ben/.npm-global/bin/quota-axi \
     --status-file <task status file> \
     --interval-seconds 300
 ```
@@ -193,6 +194,7 @@ Options:
 - `--once` runs one cycle and exits. Use it for a test.
 - `--gemini-budget-usd` changes the allocation. The default is 200.00.
 - `--plan-file` reads the models of each vendor from `config/benchmark-evaluation-plan-high-v1.json`. Without it the guard uses the captain's eight models.
+- `--quota-binary` gives the absolute path of `quota-axi`. The nix devshell has no npm global bin on its PATH, so a service must pass `/home/ben/.npm-global/bin/quota-axi`.
 - `--recorded-quota-file` reads a saved `quota-axi --json --full` report instead of the live command. Use it for a test.
 - `--evaluator-stale-seconds` sets how long the watch state can be old before the evaluator counts as idle. The default is 900.
 
@@ -226,3 +228,4 @@ A model that only the ledger knows, such as an earlier canary model, is marked "
 - The guard reads the ledger without a write lock, under the shared lock of the ledger file. A number can be one cycle old.
 - The guard pauses one model per fired rule per cycle. A vendor whose whole quota collapses needs as many cycles as it has models.
 - A pause is inert until the evaluator reads the same pause file. Confirm the path of the evaluator launcher before you rely on the guard.
+- When `quota-axi` cannot run, no quota rule fires. The guard records the error in `guard-state.json`, and the viewer shows it. A missing quota reading never causes a pause.

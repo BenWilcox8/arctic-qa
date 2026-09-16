@@ -716,3 +716,38 @@ def test_a_runaway_gemini_cost_pauses_the_costlier_gemini_model(
     assert [action["model"] for action in state["actions"]] == ["gemini-3.8-flash"]
     assert state["actions"][0]["rule"] == "gemini_extrapolated_over_budget"
     assert Decimal(state["gemini_budget"]["extrapolated_total_usd"]) > Decimal("200.00")
+
+
+def test_the_command_line_runs_one_cycle_against_a_recorded_report(
+    workspace: dict[str, Path],
+) -> None:
+    from arctic_qa.benchmark_guard import main
+
+    code = main(
+        [
+            "--journal-dir",
+            str(workspace["journal"]),
+            "--guard-dir",
+            str(workspace["guard"]),
+            "--pause-file",
+            str(workspace["pause"]),
+            "--shared-ledger-file",
+            str(workspace["ledger"]),
+            "--construction-policy-file",
+            str(workspace["construction"]),
+            "--evaluation-policy-file",
+            str(workspace["evaluation"]),
+            "--recorded-quota-file",
+            str(RECORDED_QUOTA),
+            "--quota-binary",
+            "/does/not/exist/quota-axi",
+            "--once",
+        ]
+    )
+    assert code == 0
+    state = json.loads(
+        (workspace["guard"] / GUARD_STATE_FILENAME).read_text(encoding="utf-8")
+    )
+    assert state["schema"] == "benchmark-guard-state-v1"
+    assert state["errors"] == []
+    assert state["quota"]["claude_session"]["percent_remaining"] == 84
