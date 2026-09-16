@@ -164,6 +164,9 @@ _STANDALONE_DEPENDENT_REASONS = frozenset(
         "relation_scope_mismatch",
         "answer_verifier_scope_not_source_bound",
         "reconstruction_scope_not_source_bound",
+        # reconstruction-record-v2: the meaning test that replaced the
+        # reconstructor wording test (chapter 2 yield audit 4.3 f).
+        "reconstruction_scope_contradicts_answer",
         "answer_ambiguous",
         "question_claim_type_disagreement",
     }
@@ -1568,6 +1571,8 @@ def _reason_family(reason: str) -> str:
         "answer_scope_not_source_bound",
         "answer_verifier_scope_not_source_bound",
         "reconstruction_scope_not_source_bound",
+        # reconstruction-record-v2 sibling of the code above.
+        "reconstruction_scope_contradicts_answer",
     }:
         return "scope"
     return reason

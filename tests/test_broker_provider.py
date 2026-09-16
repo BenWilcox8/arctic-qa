@@ -173,7 +173,7 @@ def test_broker_provider_binds_role_and_reuses_completed_receipt(
     assert status["stages"]["question_generation"]["submissions"] == 1
 
 
-def test_answer_judge_uses_flash_lite_and_reuses_immutable_receipt(
+def test_answer_judge_uses_the_pro_judge_and_reuses_immutable_receipt(
     tmp_path: Path,
 ) -> None:
     transport = JudgeTransport()
@@ -204,16 +204,18 @@ def test_answer_judge_uses_flash_lite_and_reuses_immutable_receipt(
     assert first.payload == "yes"
     assert second == first
     assert transport.methods == ["countTokens", "generateContent"]
-    assert transport.models == ["gemini-3.1-flash-lite"] * 2
+    # Chapter 3 (yield audit 4.5 R5): the fallback judge is the Pro judge.
+    assert transport.models == ["gemini-3.1-pro-preview"] * 2
     generation = transport.bodies[1]["generationConfig"]
     assert generation["responseMimeType"] == "text/x.enum"
     assert generation["responseJsonSchema"] == schema
     assert generation["maxOutputTokens"] == 128
-    assert generation["thinkingConfig"] == {"thinkingLevel": "minimal"}
+    assert generation["thinkingConfig"] == {"thinkingLevel": "low"}
     receipt = json.loads(Path(reference["receipt_file"]).read_text(encoding="utf-8"))
-    assert receipt["model"] == "gemini-3.1-flash-lite"
+    assert receipt["model"] == "gemini-3.1-pro-preview"
     assert receipt["stage"] == "answer_agreement"
-    assert receipt["actual_cost_usd"] == "0.000027"
+    # Pro pricing: USD 2.00 in and USD 12.00 out per million tokens.
+    assert receipt["actual_cost_usd"] == "0.000212"
     assert broker.status()["stages"]["answer_agreement"]["submissions"] == 1
 
 

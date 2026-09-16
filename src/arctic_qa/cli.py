@@ -294,6 +294,45 @@ def parser() -> argparse.ArgumentParser:
     chapter2.add_argument("--sample-size", type=int, default=50)
     chapter2.add_argument("--report-file", type=Path)
 
+    calibrate = commands.add_parser(
+        "calibrate-standalone",
+        help=(
+            "Record the source-blind judge against the standalone calibration set, "
+            "or replay a recorded cassette against the release rule."
+        ),
+    )
+    calibrate.add_argument("--mode", choices=("record", "replay"), required=True)
+    calibrate.add_argument("--cassette", type=Path, required=True)
+    calibrate.add_argument("--calibration-set", type=Path)
+    calibrate.add_argument(
+        "--provider",
+        choices=("fake", "broker"),
+        default="broker",
+        help="record only: the fake provider replays --provider-script; broker is the live judge.",
+    )
+    calibrate.add_argument("--provider-script", type=Path)
+    calibrate.add_argument("--run-id", default="standalone-calibration")
+    calibrate.add_argument("--phase", default="calibration")
+    calibrate.add_argument("--timeout", type=float, default=300.0)
+    calibrate.add_argument("--streaming-budget-policy-file", type=Path)
+    calibrate.add_argument("--price-config-file", type=Path)
+    calibrate.add_argument("--execution-gate-file", type=Path)
+    calibrate.add_argument("--shared-ledger-file", type=Path)
+    calibrate.add_argument("--model-receipts-dir", type=Path)
+    calibrate.add_argument("--ledger-config-transition-file", type=Path)
+    calibrate.add_argument("--credential-file", type=Path)
+    calibrate.add_argument("--prior-construction-spend-usd", type=Decimal)
+
+    replay_gates = commands.add_parser(
+        "replay-chapter2-gates",
+        help=(
+            "Run the recorded chapter 2 candidates through the current deterministic "
+            "gates and report which candidates change outcome. No model call."
+        ),
+    )
+    replay_gates.add_argument("--evidence-dir", type=Path, required=True)
+    replay_gates.add_argument("--report-file", type=Path)
+
     extract = commands.add_parser(
         "extract", help="Extract sections and chunks from one stored source."
     )
@@ -564,6 +603,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "chapter2-corpus":
             paths = DataPaths.open(args.data_root, test_mode=args.test_mode)
             return _emit(args, _chapter2_corpus(args, paths))
+        if args.command == "calibrate-standalone":
+            report = _calibrate_standalone(args)
+            _emit(args, report)
+            return 0 if report.get("passed", True) else 1
+        if args.command == "replay-chapter2-gates":
+            return _emit(args, _replay_chapter2_gates(args))
         if args.command == "metadata-prefilter":
             return _emit(
                 args,
@@ -693,6 +738,87 @@ def main(argv: list[str] | None = None) -> int:
         }
         print(canonical_json(payload), file=sys.stderr)
         return 2
+
+
+def _calibrate_standalone(args) -> dict[str, Any]:
+    """Record or replay the standalone calibration cassette."""
+    from .standalone_calibration import (
+        DEFAULT_CALIBRATION_SET,
+        evaluate_cassette,
+        load_calibration_set,
+        record_cassette,
+    )
+
+    calibration = load_calibration_set(
+        (args.calibration_set or DEFAULT_CALIBRATION_SET).resolve()
+    )
+    cassette = args.cassette.resolve()
+    if args.mode == "replay":
+        return evaluate_cassette(calibration, cassette)
+    if args.provider == "fake":
+        if not args.provider_script:
+            raise ValueError("the fake provider requires --provider-script")
+        provider = make_provider(
+            "fake", "fake-standalone-judge", args.provider_script.resolve()
+        )
+        bind_row = None
+    else:
+        required = (
+            "streaming_budget_policy_file",
+            "price_config_file",
+            "execution_gate_file",
+            "shared_ledger_file",
+            "model_receipts_dir",
+            "credential_file",
+            "prior_construction_spend_usd",
+        )
+        missing = [name for name in required if getattr(args, name) is None]
+        if missing:
+            raise ValueError(
+                "live calibration recording requires: "
+                + ", ".join("--" + name.replace("_", "-") for name in missing)
+            )
+        broker = SharedGeminiBroker(
+            policy_file=args.streaming_budget_policy_file.resolve(),
+            price_config_file=args.price_config_file.resolve(),
+            execution_gate_file=args.execution_gate_file.resolve(),
+            ledger_file=args.shared_ledger_file.resolve(),
+            receipts_dir=args.model_receipts_dir.resolve(),
+            credential_file=args.credential_file.resolve(),
+            prior_construction_spend_usd=args.prior_construction_spend_usd,
+            config_transition_file=(
+                args.ledger_config_transition_file.resolve()
+                if args.ledger_config_transition_file
+                else None
+            ),
+        )
+        provider = BrokerProvider(
+            broker=broker, phase=args.phase, invocation_run_id=args.run_id
+        )
+
+        def bind_row(unbound, row):
+            return unbound.bind(
+                paper_id="standalone-calibration",
+                family_id=str(row.get("family_id") or "standalone-calibration"),
+                source_version_id=str(calibration.header["calibration_set_version"]),
+            )
+
+    report = record_cassette(
+        calibration, provider, cassette, timeout=args.timeout, bind_row=bind_row
+    )
+    return {**report, **evaluate_cassette(calibration, cassette)}
+
+
+def _replay_chapter2_gates(args) -> dict[str, Any]:
+    from .chapter2_replay import replay_chapter2_gates
+
+    report = replay_chapter2_gates(args.evidence_dir.resolve())
+    if args.report_file:
+        args.report_file.parent.mkdir(parents=True, exist_ok=True)
+        args.report_file.write_text(canonical_json(report), encoding="utf-8")
+    summary = {key: value for key, value in report.items() if key != "rows"}
+    summary["report_file"] = str(args.report_file) if args.report_file else None
+    return summary
 
 
 def _open(args) -> tuple[DataPaths, Database]:

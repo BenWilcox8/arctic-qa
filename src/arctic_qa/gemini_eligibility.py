@@ -102,6 +102,7 @@ def _config(path: Path) -> dict[str, Any]:
         "arctic-gemini-eligibility-r1-config-v5",
         "arctic-gemini-eligibility-r1-config-v6",
         "arctic-gemini-eligibility-r1-config-v7",
+        "arctic-gemini-eligibility-r1-config-v8",
     }:
         raise ValueError("the Gemini eligibility config revision is not approved")
     if value.get("model") != "gemini-3.8-flash":
@@ -159,18 +160,28 @@ def _config(path: Path) -> dict[str, Any]:
     elif value["config_id"] in {
         "arctic-gemini-eligibility-r1-config-v6",
         "arctic-gemini-eligibility-r1-config-v7",
+        "arctic-gemini-eligibility-r1-config-v8",
     }:
         # Chapter 2: the source-blind judge, the option judge, the blind
         # reconstructor and the answer verifier run on a stronger model than
         # the writer (r15 audit section 4.2 fix 4). Every price is pinned.
         # v7 adds one pinned per-call timeout to those judge stages; the Pro
         # judge thinks for longer than the fixed 120 second transport timeout.
+        # v8 (chapter 3, yield audit 4.5 R5) moves the answer-agreement
+        # fallback judge to the same Pro model, with its 128-token enum output.
         if not isinstance(stage_models, dict) or set(stage_models) != (
             {"answer_agreement"} | PRO_JUDGE_STAGES
         ):
             raise ValueError("the Gemini stage model registry changed")
-        _validate_answer_agreement_config(stage_models["answer_agreement"])
-        pinned_timeout = value["config_id"] == "arctic-gemini-eligibility-r1-config-v7"
+        pro_agreement = value["config_id"] == "arctic-gemini-eligibility-r1-config-v8"
+        if pro_agreement:
+            _validate_pro_answer_agreement_config(stage_models["answer_agreement"])
+        else:
+            _validate_answer_agreement_config(stage_models["answer_agreement"])
+        pinned_timeout = value["config_id"] in {
+            "arctic-gemini-eligibility-r1-config-v7",
+            "arctic-gemini-eligibility-r1-config-v8",
+        }
         for stage in sorted(PRO_JUDGE_STAGES):
             _validate_pro_judge_config(
                 stage_models[stage], pinned_timeout=pinned_timeout
@@ -251,6 +262,18 @@ def _validate_pro_judge_config(value: Any, *, pinned_timeout: bool = False) -> N
     end = date.fromisoformat(str(value.get("price_valid_through")))
     if not start <= date.today() <= end:
         raise ValueError("judge model pricing is not active; update the price record")
+
+
+def _validate_pro_answer_agreement_config(value: Any) -> None:
+    """v8: the fallback judge is the Pro judge with a 128-token enum output."""
+    if not isinstance(value, dict):
+        raise ValueError("the answer agreement price configuration is invalid")
+    if value.get("maximum_output_tokens") != 128:
+        raise ValueError("the answer agreement output limit must stay 128 tokens")
+    _validate_pro_judge_config(
+        {**value, "maximum_output_tokens": PRO_JUDGE_EXACT_CONFIG["maximum_output_tokens"]},
+        pinned_timeout=True,
+    )
 
 
 def _validate_answer_agreement_config(value: Any) -> None:

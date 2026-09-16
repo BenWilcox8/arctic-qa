@@ -78,7 +78,8 @@ def test_the_launch_profile_runs_inside_one_provider_with_separated_models() -> 
     best = max(strength[roles[role]["model"]] for role in JUDGE_ROLES)
     for role in STRONGEST_JUDGE_ROLES:
         assert strength[roles[role]["model"]] == best
-    assert roles["answer_judge"]["model"] == "gemini-3.1-flash-lite"
+    # Chapter 3 (yield audit 4.5 R5): the fallback judge is the Pro judge.
+    assert roles["answer_judge"]["model"] == "gemini-3.1-pro-preview"
 
 
 def test_a_mixed_provider_profile_still_keeps_judges_out_of_the_writer_family(
@@ -109,10 +110,15 @@ def test_the_launch_profile_matches_the_broker_stage_models() -> None:
 # Run blocker 1: judge stage models with verified pricing.
 
 
-def test_price_config_v7_pins_the_judge_model_and_its_price() -> None:
+def test_price_config_v8_pins_the_judge_model_and_its_price() -> None:
     config = _config(PRICE_CONFIG)
 
-    assert config["config_id"] == "arctic-gemini-eligibility-r1-config-v7"
+    assert config["config_id"] == "arctic-gemini-eligibility-r1-config-v8"
+    # Chapter 3: the answer-agreement fallback judge runs on the Pro judge.
+    agreement = config["stage_models"]["answer_agreement"]
+    assert agreement["model"] == "gemini-3.1-pro-preview"
+    assert agreement["maximum_output_tokens"] == 128
+    assert agreement["call_timeout_seconds"] == 300
     assert config["model"] == "gemini-3.8-flash"
     for stage in PRO_JUDGE_STAGES:
         row = config["stage_models"][stage]

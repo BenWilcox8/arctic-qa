@@ -660,16 +660,37 @@ def test_config_requires_low_thinking_for_bounded_structured_output(
 
     config = _config(config_path)
     assert config["thinking_level"] == "low"
-    assert config["config_id"] == "arctic-gemini-eligibility-r1-config-v7"
+    assert config["config_id"] == "arctic-gemini-eligibility-r1-config-v8"
     assert config["stage_models"]["answer_agreement"]["maximum_output_tokens"] == 128
     assert value["maximum_output_tokens"] == 8192
 
     legacy = json.loads(config_path.read_text())
     legacy["config_id"] = "arctic-gemini-eligibility-r1-config-v4"
+    # The immutable v4 route ran the fallback judge on flash-lite; v8 runs it
+    # on the Pro judge, so the legacy block is stated here, not copied.
     legacy["stage_models"] = {
-        "answer_agreement": legacy["stage_models"]["answer_agreement"]
+        "answer_agreement": {
+            "model": "gemini-3.1-flash-lite",
+            "maximum_input_tokens": 1048576,
+            "model_output_token_limit": 65536,
+            "maximum_output_tokens": 4,
+            "thinking_level": "minimal",
+            "input_usd_per_million_tokens": "0.25",
+            "output_usd_per_million_tokens_including_thinking": "1.50",
+            "price_valid_from": "2026-09-14",
+            "price_valid_through": "2026-12-31",
+            "price_source": "https://ai.google.dev/gemini-api/docs/pricing",
+            "model_source": "https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite",
+            "thinking_source": "https://ai.google.dev/gemini-api/docs/generate-content/thinking",
+            "structured_output_source": "https://ai.google.dev/api/generate-content",
+            "documented_availability_checked_at_utc": "2026-09-14T00:00:00Z",
+            "documented_supported_methods": [
+                "generateContent",
+                "countTokens",
+                "batchGenerateContent",
+            ],
+        }
     }
-    legacy["stage_models"]["answer_agreement"]["maximum_output_tokens"] = 4
     legacy_path = tmp_path / "legacy-four-token-answer-judge.json"
     write_json(legacy_path, legacy)
     assert _config(legacy_path)["config_id"] == (
@@ -679,9 +700,7 @@ def test_config_requires_low_thinking_for_bounded_structured_output(
     value["stage_models"]["answer_agreement"]["maximum_output_tokens"] = 4
     changed_path = tmp_path / "four-token-answer-judge.json"
     write_json(changed_path, value)
-    with pytest.raises(
-        ValueError, match="answer agreement model configuration changed"
-    ):
+    with pytest.raises(ValueError, match="answer agreement output limit must stay 128"):
         _config(changed_path)
 
     value["stage_models"]["answer_agreement"]["maximum_output_tokens"] = 128
@@ -712,8 +731,10 @@ def test_pro_judge_stages_carry_a_pinned_longer_call_timeout(tmp_path: Path) -> 
     ):
         assert config["stage_models"][stage]["call_timeout_seconds"] == 300
         assert call_timeout_seconds(config, stage) == 300
-    # A stage that registers no timeout keeps the one documented default.
-    assert call_timeout_seconds(config, "answer_agreement") == 120
+    # v8: the answer-agreement fallback judge is the Pro judge and carries
+    # the same pinned timeout. A stage that registers no timeout keeps the
+    # one documented default.
+    assert call_timeout_seconds(config, "answer_agreement") == 300
     assert call_timeout_seconds(config, "question_generation") == 120
     assert maximum_call_timeout_seconds(config) == 300
 
@@ -735,5 +756,7 @@ def test_pro_judge_stages_carry_a_pinned_longer_call_timeout(tmp_path: Path) -> 
     value["config_id"] = "arctic-gemini-eligibility-r1-config-v6"
     changed = tmp_path / "v6-with-judge-timeout.json"
     write_json(changed, value)
-    with pytest.raises(ValueError, match="judge model configuration changed"):
+    # v6 pins neither the judge timeout nor the Pro agreement judge, so the
+    # first pinned block that differs rejects the file.
+    with pytest.raises(ValueError, match="configuration changed"):
         _config(changed)

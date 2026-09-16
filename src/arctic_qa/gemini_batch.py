@@ -59,6 +59,13 @@ BATCH_INPUT_USD_PER_MILLION = Decimal("0.375")
 BATCH_OUTPUT_USD_PER_MILLION = Decimal("1.875")
 PRICING_VALID_THROUGH = "2026-12-31"
 PRICING_SOURCE = "https://ai.google.dev/gemini-api/docs/pricing"
+# Batch mode is half the standard price, per PRICING_SOURCE (checked
+# 2026-09-15). The agreement judge model is pinned per price config revision:
+# flash-lite through v7, the Pro judge from v8 (chapter 3, yield audit 4.5 R5).
+BATCH_AGREEMENT_PRICE_RECORDS = {
+    "gemini-3.1-flash-lite": ("0.125", "0.75"),
+    "gemini-3.1-pro-preview": ("1.00", "6.00"),
+}
 MODEL_SOURCE = "https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash"
 BATCH_SOURCE = "https://ai.google.dev/gemini-api/docs/batch-api"
 TERMINAL_JOB_STATES = {
@@ -259,17 +266,24 @@ class BatchStore:
             raise ValueError(
                 "the standard output price does not match the batch price record"
             )
+        # The reviewed price config pins the agreement model per revision
+        # (flash-lite through v7, the Pro judge from v8); the batch evidence
+        # is the documented method list bound in that record.
         agreement_config = model_config_for_stage(self.config, "answer_agreement")
-        if agreement_config["model"] != "gemini-3.1-flash-lite" or (
-            "batchGenerateContent"
-            not in agreement_config.get("documented_supported_methods", [])
+        if "batchGenerateContent" not in agreement_config.get(
+            "documented_supported_methods", []
         ):
             raise ValueError(
                 "the configured answer agreement model lacks batch support evidence"
             )
+        agreement_record = BATCH_AGREEMENT_PRICE_RECORDS.get(str(agreement_config["model"]))
+        if agreement_record is None:
+            raise ValueError(
+                "the configured answer agreement model lacks batch support evidence"
+            )
         if _batch_pricing(agreement_config) != {
-            "input_usd_per_million_tokens": "0.125",
-            "output_usd_per_million_tokens_including_thinking": "0.75",
+            "input_usd_per_million_tokens": agreement_record[0],
+            "output_usd_per_million_tokens_including_thinking": agreement_record[1],
             "valid_through": agreement_config["price_valid_through"],
             "source": PRICING_SOURCE,
         }:

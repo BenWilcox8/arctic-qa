@@ -22,6 +22,7 @@ from .validation import (
     ANSWER_AGREEMENT_CONTRACT_VERSION,
     ANSWER_AGREEMENT_PROMPT_VERSION,
     ANSWER_AGREEMENT_SYSTEM,
+    CLAIM_TYPE_DEFINITIONS,
     CONTEXT_ONLY_EVIDENCE_CONTRACT_VERSION,
     DIRECT_SOURCE_VALUE_CONTRACT_VERSION,
     FINDING_ADMISSION_CONTRACT_VERSION,
@@ -36,6 +37,8 @@ from .validation import (
     answer_verifier_scope_reasons,
     benchmark_context_verification_reason,
     benchmark_text_raw_source_artifact,
+    claim_type_note,
+    claim_type_reasons,
     context_only_span_records,
     interpretation_spans_contain_answer,
     numeric_rule_is_source_bound,
@@ -46,6 +49,8 @@ from .validation import (
     question_qualifier_binding_reason,
     reconstruction_has_competing_alternatives,
     reconstruction_matches,
+    reconstruction_scope_reasons,
+    reconstruction_scope_representation_note,
     required_question_phrases_contain_answer,
     scope_is_evidence_bound,
     scope_phrase_in_text,
@@ -551,7 +556,10 @@ ANSWER_SCHEMA = {
             ),
         },
         "variants": {"type": "array", "items": {"type": "string"}},
-        "claim_type": {"enum": ["observation", "association", "causal", "definition"]},
+        "claim_type": {
+            "enum": ["observation", "association", "causal", "definition"],
+            "description": CLAIM_TYPE_DEFINITIONS,
+        },
         "selection_rationale": JUSTIFICATION_SCHEMA,
         "evidence_quote": {"type": "string", "minLength": 1},
         "locator": LOCATOR_SCHEMA,
@@ -881,7 +889,8 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
                 "locator": LOCATOR_SCHEMA,
                 "scope": SCOPE_SCHEMA,
                 "question_claim_type": {
-                    "enum": ["observation", "association", "causal", "definition"]
+                    "enum": ["observation", "association", "causal", "definition"],
+                    "description": CLAIM_TYPE_DEFINITIONS,
                 },
                 "ambiguity_label": {
                     "enum": ["one_answer", "multiple_answers", "unresolved"]
@@ -990,7 +999,8 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
                 },
                 "question_answer_leakage_absent": {"type": "boolean"},
                 "question_claim_type": {
-                    "enum": ["observation", "association", "causal", "definition"]
+                    "enum": ["observation", "association", "causal", "definition"],
+                    "description": CLAIM_TYPE_DEFINITIONS,
                 },
                 "evidence_quote": {"type": "string", "minLength": 1},
                 "locator": LOCATOR_SCHEMA,
@@ -1806,6 +1816,8 @@ def generate_candidate(
         "question. Do not list paraphrases, spelling or unit variants, or false "
         "and negated answer choices as alternatives. "
         + RECONSTRUCTION_NUMERIC_INSTRUCTIONS
+        + " "
+        + CLAIM_TYPE_DEFINITIONS
         + " Set reconstruction_rationale "
         "to a concise evidence-grounded justification for the reconstructed "
         "answer and ambiguity label. Do not provide hidden reasoning."
@@ -1844,8 +1856,7 @@ def generate_candidate(
         "sample, period, condition, or referent. SOURCE_DATA "
         "can still determine or verify the answer. Verify entailment, relation, scope, ambiguity, "
         "alternatives, evidence, and the question claim type. Label the question claim "
-        "type from QUESTION and SOURCE_DATA alone. "
-        "alternatives, evidence, and the question claim type. "
+        "type from QUESTION and SOURCE_DATA alone. " + CLAIM_TYPE_DEFINITIONS + " "
         "Set relation_scope_match to false only when the selected span does not "
         "support the ANSWER_RECORD answer as the answer to this QUESTION. Judge "
         "the scientific relation, not the wording. "
@@ -2153,6 +2164,16 @@ def generate_candidate(
         "answer_verification": answer_verification,
         "standalone_verification": standalone_verification,
         "answer_agreement": answer_agreement,
+        "claim_type_note": claim_type_note(
+            answer, reconstruction, answer_verification
+        ),
+        "reconstruction_scope_representation_note": (
+            reconstruction_scope_representation_note(
+                answer,
+                reconstruction,
+                [str(span.get("text", "")) for span in forwarded_interpretation_spans],
+            )
+        ),
         "decision_evidence": decision_evidence,
         "qa_gate_reasons": qa_gate_reasons,
         "distractors": distractors,
@@ -3024,10 +3045,12 @@ def _qa_gate_reasons(
         reasons.append("source_bound_numeric_rule_missing")
     if not scope_is_evidence_bound(answer.get("scope"), answer, interpretation_texts):
         reasons.append("answer_scope_not_source_bound")
-    if not scope_is_evidence_bound(
-        reconstruction.get("scope"), reconstruction, interpretation_texts
-    ):
-        reasons.append("reconstruction_scope_not_source_bound")
+    # Contract reconstruction-record-v2: the blind reconstructor asserts
+    # nothing about the paper, so its scope is tested for meaning against the
+    # answer, with an all-null scope allowed (chapter 2 yield audit 4.3 f).
+    reasons.extend(
+        reconstruction_scope_reasons(answer, reconstruction, interpretation_texts)
+    )
     if not scope_is_evidence_bound(
         verification.get("scope"), verification, interpretation_texts
     ):
@@ -3072,18 +3095,9 @@ def _qa_gate_reasons(
         )
         if context_reason:
             reasons.append(context_reason)
-    claim_types = {
-        reconstruction.get("question_claim_type"),
-        verification.get("question_claim_type"),
-    }
-    if len(claim_types) != 1:
-        reasons.append("question_claim_type_disagreement")
-    question_claim_type = verification.get("question_claim_type")
-    if (
-        answer.get("claim_type") in {"observation", "association"}
-        and question_claim_type == "causal"
-    ):
-        reasons.append("causal_overclaim")
+    # Claim type is a signal: only an incompatible pair rejects, and a causal
+    # reading by either judge is an overclaim (chapter 2 yield audit 4.3 e).
+    reasons.extend(claim_type_reasons(answer, reconstruction, verification))
     required_phrases = answer.get("required_question_phrases")
     if (
         not isinstance(required_phrases, list)

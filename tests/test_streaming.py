@@ -210,9 +210,10 @@ def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
     properties = generation_module.NUMERIC_RULE_SCHEMA["properties"]
 
     assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v22"
+    # Chapter 3: v4 reads standard uncertainty notation (yield audit 4.3 d).
     assert (
         generation_module.NUMERIC_RULE_CONTRACT_VERSION
-        == "numeric-rule-source-support-v3"
+        == "numeric-rule-source-support-v4"
     )
     assert (
         generation_module.SCOPE_CONTRACT_VERSION == "selected-evidence-literal-scope-v4"
@@ -463,7 +464,13 @@ def test_position_1043_counterfactual_keeps_scope_rejection() -> None:
     assert "reconstruction_alternative_answer_present" not in reasons
     assert "source_bound_numeric_rule_missing" not in reasons
     assert "answer_scope_not_source_bound" in reasons
-    assert "reconstruction_scope_not_source_bound" in reasons
+    # reconstruction-record-v2 (chapter 3, yield audit 4.3 f): the blind
+    # reconstructor's "ramping experiments with fast to intermediate rates"
+    # entails the answer's "ramping experiments" and its unpaired method value
+    # sits in the span, so the reconstruction record no longer rejects on
+    # wording. The answer and verifier records keep the verbatim binding.
+    assert "reconstruction_scope_not_source_bound" not in reasons
+    assert "reconstruction_scope_contradicts_answer" not in reasons
     assert "answer_verifier_scope_not_source_bound" in reasons
     assert "reconstruction_scope_mismatch" not in reasons
     assert "answer_verifier_scope_mismatch" not in reasons

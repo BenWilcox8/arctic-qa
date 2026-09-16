@@ -120,7 +120,7 @@ class FakeBatchTransport:
         return b""
 
 
-def test_batch_answer_judge_uses_flash_lite_price_and_payload(
+def test_batch_answer_judge_uses_the_pro_judge_price_and_payload(
     tmp_path: Path,
 ) -> None:
     _, ledger = shared_ledger(tmp_path)
@@ -148,10 +148,11 @@ def test_batch_answer_judge_uses_flash_lite_price_and_payload(
     key = next(iter(state["requests"]))
     request = store.prepared_record(key)
     assert request["stage"] == "answer_agreement"
-    assert request["model"] == "gemini-3.1-flash-lite"
+    # Chapter 3 (yield audit 4.5 R5): the fallback judge is the Pro judge.
+    assert request["model"] == "gemini-3.1-pro-preview"
     assert request["batch_pricing"] == {
-        "input_usd_per_million_tokens": "0.125",
-        "output_usd_per_million_tokens_including_thinking": "0.75",
+        "input_usd_per_million_tokens": "1.00",
+        "output_usd_per_million_tokens_including_thinking": "6.00",
         "valid_through": "2026-12-31",
         "source": "https://ai.google.dev/gemini-api/docs/pricing",
     }
@@ -162,7 +163,7 @@ def test_batch_answer_judge_uses_flash_lite_price_and_payload(
         "type": "string",
         "enum": ["yes", "no"],
     }
-    assert generation["thinkingConfig"] == {"thinkingLevel": "minimal"}
+    assert generation["thinkingConfig"] == {"thinkingLevel": "low"}
     manifest = store.make_round(
         run_identity={"run_id": "judge-batch-run"},
         ordered_inputs=[
@@ -175,7 +176,7 @@ def test_batch_answer_judge_uses_flash_lite_price_and_payload(
         ],
     )
     assert manifest is not None
-    assert manifest["model"] == "gemini-3.1-flash-lite"
+    assert manifest["model"] == "gemini-3.1-pro-preview"
     assert manifest["pricing"] == request["batch_pricing"]
 
 
