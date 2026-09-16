@@ -82,9 +82,12 @@ Its paid calls carry the invocation run id of the current producer.
 One of those calls was submitted or completed inside the active window of 420 seconds.
 The paper has no completion label of that run and no final state in the progress record.
 
-Each row gives the paper title and identity, the stage of its most recent call, the number of calls and the money this run spent on them, and the time the paper has been in analysis.
+Each row gives the paper title and identity.
+It also gives the stage of the most recent call, the number of calls, and the money this run spent on them.
+The last column gives the time the paper has been in analysis.
 That time starts at the first call of the current burst of work.
-A relaunched producer replays the receipts of a paper it visited before, and a replay is separated from live work by more than the window, so the replayed calls stay out of the count.
+A relaunched producer replays the receipts of a paper it visited before.
+More than one window separates such a replay from live work, so the replayed calls stay out of the count.
 
 The "Thread or slot" column stays empty.
 The producer runs one thread per paper, but it writes no thread name and no slot number into any record.
@@ -94,7 +97,13 @@ The lower table holds the last 10 papers of the run that reached a final outcome
 An accepted paper shows its accepted question count.
 A rejected paper shows its final reason code.
 A screened-out paper, an unresolved paper and a paper that reached the per-paper cost cap show the same reason field.
-The outcome comes from the completion label of the run when the paper has one, and from the progress record when it has none.
+The outcome comes from the completion label of the run when the paper has one.
+It comes from the progress record when the paper has none.
+
+The finish time of a paper is the time of its last paid call, not the time of its label.
+A batch catch-up labels every finished paper of one run in one transaction.
+Such a batch gives every label the same minute, and that minute holds no order.
+A paper this run replayed and never called keeps the label time, because the label is its only timestamp.
 
 The section names the producer state when no producer is running.
 It shows the message of the progress record instead of an empty table.
