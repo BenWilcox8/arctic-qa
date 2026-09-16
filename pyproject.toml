@@ -29,7 +29,7 @@ testpaths = ["tests"]
 addopts = "-q"
 
 [tool.ruff]
-# `data/` holds the one-off analysis scripts that finished tasks recorded as
+# `research/` holds the one-off analysis scripts that finished tasks recorded as
 # evidence beside their reports. They are never imported and must stay exactly
 # as they ran, so the linter and the formatter leave them alone.
-extend-exclude = ["data"]
+extend-exclude = ["research"]

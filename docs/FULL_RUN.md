@@ -4,6 +4,9 @@ This tool writes a future stream plan.
 It does not start a stream, activate a gate, or send a provider request.
 It does not copy or hash original source files.
 
+The commands of this document write path variables such as `$ARCTIC_QA_DATA_ROOT`.
+The "Environment variables" section of `docs/REPRODUCTION.md` gives their values.
+
 The plan reads the frozen article-access manifest.
 The ordered source list uses the manifest order.
 The plan includes a source hash when the manifest has one.
@@ -17,21 +20,21 @@ Set each uppercase path before you run the command.
 ```bash
 PYTHONPATH=src python -m arctic_qa.full_run_plan \
   --json-out /PRIVATE/PLAN/full-run-plan.json \
-  --data-root /mnt/crdata/research-abstention \
-  --access-run-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/trial-inputs/full-manifest-continuation-4420-minus41-r1 \
-  --eligibility-run-dir /mnt/crdata/research-abstention/arctic-qa/ELIGIBILITY_RUN \
+  --data-root $ARCTIC_QA_DATA_ROOT \
+  --access-run-dir $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/trial-inputs/full-manifest-continuation-4420-minus41-r1 \
+  --eligibility-run-dir $ARCTIC_QA_DATA_ROOT/arctic-qa/ELIGIBILITY_RUN \
   --run-id FUTURE_SCIENTIFIC_RUN_ID \
   --campaign-id FUTURE_CAMPAIGN_ID \
   --credential-file /PRIVATE/DIRECTORY/gemini.key \
-  --shared-ledger-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
-  --model-receipts-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/model-receipts \
+  --shared-ledger-file $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
+  --model-receipts-dir $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/model-receipts \
   --streaming-budget-policy-file config/streaming-dataset-budget-policy-v1.json \
   --price-config-file config/gemini-eligibility-v1.json \
   --execution-gate-file config/streaming-live-execution-gate-v1.json \
   --ledger-config-transition-file /PRIVATE/DIRECTORY/reviewed-transition.json \
   --eligibility-prompt-file config/gemini-eligibility-prompt-v3.txt \
   --eligibility-schema-file schemas/gemini-eligibility.v1.schema.json \
-  --eligibility-policy-file /mnt/crdata/research-abstention/arctic-qa/ELIGIBILITY_POLICY.json \
+  --eligibility-policy-file $ARCTIC_QA_DATA_ROOT/arctic-qa/ELIGIBILITY_POLICY.json \
   --planning-cumulative-budget-usd 20
 ```
 
@@ -81,9 +84,9 @@ The current builder must normalize namespace-relative file paths before this han
 
 ```bash
 PYTHONPATH=src python -m arctic_qa.quality_summary \
-  --export-manifest /mnt/crdata/research-abstention/arctic-qa/exports/EXPORT_ID/manifest.json \
-  --ledger /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
-  --status /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.status.json \
+  --export-manifest $ARCTIC_QA_DATA_ROOT/arctic-qa/exports/EXPORT_ID/manifest.json \
+  --ledger $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
+  --status $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.status.json \
   --json-out /PRIVATE/REPORT/quality-summary.json \
   --markdown-out /PRIVATE/REPORT/quality-summary.md
 ```
@@ -97,7 +100,7 @@ It does not turn test results or machine acceptance into scientific accuracy.
 
 The current offline draft is at this path:
 
-`/mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/full-run-plans/proposed-full-scientific-run-4420-r1.json`
+`$ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/full-run-plans/proposed-full-scientific-run-4420-r1.json`
 
 It binds the `full-text-ready-4420-seed20260912-r1` source freeze.
 It has a distinct proposed run ID and campaign ID.
@@ -113,27 +116,30 @@ It also replaces the planning draft with a plan that has a concrete stream argv 
 
 ```bash
 PYTHONPATH=src python -m arctic_qa.full_run_plan \
-  --json-out /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/full-run-plans/proposed-full-scientific-run-4420-r1.json \
-  --data-root /mnt/crdata/research-abstention \
-  --access-run-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/full-run-inputs/full-scientific-access-4420-r1 \
-  --eligibility-run-dir /mnt/crdata/research-abstention/arctic-qa/gemini-eligibility-r1/proposed-full-scientific-run-4420-r1 \
+  --json-out $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/full-run-plans/proposed-full-scientific-run-4420-r1.json \
+  --data-root $ARCTIC_QA_DATA_ROOT \
+  --access-run-dir $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/full-run-inputs/full-scientific-access-4420-r1 \
+  --eligibility-run-dir $ARCTIC_QA_DATA_ROOT/arctic-qa/gemini-eligibility-r1/proposed-full-scientific-run-4420-r1 \
   --run-id proposed-full-scientific-run-4420-r1 \
   --campaign-id proposed-full-scientific-campaign-r1 \
-  --credential-file /home/ben/.config/arctic-qa/gemini-api-key \
-  --shared-ledger-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
-  --model-receipts-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/model-receipts \
-  --streaming-budget-policy-file /home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-qa-build-r1/proposed-streaming-dataset-budget-policy-v6.json \
+  --credential-file $ARCTIC_QA_CONFIG_DIR/gemini-api-key \
+  --shared-ledger-file $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
+  --model-receipts-dir $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/model-receipts \
+  --streaming-budget-policy-file "$REVIEWED_BUDGET_POLICY" \
   --price-config-file config/gemini-eligibility-v1.json \
-  --execution-gate-file /home/ben/.config/arctic-qa/gate-021734f-usd20-r1.json \
+  --execution-gate-file $ARCTIC_QA_CONFIG_DIR/gate-021734f-usd20-r1.json \
   --eligibility-prompt-file config/gemini-eligibility-prompt-v4.txt \
   --eligibility-schema-file schemas/gemini-eligibility.v2.schema.json \
-  --eligibility-policy-file /mnt/crdata/research-abstention/arctic-qa/corpus-search-r1/protocol/protocol-v2.json \
+  --eligibility-policy-file $ARCTIC_QA_DATA_ROOT/arctic-qa/corpus-search-r1/protocol/protocol-v2.json \
   --planning-cumulative-budget-usd 20 \
-  --frozen-source-manifest-file /mnt/crdata/research-abstention/arctic-qa/corpus-freeze-r1/full-text-ready-4420-seed20260912-r1/full-text-ready-manifest.jsonl \
-  --frozen-manifest-descriptor-file /mnt/crdata/research-abstention/arctic-qa/corpus-freeze-r1/full-text-ready-4420-seed20260912-r1/manifest-descriptor.json \
-  --materialized-access-run-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/full-run-inputs/full-scientific-access-4420-r1 \
+  --frozen-source-manifest-file $ARCTIC_QA_DATA_ROOT/arctic-qa/corpus-freeze-r1/full-text-ready-4420-seed20260912-r1/full-text-ready-manifest.jsonl \
+  --frozen-manifest-descriptor-file $ARCTIC_QA_DATA_ROOT/arctic-qa/corpus-freeze-r1/full-text-ready-4420-seed20260912-r1/manifest-descriptor.json \
+  --materialized-access-run-dir $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/full-run-inputs/full-scientific-access-4420-r1 \
   --phase away_production
 ```
+
+`$REVIEWED_BUDGET_POLICY` is the reviewed streaming budget policy of the run.
+It is written outside the repository, because a run reviews and freezes it separately.
 
 The materializer writes the access manifest, item receipts, progress, and completion receipt.
 It does not copy, download, or hash a source file or extraction file.
@@ -164,8 +170,8 @@ It does not call a provider, alter the freeze, or hash the original source files
 
 ```bash
 PYTHONPATH=src python -m arctic_qa.quality_order \
-  --source-manifest /mnt/crdata/research-abstention/arctic-qa/corpus-freeze-r1/full-text-ready-4420-seed20260912-r1/full-text-ready-manifest.jsonl \
-  --descriptor /mnt/crdata/research-abstention/arctic-qa/corpus-freeze-r1/full-text-ready-4420-seed20260912-r1/manifest-descriptor.json \
+  --source-manifest $ARCTIC_QA_DATA_ROOT/arctic-qa/corpus-freeze-r1/full-text-ready-4420-seed20260912-r1/full-text-ready-manifest.jsonl \
+  --descriptor $ARCTIC_QA_DATA_ROOT/arctic-qa/corpus-freeze-r1/full-text-ready-4420-seed20260912-r1/manifest-descriptor.json \
   --output-dir /PRIVATE/QUALITY_ORDER \
   --seed approved-quality-order-seed-r1 \
   --limit 800

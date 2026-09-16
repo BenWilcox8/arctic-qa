@@ -6,10 +6,14 @@ It reuses the metrics of the previous abstention paper.
 It does not build a separate abstention dataset.
 Abstention is part of the evaluation of every item.
 
+The commands of this document write path variables such as `$ARCTIC_QA_DATA_ROOT`.
+The "Environment variables" section of `docs/REPRODUCTION.md` gives their values.
+
 ## Decisions
 
 The captain locked these decisions on 2026-09-16.
-The decision record is `data/arctic-abstention-eval/decisions.md` in the firstmate data folder.
+The decision record is `arctic-abstention-eval/decisions.md` in the agent data folder.
+It is outside this repository.
 The exact words of the captain are quoted here.
 
 1. Distractor order.
@@ -182,7 +186,7 @@ See "Subscription providers" below.
 ### Subscription providers
 
 Two providers bill a subscription instead of an API key: `anthropic_claude_code` and `openai_codex`.
-The design record is `data/arctic-abstention-subscription-providers-r1/report.md`.
+The design record is `research/arctic-abstention-subscription-providers-r1/report.md`.
 Each trial is one subprocess call of the installed harness binary from an empty scratch directory.
 The system text and the user text are the bytes that the Gemini provider sends.
 
@@ -219,10 +223,11 @@ Fairness caveats against the Gemini path:
 
 Setup:
 
-- Claude: `claude auth status` must report `loggedIn: true` and `authMethod: claude.ai`. The binary is `/home/ben/.npm-global/bin/claude`.
-- ChatGPT: `codex login status` must report "Logged in using ChatGPT". The binary is `/home/ben/.npm-global/bin/codex` and the login is `/home/ben/.codex/auth.json`.
+- Claude: `claude auth status` must report `loggedIn: true` and `authMethod: claude.ai`. The registry holds the absolute path of the binary, `~/.npm-global/bin/claude` by default.
+- ChatGPT: `codex login status` must report "Logged in using ChatGPT". The registry holds the absolute path of the binary, `~/.npm-global/bin/codex` by default, and the login is `~/.codex/auth.json`.
 - No `ANTHROPIC_API_KEY` and no `OPENAI_API_KEY` is read. The provider removes them from the child environment.
 - The nix devshell has neither binary on PATH. The registry holds the paths. `--binary-path` overrides them.
+- The registry holds the absolute binary paths of the machine that produced the runs. The evaluation gate binds the registry by hash in the price-config slot, so an edit invalidates a gate of a live run. On another machine, pass `--binary-path`, or copy the registry to a new file with a new `config_id` and pass `--subscription-models-file`.
 
 ### Scoring
 
@@ -245,7 +250,7 @@ Prefix each command with `PYTHONPATH=src python -m arctic_qa --json abstention-e
 1. Build the evaluation set.
 
    ```bash
-   --action build-set --state-db /mnt/crdata/research-abstention/arctic-qa/state.sqlite3 \
+   --action build-set --state-db $ARCTIC_QA_DATA_ROOT/arctic-qa/state.sqlite3 \
      --output-dir <sets-dir> --population current \
      --contract-file config/abstention-eval-chapter2-contract-v1.json
    ```
@@ -353,7 +358,7 @@ Prefix each command with `PYTHONPATH=src python -m arctic_qa --json abstention-e
    A rerun resumes from both.
 5. Score the run with `--action score`.
 
-The launcher of the first live test is `/mnt/crdata/research-abstention/arctic-qa/abstention-eval/private/subscription-test-r1-launcher.sh`.
+The launcher of the first live test is `$ARCTIC_QA_DATA_ROOT/arctic-qa/abstention-eval/private/subscription-test-r1-launcher.sh`.
 
 ## Concurrent plan
 
@@ -579,7 +584,7 @@ journalctl --user -u arctic-abstention-stream-r1 -f
 systemctl --user stop arctic-abstention-stream-r1
 ```
 
-The launcher of the first live run is `/mnt/crdata/research-abstention/arctic-qa/abstention-eval/private/streaming-eval-r1-launcher.sh`.
+The launcher of the first live run is `$ARCTIC_QA_DATA_ROOT/arctic-qa/abstention-eval/private/streaming-eval-r1-launcher.sh`.
 The work directory holds the sets, the derived gates, the runs, the cost journal and `watch-state.json`.
 The evaluator writes `watch-state.json` after every poll, so its poll count and its item list rise while the unit runs.
 
@@ -593,7 +598,7 @@ Give the launcher both when the service is restarted from a new snapshot.
   gemini-3.7-flash returned a usage record without `candidatesTokenCount` on 2026-09-16, with a total that equals the prompt count plus the thinking count.
   The broker books that as an ambiguous charge, as `docs/SHARED_MODEL_BROKER.md` requires, and the halt stops every phase of the ledger.
   No reviewed settlement path covers an omitted answer-token count.
-  Section 7 of `data/arctic-abstention-streaming-eval-r1/report.md` holds the evidence and the two ways to settle it.
+  Section 7 of `research/arctic-abstention-streaming-eval-r1/report.md` holds the evidence and the two ways to settle it.
   Read that section before the large Gemini run.
 
 - The evaluation policy raises the per-minute pace only in the dry run. A paid run keeps the pace of the policy file.

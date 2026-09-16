@@ -108,7 +108,7 @@ CODEX_ISOLATION_FLAGS = (
 )
 # The static part of the private Codex config. Every key was accepted by
 # ``--strict-config`` of codex-cli 0.154.0 and the effect was verified on a
-# captured request (data/arctic-abstention-subscription-providers-r1/report.md).
+# captured request (research/arctic-abstention-subscription-providers-r1/report.md).
 CODEX_CONFIG_TOML = """# Written by arctic_qa.abstention_subscription; do not edit.
 project_doc_max_bytes = 0
 sandbox_mode = "read-only"

@@ -4,6 +4,9 @@ This module continues the scientific pipeline with the Gemini Batch API.
 It reuses the current prompts, schemas, deterministic validators, database, accepted export, and publication exporter.
 Preparation makes no network call and does not change the shared paid-call ledger.
 
+The commands of this document write path variables such as `$ARCTIC_QA_DATA_ROOT`.
+The "Environment variables" section of `docs/REPRODUCTION.md` gives their values.
+
 The batch campaign has a separate USD 25 allocation.
 The first USD 50 live campaign keeps its own cumulative ledger and liabilities.
 The root operator must coordinate the shared ledger before the first submission.
@@ -66,13 +69,13 @@ It does not copy source files or change production data.
 ```bash
 nix develop --offline -c bash -lc '
 PYTHONPATH=src python -m arctic_qa.gemini_batch select-continuation \
-  --access-run-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/production-campaign-r1/quality-order-r1/materialized-top-800 \
-  --db /mnt/crdata/research-abstention/arctic-qa/state.sqlite3 \
+  --access-run-dir $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/production-campaign-r1/quality-order-r1/materialized-top-800 \
+  --db $ARCTIC_QA_DATA_ROOT/arctic-qa/state.sqlite3 \
   --campaign-id arctic-qa-production-campaign-001 \
   --prior-run-id first-production-6dc430d-live-rerun-r8 \
-  --eligibility-run-dir /mnt/crdata/research-abstention/arctic-qa/gemini-eligibility-r1/first-production-6dc430d-live-rerun-r8 \
-  --shared-ledger-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
-  --production-progress-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/progress.json \
+  --eligibility-run-dir $ARCTIC_QA_DATA_ROOT/arctic-qa/gemini-eligibility-r1/first-production-6dc430d-live-rerun-r8 \
+  --shared-ledger-file $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
+  --production-progress-file $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/progress.json \
   --output-file "$BATCH_STATE/final-continuation-plan.json" \
   --require-stopped
 '
@@ -90,18 +93,18 @@ Use the final continuation plan from the preceding command.
 nix develop --offline -c bash -lc '
 PYTHONPATH=src python -m arctic_qa.gemini_batch prepare \
   --state-dir "$BATCH_STATE" \
-  --db /mnt/crdata/research-abstention/arctic-qa/state.sqlite3 \
-  --namespace /mnt/crdata/research-abstention/arctic-qa \
+  --db $ARCTIC_QA_DATA_ROOT/arctic-qa/state.sqlite3 \
+  --namespace $ARCTIC_QA_DATA_ROOT/arctic-qa \
   --run-id FUTURE_BATCH_INVOCATION_ID \
   --campaign-id FUTURE_BATCH_CAMPAIGN_ID \
-  --access-run-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/production-campaign-r1/quality-order-r1/materialized-top-800 \
+  --access-run-dir $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/production-campaign-r1/quality-order-r1/materialized-top-800 \
   --continuation-plan "$BATCH_STATE/final-continuation-plan.json" \
   --eligibility-run-dir "$BATCH_STATE/eligibility" \
   --eligibility-prompt-file config/gemini-eligibility-prompt-v6.txt \
   --eligibility-schema-file schemas/gemini-eligibility.v3.schema.json \
-  --eligibility-policy-file /mnt/crdata/research-abstention/arctic-qa/corpus-search-r1/protocol/protocol-v3.json \
+  --eligibility-policy-file $ARCTIC_QA_DATA_ROOT/arctic-qa/corpus-search-r1/protocol/protocol-v3.json \
   --price-config-file config/gemini-eligibility-v1.json \
-  --shared-ledger-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
+  --shared-ledger-file $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
   --batch-allocation-usd 25
 '
 ```
@@ -184,9 +187,9 @@ PYTHONPATH=src python -m arctic_qa.gemini_batch submit \
   --state-dir "$BATCH_STATE" \
   --manifest "$BATCH_STATE/rounds/ROUND_ID/manifest.json" \
   --authorization /PRIVATE/ROUND_ID.authorization.json \
-  --credential-file /home/ben/.config/arctic-qa/gemini-api-key \
+  --credential-file $ARCTIC_QA_CONFIG_DIR/gemini-api-key \
   --price-config-file config/gemini-eligibility-v1.json \
-  --shared-ledger-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
+  --shared-ledger-file $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
   --batch-allocation-usd 25
 '
 ```
@@ -214,7 +217,7 @@ PYTHONPATH=src python -m arctic_qa.gemini_batch reconcile \
   --job-name batches/PROVIDER_JOB_ID \
   --provider-file-name files/UPLOADED_REQUEST_FILE \
   --price-config-file config/gemini-eligibility-v1.json \
-  --shared-ledger-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json
+  --shared-ledger-file $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json
 ```
 
 ## Get and ingest results
@@ -227,9 +230,9 @@ It downloads the result file only after a successful terminal state supplies a f
 PYTHONPATH=src python -m arctic_qa.gemini_batch status \
   --state-dir "$BATCH_STATE" \
   --round-id ROUND_ID \
-  --credential-file /home/ben/.config/arctic-qa/gemini-api-key \
+  --credential-file $ARCTIC_QA_CONFIG_DIR/gemini-api-key \
   --price-config-file config/gemini-eligibility-v1.json \
-  --shared-ledger-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json
+  --shared-ledger-file $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json
 ```
 
 Then ingest the downloaded JSONL file:
@@ -240,7 +243,7 @@ PYTHONPATH=src python -m arctic_qa.gemini_batch ingest \
   --round-id ROUND_ID \
   --results-file "$BATCH_STATE/raw/ROUND_ID.download.jsonl" \
   --price-config-file config/gemini-eligibility-v1.json \
-  --shared-ledger-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json
+  --shared-ledger-file $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json
 ```
 
 Ingestion maps out-of-order results by request key.
@@ -261,8 +264,8 @@ It can also create the reviewer, benchmark, scoring, CSV, and prompt companion p
 
 ```bash
 PYTHONPATH=src python -m arctic_qa.gemini_batch export \
-  --db /mnt/crdata/research-abstention/arctic-qa/state.sqlite3 \
-  --namespace /mnt/crdata/research-abstention/arctic-qa \
+  --db $ARCTIC_QA_DATA_ROOT/arctic-qa/state.sqlite3 \
+  --namespace $ARCTIC_QA_DATA_ROOT/arctic-qa \
   --campaign-id FUTURE_BATCH_CAMPAIGN_ID \
   --publication-output-dir /PRIVATE/PUBLICATION_PACKAGE \
   --prompt-template config/gemini-eligibility-prompt-v6.txt

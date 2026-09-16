@@ -1,9 +1,29 @@
-.pytest_cache/
+# Python
 __pycache__/
 *.py[cod]
 .venv/
-.coverage
+venv/
 dist/
 build/
 *.egg-info/
+.coverage
+
+# Tools
+.pytest_cache/
+.ruff_cache/
+.claude/
+.direnv/
+
+# Credentials. The repository never holds a key.
 .env
+*.pem
+*.key
+
+# Run state. The pipeline writes it under ARCTIC_QA_DATA_ROOT, which is
+# normally outside the checkout. These rules keep it out of the repository
+# when an operator points that variable at a directory inside the checkout.
+/data-root/
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
