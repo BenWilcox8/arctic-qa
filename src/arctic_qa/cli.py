@@ -465,6 +465,11 @@ def parser() -> argparse.ArgumentParser:
     stream.add_argument("--author-script", type=Path)
     stream.add_argument("--verifier-script", type=Path)
     stream.add_argument("--max-papers", type=int, default=1)
+    # Paper concurrency. The default of 4 papers in flight is the captain's
+    # target for the chapter 3 production run; it rises only as far as the
+    # observed provider limits allow, and the policy caps still bound it.
+    stream.add_argument("--paper-workers", type=int, default=4)
+    stream.add_argument("--option-workers", type=int, default=4)
     stream.add_argument("--resume-distractors-item-id")
     stream.add_argument("--resume-distractors-paper-id")
     stream.add_argument("--progress-file", type=Path)
@@ -1382,6 +1387,10 @@ def _status(args, paths: DataPaths, db: Database) -> dict[str, Any]:
 
 def _stream(args, paths: DataPaths, db: Database) -> dict[str, Any]:
     if args.phase == "offline":
+        # A scripted provider answers in the order the script lists, so an
+        # offline stream is sequential by construction.
+        args.paper_workers = 1
+        args.option_workers = 1
         if not args.author_script or not args.verifier_script:
             raise ValueError("offline streaming requires author and verifier scripts")
         author = make_provider(
@@ -1417,6 +1426,9 @@ def _stream(args, paths: DataPaths, db: Database) -> dict[str, Any]:
                 if args.ledger_config_transition_file
                 else None
             ),
+            # A concurrent producer releases the exclusive operation lock with
+            # its admission, so one paper's live call never blocks another's.
+            concurrent_construction=args.paper_workers > 1 or args.option_workers > 1,
         )
         author = verifier = BrokerProvider(
             broker=broker,
@@ -1517,6 +1529,8 @@ def _stream(args, paths: DataPaths, db: Database) -> dict[str, Any]:
         ),
         roles_file=args.roles_file.resolve() if args.roles_file else None,
         role_profile=args.role_profile,
+        paper_workers=args.paper_workers,
+        option_workers=args.option_workers,
     )
 
 

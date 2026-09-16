@@ -340,6 +340,27 @@ Each field must match the ledger row and the receipt.
 `count_retry_authorized` true also stamps the class `transient` on the row, so the next visit of that family counts the request again.
 A permanent count error is never counted again on a review alone: the request or the credential must change first.
 
+### Concurrent requests
+
+Every request serialises its admission and then releases it before the live call.
+
+The admission is the orphan recovery, the gate check, the pace, the count and the reservation.
+One in-process admission lock holds it, so the ledger sees one admission at a time.
+
+After the reservation the request takes its own in-flight lock, an `flock` on a per-request file, and releases the admission.
+Orphan recovery skips a submitted request whose in-flight lock is held, so a live sibling is never settled twice.
+
+The evaluation phase always works this way.
+A construction run opts in with `concurrent_construction`, which the `stream` command sets when `--paper-workers` or `--option-workers` is above one.
+
+A construction request also holds the exclusive operation lock through its admission, because a reviewed operation of the ledger must not overlap the accounting of a paid request.
+A concurrent construction request releases that lock with its admission.
+Without `concurrent_construction` the lock is held for the whole call, as before.
+
+The policy still bounds the rate: `maximum_concurrent_generation_requests` and `maximum_generation_requests_per_minute`.
+The two are one registered pair (`ALLOWED_REQUEST_RATES`), so a transition can never raise one of them alone.
+`CHAPTER3_CONCURRENCY_CHANGE` is the registered move from 2 and 10 to 8 and 40; it moves no money and keeps the expansion tranche.
+
 ### Phase slots and windows
 
 Each phase counts its own in-flight requests against its own concurrency limit.

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import inspect
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from pathlib import Path
 from collections.abc import Sequence
@@ -384,9 +386,15 @@ def run_stream(
     eligibility_rescreen_prompt_file: Path | None = None,
     roles_file: Path | None = None,
     role_profile: str | None = None,
+    paper_workers: int = 1,
+    option_workers: int = 1,
 ) -> dict[str, Any]:
     if max_papers < 1:
         raise ValueError("max papers must be at least 1")
+    if paper_workers < 1:
+        raise ValueError("paper workers must be at least 1")
+    if option_workers < 1:
+        raise ValueError("option workers must be at least 1")
     model_roles = _resolve_model_roles(
         author=author,
         verifier=verifier,
@@ -541,433 +549,494 @@ def run_stream(
     }
     paper_results: list[dict[str, Any]] = []
     resumed_papers = 0
-    for selected in selection:
-        if counts["processed"] >= max_papers:
-            break
-        candidate_key = selected.get("candidate_key")
-        access = access_items.get(candidate_key)
-        eligibility = eligibility_jobs.get(candidate_key)
-        if access is None or access.get("access_state") != "full_text_ready":
-            continue
-        paper_id = str(candidate_key)
-        family_id = str(
-            access.get("paper_family_id")
-            or stable_id("family", access.get("doi") or candidate_key)
-        )
-        # Containment (chapter 3 candidate fault slice): one paper family is one
-        # unit of work. An exception its candidate, routing, option or persistence
-        # code raises settles the family and the producer moves to the next paper.
-        # Three faults of one family ended three whole runs on 2026-09-16.
-        source_id: str | None = None
-        progress.last_error_stage = None
-        processed_before = counts["processed"]
-        results_before = len(paper_results)
+    # Paper concurrency: N papers in flight, each on its own thread, each
+    # running the whole per-paper chain unchanged. The frozen selection
+    # order is the pick-up order; completion order is not that order, and
+    # nothing downstream reads it. `paper_results` is sorted back into the
+    # selection order before the run result is returned.
+    tally = threading.RLock()
+    stop = threading.Event()
+    fatal: list[BaseException] = []
+
+    def process_paper(selected: dict[str, Any]) -> None:
+        nonlocal resumed_papers
+        if stop.is_set():
+            return
         try:
-            source_version_id = str(access["source_content_hash"])
-            operational_unresolved = _operational_unresolved_families(verifier_broker)
-            if family_id in operational_unresolved:
-                unresolved = operational_unresolved[family_id]
-                request_key = unresolved["request_key"]
-                reason_code = unresolved["reason_code"]
-                _record_operational_unresolved(
-                    db,
-                    campaign_id=campaign_id,
-                    candidate_key=str(candidate_key),
-                    selected=selected,
+            candidate_key = selected.get("candidate_key")
+            access = access_items.get(candidate_key)
+            eligibility = eligibility_jobs.get(candidate_key)
+            if access is None or access.get("access_state") != "full_text_ready":
+                return
+            paper_id = str(candidate_key)
+            family_id = str(
+                access.get("paper_family_id")
+                or stable_id("family", access.get("doi") or candidate_key)
+            )
+            # Containment (chapter 3 candidate fault slice): one paper family is one
+            # unit of work. An exception its candidate, routing, option or persistence
+            # code raises settles the family and the producer moves to the next paper.
+            # Three faults of one family ended three whole runs on 2026-09-16.
+            source_id: str | None = None
+            progress.last_error_stage = None
+            # Papers run at once, so "was this paper already counted?" is a
+            # fact about this paper, never about the shared totals.
+            counted: list[str] = []
+            try:
+                source_version_id = str(access["source_content_hash"])
+                operational_unresolved = _operational_unresolved_families(
+                    verifier_broker
+                )
+                if family_id in operational_unresolved:
+                    unresolved = operational_unresolved[family_id]
+                    request_key = unresolved["request_key"]
+                    reason_code = unresolved["reason_code"]
+                    _record_operational_unresolved(
+                        db,
+                        campaign_id=campaign_id,
+                        candidate_key=str(candidate_key),
+                        selected=selected,
+                        family_id=family_id,
+                        request_key=request_key,
+                        reason_code=reason_code,
+                    )
+                    # audit 4.9 C8: the family keeps its in-flight call records, so the
+                    # completed calls of an ambiguous charge stay visible for diagnosis
+                    # instead of vanishing with the attempt.
+                    infra = len(_incomplete_infra_records(db, campaign_id, family_id))
+                    with tally:
+                        counts.setdefault("incomplete_infra", 0)
+                        counts["incomplete_infra"] += infra
+                        counts.setdefault("operational_unresolved", 0)
+                        counts["operational_unresolved"] += 1
+                        counts["processed"] += 1
+                        counted.append("processed")
+                        paper_results.append(
+                            {
+                                "candidate_key": candidate_key,
+                                "disposition": "operational_unresolved",
+                                "reason_codes": [reason_code],
+                                "source_id": None,
+                                "broker_request_key": request_key,
+                            }
+                        )
+                        counted.append("result")
+                    progress.increment("unresolved")
+                    progress.paper(
+                        paper_id=candidate_key,
+                        title=access.get("title"),
+                        current_stage="completed",
+                        final_state="unresolved",
+                        final_reason=reason_code,
+                    )
+                    return
+                paper_author = _bind_provider(
+                    author,
+                    paper_id=paper_id,
                     family_id=family_id,
-                    request_key=request_key,
-                    reason_code=reason_code,
+                    source_version_id=source_version_id,
                 )
-                # audit 4.9 C8: the family keeps its in-flight call records, so the
-                # completed calls of an ambiguous charge stay visible for diagnosis
-                # instead of vanishing with the attempt.
-                counts.setdefault("incomplete_infra", 0)
-                counts["incomplete_infra"] += len(
-                    _incomplete_infra_records(db, campaign_id, family_id)
+                paper_verifier = _bind_provider(
+                    verifier,
+                    paper_id=paper_id,
+                    family_id=family_id,
+                    source_version_id=source_version_id,
                 )
-                counts.setdefault("operational_unresolved", 0)
-                counts["operational_unresolved"] += 1
-                counts["processed"] += 1
-                progress.increment("unresolved")
-                paper_results.append(
-                    {
-                        "candidate_key": candidate_key,
-                        "disposition": "operational_unresolved",
-                        "reason_codes": [reason_code],
-                        "source_id": None,
-                        "broker_request_key": request_key,
-                    }
-                )
-                progress.paper(
-                    paper_id=candidate_key,
-                    title=access.get("title"),
-                    current_stage="completed",
-                    final_state="unresolved",
-                    final_reason=reason_code,
-                )
-                continue
-            paper_author = _bind_provider(
-                author,
-                paper_id=paper_id,
-                family_id=family_id,
-                source_version_id=source_version_id,
-            )
-            paper_verifier = _bind_provider(
-                verifier,
-                paper_id=paper_id,
-                family_id=family_id,
-                source_version_id=source_version_id,
-            )
-            if verifier_broker is not None and (
-                eligibility is None
-                or eligibility.get("execution_authority") != "shared_gemini_broker"
-            ):
-                eligibility = None
-            if eligibility is None:
-                if not all(
-                    (
-                        eligibility_prompt_file,
-                        eligibility_schema_file,
-                        eligibility_policy_file,
-                    )
+                if verifier_broker is not None and (
+                    eligibility is None
+                    or eligibility.get("execution_authority") != "shared_gemini_broker"
                 ):
-                    raise ValueError(
-                        "streaming eligibility inputs are required for a newly ready paper"
-                    )
+                    eligibility = None
+                if eligibility is None:
+                    if not all(
+                        (
+                            eligibility_prompt_file,
+                            eligibility_schema_file,
+                            eligibility_policy_file,
+                        )
+                    ):
+                        raise ValueError(
+                            "streaming eligibility inputs are required for a newly ready paper"
+                        )
+                    try:
+                        eligibility = _run_eligibility(
+                            db,
+                            access,
+                            eligibility_run_dir,
+                            run_id=campaign_id,
+                            provider=paper_verifier,
+                            prompt_file=eligibility_prompt_file,
+                            schema_file=eligibility_schema_file,
+                            policy_file=eligibility_policy_file,
+                            rescreen_prompt_file=eligibility_rescreen_prompt_file,
+                        )
+                    except CountUnavailableError as error:
+                        # The free countTokens preflight of this paper stayed
+                        # unavailable past the broker's bounded retry. Nothing
+                        # was submitted and nothing was charged, so the family
+                        # is recorded and the run continues with the next paper.
+                        _record_count_unavailable(
+                            db,
+                            campaign_id=campaign_id,
+                            candidate_key=str(candidate_key),
+                            source_id=None,
+                            family_id=family_id,
+                            selected=selected,
+                            error=error,
+                        )
+                        with tally:
+                            counts[COUNT_UNAVAILABLE_REASON_CODE] += 1
+                            counts["processed"] += 1
+                            counted.append("processed")
+                            paper_results.append(
+                                {
+                                    "candidate_key": candidate_key,
+                                    "disposition": COUNT_UNAVAILABLE_REASON_CODE,
+                                    "reason_codes": [COUNT_UNAVAILABLE_REASON_CODE],
+                                    "source_id": None,
+                                }
+                            )
+                            counted.append("result")
+                        progress.increment(COUNT_UNAVAILABLE_REASON_CODE)
+                        progress.paper(
+                            paper_id=candidate_key,
+                            title=access.get("title"),
+                            current_stage="completed",
+                            final_state=COUNT_UNAVAILABLE_REASON_CODE,
+                            final_reason=COUNT_UNAVAILABLE_REASON_CODE,
+                        )
+                        return
+                    except PaperCostCapError as error:
+                        # The family reached the per-paper cost cap before it was
+                        # screened. Nothing is charged past the cap, so the family is
+                        # recorded and the run continues with the next paper.
+                        _record_paper_cost_cap(
+                            db,
+                            campaign_id=campaign_id,
+                            candidate_key=str(candidate_key),
+                            source_id=None,
+                            family_id=family_id,
+                            selected=selected,
+                            error=error,
+                            cost_state=_family_cost_state(paper_verifier, family_id),
+                        )
+                        with tally:
+                            counts["paper_cost_cap_reached"] += 1
+                            counts["processed"] += 1
+                            counted.append("processed")
+                            paper_results.append(
+                                {
+                                    "candidate_key": candidate_key,
+                                    "disposition": "paper_cost_cap_reached",
+                                    "reason_codes": [PAPER_COST_CAP_REASON_CODE],
+                                    "source_id": None,
+                                }
+                            )
+                            counted.append("result")
+                        progress.increment("paper_cost_cap_reached")
+                        progress.paper(
+                            paper_id=candidate_key,
+                            title=access.get("title"),
+                            current_stage="completed",
+                            final_state="paper_cost_cap_reached",
+                            final_reason=PAPER_COST_CAP_REASON_CODE,
+                        )
+                        return
+                    except Exception as error:
+                        progress.error(
+                            candidate_key, access.get("title"), "eligibility", error
+                        )
+                        raise
+                    with tally:
+                        eligibility_jobs[candidate_key] = eligibility
+                        if verifier_broker is None:
+                            decisions = [
+                                (item.get("validation") or {}).get("decision")
+                                for item in eligibility_jobs.values()
+                            ]
+                            progress.set_count(
+                                "eligible",
+                                sum(value == "eligible" for value in decisions),
+                            )
+                            progress.set_count(
+                                "eligibility_completed",
+                                sum(
+                                    value in {"eligible", "excluded", "uncertain"}
+                                    for value in decisions
+                                ),
+                            )
+                            progress.set_count(
+                                "excluded",
+                                sum(value == "excluded" for value in decisions),
+                            )
+                            progress.set_count(
+                                "unresolved",
+                                sum(value == "uncertain" for value in decisions),
+                            )
+                progress.write("running", "eligibility", f"Checking {candidate_key}.")
                 try:
-                    eligibility = _run_eligibility(
-                        db,
-                        access,
-                        eligibility_run_dir,
-                        run_id=campaign_id,
-                        provider=paper_verifier,
-                        prompt_file=eligibility_prompt_file,
-                        schema_file=eligibility_schema_file,
-                        policy_file=eligibility_policy_file,
-                        rescreen_prompt_file=eligibility_rescreen_prompt_file,
-                    )
-                except CountUnavailableError as error:
-                    # The free countTokens preflight of this paper stayed
-                    # unavailable past the broker's bounded retry. Nothing was
-                    # submitted and nothing was charged, so the family is
-                    # recorded and the run continues with the next paper.
-                    _record_count_unavailable(
-                        db,
-                        campaign_id=campaign_id,
-                        candidate_key=str(candidate_key),
-                        source_id=None,
-                        family_id=family_id,
-                        selected=selected,
-                        error=error,
-                    )
-                    counts[COUNT_UNAVAILABLE_REASON_CODE] += 1
-                    counts["processed"] += 1
-                    progress.increment(COUNT_UNAVAILABLE_REASON_CODE)
-                    paper_results.append(
-                        {
-                            "candidate_key": candidate_key,
-                            "disposition": COUNT_UNAVAILABLE_REASON_CODE,
-                            "reason_codes": [COUNT_UNAVAILABLE_REASON_CODE],
-                            "source_id": None,
+                    deterministic_unresolved = False
+                    if verifier_broker is not None:
+                        _validate_access_integrity(access, eligibility)
+                        validation = _validate_brokered_eligibility(
+                            eligibility,
+                            paper_verifier,
+                            access=access,
+                            prompt_file=eligibility_prompt_file,
+                            schema_file=eligibility_schema_file,
+                            policy_file=eligibility_policy_file,
+                            rescreen_prompt_file=eligibility_rescreen_prompt_file,
+                        )
+                        eligibility = {
+                            **eligibility,
+                            "state": _brokered_eligibility_state(
+                                eligibility, validation
+                            ),
+                            "validation": validation,
                         }
-                    )
-                    progress.paper(
-                        paper_id=candidate_key,
-                        title=access.get("title"),
-                        current_stage="completed",
-                        final_state=COUNT_UNAVAILABLE_REASON_CODE,
-                        final_reason=COUNT_UNAVAILABLE_REASON_CODE,
-                    )
-                    continue
-                except PaperCostCapError as error:
-                    # The family reached the per-paper cost cap before it was
-                    # screened. Nothing is charged past the cap, so the family is
-                    # recorded and the run continues with the next paper.
-                    _record_paper_cost_cap(
-                        db,
-                        campaign_id=campaign_id,
-                        candidate_key=str(candidate_key),
-                        source_id=None,
-                        family_id=family_id,
-                        selected=selected,
-                        error=error,
-                        cost_state=_family_cost_state(paper_verifier, family_id),
-                    )
-                    counts["paper_cost_cap_reached"] += 1
-                    counts["processed"] += 1
-                    progress.increment("paper_cost_cap_reached")
-                    paper_results.append(
-                        {
-                            "candidate_key": candidate_key,
-                            "disposition": "paper_cost_cap_reached",
-                            "reason_codes": [PAPER_COST_CAP_REASON_CODE],
-                            "source_id": None,
-                        }
-                    )
-                    progress.paper(
-                        paper_id=candidate_key,
-                        title=access.get("title"),
-                        current_stage="completed",
-                        final_state="paper_cost_cap_reached",
-                        final_reason=PAPER_COST_CAP_REASON_CODE,
-                    )
-                    continue
+                        deterministic_unresolved = validation["valid"] is not True
+                    if deterministic_unresolved:
+                        if validation.get("decision") != "uncertain":
+                            raise ValueError(
+                                "invalid deterministic eligibility must remain uncertain"
+                            )
+                    else:
+                        _validate_pair(access, eligibility)
                 except Exception as error:
                     progress.error(
                         candidate_key, access.get("title"), "eligibility", error
                     )
                     raise
-                eligibility_jobs[candidate_key] = eligibility
-                if verifier_broker is None:
-                    progress.set_count(
-                        "eligible",
-                        sum(
-                            (item.get("validation") or {}).get("decision") == "eligible"
-                            for item in eligibility_jobs.values()
-                        ),
-                    )
-                    progress.set_count(
-                        "eligibility_completed",
-                        sum(
-                            (item.get("validation") or {}).get("decision")
-                            in {"eligible", "excluded", "uncertain"}
-                            for item in eligibility_jobs.values()
-                        ),
-                    )
-                    progress.set_count(
-                        "excluded",
-                        sum(
-                            (item.get("validation") or {}).get("decision") == "excluded"
-                            for item in eligibility_jobs.values()
-                        ),
-                    )
-                    progress.set_count(
-                        "unresolved",
-                        sum(
-                            (item.get("validation") or {}).get("decision")
-                            == "uncertain"
-                            for item in eligibility_jobs.values()
-                        ),
-                    )
-            progress.write("running", "eligibility", f"Checking {candidate_key}.")
-            try:
-                deterministic_unresolved = False
+                decision = eligibility["validation"]["decision"]
                 if verifier_broker is not None:
-                    _validate_access_integrity(access, eligibility)
-                    validation = _validate_brokered_eligibility(
-                        eligibility,
-                        paper_verifier,
-                        access=access,
-                        prompt_file=eligibility_prompt_file,
-                        schema_file=eligibility_schema_file,
-                        policy_file=eligibility_policy_file,
-                        rescreen_prompt_file=eligibility_rescreen_prompt_file,
-                    )
-                    eligibility = {
-                        **eligibility,
-                        "state": _brokered_eligibility_state(eligibility, validation),
-                        "validation": validation,
-                    }
-                    deterministic_unresolved = validation["valid"] is not True
-                if deterministic_unresolved:
-                    if validation.get("decision") != "uncertain":
-                        raise ValueError(
-                            "invalid deterministic eligibility must remain uncertain"
+                    with tally:
+                        trusted_eligibility_decisions[candidate_key] = decision
+                        decisions = list(trusted_eligibility_decisions.values())
+                        progress.set_count("eligibility_completed", len(decisions))
+                        progress.set_count(
+                            "eligible",
+                            sum(value == "eligible" for value in decisions),
                         )
-                else:
-                    _validate_pair(access, eligibility)
-            except Exception as error:
-                progress.error(candidate_key, access.get("title"), "eligibility", error)
-                raise
-            decision = eligibility["validation"]["decision"]
-            if verifier_broker is not None:
-                trusted_eligibility_decisions[candidate_key] = decision
-                progress.set_count(
-                    "eligibility_completed", len(trusted_eligibility_decisions)
-                )
-                progress.set_count(
-                    "eligible",
-                    sum(
-                        value == "eligible"
-                        for value in trusted_eligibility_decisions.values()
-                    ),
-                )
-                progress.set_count(
-                    "excluded",
-                    sum(
-                        value == "excluded"
-                        for value in trusted_eligibility_decisions.values()
-                    ),
-                )
-                progress.set_count(
-                    "unresolved",
-                    sum(
-                        value == "uncertain"
-                        for value in trusted_eligibility_decisions.values()
-                    ),
-                )
-            if decision != "eligible":
-                validation = eligibility["validation"]
-                unresolved = validation["valid"] is not True or decision == "uncertain"
-                reason_codes = (
-                    validation.get("errors") or ["eligibility_validation_unresolved"]
-                    if validation["valid"] is not True
-                    else validation.get(
-                        "overall_reason_codes",
-                        eligibility["parsed_response"].get(
-                            "overall_reason_codes", ["eligibility_unresolved"]
-                        ),
+                        progress.set_count(
+                            "excluded",
+                            sum(value == "excluded" for value in decisions),
+                        )
+                        progress.set_count(
+                            "unresolved",
+                            sum(value == "uncertain" for value in decisions),
+                        )
+                if decision != "eligible":
+                    validation = eligibility["validation"]
+                    unresolved = (
+                        validation["valid"] is not True or decision == "uncertain"
                     )
-                )
-                disposition = (
-                    "eligibility_unresolved" if unresolved else "eligibility_rejected"
-                )
-                for reason_code in reason_codes:
-                    with db.transaction():
-                        db.connection.execute(
-                            """INSERT OR IGNORE INTO rejection_ledger
-                            (rejection_id,item_id,source_id,stage,reason_code,detail_json,created_at)
-                            VALUES (?,NULL,NULL,'scientific_eligibility',?,?,?)""",
-                            (
-                                stable_id(
-                                    "rejection",
-                                    campaign_id,
-                                    candidate_key,
-                                    "scientific_eligibility",
-                                    reason_code,
-                                ),
-                                reason_code,
-                                canonical_json(
-                                    {
-                                        "candidate_key": candidate_key,
-                                        "eligibility_job_key": eligibility["job_key"],
-                                        "decision": decision,
-                                        "validation_valid": validation["valid"],
-                                        "validation_errors": validation.get(
-                                            "errors", []
-                                        ),
-                                        "selection": selected,
-                                    }
-                                ),
-                                now(),
+                    reason_codes = (
+                        validation.get("errors")
+                        or ["eligibility_validation_unresolved"]
+                        if validation["valid"] is not True
+                        else validation.get(
+                            "overall_reason_codes",
+                            eligibility["parsed_response"].get(
+                                "overall_reason_codes", ["eligibility_unresolved"]
                             ),
                         )
-                paper_results.append(
-                    {
-                        "candidate_key": candidate_key,
-                        "disposition": disposition,
-                        "reason_codes": reason_codes,
-                        "source_id": None,
-                    }
-                )
-                counts[disposition] += 1
-                counts["processed"] += 1
-                progress.paper(
-                    paper_id=candidate_key,
-                    title=access.get("title"),
-                    current_stage="completed",
-                    final_state="unresolved" if unresolved else "rejected",
-                    final_reason=reason_codes[0],
-                )
-                continue
-            try:
-                source_id = _import_source(
+                    )
+                    disposition = (
+                        "eligibility_unresolved"
+                        if unresolved
+                        else "eligibility_rejected"
+                    )
+                    for reason_code in reason_codes:
+                        with db.transaction():
+                            db.connection.execute(
+                                """INSERT OR IGNORE INTO rejection_ledger
+                                (rejection_id,item_id,source_id,stage,reason_code,detail_json,created_at)
+                                VALUES (?,NULL,NULL,'scientific_eligibility',?,?,?)""",
+                                (
+                                    stable_id(
+                                        "rejection",
+                                        campaign_id,
+                                        candidate_key,
+                                        "scientific_eligibility",
+                                        reason_code,
+                                    ),
+                                    reason_code,
+                                    canonical_json(
+                                        {
+                                            "candidate_key": candidate_key,
+                                            "eligibility_job_key": eligibility[
+                                                "job_key"
+                                            ],
+                                            "decision": decision,
+                                            "validation_valid": validation["valid"],
+                                            "validation_errors": validation.get(
+                                                "errors", []
+                                            ),
+                                            "selection": selected,
+                                        }
+                                    ),
+                                    now(),
+                                ),
+                            )
+                    with tally:
+                        paper_results.append(
+                            {
+                                "candidate_key": candidate_key,
+                                "disposition": disposition,
+                                "reason_codes": reason_codes,
+                                "source_id": None,
+                            }
+                        )
+                        counted.append("result")
+                        counts[disposition] += 1
+                        counts["processed"] += 1
+                        counted.append("processed")
+                    progress.paper(
+                        paper_id=candidate_key,
+                        title=access.get("title"),
+                        current_stage="completed",
+                        final_state="unresolved" if unresolved else "rejected",
+                        final_reason=reason_codes[0],
+                    )
+                    return
+                try:
+                    source_id = _import_source(
+                        db,
+                        namespace,
+                        access,
+                        selected,
+                        eligibility,
+                        family_id=family_id,
+                    )
+                except Exception as error:
+                    progress.error(
+                        candidate_key, access.get("title"), "source_import", error
+                    )
+                    raise
+                generation_result = _progress_generation(
                     db,
                     namespace,
-                    access,
-                    selected,
-                    eligibility,
+                    progress,
+                    campaign_id=campaign_id,
+                    candidate_key=str(candidate_key),
+                    source_id=source_id,
                     family_id=family_id,
+                    selected=selected,
+                    source_version_id=source_version_id,
+                    title=access.get("title"),
+                    author=paper_author,
+                    verifier=paper_verifier,
+                    option_workers=option_workers,
+                )
+                disposition = generation_result["disposition"]
+                reason_codes = generation_result["reason_codes"]
+                with tally:
+                    if generation_result["resumed"]:
+                        resumed_papers += 1
+                    counts[
+                        {
+                            "generation_rejected": "generation_rejected",
+                            "accepted": "accepted_base_questions",
+                            "incomplete_non_mcq": "incomplete_non_mcq",
+                            "paper_cost_cap_reached": "paper_cost_cap_reached",
+                        }[disposition]
+                    ] += 1
+                    counts["processed"] += 1
+                    counted.append("processed")
+                    paper_results.append(
+                        {
+                            "candidate_key": candidate_key,
+                            "disposition": disposition,
+                            "reason_codes": reason_codes,
+                            "source_id": source_id,
+                        }
+                    )
+                    counted.append("result")
+                if disposition == "generation_rejected":
+                    progress.increment("generation_rejected")
+                elif disposition == "paper_cost_cap_reached":
+                    progress.increment("paper_cost_cap_reached")
+                elif disposition == "accepted":
+                    progress.set_count("accepted_qa", _accepted_count(db, campaign_id))
+                progress.paper(
+                    paper_id=source_id,
+                    title=access.get("title"),
+                    current_stage="completed",
+                    final_state=disposition,
+                    final_reason=(
+                        "machine_accepted_unverified"
+                        if disposition == "accepted"
+                        else (reason_codes or [disposition])[0]
+                    ),
                 )
             except Exception as error:
-                progress.error(
-                    candidate_key, access.get("title"), "source_import", error
+                if _ends_the_run(error):
+                    raise
+                fault = _contain_candidate_processing_fault(
+                    db,
+                    progress,
+                    campaign_id=campaign_id,
+                    candidate_key=str(candidate_key),
+                    source_id=source_id,
+                    family_id=family_id,
+                    selected=selected,
+                    title=access.get("title"),
+                    provider=verifier,
+                    error=error,
                 )
-                raise
-            generation_result = _progress_generation(
-                db,
-                namespace,
-                progress,
-                campaign_id=campaign_id,
-                candidate_key=str(candidate_key),
-                source_id=source_id,
-                family_id=family_id,
-                selected=selected,
-                source_version_id=source_version_id,
-                title=access.get("title"),
-                author=paper_author,
-                verifier=paper_verifier,
-            )
-            if generation_result["resumed"]:
-                resumed_papers += 1
-            disposition = generation_result["disposition"]
-            reason_codes = generation_result["reason_codes"]
-            counts[
-                {
-                    "generation_rejected": "generation_rejected",
-                    "accepted": "accepted_base_questions",
-                    "incomplete_non_mcq": "incomplete_non_mcq",
-                    "paper_cost_cap_reached": "paper_cost_cap_reached",
-                }[disposition]
-            ] += 1
-            counts["processed"] += 1
-            if disposition == "generation_rejected":
-                progress.increment("generation_rejected")
-            elif disposition == "paper_cost_cap_reached":
-                progress.increment("paper_cost_cap_reached")
-            elif disposition == "accepted":
-                progress.set_count("accepted_qa", _accepted_count(db, campaign_id))
-            paper_results.append(
-                {
-                    "candidate_key": candidate_key,
-                    "disposition": disposition,
-                    "reason_codes": reason_codes,
-                    "source_id": source_id,
-                }
-            )
-            progress.paper(
-                paper_id=source_id,
-                title=access.get("title"),
-                current_stage="completed",
-                final_state=disposition,
-                final_reason=(
-                    "machine_accepted_unverified"
-                    if disposition == "accepted"
-                    else (reason_codes or [disposition])[0]
-                ),
-            )
-        except Exception as error:
-            if _ends_the_run(error):
-                raise
-            fault = _contain_candidate_processing_fault(
-                db,
-                progress,
-                campaign_id=campaign_id,
-                candidate_key=str(candidate_key),
-                source_id=source_id,
-                family_id=family_id,
-                selected=selected,
-                title=access.get("title"),
-                provider=verifier,
-                error=error,
-            )
-            counts[CANDIDATE_PROCESSING_FAULT_REASON_CODE] += 1
-            progress.increment(CANDIDATE_PROCESSING_FAULT_REASON_CODE)
-            # The paper is counted one time. A fault after its own disposition
-            # was already recorded keeps that record and adds no second row.
-            if counts["processed"] == processed_before:
-                counts["processed"] += 1
-            if len(paper_results) == results_before:
-                paper_results.append(
-                    {
-                        "candidate_key": candidate_key,
-                        "disposition": CANDIDATE_PROCESSING_FAULT_REASON_CODE,
-                        "reason_codes": [CANDIDATE_PROCESSING_FAULT_REASON_CODE],
-                        "source_id": source_id,
-                        "candidate_processing_fault": fault,
-                    }
-                )
+                with tally:
+                    counts[CANDIDATE_PROCESSING_FAULT_REASON_CODE] += 1
+                    # The paper is counted one time. A fault after its own
+                    # disposition was already recorded keeps that record and
+                    # adds no second row.
+                    if "processed" not in counted:
+                        counts["processed"] += 1
+                    if "result" not in counted:
+                        paper_results.append(
+                            {
+                                "candidate_key": candidate_key,
+                                "disposition": (CANDIDATE_PROCESSING_FAULT_REASON_CODE),
+                                "reason_codes": [
+                                    CANDIDATE_PROCESSING_FAULT_REASON_CODE
+                                ],
+                                "source_id": source_id,
+                                "candidate_processing_fault": fault,
+                            }
+                        )
+                progress.increment(CANDIDATE_PROCESSING_FAULT_REASON_CODE)
+                return
+        except BaseException as error:  # noqa: BLE001 - re-raised below
+            # A run-ending error stops the pick-up of new papers. The
+            # papers already in flight finish, then the error is raised
+            # out of run_stream as it was before, ahead of the export.
+            stop.set()
+            with tally:
+                fatal.append(error)
+
+    ready: list[dict[str, Any]] = []
+    for selected in selection:
+        if len(ready) >= max_papers:
+            break
+        access = access_items.get(selected.get("candidate_key"))
+        if access is None or access.get("access_state") != "full_text_ready":
             continue
+        ready.append(selected)
+    if paper_workers > 1 and len(ready) > 1:
+        with ThreadPoolExecutor(
+            max_workers=paper_workers, thread_name_prefix="paper"
+        ) as pool:
+            for future in [pool.submit(process_paper, item) for item in ready]:
+                future.result()
+    else:
+        for selected in ready:
+            process_paper(selected)
+    if fatal:
+        raise fatal[0]
+    order = {
+        str(item.get("candidate_key")): position
+        for position, item in enumerate(selection)
+    }
+    paper_results.sort(key=lambda row: order.get(str(row["candidate_key"]), 0))
     progress.write("running", "export", "Writing validated dataset exports.")
     try:
         exported = export_run(
@@ -995,6 +1064,10 @@ def run_stream(
     live_provider = bool(getattr(author, "externally_metered", False))
     generation_counts = _generation_counts(db, campaign_id)
     result = {
+        "concurrency": {
+            "paper_workers": paper_workers,
+            "option_workers": option_workers,
+        },
         "state": "completed",
         "run_id": run_id,
         "campaign_id": campaign_id,
@@ -1030,6 +1103,7 @@ def _progress_generation(
     verifier: Provider,
     source_version_id: str = "",
     pending_handler: Callable[[dict[str, Any]], None] | None = None,
+    option_workers: int = 1,
 ) -> dict[str, Any]:
     try:
         paths = _generation_paths(
@@ -1243,6 +1317,7 @@ def _progress_generation(
                 attempt=next_attempt,
                 author=author,
                 verifier=verifier,
+                option_workers=option_workers,
             )
         except (CandidateRejectedError, ProviderResponseError) as error:
             reason_code = error.reason_code
@@ -1421,6 +1496,18 @@ def _progress_generation(
                 }
 
 
+def _supports_option_workers() -> bool:
+    try:
+        parameters = inspect.signature(generate_candidate).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == "option_workers"
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
 def _supports_generation_attempt() -> bool:
     try:
         parameters = inspect.signature(generate_candidate).parameters.values()
@@ -1442,6 +1529,7 @@ def _generate_candidate_attempt(
     attempt: dict[str, Any],
     author: Provider,
     verifier: Provider,
+    option_workers: int = 1,
 ) -> dict[str, Any]:
     # One attempt drives several roles, each with its own stage timeout. The
     # broker applies the exact per-stage timeout itself, so this caller value
@@ -1465,6 +1553,8 @@ def _generate_candidate_attempt(
         "retries": 0,
         "rate_limit_seconds": 0,
     }
+    if option_workers > 1 and _supports_option_workers():
+        arguments["option_workers"] = option_workers
     if _supports_generation_attempt():
         arguments["generation_attempt"] = attempt
     return generate_candidate(db, namespace, **arguments)
@@ -3866,37 +3956,52 @@ class _Progress:
         self.broker_status_file: Path | None = None
         self.budget_policy_file: Path | None = None
         self.dataset_metadata_file: Path | None = None
+        # Several papers write this one progress file at once, so every state
+        # change and every file write is taken under one reentrant lock.
+        self._lock = threading.RLock()
         # The stage the last recorded error landed on. The containment path
-        # reads it to name the stage on a settled paper fault.
-        self.last_error_stage: str | None = None
+        # reads it to name the stage on a settled paper fault. It belongs to
+        # the paper that raised, so it is per thread.
+        self._error_stage = threading.local()
+
+    @property
+    def last_error_stage(self) -> str | None:
+        return getattr(self._error_stage, "stage", None)
+
+    @last_error_stage.setter
+    def last_error_stage(self, stage: str | None) -> None:
+        self._error_stage.stage = stage
 
     def write(self, state: str, stage: str, message: str) -> None:
-        self.state = state
-        self.stage = stage
-        self.message = message
-        custody: dict[str, str] = {
-            "run_manifest_sha256": sha256_file(self.run_manifest_file)
-        }
-        if self.broker_status_file is not None:
-            custody["broker_status_sha256"] = sha256_file(self.broker_status_file)
-            custody["budget_policy_sha256"] = sha256_file(self.budget_policy_file)
-        if self.dataset_metadata_file is not None:
-            custody["dataset_metadata_sha256"] = sha256_file(self.dataset_metadata_file)
-        atomic_json(
-            self.path,
-            {
-                "schema": "streaming-dataset-progress-v1",
-                "state": state,
-                "run_id": self.run_id,
-                "invocation_run_id": self.invocation_run_id,
-                "current_stage": stage,
-                "updated_at_utc": now(),
-                "message": message,
-                "counts": self.counts,
-                "recent_papers": self.recent[-100:],
-                **custody,
-            },
-        )
+        with self._lock:
+            self.state = state
+            self.stage = stage
+            self.message = message
+            custody: dict[str, str] = {
+                "run_manifest_sha256": sha256_file(self.run_manifest_file)
+            }
+            if self.broker_status_file is not None:
+                custody["broker_status_sha256"] = sha256_file(self.broker_status_file)
+                custody["budget_policy_sha256"] = sha256_file(self.budget_policy_file)
+            if self.dataset_metadata_file is not None:
+                custody["dataset_metadata_sha256"] = sha256_file(
+                    self.dataset_metadata_file
+                )
+            atomic_json(
+                self.path,
+                {
+                    "schema": "streaming-dataset-progress-v1",
+                    "state": state,
+                    "run_id": self.run_id,
+                    "invocation_run_id": self.invocation_run_id,
+                    "current_stage": stage,
+                    "updated_at_utc": now(),
+                    "message": message,
+                    "counts": dict(self.counts),
+                    "recent_papers": self.recent[-100:],
+                    **custody,
+                },
+            )
 
     def attach_broker(self, broker: Any) -> None:
         self.broker_status_file = broker.ledger_file.with_name(
@@ -3918,10 +4023,12 @@ class _Progress:
         self.write(self.state, self.stage, self.message)
 
     def increment(self, name: str) -> None:
-        self.counts[name] = int(self.counts.get(name, 0)) + 1
+        with self._lock:
+            self.counts[name] = int(self.counts.get(name, 0)) + 1
 
     def set_count(self, name: str, value: int) -> None:
-        self.counts[name] = value
+        with self._lock:
+            self.counts[name] = value
 
     def paper(
         self,
@@ -3939,10 +4046,11 @@ class _Progress:
             "final_state": final_state,
             "final_reason": final_reason,
         }
-        self.recent = [
-            old for old in self.recent if old.get("paper_id") != paper_id
-        ] + [row]
-        self.write("running", current_stage, f"Processing {paper_id}.")
+        with self._lock:
+            self.recent = [
+                old for old in self.recent if old.get("paper_id") != paper_id
+            ] + [row]
+            self.write("running", current_stage, f"Processing {paper_id}.")
 
     def error(
         self,
@@ -3952,14 +4060,15 @@ class _Progress:
         error: Exception,
     ) -> None:
         self.last_error_stage = stage
-        self.paper(
-            paper_id=paper_id,
-            title=title,
-            current_stage=stage,
-            final_state="error",
-            final_reason=type(error).__name__,
-        )
-        self.write("error", stage, f"Streaming stopped on {type(error).__name__}.")
+        with self._lock:
+            self.paper(
+                paper_id=paper_id,
+                title=title,
+                current_stage=stage,
+                final_state="error",
+                final_reason=type(error).__name__,
+            )
+            self.write("error", stage, f"Streaming stopped on {type(error).__name__}.")
 
 
 def _read(path: Path) -> dict[str, Any]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -2013,7 +2014,10 @@ def generate_candidate(
     billable_token_overhead: int = 1024,
     pricing_usd_per_million_tokens: dict[str, Decimal] | None = None,
     generation_attempt: dict[str, Any] | None = None,
+    option_workers: int = 1,
 ) -> dict[str, Any]:
+    if option_workers < 1:
+        raise ValueError("option workers must be at least 1")
     source = db.one("SELECT * FROM sources WHERE source_id=?", (source_id,))
     if not source:
         raise ValueError(f"unknown source: {source_id}")
@@ -2989,6 +2993,7 @@ def generate_candidate(
                 if distractor_only_retry
                 else None
             ),
+            option_workers=option_workers,
         )
     option_call_plan = _option_verification_call_plan(
         option_stage, attempted=distractors, prefiltered=prefiltered_options
@@ -3642,6 +3647,7 @@ def _generate_distractors(
     rate_limit_seconds: float,
     attempt_id: str | None = None,
     option_feedback: list[dict[str, Any]] | None = None,
+    option_workers: int = 1,
 ) -> tuple[
     list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]
 ]:
@@ -3747,18 +3753,14 @@ def _generate_distractors(
     # A compound or negated option counts toward the target only when the
     # verdict comes from a model other than the writer (r15 audit 4.8 item 3).
     independent_verdict = provider_model(verifier, "option_verifier") != author.model
-    for distractor in distractors:
-        if len(verified) >= OPTION_VERIFIED_TARGET:
-            # Rank-order stop: the writer ranked its proposals and three are
-            # verified, so the rest buy nothing. They are recorded, not judged.
-            deferred.append(
-                {
-                    "option_text": str(distractor.get("text", "")),
-                    "reason_code": "option_verification_deferred",
-                }
-            )
-            continue
-        attempted.append(distractor)
+
+    def verify_one(distractor: dict[str, Any]) -> dict[str, Any]:
+        """Buy one hash-bound verdict for one option.
+
+        The call is independent of every other option's call, so a wave of
+        them runs at once. Nothing here touches the shared lists; the caller
+        merges the returned records in rank order.
+        """
         option_hash = stable_id(
             "option", qa_hash, distractor.get("text"), distractor.get("type")
         )
@@ -3796,6 +3798,7 @@ def _generate_distractors(
             rate_limit_seconds,
             system=OPTION_VERIFIER_SYSTEM,
         )
+        reask = None
         if option_verdict_is_malformed(result.payload):
             # D1 fix 5: a true admission flag with no stated reading is a
             # malformed response. Re-ask once with the rule quoted back; the
@@ -3817,13 +3820,11 @@ def _generate_distractors(
                 rate_limit_seconds,
                 system=OPTION_VERIFIER_SYSTEM,
             )
-            reasks.append(
-                {
-                    "option_text": str(distractor.get("text", "")),
-                    "reason": "option_admission_unexplained",
-                    "reask_count": 1,
-                }
-            )
+            reask = {
+                "option_text": str(distractor.get("text", "")),
+                "reason": "option_admission_unexplained",
+                "reask_count": 1,
+            }
         resolved = _resolve_source_span(
             result.payload,
             context_spans,
@@ -3841,11 +3842,49 @@ def _generate_distractors(
                 system=OPTION_VERIFIER_SYSTEM,
             ),
         }
-        verdicts.append(verdict)
-        if _option_verdict_verified(
-            distractor, verdict, independent=independent_verdict
-        ):
-            verified.append((distractor, option_hash))
+        return {
+            "distractor": distractor,
+            "option_hash": option_hash,
+            "verdict": verdict,
+            "reask": reask,
+        }
+
+    # Rank-order stop, kept exactly (docs/STREAMING_DATASET.md, "Chapter 3
+    # call plan"): verification ends once OPTION_VERIFIED_TARGET distractors
+    # are verified, and the rest are recorded as a reserve. Concurrency moves
+    # the stop to a wave boundary instead of a call boundary: a wave is never
+    # wider than the options still needed, so a run whose wave all verifies
+    # buys the same calls it bought one at a time.
+    remaining = list(distractors)
+    while remaining and len(verified) < OPTION_VERIFIED_TARGET:
+        width = min(option_workers, OPTION_VERIFIED_TARGET - len(verified))
+        wave = remaining[:width]
+        remaining = remaining[width:]
+        attempted.extend(wave)
+        if len(wave) == 1:
+            records = [verify_one(wave[0])]
+        else:
+            with ThreadPoolExecutor(
+                max_workers=len(wave), thread_name_prefix="option"
+            ) as pool:
+                records = list(pool.map(verify_one, wave))
+        for record in records:
+            if record["reask"] is not None:
+                reasks.append(record["reask"])
+            verdicts.append(record["verdict"])
+            if _option_verdict_verified(
+                record["distractor"], record["verdict"], independent=independent_verdict
+            ):
+                verified.append((record["distractor"], record["option_hash"]))
+    for distractor in remaining:
+        # Rank-order stop: the writer ranked its proposals and the target is
+        # met, so the rest buy nothing. They are recorded, not judged.
+        deferred.append(
+            {
+                "option_text": str(distractor.get("text", "")),
+                "reason_code": "option_verification_deferred",
+            }
+        )
     set_verdict = None
     if len(verified) >= OPTION_VERIFIED_TARGET:
         set_verdict = _verify_option_set(
