@@ -171,7 +171,9 @@ The metrics come from `abstention_score.metrics_from_counts`, the same function 
 ## 6. Deployment
 
 The branch is rebased onto `main` at `183779b`, so the merge stays a fast-forward.
-The viewer service and the guard service both run a read-only runtime snapshot of the branch tip `2942738`.
+The viewer service and the guard service both run a read-only runtime snapshot of commit `2942738`.
+That is the last commit of the branch that changes code.
+The commits after it change only this report and `docs/BENCHMARK_GUARD.md`.
 The snapshot is `/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-benchmark-guard-site-r1/runtime/app-2942738-arctic-benchmark-guard-site-r1`.
 The exact unit command is below.
 It is the previous command of `arctic-corpus-stage-r1-formatting.service` with two changes: the new snapshot path, and the two new benchmark options.
