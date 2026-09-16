@@ -121,11 +121,13 @@ The Codex projection rule needs proof that the benchmark drives the burn.
 `quota-axi` gives no per-caller attribution, and the Claude and Codex quotas are shared with every agent session on this machine.
 The guard therefore proves the only thing it can prove: the evaluator still polls, and the benchmark booked more Codex calls than in the previous cycle.
 When the evaluator is idle, the burn belongs to the other sessions and a pause would save nothing.
+The first cycle after a restart has no earlier count to compare against, so this rule measures before it can act.
 
 ## Which model the guard pauses
 
 A fired rule names the models of its vendor from the evaluation plan.
-The guard pauses one model per fired rule per cycle: the model with the highest cost per question that nothing pauses yet.
+The guard pauses at most one model of each affected vendor per cycle: the model with the highest cost per question that nothing pauses yet.
+Two rules of one vendor say the same thing, that the vendor is running out, so the first fired rule of that vendor owns the pause.
 The captain set that tie-break for Gemini and the guard applies it to every vendor.
 A Gemini model ranks by real USD.
 A subscription model ranks by the list-price equivalent of its tokens, which is the only per-model number that tracks how hard it leans on the shared quota.
@@ -226,6 +228,6 @@ A model that only the ledger knows, such as an earlier canary model, is marked "
 
 - The guard has no attribution for the Claude and Codex quotas. It sees the whole account window, which every agent session on this machine shares. A pause helps only when the benchmark is the main consumer of that window.
 - The guard reads the ledger without a write lock, under the shared lock of the ledger file. A number can be one cycle old.
-- The guard pauses one model per fired rule per cycle. A vendor whose whole quota collapses needs as many cycles as it has models.
+- The guard pauses one model of each affected vendor per cycle. A vendor whose whole quota collapses needs as many cycles as it has models.
 - A pause is inert until the evaluator reads the same pause file. Confirm the path of the evaluator launcher before you rely on the guard.
 - When `quota-axi` cannot run, no quota rule fires. The guard records the error in `guard-state.json`, and the viewer shows it. A missing quota reading never causes a pause.

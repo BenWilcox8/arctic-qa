@@ -751,3 +751,40 @@ def test_the_command_line_runs_one_cycle_against_a_recorded_report(
     assert state["schema"] == "benchmark-guard-state-v1"
     assert state["errors"] == []
     assert state["quota"]["claude_session"]["percent_remaining"] == 84
+
+
+def test_two_rules_of_one_vendor_pause_only_one_model(
+    workspace: dict[str, Path],
+) -> None:
+    # A Codex weekly window below 10 percent and an exhaustion projected before
+    # the reset both say the same thing, so one model is enough.
+    guard = BenchmarkGuard(
+        journal_dir=workspace["journal"],
+        guard_dir=workspace["guard"],
+        pause_file=workspace["pause"],
+        shared_ledger_file=workspace["ledger"],
+        construction_policy_file=workspace["construction"],
+        evaluation_policy_file=workspace["evaluation"],
+        recorded_quota_file=CODEX_LOW,
+    )
+    state = guard.cycle(now=NOW)
+    codex = [
+        action for action in state["actions"] if action["vendor"] == VENDOR_OPENAI_CODEX
+    ]
+    assert len(codex) == 1
+    assert codex[0]["rule"] == "codex_weekly_window_floor"
+
+
+def test_the_codex_projection_waits_for_a_second_cycle(
+    workspace: dict[str, Path],
+) -> None:
+    # The evaluator is polling, but the first cycle has no earlier call count to
+    # compare against, so the guard measures before it acts.
+    watch = workspace["journal"] / "watch-state.json"
+    record = json.loads(watch.read_text(encoding="utf-8"))
+    record["updated_at_utc"] = "2026-09-16T11:58:00Z"
+    watch.write_text(json.dumps(record), encoding="utf-8")
+    guard = guard_for(workspace, RECORDED_QUOTA)
+    first = guard.cycle(now=NOW)
+    assert first["benchmark_is_main_codex_consumer"] is False
+    assert rule(first["rules"], "codex_projected_exhaustion")["fired"] is False

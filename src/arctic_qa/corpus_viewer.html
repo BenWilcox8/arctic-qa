@@ -2370,7 +2370,7 @@
     function renderLiveBenchmark(data) {
       const guard = data.guard || {};
       setBadge($('benchmark-state'), data.availability === 'available'
-        ? ((data.evaluator || {}).running ? 'running' : 'paused')
+        ? ((data.evaluator || {}).running ? 'running' : 'not_running')
         : data.availability);
       $('benchmark-detail').textContent = data.message;
       const guardAge = guard.present
@@ -2389,7 +2389,7 @@
       const phase = guard.evaluation_phase || {};
       const expectation = guard.expectation || {};
       $('benchmark-budget-detail').textContent = guard.present
-        ? `Gemini evaluation spend counts against the captain's USD ${budget.budget_usd || '200.00'} allocation and against the ledger's benchmark_evaluation ceiling. The extrapolation projects the spend so far at its own cost per question over the ${formatNumber(expectation.questions_still_expected)} questions the chapter 3 run is still expected to accept (${label(expectation.binding_bound)} bound).`
+        ? `Gemini evaluation spend counts against the captain's USD ${budget.budget_usd || '200.00'} allocation and against the benchmark_evaluation ceiling of USD ${Number(phase.ceiling_usd ?? 0).toFixed(2)} that policy ${phase.policy_id || 'not selected'} sets. The extrapolation projects the spend so far at its own cost per question over the ${formatNumber(expectation.questions_still_expected)} questions the chapter 3 run is still expected to accept (${label(expectation.binding_bound)} bound).`
         : 'The cost and quota guard has written no state file yet, so no budget reading is available.';
       $('benchmark-budget-counts').replaceChildren(
         countBox('Gemini spent', usd(budget.spend_so_far_usd)),

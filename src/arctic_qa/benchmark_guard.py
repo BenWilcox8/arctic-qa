@@ -1186,6 +1186,10 @@ class BenchmarkGuard:
         """
         if not activity.get("running"):
             return False
+        if not previous.get("models"):
+            # The first cycle has nothing to compare against. The guard measures
+            # now and can act on the next cycle.
+            return False
         current = sum(
             entry["calls"]
             for entry in readings.values()
@@ -1251,15 +1255,24 @@ class BenchmarkGuard:
         readings: dict[str, dict[str, Any]],
         now: datetime,
     ) -> list[dict[str, Any]]:
-        """Pause one model per fired rule and resume what no rule holds."""
+        """Pause one model of each affected vendor and resume what no rule holds.
+
+        Two rules of one vendor say the same thing: that vendor is running out.
+        The guard therefore pauses at most one model per vendor per cycle, and
+        the first fired rule of that vendor owns the pause. The captain asked
+        for a pause to be rare.
+        """
         models = dict(pause.get("paused_models") or {})
         actions: list[dict[str, Any]] = []
         fired = [finding for finding in findings if finding["fired"]]
         held_by_rule: dict[str, set[str]] = {}
         for finding in fired:
             held_by_rule[finding["rule"]] = set(finding["candidate_models"])
+        acted_vendors: set[str] = set()
 
         for finding in fired:
+            if finding["vendor"] in acted_vendors:
+                continue
             already = {
                 model
                 for model, entry in active_pauses(
@@ -1269,6 +1282,7 @@ class BenchmarkGuard:
             chosen = select_pause_model(finding["candidate_models"], readings, already)
             if chosen is None:
                 continue
+            acted_vendors.add(finding["vendor"])
             reading = readings.get(chosen) or {}
             models[chosen] = {
                 "reason": finding["detail"],
