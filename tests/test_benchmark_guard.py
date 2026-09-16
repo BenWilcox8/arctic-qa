@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from arctic_qa.benchmark_guard import (
+    CODEX_ATTRIBUTION_WINDOW_SECONDS,
     CODEX_WEEKLY_FLOOR_PERCENT,
     FABLE_MODEL,
     GUARD_LOG_FILENAME,
+    GUARD_MEMORY_FILENAME,
     GUARD_OWNER,
     GUARD_STATE_FILENAME,
     PAUSE_SCHEMA,
     PLAN_MODELS_BY_VENDOR,
+    REPAUSE_HOLD_SECONDS,
+    RESUME_CLEAR_CYCLES,
     VENDOR_ANTHROPIC_CLAUDE_CODE,
     VENDOR_GOOGLE_GEMINI,
     VENDOR_OPENAI_CODEX,
@@ -40,6 +44,11 @@ CODEX_LOW = FIXTURES / "quota-axi-codex-weekly-low.json"
 CODEX_EXHAUSTION_CLEAR = FIXTURES / "quota-axi-codex-exhaustion-clear.json"
 
 NOW = datetime(2026, 9, 16, 12, 0, tzinfo=UTC)
+CYCLE = timedelta(seconds=300)
+# The live guard's Codex weekly window resets on 2026-09-20; a projection
+# before that date is what the exhaustion rule reads.
+EXHAUSTION_BEFORE_RESET = "2026-09-17T08:25:34.709Z"
+EXHAUSTION_AFTER_RESET = "2026-09-21T00:00:00.000Z"
 
 
 def windows_of(path: Path) -> dict:
@@ -374,7 +383,7 @@ def test_codex_projected_exhaustion_needs_the_benchmark_to_be_the_main_consumer(
         evaluation_ceiling_usd=Decimal("200.00"),
         evaluation_used_usd=Decimal("1.00"),
         windows=windows,
-        benchmark_drives_codex=False,
+        codex_attribution_record={"drives": False},
         now=NOW,
     )
     driving = evaluate_rules(
@@ -382,7 +391,7 @@ def test_codex_projected_exhaustion_needs_the_benchmark_to_be_the_main_consumer(
         evaluation_ceiling_usd=Decimal("200.00"),
         evaluation_used_usd=Decimal("1.00"),
         windows=windows,
-        benchmark_drives_codex=True,
+        codex_attribution_record={"drives": True},
         now=NOW,
     )
     # The recorded report projects exhaustion on 2026-09-17, before the
@@ -400,7 +409,7 @@ def test_codex_projected_exhaustion_clears_when_the_projection_passes_the_reset(
         evaluation_ceiling_usd=Decimal("200.00"),
         evaluation_used_usd=Decimal("1.00"),
         windows=windows_of(CODEX_EXHAUSTION_CLEAR),
-        benchmark_drives_codex=True,
+        codex_attribution_record={"drives": True},
         now=NOW,
     )
     assert rule(findings, "codex_projected_exhaustion")["fired"] is False
@@ -412,7 +421,7 @@ def test_an_absent_quota_window_fires_nothing() -> None:
         evaluation_ceiling_usd=None,
         evaluation_used_usd=Decimal("1.00"),
         windows={},
-        benchmark_drives_codex=True,
+        codex_attribution_record={"drives": True},
         now=NOW,
     )
     assert [finding["rule"] for finding in findings if finding["fired"]] == []
@@ -596,6 +605,63 @@ def workspace(tmp_path: Path) -> dict[str, Path]:
     }
 
 
+def codex_row(index: int) -> dict:
+    """One evaluated question that booked the three Codex models."""
+    return journal_row(
+        f"codex-{index}",
+        subscription={
+            "openai_codex": {
+                "calls": 18,
+                "list_price_equivalent_usd": "0.500000",
+                "by_model": {
+                    "gpt-6-astra": {
+                        "calls": 6,
+                        "list_price_equivalent_usd": "0.250000",
+                        "tokens": {"input": 5000, "output": 20, "thinking": 3000},
+                    },
+                    "gpt-5.6-sol": {
+                        "calls": 6,
+                        "list_price_equivalent_usd": "0.150000",
+                        "tokens": {"input": 5000, "output": 20, "thinking": 1800},
+                    },
+                    "gpt-5.6-terra": {
+                        "calls": 6,
+                        "list_price_equivalent_usd": "0.100000",
+                        "tokens": {"input": 5000, "output": 20, "thinking": 900},
+                    },
+                },
+            }
+        },
+        outcomes={
+            model: {"N0": 0, "N1": 2, "N2": 1, "N3": 0, "N4": 0, "N5": 3}
+            for model in PLAN_MODELS_BY_VENDOR[VENDOR_OPENAI_CODEX]
+        },
+    )
+
+
+def append_codex_row(workspace: dict[str, Path], index: int) -> None:
+    with (workspace["journal"] / "cost-journal.jsonl").open(
+        "a", encoding="utf-8"
+    ) as handle:
+        handle.write(json.dumps(codex_row(index)) + "\n")
+
+
+def codex_quota_file(path: Path, *, percent_remaining: int, projected: str) -> Path:
+    """Write one recorded quota report with a chosen Codex weekly reading."""
+    report = json.loads(RECORDED_QUOTA.read_text(encoding="utf-8"))
+    for provider in report["providers"]:
+        if provider["provider"] != "codex":
+            continue
+        for window in provider["windows"]:
+            if window["id"] != "weekly":
+                continue
+            window["percentRemaining"] = percent_remaining
+            window["percentUsed"] = 100 - percent_remaining
+            window["pace"]["projectedExhaustedAt"] = projected
+    path.write_text(json.dumps(report), encoding="utf-8")
+    return path
+
+
 def guard_for(workspace: dict[str, Path], quota: Path) -> BenchmarkGuard:
     return BenchmarkGuard(
         journal_dir=workspace["journal"],
@@ -650,16 +716,56 @@ def test_a_second_cycle_pauses_the_next_model_while_the_condition_holds(
     assert sorted(state["paused_models"]) == [FABLE_MODEL, "claude-opus-5"]
 
 
-def test_the_guard_resumes_its_own_pause_when_the_condition_clears(
+def test_the_guard_resumes_its_own_pause_after_three_clear_cycles(
     workspace: dict[str, Path],
 ) -> None:
     guard_for(workspace, CLAUDE_SESSION_LOW).cycle(now=NOW)
-    state = guard_for(workspace, RECORDED_QUOTA).cycle(now=NOW)
+    clear = guard_for(workspace, RECORDED_QUOTA)
+    for index in range(1, RESUME_CLEAR_CYCLES):
+        state = clear.cycle(now=NOW + CYCLE * index)
+        assert state["actions"] == []
+        assert FABLE_MODEL in state["paused_models"]
+        assert state["hysteresis"][0]["hold"] == "clear_cycles"
+        assert state["hysteresis"][0]["clear_cycles"] == index
+    state = clear.cycle(now=NOW + CYCLE * RESUME_CLEAR_CYCLES)
     assert [action["action"] for action in state["actions"]] == ["resume"]
     assert state["actions"][0]["model"] == FABLE_MODEL
     assert read_pause_file(workspace["pause"])["paused_models"] == {}
     status = workspace["status"].read_text(encoding="utf-8").splitlines()
     assert status[-1].startswith("working: resumed claude-fable-5-1 on ")
+
+
+def test_a_resumed_model_is_not_paused_again_by_the_same_rule_for_thirty_minutes(
+    workspace: dict[str, Path],
+) -> None:
+    # The Fable rule names one model, so a held model leaves the rule nothing
+    # else to pause and the whole rule waits out its hold.
+    guard_for(workspace, FABLE_LOW).cycle(now=NOW)
+    assert (
+        read_pause_file(workspace["pause"])["paused_models"][FABLE_MODEL]["rule"]
+        == "fable_weekly_window_floor"
+    )
+    clear = guard_for(workspace, RECORDED_QUOTA)
+    for index in range(1, RESUME_CLEAR_CYCLES + 1):
+        state = clear.cycle(now=NOW + CYCLE * index)
+    assert [action["action"] for action in state["actions"]] == ["resume"]
+    resumed_at = NOW + CYCLE * RESUME_CLEAR_CYCLES
+
+    held = guard_for(workspace, FABLE_LOW).cycle(now=resumed_at + CYCLE)
+    assert held["actions"] == []
+    assert read_pause_file(workspace["pause"])["paused_models"] == {}
+    hold = next(
+        record for record in held["hysteresis"] if record["hold"] == "repause_hold"
+    )
+    assert hold["rule"] == "fable_weekly_window_floor"
+    assert hold["models"] == [FABLE_MODEL]
+    assert hold["hold_seconds"] == REPAUSE_HOLD_SECONDS
+
+    after = guard_for(workspace, FABLE_LOW).cycle(
+        now=resumed_at + timedelta(seconds=REPAUSE_HOLD_SECONDS + 1)
+    )
+    assert [action["model"] for action in after["actions"]] == [FABLE_MODEL]
+    assert after["actions"][0]["rule"] == "fable_weekly_window_floor"
 
 
 def test_the_guard_never_removes_a_pause_an_operator_wrote(
@@ -775,16 +881,100 @@ def test_two_rules_of_one_vendor_pause_only_one_model(
     assert codex[0]["rule"] == "codex_weekly_window_floor"
 
 
-def test_the_codex_projection_waits_for_a_second_cycle(
+def test_the_codex_projection_waits_for_a_full_measurement_window(
     workspace: dict[str, Path],
 ) -> None:
-    # The evaluator is polling, but the first cycle has no earlier call count to
-    # compare against, so the guard measures before it acts.
-    watch = workspace["journal"] / "watch-state.json"
-    record = json.loads(watch.read_text(encoding="utf-8"))
-    record["updated_at_utc"] = "2026-09-16T11:58:00Z"
-    watch.write_text(json.dumps(record), encoding="utf-8")
+    # The first cycle has no trailing window to measure, so the rule that reads
+    # the attribution cannot fire however the projection looks.
     guard = guard_for(workspace, RECORDED_QUOTA)
     first = guard.cycle(now=NOW)
     assert first["benchmark_is_main_codex_consumer"] is False
+    assert first["codex_attribution"]["measured"] is False
+    assert str(CODEX_ATTRIBUTION_WINDOW_SECONDS) in first["codex_attribution"]["reason"]
     assert rule(first["rules"], "codex_projected_exhaustion")["fired"] is False
+    memory = json.loads(
+        (workspace["guard"] / GUARD_MEMORY_FILENAME).read_text(encoding="utf-8")
+    )
+    assert memory["schema"] == "benchmark-guard-memory-v1"
+    assert memory["codex_samples"][0]["codex_percent_remaining"] == 23
+
+
+def test_alternating_codex_cycles_under_another_sessions_burn_pause_nothing(
+    workspace: dict[str, Path], tmp_path: Path
+) -> None:
+    """The flap of 2026-09-16: the evaluator books Codex calls every other cycle
+    while the other sessions on this machine burn the whole weekly window.
+    """
+    quota = tmp_path / "quota"
+    quota.mkdir()
+    actions = []
+    for index in range(24):
+        moment = NOW + CYCLE * index
+        if index % 2:
+            append_codex_row(workspace, index)
+        # Every cycle burns one percent point, whoever booked the calls.
+        report = codex_quota_file(
+            quota / f"{index}.json",
+            percent_remaining=60 - index,
+            projected=EXHAUSTION_BEFORE_RESET,
+        )
+        state = guard_for(workspace, report).cycle(now=moment)
+        actions.extend(state["actions"])
+    attribution = state["codex_attribution"]
+    assert attribution["measured"] is True
+    assert Decimal(attribution["window_percent_burn"]) > Decimal("1")
+    assert Decimal(attribution["benchmark_usd_burn"]) > Decimal("0")
+    assert Decimal(attribution["benchmark_share_of_window"]) < Decimal("0.5")
+    assert attribution["drives"] is False
+    assert rule(state["rules"], "codex_projected_exhaustion")["fired"] is False
+    assert actions == []
+
+
+def test_a_dominant_codex_share_pauses_one_model_and_holds_it(
+    workspace: dict[str, Path], tmp_path: Path
+) -> None:
+    """The window burns only while this benchmark books Codex calls, so the
+    benchmark owns the burn and the projection is urgent.
+    """
+    quota = tmp_path / "quota"
+    quota.mkdir()
+    percent = 60
+    actions = []
+    for index in range(14):
+        moment = NOW + CYCLE * index
+        if index % 2:
+            append_codex_row(workspace, index)
+            percent -= 3
+        report = codex_quota_file(
+            quota / f"{index}.json",
+            percent_remaining=percent,
+            projected=EXHAUSTION_BEFORE_RESET,
+        )
+        state = guard_for(workspace, report).cycle(now=moment)
+        actions.extend(state["actions"])
+    attribution = state["codex_attribution"]
+    assert attribution["measured"] is True
+    assert Decimal(attribution["benchmark_share_of_window"]) >= Decimal("0.5")
+    assert Decimal(attribution["percent_per_usd"]) > Decimal("0")
+    assert [action["model"] for action in actions] == ["gpt-6-astra"]
+    assert actions[0]["rule"] == "codex_projected_exhaustion"
+    numbers = actions[0]["numbers"]
+    assert (
+        numbers["benchmark_share_of_window"]
+        == (attribution["benchmark_share_of_window"])
+    )
+    assert numbers["benchmark_percent_burn"] == attribution["benchmark_percent_burn"]
+    assert numbers["window_percent_burn"] == attribution["window_percent_burn"]
+
+    # One clear cycle does not lift the pause.
+    clear = codex_quota_file(
+        quota / "clear.json",
+        percent_remaining=percent,
+        projected=EXHAUSTION_AFTER_RESET,
+    )
+    after = guard_for(workspace, clear).cycle(now=NOW + CYCLE * 14)
+    assert rule(after["rules"], "codex_projected_exhaustion")["fired"] is False
+    assert after["actions"] == []
+    assert "gpt-6-astra" in after["paused_models"]
+    assert after["hysteresis"][0]["clear_cycles"] == 1
+    assert after["hysteresis"][0]["clear_cycles_required"] == RESUME_CLEAR_CYCLES

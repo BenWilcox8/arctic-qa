@@ -1,0 +1,82 @@
+{
+  "generated_at_utc": "2026-09-16T19:13:37Z",
+  "questions_evaluated": 12,
+  "actions": [],
+  "hysteresis": [],
+  "paused_models": {
+    "claude-fable-5-1": {
+      "paused_at_utc": "2026-09-16T10:20:00Z",
+      "reason": "the captain's daily Claude Fable quota is about 80 percent used",
+      "resume_at_utc": "2026-09-16T23:00:00Z",
+      "resume_note": "6:00 pm Central on 2026-09-16, the captain's quota reset"
+    }
+  },
+  "codex_attribution": {
+    "benchmark_alone_exhausts_before_reset": false,
+    "benchmark_percent_burn": "0.000000",
+    "benchmark_share_of_window": "0.000000",
+    "benchmark_usd_burn": "0.491460",
+    "codex_usd_per_question": "0.342770",
+    "drives": false,
+    "extrapolated_benchmark_percent": "0.000000",
+    "extrapolated_benchmark_usd": "93.233304",
+    "idle_baseline_seconds": 26501,
+    "measured": true,
+    "measured_from_utc": "2026-09-16T18:38:48Z",
+    "measured_seconds": 2089,
+    "other_percent_burn": "0.000000",
+    "other_percent_per_second": "0.000000",
+    "percent_per_usd": "0.000000",
+    "percent_remaining": "22",
+    "projected_benchmark_exhaustion_at_utc": null,
+    "reason": null,
+    "resets_at_utc": "2026-09-20T10:08:04.000Z",
+    "share_drives": false,
+    "share_floor": "0.5",
+    "window_percent_burn": "0.000000",
+    "window_percent_burn_source": "percent_remaining_delta",
+    "window_seconds": 1800
+  },
+  "codex_quota": {
+    "burn_multiple": 1.6159,
+    "label": "week",
+    "pace": "ahead",
+    "percent_remaining": 22,
+    "projected_exhausted_at_utc": "2026-09-17T18:05:59.874Z",
+    "projection_confidence": "established",
+    "provider": "codex",
+    "resets_at_utc": "2026-09-20T10:08:04.000Z",
+    "window_id": "weekly",
+    "window_seconds": 604800
+  },
+  "codex_rule": {
+    "candidate_models": [
+      "gpt-6-astra",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra"
+    ],
+    "detail": "quota-axi projects the Codex weekly window exhausted before its reset while the benchmark is the main consumer",
+    "fired": false,
+    "numbers": {
+      "attribution_measured": true,
+      "attribution_unmeasured_reason": null,
+      "benchmark_alone_exhausts_before_reset": false,
+      "benchmark_is_main_consumer": false,
+      "benchmark_percent_burn": "0.000000",
+      "benchmark_share_of_window": "0.000000",
+      "benchmark_usd_burn": "0.491460",
+      "extrapolated_benchmark_percent": "0.000000",
+      "measured_seconds": 2089,
+      "percent_per_usd": "0.000000",
+      "projected_before_reset": true,
+      "projected_exhausted_at_utc": "2026-09-17T18:05:59.874Z",
+      "projection_confidence": "established",
+      "resets_at_utc": "2026-09-20T10:08:04.000Z",
+      "share_floor": "0.5",
+      "window_percent_burn": "0.000000",
+      "window_percent_burn_source": "percent_remaining_delta"
+    },
+    "rule": "codex_projected_exhaustion",
+    "vendor": "openai_codex"
+  }
+}

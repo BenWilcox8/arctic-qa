@@ -46,7 +46,7 @@ The guard reads five sources and writes to none of them.
 
 ## Outputs
 
-The guard writes two files in its own directory:
+The guard writes three files in its own directory:
 
 - `guard-state.json`, schema `benchmark-guard-state-v1`.
   One complete reading: the per-model table, the per-vendor rollup, the budget, the extrapolation, the quota windows, every rule with its numbers, the paused models and the actions of this cycle.
@@ -55,6 +55,12 @@ The guard writes two files in its own directory:
   An append-only log.
   Every cycle appends one `poll` row with the headline numbers.
   Every pause and every resume appends its own row with the numbers that triggered it.
+- `guard-memory.json`, schema `benchmark-guard-memory-v1`.
+  What the guard must remember between cycles.
+  It holds the Codex attribution samples, the count of clear cycles of each guard-owned pause, and the moment the guard last resumed each model.
+  None of this belongs in the pause file, because that file keeps the captain's own entries exactly as written.
+  The guard rebuilds this file from an empty memory when it is absent or broken.
+  A guard that starts with an empty memory measures again before it can pause on the Codex projection.
 
 The guard also appends one `working:` line to the task status file for each pause and each resume, so that the supervisor sees it.
 
@@ -102,7 +108,7 @@ The captain asked for a pause to be rare:
 | `claude_session_window_floor` | `anthropic_claude_code` | the Claude 5-hour session window is below 15 percent remaining |
 | `fable_weekly_window_floor` | `anthropic_claude_code` | the Fable weekly window is below 10 percent remaining, after the captain's own Fable pause has expired |
 | `codex_weekly_window_floor` | `openai_codex` | the Codex weekly window is below 10 percent remaining |
-| `codex_projected_exhaustion` | `openai_codex` | `quota-axi` projects the Codex weekly window exhausted before its reset, and the benchmark is the main consumer |
+| `codex_projected_exhaustion` | `openai_codex` | `quota-axi` projects the Codex weekly window exhausted before its reset, and the measured attribution shows that the benchmark drives that burn |
 
 Three rules need a note.
 
@@ -118,10 +124,64 @@ That pause carries `resume_at_utc` 2026-09-16T23:00:00Z.
 The guard takes that time as the moment its Fable rule starts.
 
 The Codex projection rule needs proof that the benchmark drives the burn.
-`quota-axi` gives no per-caller attribution, and the Claude and Codex quotas are shared with every agent session on this machine.
-The guard therefore proves the only thing it can prove: the evaluator still polls, and the benchmark booked more Codex calls than in the previous cycle.
-When the evaluator is idle, the burn belongs to the other sessions and a pause would save nothing.
-The first cycle after a restart has no earlier count to compare against, so this rule measures before it can act.
+The next section gives that measurement.
+
+## The Codex attribution
+
+`quota-axi` gives no per-caller attribution, and the Codex weekly window is shared with every agent session on this machine.
+A rule that pauses a model on that window must therefore measure how much of the burn this benchmark causes.
+The guard measures it over one trailing window of at least 30 minutes, from samples that it takes itself every cycle.
+
+Every cycle appends one sample to `guard-memory.json`: the moment, the `percent_remaining` of the Codex weekly window, and the Codex list-price-equivalent USD that the cost journal records for the whole run.
+From those samples the guard reads three quantities over the trailing window:
+
+- `window_percent_burn`, what the whole account burned.
+  It is the `percent_remaining` delta between the two ends of the window.
+  The delta measures the window itself.
+  The burn rate that `quota-axi` reports is an average over the whole elapsed weekly cycle, so it still carries the burn of sessions that ran hours before.
+  The guard takes that rate only when the delta is not a burn, that is after a window reset inside the trailing period.
+- `benchmark_usd_burn`, what this benchmark spent over the same period, in Codex list-price-equivalent USD.
+- `other_percent_burn`, what the other sessions burned over the same period.
+  The guard separates the two regimes it can see.
+  In an interval between two samples, the benchmark either spent Codex USD or spent none.
+  The intervals in which it spent none carry only the burn of the other sessions, so their percent points a second is the baseline rate of everything that is not this benchmark.
+
+The rest of the burn belongs to the benchmark.
+That gives the share, `benchmark_percent_burn / window_percent_burn`, and the window's percent-per-USD, `benchmark_percent_burn / benchmark_usd_burn`.
+The benchmark drives the Codex window when one of two conditions is true:
+
+- Its share is one half or more of the window's burn over that period.
+- Its own extrapolated burn to the end of the run would exhaust the window before the reset by itself.
+  That extrapolation is `questions_still_expected` multiplied by the benchmark's Codex cost per question, converted to percent points with the percent-per-USD of the same measurement.
+
+The finding of `codex_projected_exhaustion` records the share and both burns, and `guard-state.json` holds the whole measurement under `codex_attribution`.
+
+Three conditions stop the measurement, and the rule cannot fire while any of them holds:
+
+- The trailing window is not full yet.
+  A guard that started less than 30 minutes ago has nothing to compare against.
+- The guard has not yet watched the window for 30 minutes with this benchmark idle.
+  Without that baseline it cannot tell the other sessions' burn from its own.
+- The whole account burned one percent point or less over the trailing window.
+  `quota-axi` reports whole percent points, so a burn that small is not a measured burn and no share is read from it.
+
+The guard measured this against the live run on 2026-09-16.
+Over 2089 seconds the Codex weekly window stayed at 22 percent while the benchmark spent USD 0.49.
+The share was 0.000 and the rule did not fire, which is correct: the projection to exhaustion came from other Codex sessions earlier that day.
+
+## Hysteresis
+
+A guard-owned pause holds until the condition is really gone.
+Between 18:20 and 18:55 UTC on 2026-09-16 the guard wrote five pauses and four resumes of `gpt-5.6-sol` on alternate cycles.
+Two bounds stop that flap, and both apply to every guard-owned pause, not only to the Codex rules:
+
+- The guard removes a pause only after its rule has been clear for three consecutive cycles.
+  `guard-state.json` shows the count under `hysteresis` while the pause waits.
+- The guard does not pause a model again by the same rule for 30 minutes after it resumed that model.
+  When a rule has no other candidate model, the whole rule waits out that hold.
+
+Both counters live in `guard-memory.json`.
+The pause file keeps only what the evaluator reads.
 
 ## Which model the guard pauses
 
@@ -214,6 +274,7 @@ Options:
 - `--quota-binary` gives the absolute path of `quota-axi`. The nix devshell has no npm global bin on its PATH, so a service must pass `/home/ben/.npm-global/bin/quota-axi`.
 - `--recorded-quota-file` reads a saved `quota-axi --json --full` report instead of the live command. Use it for a test.
 - `--evaluator-stale-seconds` sets how long the watch state can be old before the evaluator counts as idle. The default is 900.
+- `--codex-attribution-window-seconds` sets the trailing window of the Codex attribution. The default is 1800, which is also the smallest value the guard accepts.
 
 ## The website section
 
@@ -241,9 +302,11 @@ A model that only the ledger knows, such as an earlier canary model, is marked "
 
 ## Limits
 
-- The guard has no attribution for the Claude and Codex quotas. It sees the whole account window, which every agent session on this machine shares. A pause helps only when the benchmark is the main consumer of that window.
+- The guard has no per-caller attribution from `quota-axi`. It estimates the Codex share from its own samples, as "The Codex attribution" describes. It makes no such estimate for the Claude windows, so the Claude rules read the whole account window that every agent session on this machine shares.
+- The Codex attribution needs a benchmark-idle baseline. An evaluator that never stops gives the guard no idle interval, and the Codex projection rule then stays inert. The Codex weekly floor rule still bounds that window.
+- The Codex attribution is one measurement of a shared window, not a receipt. It assumes that the other sessions burn at a steady rate over the trailing window.
 - The guard reads the ledger without a write lock, under the shared lock of the ledger file. A number can be one cycle old.
-- The guard pauses one model of each affected vendor per cycle. A vendor whose whole quota collapses needs as many cycles as it has models.
+- The guard pauses one model of each affected vendor per cycle. A vendor whose whole quota collapses needs as many cycles as it has models, and the hysteresis holds each of those pauses for at least three clear cycles.
 - A pause is inert until the evaluator reads the same pause file. Confirm the path of the evaluator launcher before you rely on the guard.
 - When the shared ledger cannot be read, the Gemini readings are zero and no Gemini rule fires. The guard records the error, and the evaluator's own ceiling precheck still bounds the run.
 - When `quota-axi` cannot run, no quota rule fires. The guard records the error in `guard-state.json`, and the viewer shows it. A missing quota reading never causes a pause.

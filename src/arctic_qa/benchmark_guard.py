@@ -36,7 +36,7 @@ import fcntl
 import json
 import subprocess
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -54,6 +54,8 @@ GUARD_OWNER = "benchmark-cost-guard"
 
 GUARD_STATE_FILENAME = "guard-state.json"
 GUARD_LOG_FILENAME = "guard-log.jsonl"
+GUARD_MEMORY_FILENAME = "guard-memory.json"
+GUARD_MEMORY_SCHEMA = "benchmark-guard-memory-v1"
 JOURNAL_FILENAME = "cost-journal.jsonl"
 WATCH_STATE_FILENAME = "watch-state.json"
 
@@ -102,6 +104,28 @@ CODEX_WEEKLY_FLOOR_PERCENT = Decimal("10")
 
 DEFAULT_INTERVAL_SECONDS = 300
 DEFAULT_EVALUATOR_STALE_SECONDS = 900
+
+# The Codex attribution measurement. `quota-axi` gives no per-caller
+# attribution, so the guard measures the benchmark's own Codex burn against the
+# whole account's burn over a trailing window. The window is at least 30
+# minutes, which is six cycles at the default interval.
+CODEX_ATTRIBUTION_WINDOW_SECONDS = 1800
+# The benchmark drives the Codex window when it causes at least this share of
+# the window's burn over that period.
+CODEX_DRIVES_SHARE = Decimal("0.5")
+# `quota-axi` reports whole percent points, so a measured burn of `d` points
+# means a true burn below `d + 1` points.
+QUOTA_PERCENT_RESOLUTION = Decimal("1")
+# 48 hours of five-minute cycles.
+CODEX_SAMPLE_LIMIT = 576
+CODEX_SAMPLE_MAXIMUM_AGE_SECONDS = 172800
+
+# Hysteresis. A guard-owned pause is removed only after its rule has been clear
+# for this many consecutive cycles, and a model the guard resumed is not paused
+# again by the same rule for this many seconds.
+RESUME_CLEAR_CYCLES = 3
+REPAUSE_HOLD_SECONDS = 1800
+
 QUOTA_COMMAND = ("quota-axi", "--json", "--full")
 # The nix devshell has no npm global bin on PATH, so a service passes the
 # absolute path of the binary with `--quota-binary`.
@@ -383,6 +407,8 @@ def quota_windows(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 "label": window.get("label"),
                 "percent_remaining": window.get("percentRemaining"),
                 "resets_at_utc": window.get("resetsAt"),
+                "window_seconds": pace.get("cycleSeconds")
+                or window.get("windowSeconds"),
                 "projected_exhausted_at_utc": pace.get("projectedExhaustedAt"),
                 "pace": pace.get("status"),
                 "burn_multiple": pace.get("burnMultiple"),
@@ -390,6 +416,272 @@ def quota_windows(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
             }
     result["generated_at_utc"] = report.get("generatedAt")
     return result
+
+
+def codex_list_price_equivalent_usd(rows: list[dict[str, Any]]) -> Decimal:
+    """Sum the Codex list-price equivalent of every evaluated question."""
+    total = Decimal("0")
+    for row in rows:
+        vendor = ((row.get("evaluation") or {}).get("subscription") or {}).get(
+            VENDOR_OPENAI_CODEX
+        ) or {}
+        total += _money(vendor.get("list_price_equivalent_usd"))
+    return total
+
+
+def codex_calls(rows: list[dict[str, Any]]) -> int:
+    """Count the Codex calls of every evaluated question."""
+    total = 0
+    for row in rows:
+        vendor = ((row.get("evaluation") or {}).get("subscription") or {}).get(
+            VENDOR_OPENAI_CODEX
+        ) or {}
+        total += int(vendor.get("calls") or 0)
+    return total
+
+
+def _reported_burn_percent_per_second(window: dict[str, Any]) -> Decimal | None:
+    """The average burn `quota-axi` reports for one window, in percent a second.
+
+    `pace.burnMultiple` is the used percent divided by the elapsed percent of
+    the cycle, so `burnMultiple * 100 / cycleSeconds` is that average rate.
+    """
+    multiple = window.get("burn_multiple")
+    seconds = window.get("window_seconds")
+    if multiple is None or not seconds:
+        return None
+    try:
+        return Decimal(str(multiple)) * Decimal("100") / Decimal(str(seconds))
+    except (ArithmeticError, ValueError):
+        return None
+
+
+def codex_idle_baseline(
+    samples: list[dict[str, Any]],
+) -> tuple[Decimal | None, Decimal, Decimal]:
+    """Return the burn rate of the other Codex sessions on this machine.
+
+    `quota-axi` reports no per-caller attribution, so the guard separates the
+    two regimes it can see. In an interval between two samples the benchmark
+    either spent Codex list-price-equivalent USD or it spent none. The
+    intervals in which it spent none carry only the burn of the other sessions,
+    so their percent points a second is the baseline rate of everything that is
+    not this benchmark.
+
+    Returns the rate, the seconds it was measured over and the percent points
+    those seconds burned. The rate is None until an idle interval exists.
+    """
+    seconds = Decimal("0")
+    percent = Decimal("0")
+    for earlier, later in zip(samples, samples[1:], strict=False):
+        first = parse_utc(earlier.get("at_utc"))
+        second = parse_utc(later.get("at_utc"))
+        if first is None or second is None or second <= first:
+            continue
+        if (
+            earlier.get("codex_percent_remaining") is None
+            or later.get("codex_percent_remaining") is None
+        ):
+            continue
+        spent = _money(later.get("benchmark_codex_usd")) - _money(
+            earlier.get("benchmark_codex_usd")
+        )
+        if spent > 0:
+            continue
+        burn = _money(earlier["codex_percent_remaining"]) - _money(
+            later["codex_percent_remaining"]
+        )
+        if burn < 0:
+            # The weekly window reset inside this interval.
+            continue
+        seconds += Decimal(str((second - first).total_seconds()))
+        percent += burn
+    rate = percent / seconds if seconds > 0 else None
+    return rate, seconds, percent
+
+
+def codex_attribution(
+    *,
+    samples: list[dict[str, Any]],
+    now: datetime,
+    window: dict[str, Any],
+    percent_remaining: Decimal | None,
+    benchmark_codex_usd: Decimal,
+    questions_evaluated: int,
+    questions_still_expected: int,
+    window_seconds: int = CODEX_ATTRIBUTION_WINDOW_SECONDS,
+) -> dict[str, Any]:
+    """Estimate how much of the Codex weekly burn this benchmark causes.
+
+    The guard measures three things over one trailing window of at least 30
+    minutes, all from samples it takes itself every cycle:
+
+    - `window_percent_burn`, what the whole account burned, from the
+      `percent_remaining` delta of the Codex weekly window. The delta measures
+      the window itself. `quota-axi`'s own burn rate is an average over the
+      whole elapsed weekly cycle and still carries the burn of earlier
+      sessions, so the guard takes it only when the delta is unusable, that is
+      after a reset inside the trailing window.
+    - `benchmark_usd_burn`, what this benchmark spent in Codex
+      list-price-equivalent USD over the same period, from the cost journal.
+    - `other_percent_burn`, what the other Codex sessions on this machine burned
+      over the same period, at the baseline rate of `codex_idle_baseline`.
+
+    The rest of the burn belongs to the benchmark, which gives both the share
+    and the window's percent-per-USD. The benchmark drives the window when its
+    share reaches `CODEX_DRIVES_SHARE`, or when its own extrapolated burn to the
+    end of the run would exhaust the window before the reset by itself.
+
+    Two measurements must be complete before the rule that reads this can fire:
+    the trailing window, and the idle baseline. `quota-axi` reports whole
+    percent points, so a window burn at or below that resolution is no measured
+    burn at all and no share is read from it.
+    """
+    attribution: dict[str, Any] = {
+        "measured": False,
+        "reason": None,
+        "drives": False,
+        "share_floor": str(CODEX_DRIVES_SHARE),
+        "window_seconds": window_seconds,
+        "measured_from_utc": None,
+        "measured_seconds": None,
+        "window_percent_burn": None,
+        "window_percent_burn_source": None,
+        "other_percent_burn": None,
+        "other_percent_per_second": None,
+        "idle_baseline_seconds": None,
+        "benchmark_percent_burn": None,
+        "benchmark_usd_burn": None,
+        "benchmark_share_of_window": None,
+        "percent_per_usd": None,
+        "share_drives": False,
+        "codex_usd_per_question": None,
+        "extrapolated_benchmark_usd": None,
+        "extrapolated_benchmark_percent": None,
+        "percent_remaining": (
+            None if percent_remaining is None else str(percent_remaining)
+        ),
+        "resets_at_utc": window.get("resets_at_utc"),
+        "projected_benchmark_exhaustion_at_utc": None,
+        "benchmark_alone_exhausts_before_reset": False,
+    }
+    if percent_remaining is None:
+        attribution["reason"] = "the Codex weekly window is not in the quota report"
+        return attribution
+
+    base = None
+    for sample in reversed(samples):
+        moment = parse_utc(sample.get("at_utc"))
+        if moment is None or sample.get("codex_percent_remaining") is None:
+            continue
+        if (now - moment).total_seconds() >= window_seconds:
+            base = sample
+            break
+    if base is None:
+        attribution["reason"] = (
+            f"the trailing measurement window of {window_seconds} seconds is "
+            "not full yet"
+        )
+        return attribution
+
+    other_rate, idle_seconds, _idle_percent = codex_idle_baseline(samples)
+    attribution["idle_baseline_seconds"] = int(idle_seconds)
+    if other_rate is None or idle_seconds < window_seconds:
+        attribution["reason"] = (
+            "the guard has not yet watched the Codex window for "
+            f"{window_seconds} seconds with this benchmark idle, so it cannot "
+            "tell the other sessions' burn from its own"
+        )
+        return attribution
+
+    started = parse_utc(base["at_utc"])
+    duration = Decimal(str((now - started).total_seconds()))
+    if duration <= 0:
+        attribution["reason"] = "the trailing measurement window has no duration"
+        return attribution
+
+    burn = _money(base.get("codex_percent_remaining")) - percent_remaining
+    source = "percent_remaining_delta"
+    if burn < 0:
+        rate = _reported_burn_percent_per_second(window)
+        if rate is None:
+            attribution["reason"] = (
+                "the Codex weekly window reset inside the trailing window and "
+                "the report carries no burn rate"
+            )
+            return attribution
+        burn = rate * duration
+        source = "reported_burn_rate"
+
+    spent = benchmark_codex_usd - _money(base.get("benchmark_codex_usd"))
+    if spent < 0:
+        spent = Decimal("0")
+    others = other_rate * duration
+    mine = burn - others
+    if mine < 0:
+        mine = Decimal("0")
+    # `quota-axi` reports whole percent points, so a burn that small is not a
+    # measured burn and nothing urgent can be read from its share.
+    readable = burn > QUOTA_PERCENT_RESOLUTION
+    share = (mine / burn) if readable else Decimal("0")
+    percent_per_usd = (mine / spent) if spent > 0 else None
+
+    per_question = (
+        benchmark_codex_usd / Decimal(questions_evaluated)
+        if questions_evaluated > 0
+        else None
+    )
+    extrapolated_usd = (
+        None
+        if per_question is None
+        else per_question * Decimal(max(int(questions_still_expected), 0))
+    )
+    extrapolated_percent = (
+        None
+        if extrapolated_usd is None or percent_per_usd is None
+        else extrapolated_usd * percent_per_usd
+    )
+
+    alone = False
+    projected_at = None
+    resets = parse_utc(window.get("resets_at_utc"))
+    rate = mine / duration if mine > 0 else None
+    if (
+        extrapolated_percent is not None
+        and extrapolated_percent >= percent_remaining
+        and rate is not None
+        and resets is not None
+    ):
+        projected = (now + timedelta(seconds=float(percent_remaining / rate))).replace(
+            microsecond=0
+        )
+        projected_at = _stamp(projected)
+        alone = projected < resets
+
+    share_drives = readable and share >= CODEX_DRIVES_SHARE
+    attribution.update(
+        {
+            "measured": True,
+            "drives": bool(share_drives or alone),
+            "measured_from_utc": base["at_utc"],
+            "measured_seconds": int(duration),
+            "window_percent_burn": _quantize(burn),
+            "window_percent_burn_source": source,
+            "other_percent_burn": _quantize(others),
+            "other_percent_per_second": _quantize(other_rate),
+            "benchmark_percent_burn": _quantize(mine),
+            "benchmark_usd_burn": _quantize(spent),
+            "benchmark_share_of_window": _quantize(share),
+            "percent_per_usd": _quantize(percent_per_usd),
+            "share_drives": bool(share_drives),
+            "codex_usd_per_question": _quantize(per_question),
+            "extrapolated_benchmark_usd": _quantize(extrapolated_usd),
+            "extrapolated_benchmark_percent": _quantize(extrapolated_percent),
+            "projected_benchmark_exhaustion_at_utc": projected_at,
+            "benchmark_alone_exhausts_before_reset": bool(alone),
+        }
+    )
+    return attribution
 
 
 def _percent(windows: dict[str, Any], key: str) -> Decimal | None:
@@ -704,7 +996,7 @@ def evaluate_rules(
     windows: dict[str, Any],
     gemini_budget_usd: Decimal = GEMINI_BUDGET_USD,
     fable_rule_active_after: datetime | None = None,
-    benchmark_drives_codex: bool = False,
+    codex_attribution_record: dict[str, Any] | None = None,
     models_by_vendor: dict[str, tuple[str, ...]] | None = None,
     now: datetime | None = None,
 ) -> list[dict[str, Any]]:
@@ -716,6 +1008,7 @@ def evaluate_rules(
     """
     moment = now or _utc_now()
     models_of = models_by_vendor or dict(PLAN_MODELS_BY_VENDOR)
+    attribution = codex_attribution_record or {}
     findings: list[dict[str, Any]] = []
 
     extrapolated = gemini.get("extrapolated_total_usd")
@@ -861,10 +1154,11 @@ def evaluate_rules(
     exhausted = parse_utc(window.get("projected_exhausted_at_utc"))
     resets = parse_utc(window.get("resets_at_utc"))
     early = exhausted is not None and resets is not None and exhausted < resets
+    drives = bool(attribution.get("drives"))
     findings.append(
         _finding(
             "codex_projected_exhaustion",
-            fired=early and benchmark_drives_codex,
+            fired=early and drives,
             vendor=VENDOR_OPENAI_CODEX,
             detail=(
                 "quota-axi projects the Codex weekly window exhausted before "
@@ -874,8 +1168,29 @@ def evaluate_rules(
                 "projected_exhausted_at_utc": window.get("projected_exhausted_at_utc"),
                 "resets_at_utc": window.get("resets_at_utc"),
                 "projected_before_reset": early,
-                "benchmark_is_main_consumer": benchmark_drives_codex,
+                "benchmark_is_main_consumer": drives,
                 "projection_confidence": window.get("projection_confidence"),
+                "attribution_measured": bool(attribution.get("measured")),
+                "attribution_unmeasured_reason": attribution.get("reason"),
+                "measured_seconds": attribution.get("measured_seconds"),
+                "benchmark_share_of_window": attribution.get(
+                    "benchmark_share_of_window"
+                ),
+                "share_floor": attribution.get("share_floor")
+                or str(CODEX_DRIVES_SHARE),
+                "benchmark_percent_burn": attribution.get("benchmark_percent_burn"),
+                "window_percent_burn": attribution.get("window_percent_burn"),
+                "window_percent_burn_source": attribution.get(
+                    "window_percent_burn_source"
+                ),
+                "benchmark_usd_burn": attribution.get("benchmark_usd_burn"),
+                "percent_per_usd": attribution.get("percent_per_usd"),
+                "extrapolated_benchmark_percent": attribution.get(
+                    "extrapolated_benchmark_percent"
+                ),
+                "benchmark_alone_exhausts_before_reset": attribution.get(
+                    "benchmark_alone_exhausts_before_reset"
+                ),
             },
             candidates=models_of[VENDOR_OPENAI_CODEX],
         )
@@ -903,6 +1218,65 @@ def select_pause_model(
         return (0 if cost is not None else 1, -(cost or Decimal("0")), model)
 
     return sorted(open_models, key=key)[0]
+
+
+# --- The guard's own memory ------------------------------------------------------
+
+
+def empty_memory() -> dict[str, Any]:
+    """The memory of a guard that never ran."""
+    return {
+        "schema": GUARD_MEMORY_SCHEMA,
+        "updated_at_utc": None,
+        "codex_samples": [],
+        "rule_clear_cycles": {},
+        "guard_resumes": {},
+    }
+
+
+def read_memory(path: Path) -> dict[str, Any]:
+    """Read the guard's memory sidecar; a missing or broken file starts empty.
+
+    The memory holds what the guard must remember between cycles and must not
+    write into the pause file: the Codex attribution samples, how many
+    consecutive cycles each guard-owned pause has been clear, and when the guard
+    last resumed a model. The pause file keeps the captain's own entries exactly
+    as written, so nothing of this belongs there.
+    """
+    memory = empty_memory()
+    value = _read_json(path)
+    if not isinstance(value, dict) or value.get("schema") != GUARD_MEMORY_SCHEMA:
+        return memory
+    samples = value.get("codex_samples")
+    if isinstance(samples, list):
+        memory["codex_samples"] = [
+            sample for sample in samples if isinstance(sample, dict)
+        ]
+    for name in ("rule_clear_cycles", "guard_resumes"):
+        block = value.get(name)
+        if isinstance(block, dict):
+            memory[name] = dict(block)
+    return memory
+
+
+def memory_key(model: str, rule: str) -> str:
+    """One hysteresis key: a pause belongs to one model of one rule."""
+    return f"{model}::{rule}"
+
+
+def trim_codex_samples(
+    samples: list[dict[str, Any]], *, now: datetime
+) -> list[dict[str, Any]]:
+    """Keep the recent samples: 48 hours, and at most `CODEX_SAMPLE_LIMIT`."""
+    kept = []
+    for sample in samples:
+        moment = parse_utc(sample.get("at_utc"))
+        if moment is None:
+            continue
+        if (now - moment).total_seconds() > CODEX_SAMPLE_MAXIMUM_AGE_SECONDS:
+            continue
+        kept.append(sample)
+    return kept[-CODEX_SAMPLE_LIMIT:]
 
 
 # --- One guard cycle --------------------------------------------------------------
@@ -961,6 +1335,7 @@ class BenchmarkGuard:
         quota_command: tuple[str, ...] = QUOTA_COMMAND,
         recorded_quota_file: Path | None = None,
         evaluator_stale_seconds: int = DEFAULT_EVALUATOR_STALE_SECONDS,
+        codex_attribution_window_seconds: int = CODEX_ATTRIBUTION_WINDOW_SECONDS,
     ) -> None:
         self.journal_dir = Path(journal_dir)
         self.guard_dir = Path(guard_dir)
@@ -982,8 +1357,10 @@ class BenchmarkGuard:
             Path(recorded_quota_file) if recorded_quota_file else None
         )
         self.evaluator_stale_seconds = evaluator_stale_seconds
+        self.codex_attribution_window_seconds = codex_attribution_window_seconds
         self.state_file = self.guard_dir / GUARD_STATE_FILENAME
         self.log_file = self.guard_dir / GUARD_LOG_FILENAME
+        self.memory_file = self.guard_dir / GUARD_MEMORY_FILENAME
 
     # -- inputs
 
@@ -1086,8 +1463,34 @@ class BenchmarkGuard:
         )
         windows = self._quota(errors)
 
-        previous = _read_json(self.state_file) or {}
-        drives_codex = self._benchmark_drives_codex(readings, previous, activity)
+        memory = read_memory(self.memory_file)
+        codex_usd = codex_list_price_equivalent_usd(items)
+        attribution = codex_attribution(
+            samples=memory["codex_samples"],
+            now=moment,
+            window=windows.get("codex_weekly") or {},
+            percent_remaining=_percent(windows, "codex_weekly"),
+            benchmark_codex_usd=codex_usd,
+            questions_evaluated=len(items),
+            questions_still_expected=still,
+            window_seconds=self.codex_attribution_window_seconds,
+        )
+        drives_codex = bool(attribution["drives"])
+        memory["codex_samples"] = trim_codex_samples(
+            [
+                *memory["codex_samples"],
+                {
+                    "at_utc": _stamp(moment),
+                    "codex_percent_remaining": (windows.get("codex_weekly") or {}).get(
+                        "percent_remaining"
+                    ),
+                    "benchmark_codex_usd": _quantize(codex_usd),
+                    "benchmark_codex_calls": codex_calls(items),
+                    "questions_evaluated": len(items),
+                },
+            ],
+            now=moment,
+        )
 
         try:
             pause = read_pause_file(self.pause_file)
@@ -1102,13 +1505,18 @@ class BenchmarkGuard:
             windows=windows,
             gemini_budget_usd=self.gemini_budget_usd,
             fable_rule_active_after=self._fable_rule_active_after(pause),
-            benchmark_drives_codex=drives_codex,
+            codex_attribution_record=attribution,
             models_by_vendor=models_by_vendor,
             now=moment,
         )
-        actions = self._act(
-            pause=pause, findings=findings, readings=readings, now=moment
+        actions, holds = self._act(
+            pause=pause,
+            findings=findings,
+            readings=readings,
+            memory=memory,
+            now=moment,
         )
+        memory["updated_at_utc"] = _stamp(moment)
 
         state = {
             "schema": GUARD_STATE_SCHEMA,
@@ -1155,13 +1563,16 @@ class BenchmarkGuard:
             ],
             "quota": windows,
             "benchmark_is_main_codex_consumer": drives_codex,
+            "codex_attribution": attribution,
             "rules": findings,
             "paused_models": active_pauses(pause, now=moment),
             "actions": actions,
+            "hysteresis": holds,
             "errors": errors,
         }
         self.guard_dir.mkdir(parents=True, exist_ok=True)
         atomic_json(self.state_file, state)
+        atomic_json(self.memory_file, memory)
         self._log({"event": "poll", **self._headline(state)}, moment)
         for action in actions:
             self._log({"event": action["action"], **action}, moment)
@@ -1169,38 +1580,6 @@ class BenchmarkGuard:
         return state
 
     # -- helpers of one cycle
-
-    def _benchmark_drives_codex(
-        self,
-        readings: dict[str, dict[str, Any]],
-        previous: dict[str, Any],
-        activity: dict[str, Any],
-    ) -> bool:
-        """Is this benchmark the main consumer of the Codex weekly window?
-
-        quota-axi reports no per-caller attribution, so the guard proves the
-        only thing it can prove: the evaluator is still polling and it booked
-        more Codex calls since the last cycle. When the evaluator is idle, the
-        Codex burn belongs to the other agent sessions on this machine and
-        pausing a benchmark model would save nothing.
-        """
-        if not activity.get("running"):
-            return False
-        if not previous.get("models"):
-            # The first cycle has nothing to compare against. The guard measures
-            # now and can act on the next cycle.
-            return False
-        current = sum(
-            entry["calls"]
-            for entry in readings.values()
-            if entry.get("vendor") == VENDOR_OPENAI_CODEX
-        )
-        earlier = sum(
-            int(model.get("calls") or 0)
-            for model in previous.get("models") or []
-            if model.get("vendor") == VENDOR_OPENAI_CODEX
-        )
-        return current > earlier
 
     def _vendor_rollup(
         self,
@@ -1253,21 +1632,34 @@ class BenchmarkGuard:
         pause: dict[str, Any],
         findings: list[dict[str, Any]],
         readings: dict[str, dict[str, Any]],
+        memory: dict[str, Any],
         now: datetime,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Pause one model of each affected vendor and resume what no rule holds.
 
         Two rules of one vendor say the same thing: that vendor is running out.
         The guard therefore pauses at most one model per vendor per cycle, and
         the first fired rule of that vendor owns the pause. The captain asked
         for a pause to be rare.
+
+        Two hysteresis bounds keep a pause from flapping. A guard-owned pause is
+        removed only after its rule has been clear for `RESUME_CLEAR_CYCLES`
+        consecutive cycles, and a model the guard resumed is not paused again by
+        the same rule for `REPAUSE_HOLD_SECONDS`. Both live in the guard's own
+        memory sidecar, never in the pause file, whose captain-owned entries
+        stay exactly as written.
+
+        Returns the actions of this cycle and the holds that hysteresis applied.
         """
         models = dict(pause.get("paused_models") or {})
         actions: list[dict[str, Any]] = []
+        holds: list[dict[str, Any]] = []
         fired = [finding for finding in findings if finding["fired"]]
         held_by_rule: dict[str, set[str]] = {}
         for finding in fired:
             held_by_rule[finding["rule"]] = set(finding["candidate_models"])
+        clear_cycles = dict(memory.get("rule_clear_cycles") or {})
+        resumes = dict(memory.get("guard_resumes") or {})
         acted_vendors: set[str] = set()
 
         for finding in fired:
@@ -1279,11 +1671,37 @@ class BenchmarkGuard:
                     {"paused_models": models}, now=now
                 ).items()
             }
-            chosen = select_pause_model(finding["candidate_models"], readings, already)
+            blocked = {}
+            for model in finding["candidate_models"]:
+                resumed = parse_utc(resumes.get(memory_key(model, finding["rule"])))
+                if resumed is None:
+                    continue
+                waited = (now - resumed).total_seconds()
+                if waited < REPAUSE_HOLD_SECONDS:
+                    blocked[model] = int(REPAUSE_HOLD_SECONDS - waited)
+            chosen = select_pause_model(
+                finding["candidate_models"], readings, already | set(blocked)
+            )
             if chosen is None:
+                if blocked:
+                    holds.append(
+                        {
+                            "hold": "repause_hold",
+                            "rule": finding["rule"],
+                            "vendor": finding["vendor"],
+                            "models": sorted(blocked),
+                            "seconds_remaining": max(blocked.values()),
+                            "hold_seconds": REPAUSE_HOLD_SECONDS,
+                            "note": (
+                                "the guard resumed these models on this rule "
+                                "less than the hold ago"
+                            ),
+                        }
+                    )
                 continue
             acted_vendors.add(finding["vendor"])
             reading = readings.get(chosen) or {}
+            clear_cycles.pop(memory_key(chosen, finding["rule"]), None)
             models[chosen] = {
                 "reason": finding["detail"],
                 "paused_at_utc": _stamp(now),
@@ -1293,7 +1711,8 @@ class BenchmarkGuard:
                 "numbers": finding["numbers"],
                 "cost_per_question_usd": _quantize(_cost_per_question(reading)),
                 "resume_note": (
-                    "the guard removes this entry by itself when the condition clears"
+                    "the guard removes this entry by itself after the condition "
+                    f"has been clear for {RESUME_CLEAR_CYCLES} cycles"
                 ),
             }
             actions.append(
@@ -1311,17 +1730,42 @@ class BenchmarkGuard:
         for model, entry in list(models.items()):
             if (entry or {}).get("owner") != GUARD_OWNER:
                 continue
-            rule = (entry or {}).get("rule")
-            if model in held_by_rule.get(str(rule), set()):
+            rule = str((entry or {}).get("rule"))
+            key = memory_key(model, rule)
+            if model in held_by_rule.get(rule, set()):
+                clear_cycles[key] = 0
+                continue
+            clear = int(clear_cycles.get(key) or 0) + 1
+            clear_cycles[key] = clear
+            if clear < RESUME_CLEAR_CYCLES:
+                holds.append(
+                    {
+                        "hold": "clear_cycles",
+                        "model": model,
+                        "rule": rule,
+                        "vendor": (entry or {}).get("vendor"),
+                        "clear_cycles": clear,
+                        "clear_cycles_required": RESUME_CLEAR_CYCLES,
+                        "note": (
+                            "the rule is clear, but the pause holds until it "
+                            f"has been clear for {RESUME_CLEAR_CYCLES} cycles"
+                        ),
+                    }
+                )
                 continue
             del models[model]
+            clear_cycles.pop(key, None)
+            resumes[key] = _stamp(now)
             actions.append(
                 {
                     "action": "resume",
                     "model": model,
                     "vendor": (entry or {}).get("vendor"),
                     "rule": rule,
-                    "reason": f"the condition of {rule} no longer holds",
+                    "reason": (
+                        f"the condition of {rule} has been clear for "
+                        f"{RESUME_CLEAR_CYCLES} cycles"
+                    ),
                     "numbers": next(
                         (
                             finding["numbers"]
@@ -1333,10 +1777,17 @@ class BenchmarkGuard:
                 }
             )
 
+        memory["rule_clear_cycles"] = clear_cycles
+        memory["guard_resumes"] = {
+            key: stamp
+            for key, stamp in resumes.items()
+            if (moment := parse_utc(stamp)) is not None
+            and (now - moment).total_seconds() <= CODEX_SAMPLE_MAXIMUM_AGE_SECONDS
+        }
         if actions:
             pause["paused_models"] = models
             write_pause_file(self.pause_file, pause)
-        return actions
+        return actions, holds
 
     @staticmethod
     def _headline(state: dict[str, Any]) -> dict[str, Any]:
@@ -1359,6 +1810,12 @@ class BenchmarkGuard:
             ),
             "codex_weekly_percent_remaining": (quota.get("codex_weekly") or {}).get(
                 "percent_remaining"
+            ),
+            "codex_benchmark_share_of_window": (
+                state.get("codex_attribution") or {}
+            ).get("benchmark_share_of_window"),
+            "codex_attribution_measured": (state.get("codex_attribution") or {}).get(
+                "measured"
             ),
             "paused_models": sorted(state.get("paused_models") or {}),
             "evaluator_running": (state.get("evaluator") or {}).get("running"),
@@ -1587,6 +2044,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--evaluator-stale-seconds", type=int, default=DEFAULT_EVALUATOR_STALE_SECONDS
     )
+    parser.add_argument(
+        "--codex-attribution-window-seconds",
+        type=int,
+        default=CODEX_ATTRIBUTION_WINDOW_SECONDS,
+    )
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args(argv)
     guard = BenchmarkGuard(
@@ -1602,6 +2064,10 @@ def main(argv: list[str] | None = None) -> int:
         quota_command=(str(args.quota_binary), *QUOTA_ARGUMENTS),
         recorded_quota_file=args.recorded_quota_file,
         evaluator_stale_seconds=args.evaluator_stale_seconds,
+        codex_attribution_window_seconds=max(
+            int(args.codex_attribution_window_seconds),
+            CODEX_ATTRIBUTION_WINDOW_SECONDS,
+        ),
     )
     return guard.run(interval_seconds=args.interval_seconds, once=args.once)
 
