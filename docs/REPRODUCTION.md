@@ -148,7 +148,8 @@ Use `--adapter replay --input FILE` when the public APIs are unavailable.
 
 The repository does not hold the corpus.
 The full texts are copyrighted articles, so they stay on the data root of the run and are not redistributed.
-The frozen manifest records the DOI, the retrieval URL and the SHA-256 of each paper, so a reader can get the same articles from their publishers.
+The frozen manifest records the DOI, the retrieval URL and the SHA-256 of each paper.
+A reader can get the same articles from their publishers.
 
 The corpus stages are in [CLI_WALKTHROUGH.md](CLI_WALKTHROUGH.md), sections 2 to 5:
 discovery, the metadata prefilter, the bounded source pass, the article-access readiness pass, and the freeze.
