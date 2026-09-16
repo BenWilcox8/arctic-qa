@@ -51,6 +51,9 @@ EVALUATION_POLICY_SCHEMA = "benchmark-evaluation-policy-v1"
 EVALUATION_PRICE_CONFIG_SCHEMA = "benchmark-evaluation-price-config-v1"
 EVALUATION_GATE_SCHEMA = "benchmark-evaluation-execution-gate-v1"
 EVALUATION_CEILING_REASON = "the paid request exceeds the evaluation ceiling"
+# The per-item repeat limit is item-scoped: it says nothing about the next
+# item, so a consumer must not treat it as a vendor-wide stop.
+EVALUATION_ITEM_REPEAT_REASON = "the evaluation repeat limit for this item is complete"
 # An ambiguous evaluation charge halts the evaluation phase only. Construction
 # keeps running under its own ceiling (firstmate instruction 2026-09-16: an
 # evaluation error must never stop the production pipeline). These two optional
@@ -5937,7 +5940,7 @@ class SharedGeminiBroker:
         if evaluation["calls_by_trial_key"].get(trial_key, 0) >= int(
             policy["maximum_calls_per_item_condition_model_arm"]
         ):
-            raise ValueError("the evaluation repeat limit for this item is complete")
+            raise ValueError(EVALUATION_ITEM_REPEAT_REASON)
 
     def _reserve(
         self,

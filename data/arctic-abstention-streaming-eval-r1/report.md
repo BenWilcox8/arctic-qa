@@ -725,6 +725,7 @@ The new tests cover:
 - The paused model in a plan run: 42 of the 48 trials run, the six Fable trials stay pending, the invalid count stays zero, no recorded row names the paused model, and a pass after the resume time runs those six and re-calls nothing else.
 - The paused model in the streaming evaluator: the item's row names the held model and counts its trials, the item is not complete, a second pass before the resume holds the trials again, the pass after it completes the item, the totals read one row per item, and the finished item is never evaluated again.
 - The `pause-status` action: the standing pause, the command-line pause, `--no-pause-file`, and two pause files where the guard's entry wins for the same model and its resume time frees it.
+- The item-scoped stop: the per-item repeat limit records a stop on that item and keeps every vendor active, while a ceiling stop or a harness error still pauses the vendor.
 - The model pause on the path that has a broker: the ceiling precheck of the Gemini vendor keeps its own record, so a paused model stays held while Gemini keeps its slot. This is the defect of section 5.5.
 - The evaluation ceiling: the shipped v3 policy differs from v2 in the ceiling and its names only, the registered step is the only one, and the construction reserve still covers it.
 - The applied ceiling transition: the larger ceiling is refused without it, the event is immutable and names its predecessor, a later start needs no file, a paid call binds the event hash, and a fork of the chain is refused.

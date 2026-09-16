@@ -36,13 +36,18 @@ from arctic_qa.abstention_watch import (
     authorization_record,
     estimated_gemini_item_usd,
     is_ceiling_reason,
+    is_item_scoped_reason,
     pending_item_ids,
     validate_authorization,
     vendor_stop_reason,
     watch,
 )
 from arctic_qa.cli import main as cli_main
-from arctic_qa.model_broker import EVALUATION_CEILING_REASON, EVALUATION_PHASE
+from arctic_qa.model_broker import (
+    EVALUATION_CEILING_REASON,
+    EVALUATION_ITEM_REPEAT_REASON,
+    EVALUATION_PHASE,
+)
 from arctic_qa.util import atomic_json
 from test_abstention_render import _candidate, _state_db, DISTRACTORS
 
@@ -1291,3 +1296,83 @@ def test_the_model_pause_survives_the_gemini_ceiling_check(tmp_path: Path) -> No
     assert row["evaluation"]["recorded_trials"] == 42
     assert "claude-fable-5-1" not in row["outcomes_by_model"]
     assert row["complete"] is False
+
+
+def test_an_item_scoped_stop_keeps_the_vendor_running(tmp_path: Path) -> None:
+    """The per-item repeat limit must not pause a vendor for the whole watch.
+
+    The live service met this on 2026-09-16: a re-evaluated item exhausted its
+    Gemini repeat budget, the stop was read as a vendor stop, and the Gemini
+    arm was then off for every later question. The repeat limit counts one
+    item, condition, model and arm, so it says nothing about the next item.
+    """
+    assert is_item_scoped_reason(f"not_submitted: {EVALUATION_ITEM_REPEAT_REASON}")
+    assert not is_item_scoped_reason(f"not_submitted: {EVALUATION_CEILING_REASON}")
+    assert not is_item_scoped_reason(None)
+    assert not is_item_scoped_reason("harness_error: the login expired")
+    db = state_db(tmp_path, chapter3=["aqa-a", "aqa-b"])
+    ledger_file = construction_ledger(tmp_path, {"family-aqa-a": ["0.01"]})
+    auth = authorization(tmp_path, db, maximum_items=2)
+    work = tmp_path / "work"
+
+    import arctic_qa.abstention_watch as module
+
+    stops = {"count": 0}
+
+    def fake_build(*, plan, set_dir, run_id, gate_dir, vendors, **_: object):
+        return {
+            vendor: VendorRun(
+                vendor=vendor,
+                provider=ScriptedEvaluationProvider(policy="gold", seed=run_id),
+                decoding={"scripted": True, "vendor": vendor},
+                models=plan["vendors"][vendor]["models"],
+                concurrency=2,
+            )
+            for vendor in vendors
+        }
+
+    original_build = module.build_vendor_runs
+    original_reason = module.vendor_stop_reason
+
+    def fake_reason(summary: dict, vendor: str) -> str | None:
+        # The first item reports the item-scoped stop for Gemini only.
+        if vendor == PROVIDER_GOOGLE_GEMINI and stops["count"] < 1:
+            stops["count"] += 1
+            return f"not_submitted: {EVALUATION_ITEM_REPEAT_REASON}"
+        return None
+
+    module.build_vendor_runs = fake_build  # type: ignore[assignment]
+    module.vendor_stop_reason = fake_reason  # type: ignore[assignment]
+    try:
+        result = watch(
+            authorization_file=auth,
+            plan_file=PLAN_FILE,
+            contract_file=CH3_CONTRACT,
+            evaluation_policy_file=POLICY_V2,
+            evaluation_price_config_file=PRICES,
+            subscription_models_file=MODELS_FILE,
+            state_db=db,
+            work_dir=work,
+            shared_ledger_file=ledger_file,
+            broker_factory=None,
+            subscription_ledger_root=work / "subscription",
+            list_price_file=LIST_PRICES,
+            poll_seconds=5,
+            once=True,
+            code_commit="test-commit",
+            ledger_run_prefixes=("chapter3-",),
+        )
+    finally:
+        module.build_vendor_runs = original_build  # type: ignore[assignment]
+        module.vendor_stop_reason = original_reason  # type: ignore[assignment]
+    # The vendor is not paused, and it kept its place for the second item.
+    assert result["paused_vendors"] == {}
+    assert PROVIDER_GOOGLE_GEMINI in result["active_vendors"]
+    assert [row["item_id"] for row in result["items_this_invocation"]] == [
+        "aqa-a",
+        "aqa-b",
+    ]
+    # No pause row was journalled for an item-scoped stop.
+    assert [
+        row for row in CostJournal(work).rows() if row.get("kind") == "vendor_pause"
+    ] == []

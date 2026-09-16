@@ -83,7 +83,11 @@ from .abstention_set import (
     load_contract,
     load_eval_set,
 )
-from .model_broker import EVALUATION_CEILING_REASON, SharedGeminiBroker
+from .model_broker import (
+    EVALUATION_CEILING_REASON,
+    EVALUATION_ITEM_REPEAT_REASON,
+    SharedGeminiBroker,
+)
 from .util import atomic_json, sha256_file
 
 
@@ -512,6 +516,22 @@ def vendor_stop_reason(summary: dict[str, Any], vendor: str) -> str | None:
     return f"{state}: {detail}" if detail else state
 
 
+def is_item_scoped_reason(reason: str | None) -> bool:
+    """Say whether one stop reason belongs to this item alone.
+
+    The per-item repeat limit of the evaluation policy counts the calls of one
+    item, condition, model and arm. It says nothing about the next item, so a
+    vendor that meets it must keep running: the evaluator records the stop on
+    this item and takes the next one. Every other stop pauses the vendor,
+    because the policy forbids a retry and the next item would repeat it.
+
+    The live service met this on 2026-09-16: a re-evaluated item exhausted its
+    Gemini repeat budget, and the Gemini vendor was then paused for every
+    later question, which is the arm the captain most wants measured.
+    """
+    return bool(reason) and EVALUATION_ITEM_REPEAT_REASON in str(reason)
+
+
 def is_ceiling_reason(reason: str | None) -> bool:
     """Return whether one stop reason is the evaluation budget wall."""
     if not reason:
@@ -753,10 +773,22 @@ def watch(
             )
             # A vendor that stopped on this item is paused for the rest of the
             # watch, whatever the reason: the policy forbids a retry, so the
-            # next item repeats the same stop. The other vendors run on.
+            # next item repeats the same stop. The other vendors run on. The
+            # one exception is an item-scoped stop, which says nothing about
+            # the next item.
             for vendor in list(vendors):
                 reason = vendor_stop_reason(result["summary"], vendor)
                 if reason is None:
+                    continue
+                if is_item_scoped_reason(reason):
+                    emit(
+                        {
+                            "event": "vendor_stopped_on_this_item",
+                            "vendor": vendor,
+                            "item_id": item_id,
+                            "reason": reason,
+                        }
+                    )
                     continue
                 vendors = [name for name in vendors if name != vendor]
                 state["paused_vendors"][vendor] = {"reason": reason}

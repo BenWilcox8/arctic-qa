@@ -466,6 +466,11 @@ Before each item the evaluator also compares the remaining ceiling with the rese
 If one more item passes a bound, the evaluator pauses the Gemini vendor, writes a pause row in the journal, and keeps the subscription vendors running.
 A vendor that stops on an item is paused the same way, whatever the reason: a budget stop, a harness error, a timeout or an ambiguous charge.
 The policy forbids a retry, so the next item repeats that stop.
+
+One stop is item-scoped and never pauses a vendor: the per-item repeat limit of the evaluation policy.
+That limit counts the calls of one item, condition, model and arm, so it says nothing about the next item.
+The evaluator records the stop on that item and takes the next one with every vendor still active.
+The running service met this on 2026-09-16: a re-evaluated question exhausted its Gemini repeat budget, and the Gemini arm was then off for every later question.
 The pause row names the vendor and the reason, and a restart clears it.
 The evaluator stops when every vendor is paused.
 It exits non-zero only on a real error.
