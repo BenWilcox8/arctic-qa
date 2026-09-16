@@ -96,10 +96,31 @@ The dry run built a private ledger and ran the whole path with the scripted tran
 
 ## 6. Canary
 
-Pending the captain's price-gauge authorization through the firstmate inbox.
-Plan: the 5 current-contract items, both conditions, `gemini-3.1-pro-preview`, preset `medium`, one repeat, evaluation ceiling USD 5.00.
-Worst-case reservation per call: 250 x 2e-6 + 4096 x 12e-6 = USD 0.0497.
-Worst case for 10 calls: USD 0.50.
+Authorization: firstmate inbox message 001 (2026-09-16T04:37:01Z), the captain's price-gauge authorization.
+Run id `abstention-canary-r1`, commit `9717864`, gate and review record under `/mnt/crdata/research-abstention/arctic-qa/abstention-eval/private/`.
+Run directory: `/mnt/crdata/research-abstention/arctic-qa/abstention-eval/runs/canary-r1/` (`responses.jsonl`, `run-summary.json`, `scores/`).
+Plan: the 5 current-contract items, both conditions, `gemini-3.1-pro-preview`, preset `medium`, temperature 2.0, one repeat, enum output, ceiling USD 5.00, on the production ledger.
+
+| Measure | Value |
+| --- | --- |
+| Calls | 10 of 10 planned, all completed, no ambiguous charge, no budget stop |
+| Total cost | USD 0.060676 |
+| Cost per call | USD 0.006068 (min 0.002646, max 0.009290) |
+| Prompt tokens per call | 216.2 |
+| Thinking tokens per call | 468.6 (min 186, max 739) |
+| Output tokens per call | 1.0 |
+| Latency per call | mean 14.5 s, median 14.2 s, max 17.6 s |
+| Invalid rate (N0) | 0 of 10 |
+| Wall time | 2 min 39 s at the 10-per-minute pace |
+| Ledger after the run | `benchmark_evaluation_usd 0.060676`, `dataset_construction_usd 54.103785` (unchanged), `project_lifetime_usd 54.164461`, evaluation remaining USD 4.939324 |
+
+Outcomes: N1 3, N2 1, N3 1, N4 0, N5 5.
+Point estimates on 5 items (not a paper result): ACC 0.80, Precision_abs 0.83, Recall_abs 0.83, F1_abs 0.83, Abstention Rate 0.60, R-Acc 0.75, SSR 0.90.
+The model abstained in all five gold-absent trials and answered the gold option in three of five gold-present trials.
+
+Price projection from the canary at the medium preset: about USD 0.006 per call, so USD 0.012 per item for both conditions and one repeat.
+At that rate USD 5.00 covers about 400 item-condition pairs, and 500 items x 2 conditions x 4 repeats cost about USD 24 per Pro model per arm.
+The high preset will think for longer; measure it with one more canary before the large run.
 
 ## 7. Tests
 
