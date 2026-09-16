@@ -9,24 +9,26 @@ Nothing under `chapter2/` or `streaming-dataset-r1/` changed except the shared l
 
 ## 1. Result in six lines
 
-1. The producer is NOT launched. The standalone contract v4 calibration cassette failed the release rule, and rule 4 of the brief blocks the launch. The decision is with firstmate (status `needs-decision`).
+1. The producer is NOT launched. The standalone calibration failed the release rule twice: once under contract v4 (three held-out controls passed), and once under the v5 revision that firstmate ordered (three must-pass rows now fail and one new held-out control passes). Rule 4 of the brief blocks the launch. The second decision is with firstmate (status `needs-decision`).
 2. The shared ledger carries two new chained transitions: price config v8, then the construction ceiling of USD 73.990121. Section 3 gives every number.
-3. The cassette was recorded through the same gate and ledger. Every must-pass row passed (20 of 20). Three must-fail controls also passed, all from the held-out chapter 2 slice. Section 5 names them. Spend: USD 0.238626 on 41 Pro calls.
-4. Two code changes were necessary before the activation could be built. Section 2 explains them. The prepared commit is `9f4cb18`, which is `7dc6485` plus three commits of this task.
-5. The gate, the launcher, the runtime snapshot, the chapter 3 root and the streaming input are built and bound. A launch after the decision needs no rebuild unless the judge prompt changes.
+3. Both cassettes were recorded through the same gate and ledger. Section 5 names every misjudged row. Spend: USD 0.238626 on 41 Pro calls for v4, USD 0.244198 on 41 for v5, USD 0.482824 in total, inside the USD 20.
+4. Two code changes were necessary before the activation could be built. Section 2 explains them. The prepared commit is `61d2ea6`: `7dc6485` plus five commits of this task (the v5 prompt revision is the last).
+5. The gate (a reviewed successor of the `9f4cb18` gate), the launcher, the runtime snapshot, the chapter 3 root and the streaming input are built and bound. A launch after the decision needs a re-snapshot only if the judge prompt changes again.
 6. The phase E script is beside the run and was proven on the chapter 2 artifacts. It has no chapter 3 run to read yet. Section 8.
 
 ## 2. Deviations from the fixed decisions, and why
 
 The brief fixed the deployed commit as local `main` at `7dc6485`.
-The run deploys `9f4cb18` instead.
-That commit is `7dc6485` plus three commits of this task, and no other change:
+The prepared runtime is `61d2ea6` instead.
+That commit is `7dc6485` plus five commits of this task, and no other change:
 
 | Commit | Change | Reason |
 |---|---|---|
 | `525d86a` | `ruff format` over the nine abstention modules. Layout only. | The format check was red on `7dc6485`. The abstention harness landed without a format pass. |
 | `4994432` | `CHAPTER3_BUDGET_CHANGE` and `CHAPTER3_CUMULATIVE_CEILING_USD` in `model_broker.py`. `calibration_paper_identity` in `standalone_calibration.py`. The stream-input options of `calibrate-standalone` in `cli.py`. Five tests in `tests/test_chapter3_production_run.py`. | See the two paragraphs below. |
 | `9f4cb18` | `data/arctic-ch3-production-run-r1/phase_e_measures.py`. | The phase E script travels with the deployed runtime. |
+| `dfb87f6` | The report and the v4 cassette. | Evidence for the first decision. |
+| `61d2ea6` | `STANDALONE_SYSTEM` revised to contract v5 (three fail clauses, no pass rule changed); the three v4 misses moved to a `seen` slice; every test that pinned the live literal moved to v5. | Firstmate decision of 2026-09-16 05:52 UTC, option (a). |
 
 **The ceiling.** The broker accepts only registered policy transitions.
 `POLICY_TRANSITION_CHANGES` lists every allowed change set, and `_validate_policy` lists every allowed value of `away_session_total_ceiling_usd`.
@@ -47,7 +49,8 @@ The CLI binds the gate's streaming input before the first call, with the same fi
 `docs/STANDALONE_CALIBRATION.md` gives the new command.
 
 The run id stays `chapter3-7dc6485-r1` as the brief fixed it.
-The gate binds the deployed commit `9f4cb18` and names `7dc6485` as `deploy_base_commit`.
+The first gate binds `9f4cb18` and names `7dc6485` as `deploy_base_commit`.
+The successor gate `live-execution-gate-61d2ea6-ch3.json` (sha256 `6e718fc9...`) binds `61d2ea6` and names the `9f4cb18` gate in `supersedes_config_transition_review`, so the two applied transition events stay valid under it. The broker accepted 41 requests under the successor gate.
 
 ## 3. The ledger transitions
 
@@ -112,48 +115,59 @@ The eligibility run directory is `chapter3/gemini-eligibility/chapter3-7dc6485-r
 
 ## 5. The calibration
 
-Command: `calibrate-standalone --mode record --provider broker --phase away_production --run-id chapter3-7dc6485-r1 --campaign-id arctic-qa-production-campaign-003`, with the gate, the policy v9, the ledger transition and the five stream-input options, from the runtime snapshot.
-Recorded 2026-09-16 05:39:48 to 05:48:49 UTC.
+Two recordings, both with `calibrate-standalone --mode record --provider broker --phase away_production --run-id chapter3-7dc6485-r1 --campaign-id arctic-qa-production-campaign-003`, the gate, the policy v9, the ledger transition and the five stream-input options, from the runtime snapshot of the commit named.
 
-| Quantity | Value |
-|---|---|
-| Calls | 41 (every gating row), all `completed` |
-| Stage, model | `standalone_verification`, `gemini-3.1-pro-preview` |
-| Paper family in the ledger | `standalone-calibration:standalone-calibration-v2:2a7b6da0146b` |
-| Spend | USD 0.238626 (the integration report estimated USD 0.31) |
-| Ledger after | spent 54.289423, inflight 0, not halted, `integrity_valid` true, headroom 19.647710 |
-| Cassette | `standalone-calibration-v2.cassette.jsonl` (copied into this directory), sha256 `0d4a0eff...` |
-| Report | `calibration-report-9f4cb18-ch3.json` (copied into this directory) |
-| Must-pass | 20 of 20 passed (14 core, 6 held-out) |
-| Must-fail | 18 of 21 failed as required (12 core, 6 held-out); 3 held-out controls passed |
-| Release rule | not met (`passed: false`, exit code 1) |
+| Quantity | v4 recording (commit `9f4cb18`) | v5 recording (commit `61d2ea6`) |
+|---|---|---|
+| Recorded (UTC) | 05:39:48 to 05:48:49 | 06:16:20 to 06:25:46 |
+| Calls, all `completed`, stage `standalone_verification`, `gemini-3.1-pro-preview` | 41 | 41 |
+| Ledger paper family | `standalone-calibration:standalone-calibration-v2:2a7b6da0146b` | `standalone-calibration:standalone-calibration-v2:144b05368c26` |
+| Spend | USD 0.238626 | USD 0.244198 |
+| Cassette (copied into this directory) | `standalone-calibration-v2.cassette.v4.jsonl`, sha256 `0d4a0eff...` | `standalone-calibration-v2.cassette.v5.jsonl`, sha256 `ebd1cfe2...` |
+| Report (copied into this directory) | `calibration-report-9f4cb18-ch3.v4.json` | `calibration-report-61d2ea6-ch3.v5.json` |
+| Must-pass | 20 of 20 | 17 of 20 (12 of 14 core, 5 of 6 held-out) |
+| Must-fail | 18 of 21 failed as required; 3 held-out controls passed | 20 of 21 failed as required, including the 3 seen rows; 1 held-out control passed |
+| Release rule | not met | not met |
 
-The three controls that the judge passed, with the labelers' reasons:
+Ledger after the second recording: spent 54.533621, inflight 0, not halted, `integrity_valid` true, construction headroom USD 19.403512.
 
-| Row | Question | Both labelers | Judge |
+**The v4 misses** (both labelers, judge):
+
+| Row | Question | Both labelers | v4 judge |
 |---|---|---|---|
-| `aqa-69212ceec983481ba3b4` | "During the aeromycological analyses across the entire sample collection period in May 2019, what airborne fungal concentration value was obtained at sampling location number four, located in the 'Huset' region in the middle of the Longyeardalen valley?" | `undefined_measured_variable`: the unit or metric (CFU per cubic meter) is never named | pass, "all referents are well-defined" |
-| `aqa-75eec503337a30ec9192` | "What was the median relative abundance of the bacterial genus Corynebacterium in samples from Resolute Bay?" (empty context) | `undefined_population_or_sample`: the sample type is not stated | pass, "all referents are defined" |
-| `aqa-ada85a8246f0e1d0a319` | "Which ports are listed in association with the taxon Prochromadora sp. 3?" (empty context) | `undefined_location`, `source_dependent_locator`: "listed" points to an unseen table | pass, "the study identity is not a necessary detail" |
+| `aqa-69212ceec983481ba3b4` | "During the aeromycological analyses across the entire sample collection period in May 2019, what airborne fungal concentration value was obtained at sampling location number four, located in the 'Huset' region in the middle of the Longyeardalen valley?" | `undefined_measured_variable`: the unit or metric (CFU per cubic meter) is never named | pass |
+| `aqa-75eec503337a30ec9192` | "What was the median relative abundance of the bacterial genus Corynebacterium in samples from Resolute Bay?" (empty context) | `undefined_population_or_sample`: the sample type is not stated | pass |
+| `aqa-ada85a8246f0e1d0a319` | "Which ports are listed in association with the taxon Prochromadora sp. 3?" (empty context) | `undefined_location`, `source_dependent_locator`: "listed" points to an unseen table | pass |
 
-The deterministic half of the composed decision did not fire on the three rows either.
-Every core row (the r15 rows that shaped the prompt) is judged correctly.
-Every miss is a held-out chapter 2 row, which is the slice that measures a prompt revision after it is written.
-The judge is under-strict on three of nine held-out controls, and under-strict is the direction that admits paper-dependent items.
-In chapter 2 these three candidates were killed by other gates (the scope gate, the reconstructor and the deterministic rules), so the run has more than one gate on them.
-The release rule of the calibration set does not allow a launch on that argument, and the brief does not either.
+The v5 prompt adds one fail clause per class (an unnamed unit or metric, an unstated sample type, a locator word that points at an unseen table) and changes no pass rule.
+The three rows moved to a `seen` slice with their labels unchanged, as the decision required.
+Under v5 all three fail as required.
+
+**The v5 misses:**
+
+| Row | Slice, label | Question | Both labelers | v5 judge |
+|---|---|---|---|---|
+| `aqa-950e9ae4b70336903e74` | core, must_pass | "According to the Operational taxonomic units cluster analysis, into how many groups were the 12 samples clustered?" Context: "Samples were collected across Hill, Up, Down, and Sedi sampling sites." | pass | fail, `undefined_population_or_sample` on "12 samples" |
+| `aqa-4879bbe8febc48c0b1aa` | core, must_pass | "Across all years, measurement campaigns, and sites in the nutrient-poor Stordalen permafrost peatland (n = 1383), what was the reported mean net N2O flux?" | pass, a quantity stated with its own sample size | fail, `undefined_measured_variable` on "mean net N2O flux" (no unit) |
+| `aqa-a355163ada6a2e646d0e` | held-out, must_pass | "In the analysis of ice drift displacement data reconstructed using only the first two principal components, what was the RMS error in reconstruction of ITP 103?" with the ITP context | pass | fail, `undefined_measured_variable` on "RMS error" (no unit) |
+| `aqa-590325c3fba229c0e14f` | held-out, must_fail | "What percentage higher was krill production at Iceland supported by baleen whale migration from the Arctic Ocean to seamounts forming Iceland shelf waters?" (empty context) | `undefined_period_or_event`, `undefined_comparison_basis`: the baseline of "higher" is never stated | pass |
+
+The two new fail clauses cut both ways.
+The unit clause now kills two named quantities ("mean net N2O flux", "RMS error") whose unit a scientist reads from the name, and the sample clause kills "the 12 samples" in a clustering count where the sample type does not change the count.
+The v4 judge already passed the krill row, so that miss is not new to v5; it is a comparison-basis defect that neither prompt names.
+The must-pass rate (17 of 20, 85 percent) is above the 80 percent floor, but one must-fail violation fails the rule on its own.
 
 ## 6. The launch
 
 Not performed.
 No tmux session `arctic-ch3-production-r1` exists, no producer process runs, and no request of the run other than the 41 calibration calls is in the ledger.
-The launcher `launcher-9f4cb18-ch3.sh` is ready and names the runtime, the gate, the ledger transition, the policy v9 and every input of section 4.
-`build-activation.py 9f4cb18 launch` refuses to start while the calibration record says `passed: false`.
+The launcher `launcher-61d2ea6-ch3.sh` is ready and names the `61d2ea6` runtime, the successor gate, the ledger transition applied under the `9f4cb18` gate, the policy v9 and every input of section 4.
+`build-activation.py 61d2ea6 launch` refuses to start while the calibration record says `passed: false`.
 
 ## 7. The eligibility watch
 
 Not reached.
-`build-activation.py 9f4cb18 watch-eligibility` implements rule 5: after the producer passes paper 20, it reads the last row of each of the first 20 papers in frozen order.
+`build-activation.py 61d2ea6 watch-eligibility` implements rule 5: after the producer passes paper 20, it reads the last row of each of the first 20 papers in frozen order.
 If more than 5 are `screening_error` or `unresolved_rescreenable`, it waits for zero in-flight requests, sends SIGINT and records the interrupt.
 
 ## 8. The first phase E readout
@@ -175,7 +189,7 @@ PYTHONPATH=src python data/arctic-ch3-production-run-r1/phase_e_measures.py \
 
 ## 9. Test results
 
-Command: `nix develop -c bash -c 'PYTHONPATH=src pytest <files> -p no:cacheprovider -o addopts=""'` on `9f4cb18`, four bounded foreground parts.
+Command: `nix develop -c bash -c 'PYTHONPATH=src pytest <files> -p no:cacheprovider -o addopts=""'`, four bounded foreground parts, run on `9f4cb18` and again on `61d2ea6` with the same result.
 
 | Part | Result |
 |---|---|
@@ -188,12 +202,13 @@ Command: `nix develop -c bash -c 'PYTHONPATH=src pytest <files> -p no:cacheprovi
 
 The five new tests in `tests/test_chapter3_production_run.py` are in the first part.
 They pin the ceiling constant, replay the chain (chapter 2 price, chapter 2 ceiling, chapter 3 price, chapter 3 ceiling) on a fixture ledger, refuse a wrong tranche, record a cassette through a bound broker with a fake transport, and refuse a recording without the gate's streaming input.
+The offline calibration tests pin the v5 clauses and the `seen` slice.
 
 ## 10. Deferred and open
 
 | Item | Owner |
 |---|---|
-| The launch decision after the failed calibration: hold and revise the judge prompt (a new `STANDALONE_SYSTEM`, a new cassette at about USD 0.24, then launch from a re-snapshotted commit), or launch on the recorded judge with the three held-out misses on record. Relabeling the three rows is not an option this report proposes: both labelers agree and the rule would relax a gate. | firstmate and captain |
+| The second launch decision. The v5 judge is over-strict on two named quantities without a unit and on a counted sample set, and under-strict on one comparison-basis control. Options this report sees: (a) a v6 prompt that narrows the unit clause to quantities with no name at all (or with a bare word such as "value" or "concentration"), narrows the sample clause to quantities that vary with the sample type, adds a comparison-basis clause for "higher", "lower" or "more" with no stated baseline, then a third recording at about USD 0.24; (b) launch on the v4 or the v5 judge as recorded, with the misses on record. Relabeling rows is not proposed: both labelers agree on every row. | firstmate and captain |
 | The exporter rebind to the chapter 3 runtime (step 7 of the pattern) waits for the launch, so the dataset page keeps showing the chapter 2 snapshot until then. | this task, after the decision |
 | Measures 4 and 5 (reader labels) are outside this task. | phase E |
 | The `standalone-calibration` paper family in the shared ledger is bound to set v2 and prompt hash `2a7b6da0146b`; a re-recording under a new prompt binds a new family. | whoever revises the prompt |
