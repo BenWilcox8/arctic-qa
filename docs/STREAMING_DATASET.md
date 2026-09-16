@@ -1,6 +1,7 @@
 # Streaming dataset scheduler
 
-The streaming scheduler processes one full-text paper at a time.
+The streaming scheduler processes several full-text papers at a time.
+Each paper runs the whole chain on its own thread; read "Paper concurrency" below.
 It runs scientific eligibility for each newly ready paper.
 It immediately continues an eligible paper through QA, distractors, validation, and export.
 It does not require a separate eligibility batch or manual stage relaunch.
@@ -419,6 +420,26 @@ The validator's model-free option checks run before any paid option call.
 
 A production run never selects the `cost_aware` role profile.
 The `research/arctic-ch3-cost-r1/` directory holds the receipts-based measurements behind these rules.
+
+## Paper concurrency
+
+`run_stream` runs several papers at the same time.
+`--paper-workers` sets how many papers are in flight; each one runs the whole existing chain on its own thread.
+`--option-workers` sets how many option verdicts of one paper are in flight.
+Both default to 4; `--phase offline` forces both to 1, because a scripted provider answers in script order.
+
+The frozen selection order is the pick-up order.
+The completion order is not that order, so the run sorts `paper_results` back into the selection order before it returns.
+A paper is claimed only while fewer than `--max-papers` papers have been claimed, so the paper bound holds exactly as it did one at a time.
+
+The option calls of one paper run in waves.
+A wave is never wider than the options the rank-order stop still needs, so a paper whose first wave all verifies buys the calls it bought one at a time.
+
+A fault of one paper never reaches another: the containment of `_contain_candidate_processing_fault` settles that family and the other threads continue.
+A run-ending error stops the pick-up of new papers, lets the papers in flight finish and is then raised out of `run_stream` ahead of the export.
+
+The shared pieces are serialised: the state database behind `Database.lock`, the progress file behind its own lock, and the ledger behind the broker's admission lock and its file locks.
+Read "Concurrent requests" in `docs/SHARED_MODEL_BROKER.md` before you change the broker half.
 
 ## Viewer command
 

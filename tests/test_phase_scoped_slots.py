@@ -370,3 +370,62 @@ def test_construction_activity_before_the_first_transitioned_request_still_stops
     assert execute(values["broker"], paper="p1")["state"] == "completed"
     with pytest.raises(ValueError, match="ledger hash changed"):
         _construction_broker(values, tmp_path, values["policy"], values["transition"])
+
+
+def test_an_applied_transition_survives_a_phase_less_evaluation_row(
+    tmp_path: Path,
+) -> None:
+    """The 23:04 UTC exit.
+
+    A request refused before its reservation never records a phase: the row is
+    created by the count event and the phase is written by the reserve. The
+    production ledger held thirty-one evaluation rows of that shape. Reading
+    one of them as construction activity refused every start of the producer
+    after an applied transition.
+    """
+    values = _applied_construction_transition(tmp_path)
+    repeats = int(
+        values["broker"].evaluation_policy["maximum_calls_per_item_condition_model_arm"]
+    )
+    for index in range(repeats):
+        assert evaluation_execute(values, trial_id=f"t{index}")["state"] == "completed"
+    refused = evaluation_execute(values, trial_id="t-over")
+    assert refused["state"] == "not_submitted"
+    assert refused["reason"] == model_broker.EVALUATION_ITEM_REPEAT_REASON
+
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    row = ledger["requests"][refused["request_key"]]
+    assert "phase" not in row, row
+    assert str(row["stage"]).startswith("evaluation_")
+
+    restarted = _construction_broker(
+        values, tmp_path, values["policy"], values["transition"]
+    )
+
+    assert restarted.status()["integrity_valid"] is True
+    assert execute(restarted, paper="p1")["state"] == "completed"
+
+
+def test_the_tolerance_reads_the_stage_family_not_only_the_phase() -> None:
+    """A phase-less row is evaluation activity only when its stage says so."""
+    applied = _stamp(60)
+    later = _stamp(5)
+
+    def ledger_with(stage: str) -> dict:
+        return {
+            "requests": {
+                "k": {
+                    "state": "not_submitted",
+                    "stage": stage,
+                    "completed_at_utc": later,
+                }
+            }
+        }
+
+    only_evaluation = SharedGeminiBroker._only_evaluation_activity_since
+    assert only_evaluation(ledger_with("evaluation_answer:gemini-3.8-flash"), applied)
+    assert not only_evaluation(ledger_with("eligibility"), applied)
+    # A row that predates the application is not activity since it at all.
+    stale = ledger_with("eligibility")
+    stale["requests"]["k"]["completed_at_utc"] = _stamp(120)
+    assert only_evaluation(stale, applied)

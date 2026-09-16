@@ -2276,12 +2276,19 @@ def test_live_stream_cli_runs_inline_eligibility_and_qa(
             str(tmp_path / "unused-private-key"),
             "--prior-construction-spend-usd",
             "0",
+            # The scripted transport answers in script order, so this run is
+            # the one-at-a-time run the script was written for.
+            "--paper-workers",
+            "1",
+            "--option-workers",
+            "1",
         ]
     )
 
     assert exit_code == 0
     result = json.loads(capsys.readouterr().out)
     assert result["counts"]["accepted_base_questions"] == 1
+    assert result["concurrency"] == {"paper_workers": 1, "option_workers": 1}
     assert broker.status()["generation_submissions"] == 12
     assert transport.methods.count("generateContent") == 12
 

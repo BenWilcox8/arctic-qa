@@ -320,3 +320,85 @@ def test_an_exhausted_transient_count_is_contained_and_the_run_continues(
     assert fault["error_class"] == "CountUnavailableError"
     assert fault["error_message"] == COUNT_ERROR
     assert second["disposition"] != "candidate_processing_fault"
+
+
+def _strip_receipt_class(receipts: Path, key: str, *, error: str | None = None) -> None:
+    """Rewrite one stored count-error receipt as the pre-retry broker wrote it.
+
+    The 21:11 UTC receipt of 2026-09-16 carries no ``count_failure_class``:
+    that field arrived with the bounded retry. The ledger row of that request
+    was classed later by a reviewed continuation, so the live shape at the
+    22:27 UTC exit was a classed row beside an unclassed receipt. The provider
+    reads the receipt, so the receipt is what this reproduces.
+    """
+    path = receipts / f"{key}.json"
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    receipt.pop("count_failure_class", None)
+    if error is not None:
+        receipt["error"] = error
+    path.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def test_a_classed_row_beside_an_unclassed_receipt_is_counted_again(
+    tmp_path: Path,
+) -> None:
+    """The exact 22:27 UTC shape: the row says transient, the receipt says nothing."""
+    transport = RecoveringCountTransport(failures=COUNT_RETRY_ATTEMPTS)
+    broker = broker_fixture(tmp_path, transport)
+    provider = _bound_provider(broker)
+    with pytest.raises(CountUnavailableError):
+        provider.invoke(
+            "question_writer", "System", "Prompt", _parameters(), timeout=30
+        )
+    key = next(
+        path.stem
+        for path in (tmp_path / "receipts").glob("*.json")
+        if path.stem.count(".") == 0
+    )
+    _strip_receipt_class(tmp_path / "receipts", key)
+    stored = json.loads((tmp_path / "receipts" / f"{key}.json").read_text())
+    assert "count_failure_class" not in stored
+    assert stored["error"].startswith("HTTPError: HTTP Error 503: ")
+
+    result = provider.invoke(
+        "question_writer", "System", "Prompt", _parameters(), timeout=30
+    )
+
+    assert result.payload == {"question": "What changed?"}
+    assert transport.methods[-2:] == ["countTokens", "generateContent"]
+    assert (tmp_path / "receipts" / f"{key}.count-retry-1.json").is_file()
+    status = broker.status()
+    assert status["halted"] is False
+    assert status["generation_submissions"] == 1
+
+
+def test_an_unclassed_receipt_that_reads_permanent_is_not_counted_again(
+    tmp_path: Path,
+) -> None:
+    """The receipt is the authority: a row classed transient does not overrule it."""
+    transport = RecoveringCountTransport(failures=COUNT_RETRY_ATTEMPTS)
+    broker = broker_fixture(tmp_path, transport)
+    provider = _bound_provider(broker)
+    with pytest.raises(CountUnavailableError):
+        provider.invoke(
+            "question_writer", "System", "Prompt", _parameters(), timeout=30
+        )
+    key = next(
+        path.stem
+        for path in (tmp_path / "receipts").glob("*.json")
+        if path.stem.count(".") == 0
+    )
+    _strip_receipt_class(
+        tmp_path / "receipts", key, error="HTTPError: HTTP Error 404: Not Found"
+    )
+    calls_before = len(transport.methods)
+
+    with pytest.raises(Exception) as caught:
+        provider.invoke(
+            "question_writer", "System", "Prompt", _parameters(), timeout=30
+        )
+
+    assert not isinstance(caught.value, CountUnavailableError)
+    assert len(transport.methods) == calls_before
+    assert not (tmp_path / "receipts" / f"{key}.count-retry-1.json").exists()
+    assert broker.status()["generation_submissions"] == 0

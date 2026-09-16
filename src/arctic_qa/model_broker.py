@@ -205,6 +205,29 @@ CHAPTER3_EXPANSION_CHANGE = {
         "to": str(CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD),
     },
 }
+# Chapter 3 paper concurrency (captain order 2026-09-16 21:20 UTC): the
+# producer runs several papers at once, so the request rate the run can reach
+# is no longer one call at a time. The two request-rate limits move together
+# and nothing else moves: the money ceilings, the per-request cap, the paper
+# cost cap and every project design count stay exactly as the expansion left
+# them. The pair is registered, so only these two exact values are admitted.
+CHAPTER3_CONCURRENCY_REQUESTS = 8
+CHAPTER3_CONCURRENCY_REQUESTS_PER_MINUTE = 40
+CHAPTER3_CONCURRENCY_CHANGE = {
+    "maximum_concurrent_generation_requests": {
+        "from": 2,
+        "to": CHAPTER3_CONCURRENCY_REQUESTS,
+    },
+    "maximum_generation_requests_per_minute": {
+        "from": 10,
+        "to": CHAPTER3_CONCURRENCY_REQUESTS_PER_MINUTE,
+    },
+}
+# The registered request-rate pairs, in the order they were authorized.
+ALLOWED_REQUEST_RATES = (
+    (2, 10),
+    (CHAPTER3_CONCURRENCY_REQUESTS, CHAPTER3_CONCURRENCY_REQUESTS_PER_MINUTE),
+)
 POLICY_TRANSITION_CHANGES = (
     {"live_test_maximum_papers": {"from": 20, "to": 40}},
     {
@@ -217,6 +240,7 @@ POLICY_TRANSITION_CHANGES = (
     CHAPTER2_BUDGET_EXTENSION_CHANGE,
     CHAPTER3_BUDGET_CHANGE,
     CHAPTER3_EXPANSION_CHANGE,
+    CHAPTER3_CONCURRENCY_CHANGE,
 )
 # The policy transitions that move the construction ceiling. Each one binds a
 # complete stream-input gate and names its own cumulative ceiling as the tranche.
@@ -257,6 +281,12 @@ TRANSIENT_RESERVATION_RETRY_INTERVAL_SECONDS = 3.0
 # on 2026-09-16 while a release of another task held the lock.
 OPERATION_LOCK_WAIT_SECONDS = 120.0
 OPERATION_LOCK_WAIT_INTERVAL_SECONDS = 1.0
+# A concurrent request holds the operation lock only through its admission, so
+# the next request is usually waiting for a lock that frees within
+# milliseconds. A one-second poll would serialise the admissions at one a
+# second whatever the policy allows, so the concurrent path polls finely. The
+# bound and the refusal are unchanged.
+OPERATION_LOCK_CONCURRENT_WAIT_INTERVAL_SECONDS = 0.01
 OPERATION_LOCK_BUSY_REASON = "another paid broker operation is active"
 ALLOWED_LIVE_TEST_LIMITS = {(20, 100), (40, 100), (41, 101), (None, None)}
 STREAM_INPUT_BINDING_VERSION = "stream-input-binding-v1"
@@ -626,6 +656,7 @@ def hold_operation_lock(
     *,
     wait_seconds: float = 0.0,
     busy_error: type[ValueError] = ValueError,
+    poll_seconds: float | None = None,
 ) -> Any:
     """Open the exclusive operation lock file and hold it, or refuse.
 
@@ -653,7 +684,12 @@ def hold_operation_lock(
             if remaining <= 0:
                 handle.close()
                 raise busy_error(OPERATION_LOCK_BUSY_REASON) from error
-            time.sleep(min(OPERATION_LOCK_WAIT_INTERVAL_SECONDS, remaining))
+            interval = (
+                OPERATION_LOCK_WAIT_INTERVAL_SECONDS
+                if poll_seconds is None
+                else poll_seconds
+            )
+            time.sleep(min(interval, remaining))
 
 
 def activate_exclusive_batch_mode(
@@ -1024,14 +1060,28 @@ def _validate_policy(path: Path) -> dict[str, Any]:
     if live_test_suballocation > _money(away_ceiling, "away_session_total_ceiling_usd"):
         raise ValueError("the live-test budget exceeds the away-session budget")
     exact_int = {
-        "maximum_concurrent_generation_requests": 2,
-        "maximum_generation_requests_per_minute": 10,
         "maximum_output_tokens_including_thinking": 8192,
         "automatic_transport_generation_retries": 0,
     }
     for field, expected in exact_int.items():
         if value.get(field) != expected:
             raise ValueError(f"streaming budget value changed: {field}")
+    # The concurrency slot count and the minute window are one registered
+    # pair, so a policy can never raise one of them alone. The refusal names
+    # the field that left its registered values, and names the slot count when
+    # both are registered values of different pairs.
+    request_rate = (
+        value.get("maximum_concurrent_generation_requests"),
+        value.get("maximum_generation_requests_per_minute"),
+    )
+    if request_rate not in ALLOWED_REQUEST_RATES:
+        registered_slots = {pair[0] for pair in ALLOWED_REQUEST_RATES}
+        field = (
+            "maximum_generation_requests_per_minute"
+            if request_rate[0] in registered_slots
+            else "maximum_concurrent_generation_requests"
+        )
+        raise ValueError(f"streaming budget value changed: {field}")
     # The two project design counts have one registered expansion each, and
     # both move only together with the chapter 3 expansion ceiling.
     expanded = away_ceiling == CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD
@@ -1365,6 +1415,7 @@ class SharedGeminiBroker:
         evaluation_price_config_file: Path | None = None,
         evaluation_gate_file: Path | None = None,
         evaluation_policy_transition_file: Path | None = None,
+        concurrent_construction: bool = False,
     ) -> None:
         self.policy_file = policy_file.resolve()
         self.price_config_file = price_config_file.resolve()
@@ -1385,10 +1436,15 @@ class SharedGeminiBroker:
         self._authorized_live_test_ceiling_usd: Decimal | None = None
         self._status_observer: Callable[[Path], None] | None = None
         self._stream_input_binding: dict[str, Any] | None = None
-        # Evaluation-phase concurrency (docs/SHARED_MODEL_BROKER.md, "Concurrent
+        # Admission concurrency (docs/SHARED_MODEL_BROKER.md, "Concurrent
         # evaluation requests"): one admission at a time per process, N calls
-        # in flight, each guarded by its own in-flight lock file.
-        self._evaluation_admission_lock = threading.Lock()
+        # in flight, each guarded by its own in-flight lock file. The
+        # evaluation phase always works this way. A construction run opts in
+        # with ``concurrent_construction``, which the paper-concurrent producer
+        # sets; without it a construction request keeps the historical shape of
+        # one exclusive operation lock held for the whole call.
+        self._admission_lock = threading.Lock()
+        self.concurrent_construction = bool(concurrent_construction)
         self._pacing_state = threading.local()
         evaluation_files = (
             evaluation_policy_file,
@@ -2077,7 +2133,16 @@ class SharedGeminiBroker:
             # application counts as later, which errs toward a refused start.
             if not times or max(times) < applied:
                 continue
-            if request.get("phase") != EVALUATION_PHASE:
+            # A request that never reached its reservation carries no phase:
+            # the row is created before the phase is recorded, and a refusal
+            # before the reserve leaves it unset. The stage family is the
+            # authority either way, and ``execute`` refuses a request whose
+            # phase and stage family disagree, so a phase-less evaluation row
+            # is still evaluation activity. Reading it as construction stopped
+            # every start after a transition (2026-09-16 23:04 UTC).
+            if request.get("phase") != EVALUATION_PHASE and not is_evaluation_stage(
+                request.get("stage")
+            ):
                 return False
         return True
 
@@ -2197,7 +2262,12 @@ class SharedGeminiBroker:
                     expected_tranche = CHAPTER2_CUMULATIVE_CEILING_USD
                 elif changed_policy_fields == CHAPTER3_BUDGET_CHANGE:
                     expected_tranche = CHAPTER3_CUMULATIVE_CEILING_USD
-                elif changed_policy_fields == CHAPTER3_EXPANSION_CHANGE:
+                elif changed_policy_fields in (
+                    CHAPTER3_EXPANSION_CHANGE,
+                    # The concurrency transition moves no money, so it names
+                    # the ceiling the expansion already authorized.
+                    CHAPTER3_CONCURRENCY_CHANGE,
+                ):
                     expected_tranche = CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD
                 else:
                     expected_tranche = Decimal("5")
@@ -7153,22 +7223,24 @@ class SharedGeminiBroker:
                     ),
                 }
             )
-        # A construction request holds the exclusive operation lock for its
-        # whole call, as before. An evaluation request never takes that lock:
-        # it serialises its admission (recovery, gate check, pace, count,
-        # reserve) behind the in-process admission lock, then releases the
-        # admission and holds only its own in-flight lock during the live
-        # call. So N evaluation calls run at once, a construction run on the
-        # same ledger keeps its own lock, slots and window, and every ledger
-        # write stays under the ledger lock.
-        concurrent = phase == EVALUATION_PHASE
+        # Admission is serialised; the live call is not. Every request
+        # serialises its admission (recovery, gate check, pace, count,
+        # reserve), then releases the admission and holds only its own
+        # in-flight lock during the live call. So N calls run at once and
+        # every ledger write stays under the ledger lock.
+        #
+        # An evaluation request never takes the exclusive operation lock. A
+        # construction request takes it, because a reviewed operation of this
+        # ledger must not overlap the accounting of a paid request. A
+        # concurrent construction request releases that lock with its
+        # admission, before the live call, so one paper's call never blocks
+        # another's. Without ``concurrent_construction`` the lock is held for
+        # the whole call, as before.
+        concurrent = phase == EVALUATION_PHASE or self.concurrent_construction
         operation = None
         inflight_lock = None
         admitted = False
-        if concurrent:
-            self._evaluation_admission_lock.acquire()
-            admitted = True
-        else:
+        if phase != EVALUATION_PHASE:
             # This is the broker's one ordinary request path, so it waits for
             # a reviewed operation of this ledger rather than ending the run on
             # it. The bound raises ``BrokerOperationBusyError``, which the
@@ -7177,7 +7249,15 @@ class SharedGeminiBroker:
                 self._operation_lock_file,
                 wait_seconds=OPERATION_LOCK_WAIT_SECONDS,
                 busy_error=BrokerOperationBusyError,
+                poll_seconds=(
+                    OPERATION_LOCK_CONCURRENT_WAIT_INTERVAL_SECONDS
+                    if self.concurrent_construction
+                    else None
+                ),
             )
+        if concurrent:
+            self._admission_lock.acquire()
+            admitted = True
         try:
             if exclusive_batch_marker_path(self.ledger_file).exists():
                 raise ValueError("exclusive Gemini batch mode is active")
@@ -7379,9 +7459,18 @@ class SharedGeminiBroker:
                 # observability failure cannot strand a paid reservation.
                 pass
             if concurrent:
+                # The request is reserved and durable. Hold its own in-flight
+                # lock, then release the admission and the exclusive operation
+                # lock so the next request can be admitted while this one is
+                # on the wire. Orphan recovery skips a request whose in-flight
+                # lock is held.
                 inflight_lock = self._hold_inflight(request_key)
-                self._evaluation_admission_lock.release()
-                admitted = False
+                if admitted:
+                    self._admission_lock.release()
+                    admitted = False
+                if operation is not None:
+                    operation.close()
+                    operation = None
             try:
                 response = client.post(
                     request_config["model"], "generateContent", payload
@@ -7449,6 +7538,6 @@ class SharedGeminiBroker:
                 inflight_lock.close()
                 self._inflight_lock_path(request_key).unlink(missing_ok=True)
             if admitted:
-                self._evaluation_admission_lock.release()
+                self._admission_lock.release()
             if operation is not None:
                 operation.close()

@@ -24,6 +24,9 @@ from arctic_qa.abstention_plan import (
     PLAN_SUMMARY_FILENAME,
     VendorRun,
     parse_pause_models,
+    DEFAULT_PAUSE_FILE,
+    load_pause,
+    paused_models,
 )
 from arctic_qa.abstention_providers import (
     PROVIDER_GOOGLE_GEMINI,
@@ -53,6 +56,7 @@ from arctic_qa.model_broker import (
 )
 from arctic_qa.util import atomic_json
 from test_abstention_render import _candidate, _state_db, DISTRACTORS
+from test_abstention_plan import future_resume_utc  # noqa: E402
 
 
 ROOT = Path(__file__).parents[1]
@@ -1087,7 +1091,7 @@ def test_the_fable_pause_holds_its_trials_and_the_item_is_revisited(
         work_dir=work,
         ledger_file=ledger_file,
         authorization_file=auth,
-        pause_models=parse_pause_models(["claude-fable-5-1=2026-09-16T23:00:00Z"]),
+        pause_models=parse_pause_models([f"claude-fable-5-1={future_resume_utc()}"]),
     )
     assert held["paused_models"] == ["claude-fable-5-1"]
     journal = CostJournal(work)
@@ -1116,7 +1120,7 @@ def test_the_fable_pause_holds_its_trials_and_the_item_is_revisited(
         work_dir=work,
         ledger_file=ledger_file,
         authorization_file=auth,
-        pause_models=parse_pause_models(["claude-fable-5-1=2026-09-16T23:00:00Z"]),
+        pause_models=parse_pause_models([f"claude-fable-5-1={future_resume_utc()}"]),
     )
     assert again["items_this_invocation"] == []
     assert len(CostJournal(work).item_rows()) == 1
@@ -1171,11 +1175,14 @@ def test_cli_pause_status_shows_the_shipped_pause_and_the_options(
     status = json.loads(capsys.readouterr().out)
     assert status["schema"] == "abstention-eval-pause-status-v1"
     # The committed file holds the captain's standing order. Other entries
-    # come and go as an operator or the guard pauses a model, so this asserts
-    # the standing one and not the whole list.
-    assert "claude-fable-5-1" in status["paused_now"]
+    # come and go as an operator or the guard pauses a model, and the standing
+    # one resumes on its own clock, so this asserts the recorded entry and
+    # that the live list agrees with the rule, not the calendar.
     assert (
         status["entries"]["claude-fable-5-1"]["resume_at_utc"] == "2026-09-16T23:00:00Z"
+    )
+    assert set(status["paused_now"]) == set(
+        paused_models(load_pause(DEFAULT_PAUSE_FILE))
     )
     assert status["pause_files"] == ["config/benchmark-evaluation-model-pause-v1.json"]
     # The command line adds a model, and --no-pause-file drops every file.
@@ -1286,7 +1293,9 @@ def test_the_model_pause_survives_the_gemini_ceiling_check(tmp_path: Path) -> No
             once=True,
             code_commit="test-commit",
             ledger_run_prefixes=("chapter3-",),
-            pause_models=parse_pause_models(["claude-fable-5-1=2026-09-16T23:00:00Z"]),
+            pause_models=parse_pause_models(
+                [f"claude-fable-5-1={future_resume_utc()}"]
+            ),
         )
     finally:
         module.build_vendor_runs = original  # type: ignore[assignment]
@@ -1455,7 +1464,7 @@ def test_a_fully_held_item_waits_for_the_resume_instead_of_every_poll(
     ledger_file = construction_ledger(tmp_path, {"family-aqa-a": ["0.01"]})
     auth = authorization(tmp_path, db)
     work = tmp_path / "work"
-    held = parse_pause_models(["claude-fable-5-1=2026-09-16T23:00:00Z"])
+    held = parse_pause_models([f"claude-fable-5-1={future_resume_utc()}"])
     first = scripted_watch(
         db=db,
         work_dir=work,
