@@ -213,6 +213,8 @@ nix develop -c bash -c 'PYTHONPATH=src python -m arctic_qa --json abstention-eva
 ```
 
 The first prints the registered models and the version of the installed harness binary.
+It needs that binary, and it reports an error when the registry path does not exist.
+Pass `--binary-path` to name your own.
 The second prints which models are held now.
 
 An evaluation set is built from the state database of a production run.
@@ -266,7 +268,8 @@ The live guard runs as a systemd user unit against a read-only snapshot of a lan
 
 | Stage | Paid | Note |
 | --- | --- | --- |
-| Test suite, linter | No | About 20 minutes. |
+| Test suite | No | About 20 minutes. |
+| Linter and formatter check | No | A few seconds. |
 | `smoke` | No | Fake provider, synthetic fixture. |
 | `discover` | No | Public Crossref and OpenAlex requests. |
 | Metadata prefilter, source pass | No | Metadata only. |
