@@ -103,6 +103,7 @@ The [reproduction guide](../docs/REPRODUCTION.md#3-environment-variables) lists 
 | `test_ch3_candidate_fault_containment.py` | Paper-family containment for generation, routing, validation, and persistence faults. |
 | `test_ch3_integration.py` | The free chapter 3 integration path across all pipeline slices. |
 | `test_chapter3_production_run.py` | Registered policy transitions, live-run bindings, and production resume rules. |
+| `test_count_error_retry.py` | Retry, receipt chaining, and paper-level containment for a transient free token-count failure. |
 | `test_cost_call_plan.py` | Per-paper call counts, cost projection, and bounded option calls. |
 | `test_http_rejection_settlement.py` | Settlement of provider HTTP rejections before generation. |
 | `test_model_broker.py` | Budget, gate, receipt, reservation, recovery, concurrency, and settlement invariants. |

@@ -80,6 +80,7 @@ Each one records a fault that stopped a run, the correction, and the live eviden
 | `arctic-ch3-settle-not-submitted-r1/` | A double settlement between two workers of one shared ledger. |
 | `arctic-ch3-candidate-fault-containment-r1/` | The rule that one faulty candidate never ends a whole run. |
 | `arctic-broker-operation-lock-wait-r1/` | The operation lock of the shared ledger, and the wait that stops a starved producer. |
+| `arctic-ch3-count-error-retry-r1/` | A free token-count 503, its bounded retry, and the paper-level containment after retry exhaustion. |
 | `arctic-geography-fix-r1/` | The geography correction, with the correction overlay and the successor gate drafts. |
 
 ## Abstention benchmark
