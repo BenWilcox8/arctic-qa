@@ -399,6 +399,7 @@ def _producer(
         message = _text(progress.get("message")) or "No producer is running."
     return {
         "running": running,
+        "evidence": "progress_record" if running else None,
         "state": state,
         "message": message,
         "run_id": _text(progress.get("invocation_run_id")) or None,
@@ -535,6 +536,29 @@ def live_papers_report(
                 final=final,
             )
         )
+
+    # A paid call of this run is the stronger evidence. The producer writes the
+    # progress record when it finishes a paper, so a run that skips its labelled
+    # papers and then works one slow paper leaves that record quiet for longer
+    # than the staleness bound. A live call of the run proves the producer is up
+    # whatever the record says, and it cannot be confused with the evaluator,
+    # which carries another run id and the evaluation phase.
+    if (
+        in_analysis
+        and not producer["running"]
+        and producer["state"] == RUNNING_STATE
+        and producer["stale"]
+    ):
+        producer = {
+            **producer,
+            "running": True,
+            "evidence": "paid_call",
+            "message": (
+                "The progress record is quiet, but the producer moved a paid "
+                "call inside the window."
+            ),
+        }
+        report["producer"] = producer
 
     in_analysis.sort(key=lambda row: (row["started_at_utc"] or "", row["family_id"]))
     finished.sort(

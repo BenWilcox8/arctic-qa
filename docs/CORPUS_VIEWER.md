@@ -109,6 +109,14 @@ The section names the producer state when no producer is running.
 It shows the message of the progress record instead of an empty table.
 A progress record that says running but is older than `--process-stale-after-seconds` is not a running producer.
 
+One paid call of the run outranks that staleness rule.
+The producer writes the progress record when it finishes a paper.
+A run that skips its labelled papers and then works one slow paper leaves that record quiet.
+A call of the run inside the window proves the producer is up.
+Such a call carries the run id, so an evaluation call can never be read as producer work.
+A record that reports an error or a stop is never overruled.
+A call was in flight when the producer died, and the producer did die.
+
 Three inputs select the section.
 `--shared-ledger-file` gives the paid calls.
 `--streaming-progress-file` gives the producer state and the recent papers.

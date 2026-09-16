@@ -460,15 +460,45 @@ def test_a_stopped_producer_is_named_instead_of_an_empty_table(
     assert payload["message"] == "Streaming stopped on ProviderError."
 
 
-def test_a_stale_running_record_is_not_a_running_producer(
+def test_a_stale_record_with_no_live_call_is_not_a_running_producer(
     facts: dict[str, object],
 ) -> None:
+    ledger = fixture_ledger()
+    ledger["requests"].pop("1" * 64)  # type: ignore[union-attr]
+    ledger["requests"].pop("2" * 64)  # type: ignore[union-attr]
     progress = fixture_progress()
     progress["updated_at_utc"] = stamp(20)
-    payload = report(progress=progress, facts=facts, process_stale_after_seconds=300)
+    payload = report(
+        ledger=ledger, progress=progress, facts=facts, process_stale_after_seconds=300
+    )
     assert payload["producer"]["running"] is False
     assert payload["producer"]["stale"] is True
     assert "No producer is running" in payload["message"]
+
+
+def test_a_live_paid_call_outranks_a_quiet_progress_record(
+    facts: dict[str, object],
+) -> None:
+    """The producer writes the record per finished paper, so it can stay quiet."""
+    progress = fixture_progress()
+    progress["updated_at_utc"] = stamp(20)
+    payload = report(progress=progress, facts=facts, process_stale_after_seconds=300)
+    assert payload["producer"]["running"] is True
+    assert payload["producer"]["evidence"] == "paid_call"
+    assert payload["producer"]["stale"] is True
+    assert [row["family_id"] for row in payload["in_analysis"]] == [FLIGHT_FAMILY]
+
+
+def test_a_reported_error_is_never_overruled_by_a_call_in_flight(
+    facts: dict[str, object],
+) -> None:
+    """A call was in flight when the producer died. It did die."""
+    progress = fixture_progress(state="error")
+    progress["message"] = "Streaming stopped on ProviderError."
+    payload = report(progress=progress, facts=facts)
+    assert payload["producer"]["running"] is False
+    assert payload["producer"]["evidence"] is None
+    assert payload["message"] == "Streaming stopped on ProviderError."
 
 
 def test_a_running_producer_with_no_recent_call_says_so(
