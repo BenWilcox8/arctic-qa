@@ -1043,15 +1043,21 @@ def _validate_policy(path: Path) -> dict[str, Any]:
         if value.get(field) != expected:
             raise ValueError(f"streaming budget value changed: {field}")
     # The concurrency slot count and the minute window are one registered
-    # pair, so a policy can never raise one of them alone.
+    # pair, so a policy can never raise one of them alone. The refusal names
+    # the field that left its registered values, and names the slot count when
+    # both are registered values of different pairs.
     request_rate = (
         value.get("maximum_concurrent_generation_requests"),
         value.get("maximum_generation_requests_per_minute"),
     )
     if request_rate not in ALLOWED_REQUEST_RATES:
-        raise ValueError(
-            "streaming budget value changed: maximum_concurrent_generation_requests"
+        registered_slots = {pair[0] for pair in ALLOWED_REQUEST_RATES}
+        field = (
+            "maximum_generation_requests_per_minute"
+            if request_rate[0] in registered_slots
+            else "maximum_concurrent_generation_requests"
         )
+        raise ValueError(f"streaming budget value changed: {field}")
     # The two project design counts have one registered expansion each, and
     # both move only together with the chapter 3 expansion ceiling.
     expanded = away_ceiling == CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD
