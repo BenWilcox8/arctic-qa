@@ -52,10 +52,10 @@ None of them holds a secret value except the two API keys.
 | --- | --- | --- |
 | `ARCTIC_QA_DATA_ROOT` | The directory that holds every run: the database, the originals, the receipts and the exports. | `/mnt/crdata/research-abstention`, the mounted drive of the machine that produced the runs of the paper. |
 | `ARCTIC_QA_CONFIG_DIR` | The directory that holds the local credential files. | `~/.config/arctic-qa` |
-| `GEMINI_API_KEY` | The Gemini API key. The eligibility and generation stages read it. | Not set. |
+| `GEMINI_API_KEY` | The Gemini API key. The eligibility adapter reads it, and prefers it over the credential file. The shared broker reads the credential file only. | Not set. |
 | `ANTHROPIC_API_KEY` | The Anthropic API key. Only the direct Claude transport reads it. | Not set. |
-| `ARCTIC_CH2_EVIDENCE_DIR` | The chapter 2 yield-audit evidence bundle. Three replay tests skip without it. | The path of the machine that produced the run. |
-| `ARCTIC_REAL_CORPUS_DIR` | The corpus search run of the paper. The corpus-viewer tests skip without it. | The path of the machine that produced the run. |
+| `ARCTIC_CH2_EVIDENCE_DIR` | The chapter 2 yield-audit evidence bundle. The chapter 2 replay tests skip without it. | The path of the machine that produced the run. |
+| `ARCTIC_REAL_CORPUS_DIR` | The corpus search run of the paper. The corpus-viewer tests over the real corpus skip without it. | The path of the machine that produced the run. |
 | `ARCTIC_REAL_CORPUS_RUN` | The run identifier inside that corpus. | `20260911T232247Z` |
 | `ARCTIC_ZOTERO_RECEIPTS_DIR` | The Zotero custody receipts of that corpus. | The path of the machine that produced the run. |
 
@@ -78,7 +78,7 @@ A root that you name through `ARCTIC_QA_DATA_ROOT` carries no mount rule.
 Free commands need no credential.
 Skip this section until you want to run a paid stage.
 
-The Gemini key is read from a file, not from the environment, on every paid path through the broker.
+The shared broker reads the Gemini key from a file, never from the environment.
 The file must hold one line, and both the file and its directory must be private.
 
 ```bash
@@ -88,6 +88,7 @@ chmod 600 ~/.config/arctic-qa/gemini-api-key
 ```
 
 The broker refuses the file when its mode is not `600`, or when the directory is group-readable or world-readable.
+The separate Gemini eligibility adapter also accepts `GEMINI_API_KEY` from the environment.
 
 The two subscription evaluation providers use no API key.
 Claude Code bills the claude.ai login of its binary, and Codex bills the ChatGPT login of its binary.

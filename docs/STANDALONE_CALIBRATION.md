@@ -40,7 +40,7 @@ Do not record from a test and do not record without an authorized spend.
 ```
 nix develop -c bash -c 'PYTHONPATH=src python -m arctic_qa --data-root <root> --json \
   calibrate-standalone --mode record --provider broker \
-  --cassette data/<task>/standalone-calibration-v2.cassette.jsonl \
+  --cassette research/<task>/standalone-calibration-v2.cassette.jsonl \
   --run-id <run-id> --phase away_production --campaign-id <campaign-id> \
   --access-run-dir <the streaming input the gate binds> \
   --eligibility-prompt-file <prompt> --eligibility-schema-file <schema> \
