@@ -296,7 +296,27 @@ class Activation:
         assert [8, 40] in constants["allowed_request_rates"], constants
         assert constants["chapter3_expansion_cumulative_ceiling_usd"] == CEILING
         suite = read_json(DATA / "suite-result.json")
-        assert suite["commit"] == self.short, suite["commit"]
+        if suite["commit"] != self.short:
+            # A later commit that touches only this activation directory does
+            # not invalidate the suite. Prove the tested code is this code.
+            changed = run(
+                [
+                    "git",
+                    "-C",
+                    str(WORKTREE),
+                    "diff",
+                    "--name-only",
+                    suite["commit"],
+                    self.commit,
+                    "--",
+                    "src",
+                    "tests",
+                ]
+            ).stdout.strip()
+            assert not changed, (
+                f"the suite ran on {suite['commit']}, which differs in: {changed}"
+            )
+        assert "FAILED" not in json.dumps(suite), suite
 
         self.review.write_text(
             "\n".join(
