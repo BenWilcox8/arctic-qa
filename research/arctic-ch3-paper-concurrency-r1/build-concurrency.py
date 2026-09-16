@@ -472,10 +472,20 @@ class Activation:
         ledger = read_json(LEDGER)
         assert not ledger["halted"] and ledger["inflight"] == 0, "the ledger is busy"
         price_config = self.runtime / "config" / "gemini-eligibility-v1.json"
-        prior_event = RECEIPTS / (
-            f"config-transition-{state['ledger_before_transition']['result']['config_transition_sha256']}.json"
+        # The event file is named for the canonical hash of its authorization,
+        # while the ledger status reports the hash of the file itself, which is
+        # also what a successor names as its predecessor. So the predecessor is
+        # found by content, not by name.
+        active = state["ledger_before_transition"]["result"]["config_transition_sha256"]
+        prior_events = [
+            path
+            for path in RECEIPTS.glob("config-transition-*.json")
+            if sha256_file(path) == active
+        ]
+        assert len(prior_events) == 1, (
+            f"active transition event {active}: {prior_events}"
         )
-        assert prior_event.is_file(), prior_event
+        prior_event = prior_events[0]
         authorization = {
             "schema": "shared-paid-call-config-transition-v2",
             "ledger_file": str(LEDGER),
