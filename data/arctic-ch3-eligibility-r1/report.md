@@ -212,6 +212,7 @@ The owned set is `gemini_eligibility.py`, `screening.py`, the eligibility prompt
 | `src/arctic_qa/cli.py` | New `--eligibility-rescreen-prompt-file` option on `stream`, defaulting to `config/gemini-eligibility-geography-rescreen-v2.txt`, passed only when the file exists. | The CLI is the only caller of `run_stream`. |
 | `docs/BENCHMARK_INPUT_CONTRACT.md` | New section "Dimension-labelled study-setting spans" with the forwarded record shape. | Required by the brief, so the writer-context slice and this slice agree on the shape. |
 | `fixtures/ch2-eligibility-non-eligible-v1.jsonl` | New, 79 rows distilled from the read-only audit evidence. | The replay fixture. |
+| `AGENTS.md` | One line: a run directory can hold three eligibility job rows for one paper, and `_load_eligibility_jobs` takes the last attempt. | A sharp edge a future session would otherwise meet in the run directory. Low-conflict, one bullet. |
 
 `src/arctic_qa/screening.py` is in the owned set and needed no change. It holds the legacy deterministic geography screen, which is not part of the Gemini eligibility contract and is not named by audit 4.7.
 
