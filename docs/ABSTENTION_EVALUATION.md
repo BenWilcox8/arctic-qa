@@ -492,6 +492,12 @@ A model pause is not cleared by a start: it lives in the pause files, which an o
 The evaluator stops when every vendor is paused.
 It exits non-zero only on a real error.
 
+A bound is not an error, so the exit code alone never says that the benchmark stopped.
+The unit met its item bound at 2026-09-16T19:31:44Z, exited 0, and no operator saw it until the next morning.
+So `--status-file` takes the supervisor's status file, and the evaluator appends one `blocked:` line to it in three cases: the item bound ends the run, every vendor is paused, and a budget bound pauses the Gemini vendor.
+That third case does not end the run, because the subscription vendors go on, but it turns off the arm the USD allocation pays for.
+The cost guard of `docs/BENCHMARK_GUARD.md` watches the same stop from outside: it reports an evaluator whose watch state stopped moving.
+
 ### Paused models
 
 A model can be paused without a stop of the run.
@@ -568,6 +574,7 @@ The answer has schema `abstention-eval-pause-status-v1`, with `paused_now` and t
    Add `--once` for one pass, or `--deadline-seconds` for a bounded test.
    Add `--pause-file` (repeatable) or `--pause-model` to hold one model's trials.
    Give the cost guard's own pause file as a second `--pause-file`.
+   Add `--status-file` with the supervisor's status file, so a bound that ends the run says so.
 
 3. Read the cost summary.
 

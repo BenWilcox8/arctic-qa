@@ -493,6 +493,43 @@ PYTHONPATH=src python -m arctic_qa --json settle-http-rejection \
   --prior-construction-spend-usd KNOWN_VALUE
 ```
 
+## The phase of a refused request
+
+Every request records its `phase` from its first ledger record, not from its reservation.
+
+The phase matters after a reviewed configuration transition is applied.
+Such a transition is validated again on every broker start until its first construction request, and `_only_evaluation_activity_since` is the one exception to that check: an evaluation request may land in between, a construction request may not.
+That reader takes a request without a `phase` for a construction request.
+
+Before this rule, a refusal that stopped before the reservation carried no phase.
+One such refusal of the evaluation phase, at 2026-09-16T23:03:53Z, made every later broker start refuse the applied transition and write an integrity halt.
+Both the chapter 3 producer and the streaming evaluator then could not start.
+
+The reviewed `settle-phaseless-refusal` command repairs one such row.
+It is pinned in code to that one request key, in `PHASELESS_REFUSAL_SETTLEMENT_REQUEST`, and refuses any other.
+It moves no money: it asserts that the row has no `submitted_at_utc`, no `usage`, no reservation and no cost, because a `not_submitted` row is a refusal recorded before the provider was called.
+It reads the phase from the row's own evidence, which must all be present: the stage prefix `evaluation_answer:`, the evaluation trial, the evaluation gate hash and the evaluation policy hash.
+It writes `<request-key>.phase-settlement.json` and the one field `phase`, and nothing else of the row changes.
+
+Every broker start refuses while an integrity halt record is on disk, so the command supersedes that record as part of the one operation.
+It accepts only a halt whose reason is `ValueError: the configuration transition ledger hash changed`, it renames the record instead of erasing it, it puts the record back when the settlement does not apply, and the settlement receipt binds the renamed record by hash.
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json settle-phaseless-refusal \
+  --request-key REQUEST_KEY \
+  --expected-ledger-sha256 LEDGER_SHA256 \
+  --review-file /PRIVATE/DIRECTORY/review.md \
+  --streaming-budget-policy-file POLICY --price-config-file PRICE_CONFIG \
+  --execution-gate-file /PRIVATE/DIRECTORY/gate.json \
+  --shared-ledger-file LEDGER --model-receipts-dir RECEIPTS \
+  --ledger-config-transition-file TRANSITION \
+  --credential-file /PRIVATE/DIRECTORY/gemini.key \
+  --prior-construction-spend-usd KNOWN_VALUE
+```
+
+Give the construction files of the pair the ledger already holds requests under.
+A broker built on a pair with no request yet runs the whole transition validation again, which is the check this repair exists to satisfy.
+
 ## Ambiguous continuation
 
 An ambiguous charge keeps its full reservation, because the provider can have billed the call.

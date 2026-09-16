@@ -57,12 +57,26 @@ The guard writes three files in its own directory:
   Every pause and every resume appends its own row with the numbers that triggered it.
 - `guard-memory.json`, schema `benchmark-guard-memory-v1`.
   What the guard must remember between cycles.
-  It holds the Codex attribution samples, the count of clear cycles of each guard-owned pause, and the moment the guard last resumed each model.
+  It holds the Codex attribution samples, the count of clear cycles of each guard-owned pause, the moment the guard last resumed each model, and whether the guard has already reported that the evaluator stopped.
   None of this belongs in the pause file, because that file keeps the captain's own entries exactly as written.
   The guard rebuilds this file from an empty memory when it is absent or broken.
   A guard that starts with an empty memory measures again before it can pause on the Codex projection.
 
 The guard also appends one `working:` line to the task status file for each pause and each resume, so that the supervisor sees it.
+
+## The evaluator itself
+
+An evaluator that stopped scores nothing, so the guard watches it as it watches the meters.
+It reads `watch-state.json` of the journal directory, which the evaluator rewrites after every poll.
+A watch state that is absent, or that has not moved for `--evaluator-stale-seconds` (900 by default), means the evaluator is not polling.
+
+The guard then puts one line in `errors` of `guard-state.json` and appends one `blocked:` line to its status file.
+It appends one `working:` line when the evaluator polls again.
+It reports the change of state and not the state, so a long stop adds one line and not one line per cycle, and a guard that has reported nothing yet says nothing about an evaluator that runs.
+
+This is the outside half of the same guard.
+The evaluator's own `--status-file` reports a bound that ends it, and this reports a stop of any other kind: a crash, a halt of the shared ledger, or an operator who stopped the unit and forgot it.
+The unit met its item bound at 2026-09-16T19:31:44Z, exited 0, and nothing said so until the next morning.
 
 ## The extrapolation
 
