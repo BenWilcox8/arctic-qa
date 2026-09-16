@@ -52,6 +52,7 @@ from .gemini_eligibility import (
 )
 from .providers import Provider, call_provider, provider_model
 from .model_broker import PER_REQUEST_CAP_REASON, broker_request_key
+from . import paper_completion
 from .model_roles import (
     JUDGE_ROLES,
     MODEL_ROLES_CONTRACT_VERSION,
@@ -278,6 +279,23 @@ RUN_ENDING_LEDGER_STOPS = (
 INCOMPLETE_CANDIDATE_STATUSES = frozenset(
     {"incomplete_infra", "generation_incomplete", "generation_settled"}
 )
+# A completion label's outcome class, read back into the run's own vocabulary.
+# ``paper_completion.DISPOSITION_OUTCOME_CLASSES`` is the one owner of the pair,
+# so a skipped paper counts exactly as the paper the producer walked.
+COMPLETION_CLASS_DISPOSITIONS = {
+    outcome_class: disposition
+    for disposition, outcome_class in (
+        paper_completion.DISPOSITION_OUTCOME_CLASSES.items()
+    )
+}
+COMPLETION_CLASS_COUNTS = {
+    "eligibility_excluded": "eligibility_rejected",
+    "eligibility_unresolved": "eligibility_unresolved",
+    "generation_accepted": "accepted_base_questions",
+    "generation_rejected": "generation_rejected",
+    "incomplete_non_mcq": "incomplete_non_mcq",
+    "paper_cost_cap_reached": "paper_cost_cap_reached",
+}
 # The one SQL predicate that keeps call records out of a benchmark-item query.
 BENCHMARK_CANDIDATE_PREDICATE = "status NOT IN ({})".format(
     ",".join(f"'{status}'" for status in sorted(INCOMPLETE_CANDIDATE_STATUSES))
@@ -377,6 +395,7 @@ def run_stream(
     eligibility_rescreen_prompt_file: Path | None = None,
     roles_file: Path | None = None,
     role_profile: str | None = None,
+    code_commit: str | None = None,
 ) -> dict[str, Any]:
     if max_papers < 1:
         raise ValueError("max papers must be at least 1")
@@ -459,6 +478,13 @@ def run_stream(
         eligibility_rescreen_prompt_file=eligibility_rescreen_prompt_file,
         model_roles=model_roles,
     )
+    # The completion labels of this run. A labelled paper is finished, so it is
+    # skipped before any of its receipts is read: the walk that re-validates
+    # every receipt of every visited paper took about 22 minutes before the
+    # first paid call at about 5,000 receipts. The label is a note about work
+    # already finished; no receipt is altered or deleted.
+    completions = paper_completion.load_completions(db, run_id=run_id)
+    completion_commit = code_commit or "unknown"
     trusted_eligibility_decisions: dict[str, str] = {}
     if verifier_broker is not None:
         trusted_eligibility_decisions = _trusted_brokered_eligibility_decisions(
@@ -471,6 +497,7 @@ def run_stream(
             schema_file=eligibility_schema_file,
             policy_file=eligibility_policy_file,
             rescreen_prompt_file=eligibility_rescreen_prompt_file,
+            completions=completions,
         )
     progress = _Progress(
         progress_file or namespace / "streaming-dataset-r1" / "progress.json",
@@ -524,6 +551,7 @@ def run_stream(
     counts = {
         "accepted_base_questions": 0,
         CANDIDATE_PROCESSING_FAULT_REASON_CODE: 0,
+        "completion_labelled_skipped": 0,
         "eligibility_rejected": 0,
         "eligibility_unresolved": 0,
         "generation_rejected": 0,
@@ -546,6 +574,34 @@ def run_stream(
             access.get("paper_family_id")
             or stable_id("family", access.get("doi") or candidate_key)
         )
+        completion = completions.get(paper_id)
+        if completion is not None:
+            # A labelled paper is finished. It is counted and skipped here, so
+            # none of its receipts is read and no call of it is replayed.
+            outcome_class = str(completion["outcome_class"])
+            counts[COMPLETION_CLASS_COUNTS[outcome_class]] += 1
+            counts["processed"] += 1
+            counts["completion_labelled_skipped"] += 1
+            if outcome_class in {"generation_rejected", "paper_cost_cap_reached"}:
+                progress.increment(outcome_class)
+            paper_results.append(
+                {
+                    "candidate_key": candidate_key,
+                    "disposition": COMPLETION_CLASS_DISPOSITIONS[outcome_class],
+                    "reason_codes": (
+                        [str(completion["reason_code"])]
+                        if completion["reason_code"]
+                        else []
+                    ),
+                    "source_id": completion["source_id"],
+                    "completion_label": {
+                        "outcome_class": outcome_class,
+                        "labelled_at_utc": completion["labelled_at_utc"],
+                        "labelled_by_commit": completion["labelled_by_commit"],
+                    },
+                }
+            )
+            continue
         # Containment (chapter 3 candidate fault slice): one paper family is one
         # unit of work. An exception its candidate, routing, option or persistence
         # code raises settles the family and the producer moves to the next paper.
@@ -669,6 +725,19 @@ def run_stream(
                         current_stage="completed",
                         final_state="paper_cost_cap_reached",
                         final_reason=PAPER_COST_CAP_REASON_CODE,
+                    )
+                    _label_completed_paper(
+                        db,
+                        completions,
+                        run_id=run_id,
+                        campaign_id=campaign_id,
+                        candidate_key=paper_id,
+                        family_id=family_id,
+                        source_id=None,
+                        disposition="paper_cost_cap_reached",
+                        reason_codes=[PAPER_COST_CAP_REASON_CODE],
+                        eligibility_decision=None,
+                        code_commit=completion_commit,
                     )
                     continue
                 except Exception as error:
@@ -828,6 +897,19 @@ def run_stream(
                     final_state="unresolved" if unresolved else "rejected",
                     final_reason=reason_codes[0],
                 )
+                _label_completed_paper(
+                    db,
+                    completions,
+                    run_id=run_id,
+                    campaign_id=campaign_id,
+                    candidate_key=paper_id,
+                    family_id=family_id,
+                    source_id=None,
+                    disposition=disposition,
+                    reason_codes=list(reason_codes),
+                    eligibility_decision=decision,
+                    code_commit=completion_commit,
+                )
                 continue
             try:
                 source_id = _import_source(
@@ -894,6 +976,19 @@ def run_stream(
                     if disposition == "accepted"
                     else (reason_codes or [disposition])[0]
                 ),
+            )
+            _label_completed_paper(
+                db,
+                completions,
+                run_id=run_id,
+                campaign_id=campaign_id,
+                candidate_key=paper_id,
+                family_id=family_id,
+                source_id=source_id,
+                disposition=disposition,
+                reason_codes=list(reason_codes or []),
+                eligibility_decision=decision,
+                code_commit=completion_commit,
             )
         except Exception as error:
             if _ends_the_run(error):
@@ -974,6 +1069,43 @@ def run_stream(
     return result
 
 
+def _label_completed_paper(
+    db: Database,
+    completions: dict[str, dict[str, Any]],
+    *,
+    run_id: str,
+    campaign_id: str,
+    candidate_key: str,
+    family_id: str,
+    source_id: str | None,
+    disposition: str,
+    reason_codes: list[str],
+    eligibility_decision: str | None,
+    code_commit: str,
+) -> None:
+    """Label one paper the run has just finished, and hold it in this session.
+
+    The label is written the moment the paper reaches a terminal outcome, so the
+    batch catch-up is needed one time only. A disposition that left the paper
+    mid-family takes no label and keeps today's behaviour.
+    """
+    row = paper_completion.label_from_disposition(
+        run_id=run_id,
+        campaign_id=campaign_id,
+        candidate_key=candidate_key,
+        family_id=family_id,
+        source_id=source_id,
+        disposition=disposition,
+        reason_codes=reason_codes,
+        eligibility_decision=eligibility_decision,
+        code_commit=code_commit,
+    )
+    if row is None:
+        return
+    paper_completion.record_completion(db, row)
+    completions[candidate_key] = row
+
+
 def _progress_generation(
     db: Database,
     namespace: Path,
@@ -1004,6 +1136,27 @@ def _progress_generation(
     generation_attempt_supported = _supports_generation_attempt()
     slot_lookups_used = 0
 
+    def slot_lookup(
+        *,
+        failed_path: dict[str, Any],
+        evidence: dict[str, Any],
+        slot: str,
+    ) -> dict[str, Any] | None:
+        """Run the one slot lookup this paper is allowed, or none."""
+        nonlocal slot_lookups_used
+        if slot_lookups_used >= MAX_SLOT_LOOKUPS_PER_PAPER:
+            return None
+        slot_lookups_used += 1
+        return _run_slot_lookup(
+            db,
+            author,
+            run_id=campaign_id,
+            failed_path=failed_path,
+            evidence=evidence,
+            source_id=source_id,
+            slot=slot,
+        )
+
     while True:
         for path in sorted(paths.values(), key=_path_sort_key):
             candidate_row = path.get("candidate")
@@ -1023,160 +1176,39 @@ def _progress_generation(
             path["validation"] = validation
             path["candidate"] = _candidate_row(db, candidate["item_id"])
 
-        for path in paths.values():
-            candidate_row = path.get("candidate")
-            if candidate_row is None or path.get("validation") is not None:
-                continue
-            event = _require_validation_event(db, candidate_row)
-            path["validation"] = _validation_result_from_event(db, candidate_row, event)
-
-        accepted = _accepted_generation_path(paths)
-        if accepted is not None:
-            candidate_row = accepted["candidate"]
-            event = _require_validation_event(db, candidate_row)
-            reason_codes = _reason_codes(event)
-            return {
-                "disposition": "accepted",
-                "reason_codes": reason_codes,
-                "resumed": resumed,
-            }
-
-        budget_stop = next(
-            (
-                path
-                for path in sorted(paths.values(), key=_path_sort_key)
-                if path.get("budget_stop")
-            ),
-            None,
+        outcome = _stored_generation_outcome(
+            db,
+            paths,
+            campaign_id=campaign_id,
+            family_id=family_id,
+            source_id=source_id,
+            slot_lookup=slot_lookup,
         )
-        if budget_stop is not None:
-            return {
-                "disposition": "generation_rejected",
-                "reason_codes": _path_failure(db, budget_stop)["reason_codes"],
-                "resumed": resumed,
-            }
-
-        partial = next(
-            (
-                path
-                for path in sorted(paths.values(), key=_path_sort_key)
-                if path.get("candidate") is not None
-                and path["candidate"]["status"] in {"candidate", "qa_gate_failed"}
-            ),
-            None,
-        )
-        if partial is not None:
+        if outcome["kind"] == STORED_OUTCOME_UNVALIDATED:
             raise ValueError(
                 "a generated candidate remained unvalidated after its validation checkpoint"
             )
-
-        partial_finding = next(
-            (
-                path
-                for path in sorted(paths.values(), key=_path_sort_key)
-                if path.get("partial_finding")
-            ),
-            None,
-        )
-        if partial_finding is not None:
-            next_attempt = partial_finding["attempt"]
-        elif paths:
-            failed_path = max(paths.values(), key=_path_sort_key)
-            failure = _path_failure(db, failed_path)
-            if not generation_attempt_supported and failed_path.get("legacy"):
-                return {
-                    "disposition": (
-                        "incomplete_non_mcq"
-                        if failed_path.get("candidate_status") == "incomplete_non_mcq"
-                        else "generation_rejected"
-                    ),
-                    "reason_codes": failure["reason_codes"],
-                    "resumed": resumed,
-                }
-            evidence = _routing_evidence(failed_path)
-            slot_evidence = _slot_evidence_pool(db, source_id, evidence)
-            # The satisfiability guard (judge-options slice) reads only the
-            # text the writer saw, plus a found slot_lookup sentence below.
-            forwarded_slot_evidence = _forwarded_slot_evidence(failed_path)
-            unmet = _unmet_slot_demands(failure["reason_codes"], slot_evidence)
-            if unmet and slot_lookups_used < MAX_SLOT_LOOKUPS_PER_PAPER:
-                slot_lookups_used += 1
-                found = _run_slot_lookup(
-                    db,
-                    author,
-                    run_id=campaign_id,
-                    failed_path=failed_path,
-                    evidence=evidence,
-                    source_id=source_id,
-                    slot=sorted(unmet)[0],
-                )
-                if found is not None:
-                    evidence["slot_lookup"] = found
-                    slot_evidence = frozenset(
-                        {*(slot_evidence or frozenset()), found["slot"]}
-                    )
-                    forwarded_slot_evidence = frozenset(
-                        {*(forwarded_slot_evidence or frozenset()), found["slot"]}
-                    )
-            unroutable: list[str] = []
-            next_attempt = _next_generation_attempt(
-                campaign_id=campaign_id,
-                family_id=family_id,
-                paths=paths,
-                failed_path=failed_path,
-                reason_codes=failure["reason_codes"],
-                slot_evidence=slot_evidence,
-                forwarded_slot_evidence=forwarded_slot_evidence,
-                evidence=evidence,
-                unroutable=unroutable,
-            )
-            if next_attempt is None and unroutable:
+        if outcome["kind"] == STORED_OUTCOME_SLOT_LOOKUP_REQUIRED:
+            raise ValueError("the producer refused its own slot lookup")
+        if outcome["kind"] == STORED_OUTCOME_TERMINAL:
+            gate_review = outcome.get("gate_review")
+            if gate_review is not None:
                 _record_gate_review_flag(
                     db,
                     campaign_id=campaign_id,
                     candidate_key=candidate_key,
                     source_id=source_id,
                     selected=selected,
-                    attempt=failed_path["attempt"],
-                    reason_code=unroutable[0],
-                    rejection_reason_codes=failure["reason_codes"],
+                    attempt=gate_review["attempt"],
+                    reason_code=gate_review["reason_code"],
+                    rejection_reason_codes=gate_review["rejection_reason_codes"],
                 )
-            if next_attempt is None:
-                incomplete = next(
-                    (
-                        path
-                        for path in sorted(paths.values(), key=_path_sort_key)
-                        if path.get("candidate_status") == "incomplete_non_mcq"
-                    ),
-                    None,
-                )
-                if incomplete is not None:
-                    # An accepted question whose distractors failed is a product
-                    # output, so it keeps its own disposition even when routing
-                    # stopped the last path for gate review.
-                    return {
-                        "disposition": "incomplete_non_mcq",
-                        "reason_codes": _path_failure(db, incomplete)["reason_codes"],
-                        "resumed": resumed,
-                    }
-                return {
-                    "disposition": "generation_rejected",
-                    "reason_codes": [*failure["reason_codes"], *unroutable],
-                    "resumed": resumed,
-                }
-        else:
-            next_attempt = _generation_attempt(
-                campaign_id=campaign_id,
-                family_id=family_id,
-                finding_attempt_index=1,
-                question_revision_index=0,
-                attempt_kind="primary",
-                parent_attempt_id=None,
-                parent_item_id=None,
-                trigger_reason_code=None,
-                excluded_finding_span_ids=[],
-            )
-
+            return {
+                "disposition": outcome["disposition"],
+                "reason_codes": outcome["reason_codes"],
+                "resumed": resumed,
+            }
+        next_attempt = outcome["attempt"]
         progress.paper(
             paper_id=source_id,
             title=title,
@@ -1378,6 +1410,208 @@ def _progress_generation(
                     "reason_codes": validation["reasons"],
                     "resumed": resumed,
                 }
+
+
+# The three answers the stored generation paths of one paper family can give.
+# ``_stored_generation_outcome`` is the one owner of that ladder: the producer
+# walks it to find its next paid call, and the per-paper completion label walks
+# the same ladder to decide whether the run already finished the paper. Two
+# owners would let a labelled paper differ from the paper the producer would
+# have finished.
+STORED_OUTCOME_TERMINAL = "terminal"
+STORED_OUTCOME_ATTEMPT = "attempt"
+STORED_OUTCOME_UNVALIDATED = "unvalidated"
+STORED_OUTCOME_SLOT_LOOKUP_REQUIRED = "slot_lookup_required"
+
+
+def _stored_generation_outcome(
+    db: Database,
+    paths: dict[tuple[int, int], dict[str, Any]],
+    *,
+    campaign_id: str,
+    family_id: str,
+    source_id: str,
+    slot_lookup: Callable[..., dict[str, Any] | None] | None = None,
+    require_validation_events: bool = True,
+) -> dict[str, Any]:
+    """Read one paper family's next step from its stored generation paths.
+
+    The answer is one of four kinds. ``terminal`` names the disposition the run
+    reached with no further call. ``attempt`` carries the next generation
+    attempt, which costs money. ``unvalidated`` says a stored candidate still
+    needs its local validation, which the caller runs before it asks again.
+    ``slot_lookup_required`` says routing wants a slot lookup call and this
+    caller passed no ``slot_lookup``.
+
+    Each stored candidate carries its own validation, read back from the
+    validation event of that exact payload. A caller that has already validated
+    a path leaves that path's ``validation`` in place. A producer treats a
+    missing event as a fault; a read-only caller passes
+    ``require_validation_events`` false and takes ``unvalidated`` instead.
+
+    Nothing here writes to the database. A terminal answer that also reached a
+    gate review flag reports it in ``gate_review`` and the caller records it, so
+    a read-only caller stays read-only.
+    """
+    for path in paths.values():
+        candidate_row = path.get("candidate")
+        if candidate_row is None or path.get("validation") is not None:
+            continue
+        event = _validation_event_for_stored_candidate(db, candidate_row)
+        if event is None:
+            if require_validation_events:
+                raise ValueError(
+                    "a terminal streaming candidate lacks a validation event "
+                    "for its payload"
+                )
+            return {"kind": STORED_OUTCOME_UNVALIDATED}
+        path["validation"] = _validation_result_from_event(db, candidate_row, event)
+
+    accepted = _accepted_generation_path(paths)
+    if accepted is not None:
+        event = _require_validation_event(db, accepted["candidate"])
+        return {
+            "kind": STORED_OUTCOME_TERMINAL,
+            "disposition": "accepted",
+            "reason_codes": _reason_codes(event),
+        }
+
+    budget_stop = next(
+        (
+            path
+            for path in sorted(paths.values(), key=_path_sort_key)
+            if path.get("budget_stop")
+        ),
+        None,
+    )
+    if budget_stop is not None:
+        return {
+            "kind": STORED_OUTCOME_TERMINAL,
+            "disposition": "generation_rejected",
+            "reason_codes": _path_failure(db, budget_stop)["reason_codes"],
+        }
+
+    partial = next(
+        (
+            path
+            for path in sorted(paths.values(), key=_path_sort_key)
+            if path.get("candidate") is not None
+            and path["candidate"]["status"] in {"candidate", "qa_gate_failed"}
+        ),
+        None,
+    )
+    if partial is not None:
+        return {"kind": STORED_OUTCOME_UNVALIDATED}
+
+    partial_finding = next(
+        (
+            path
+            for path in sorted(paths.values(), key=_path_sort_key)
+            if path.get("partial_finding")
+        ),
+        None,
+    )
+    if partial_finding is not None:
+        return {"kind": STORED_OUTCOME_ATTEMPT, "attempt": partial_finding["attempt"]}
+
+    if not paths:
+        return {
+            "kind": STORED_OUTCOME_ATTEMPT,
+            "attempt": _generation_attempt(
+                campaign_id=campaign_id,
+                family_id=family_id,
+                finding_attempt_index=1,
+                question_revision_index=0,
+                attempt_kind="primary",
+                parent_attempt_id=None,
+                parent_item_id=None,
+                trigger_reason_code=None,
+                excluded_finding_span_ids=[],
+            ),
+        }
+
+    failed_path = max(paths.values(), key=_path_sort_key)
+    failure = _path_failure(db, failed_path)
+    if not _supports_generation_attempt() and failed_path.get("legacy"):
+        return {
+            "kind": STORED_OUTCOME_TERMINAL,
+            "disposition": (
+                "incomplete_non_mcq"
+                if failed_path.get("candidate_status") == "incomplete_non_mcq"
+                else "generation_rejected"
+            ),
+            "reason_codes": failure["reason_codes"],
+        }
+    evidence = _routing_evidence(failed_path)
+    slot_evidence = _slot_evidence_pool(db, source_id, evidence)
+    # The satisfiability guard (judge-options slice) reads only the text the
+    # writer saw, plus a found slot_lookup sentence below.
+    forwarded_slot_evidence = _forwarded_slot_evidence(failed_path)
+    unmet = _unmet_slot_demands(failure["reason_codes"], slot_evidence)
+    if unmet:
+        if slot_lookup is None:
+            return {
+                "kind": STORED_OUTCOME_SLOT_LOOKUP_REQUIRED,
+                "unmet": sorted(unmet),
+            }
+        found = slot_lookup(
+            failed_path=failed_path,
+            evidence=evidence,
+            slot=sorted(unmet)[0],
+        )
+        if found is not None:
+            evidence["slot_lookup"] = found
+            slot_evidence = frozenset({*(slot_evidence or frozenset()), found["slot"]})
+            forwarded_slot_evidence = frozenset(
+                {*(forwarded_slot_evidence or frozenset()), found["slot"]}
+            )
+    unroutable: list[str] = []
+    next_attempt = _next_generation_attempt(
+        campaign_id=campaign_id,
+        family_id=family_id,
+        paths=paths,
+        failed_path=failed_path,
+        reason_codes=failure["reason_codes"],
+        slot_evidence=slot_evidence,
+        forwarded_slot_evidence=forwarded_slot_evidence,
+        evidence=evidence,
+        unroutable=unroutable,
+    )
+    if next_attempt is not None:
+        return {"kind": STORED_OUTCOME_ATTEMPT, "attempt": next_attempt}
+    gate_review = (
+        {
+            "attempt": failed_path["attempt"],
+            "reason_code": unroutable[0],
+            "rejection_reason_codes": failure["reason_codes"],
+        }
+        if unroutable
+        else None
+    )
+    incomplete = next(
+        (
+            path
+            for path in sorted(paths.values(), key=_path_sort_key)
+            if path.get("candidate_status") == "incomplete_non_mcq"
+        ),
+        None,
+    )
+    if incomplete is not None:
+        # An accepted question whose distractors failed is a product output, so
+        # it keeps its own disposition even when routing stopped the last path
+        # for gate review.
+        return {
+            "kind": STORED_OUTCOME_TERMINAL,
+            "disposition": "incomplete_non_mcq",
+            "reason_codes": _path_failure(db, incomplete)["reason_codes"],
+            "gate_review": gate_review,
+        }
+    return {
+        "kind": STORED_OUTCOME_TERMINAL,
+        "disposition": "generation_rejected",
+        "reason_codes": [*failure["reason_codes"], *unroutable],
+        "gate_review": gate_review,
+    }
 
 
 def _supports_generation_attempt() -> bool:
@@ -3579,8 +3813,10 @@ def _trusted_brokered_eligibility_decisions(
     schema_file: Path,
     policy_file: Path,
     rescreen_prompt_file: Path | None = None,
+    completions: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, str]:
     decisions: dict[str, str] = {}
+    labelled = completions or {}
     processed = 0
     for selected in selection:
         if processed >= max_papers:
@@ -3590,6 +3826,14 @@ def _trusted_brokered_eligibility_decisions(
         if access is None or access.get("access_state") != "full_text_ready":
             continue
         processed += 1
+        completion = labelled.get(str(candidate_key))
+        if completion is not None:
+            # The paper is finished. Its recorded eligibility decision keeps the
+            # run counts true without reading one receipt of it again.
+            decision = completion["eligibility_decision"]
+            if decision is not None:
+                decisions[str(candidate_key)] = str(decision)
+            continue
         eligibility = eligibility_jobs.get(candidate_key)
         if eligibility is None or eligibility.get("execution_authority") != (
             "shared_gemini_broker"

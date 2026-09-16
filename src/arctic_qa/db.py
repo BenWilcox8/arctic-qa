@@ -189,6 +189,24 @@ CREATE TABLE IF NOT EXISTS rejection_ledger (
     detail_json TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS paper_completions (
+    completion_id TEXT PRIMARY KEY,
+    schema TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    campaign_id TEXT NOT NULL,
+    candidate_key TEXT NOT NULL,
+    paper_family_id TEXT NOT NULL,
+    source_id TEXT,
+    outcome_class TEXT NOT NULL,
+    eligibility_decision TEXT,
+    reason_code TEXT,
+    detail_json TEXT NOT NULL,
+    labelled_at_utc TEXT NOT NULL,
+    labelled_by_commit TEXT NOT NULL,
+    UNIQUE(run_id, candidate_key)
+);
+CREATE INDEX IF NOT EXISTS idx_paper_completions_run
+    ON paper_completions(run_id);
 """
 
 
@@ -214,9 +232,12 @@ class Database:
             row = self.connection.execute("SELECT version FROM schema_info").fetchone()
             if row and row[0] == SCHEMA_VERSION:
                 # The version is current, but a table added to SCHEMA under the
-                # same version (the chapter 3 finding bank) is created here.
-                # Every statement in SCHEMA is IF NOT EXISTS, so this is a
-                # no-op on a complete database.
+                # same version (the chapter 3 finding bank, the per-paper
+                # completion label) is created here. Every statement in SCHEMA
+                # is IF NOT EXISTS, so this is a no-op on a complete database.
+                # A new table that no earlier reader queries keeps the version:
+                # the live state database is shared with the benchmark
+                # evaluator, whose pinned snapshot refuses any other version.
                 with self.transaction():
                     self.connection.executescript(SCHEMA)
                 return

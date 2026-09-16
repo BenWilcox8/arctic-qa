@@ -41,6 +41,7 @@ from .gemini_eligibility import run_gemini_eligibility
 from .manifests import write_source_manifest
 from .metadata_prefilter import run_metadata_prefilter
 from .model_broker import SharedGeminiBroker
+from . import paper_completion
 from .paths import DEFAULT_DATA_ROOT, DataPaths
 from .providers import make_provider
 from .screening import screen_source
@@ -488,6 +489,36 @@ def parser() -> argparse.ArgumentParser:
     stream.add_argument("--ledger-config-transition-file", type=Path)
     stream.add_argument("--credential-file", type=Path)
     stream.add_argument("--prior-construction-spend-usd", type=Decimal)
+    stream.add_argument(
+        "--code-commit",
+        help="The commit of this code, recorded on every paper completion label.",
+    )
+
+    label = commands.add_parser(
+        "label-completed-papers",
+        help="Label every analyzed paper of one run, in one transaction.",
+    )
+    label.add_argument("--run-id", required=True)
+    label.add_argument("--campaign-id", required=True)
+    label.add_argument("--access-run-dir", type=Path, required=True)
+    label.add_argument("--eligibility-run-dir", type=Path, required=True)
+    label.add_argument("--eligibility-prompt-file", type=Path, required=True)
+    label.add_argument("--eligibility-schema-file", type=Path, required=True)
+    label.add_argument("--eligibility-policy-file", type=Path, required=True)
+    label.add_argument("--eligibility-rescreen-prompt-file", type=Path)
+    label.add_argument("--max-papers", type=int)
+    label.add_argument(
+        "--code-commit",
+        required=True,
+        help="The commit that labels these papers. A runtime snapshot is not a "
+        "git working tree, so the commit is named, never guessed.",
+    )
+    label.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write the labels. Without it the command prints and writes nothing.",
+    )
+    label.add_argument("--output-file", type=Path)
 
     abstention_cli.add_parser(commands)
 
@@ -787,7 +818,7 @@ def main(argv: list[str] | None = None) -> int:
             return _emit(args, _authorize_count_error_continuation(args))
         paths, db = _open(args)
         try:
-            handler = globals()[f"_{args.command}"]
+            handler = globals()[f"_{args.command.replace('-', '_')}"]
             return _emit(args, handler(args, paths, db))
         finally:
             db.close()
@@ -1517,7 +1548,47 @@ def _stream(args, paths: DataPaths, db: Database) -> dict[str, Any]:
         ),
         roles_file=args.roles_file.resolve() if args.roles_file else None,
         role_profile=args.role_profile,
+        code_commit=args.code_commit,
     )
+
+
+def _label_completed_papers(args, paths: DataPaths, db: Database) -> dict[str, Any]:
+    """Label every paper of one run the run already finished.
+
+    The rule is in ``docs/STREAMING_DATASET.md``, section "Paper completion
+    labels". The command reads stored state only: it makes no provider call,
+    validates no receipt and alters nothing in the shared ledger.
+    """
+    inputs = paper_completion.load_stream_inputs(
+        access_run_dir=args.access_run_dir.resolve(),
+        eligibility_run_dir=args.eligibility_run_dir.resolve(),
+        eligibility_prompt_file=args.eligibility_prompt_file.resolve(),
+        eligibility_schema_file=args.eligibility_schema_file.resolve(),
+        eligibility_policy_file=args.eligibility_policy_file.resolve(),
+        eligibility_rescreen_prompt_file=(
+            args.eligibility_rescreen_prompt_file.resolve()
+            if args.eligibility_rescreen_prompt_file
+            and args.eligibility_rescreen_prompt_file.is_file()
+            else None
+        ),
+    )
+    report = paper_completion.label_run(
+        db,
+        run_id=args.run_id,
+        campaign_id=args.campaign_id,
+        selection=inputs["selection"],
+        access_items=inputs["access_items"],
+        eligibility_jobs=inputs["eligibility_jobs"],
+        code_commit=args.code_commit,
+        max_papers=args.max_papers,
+        dry_run=not args.apply,
+    )
+    report["state_database"] = str(paths.database)
+    if args.output_file:
+        args.output_file.parent.mkdir(parents=True, exist_ok=True)
+        args.output_file.write_text(canonical_json(report), encoding="utf-8")
+        report = {**report, "output_file": str(args.output_file)}
+    return {key: value for key, value in report.items() if key != "papers"}
 
 
 def _smoke(args, paths: DataPaths, db: Database) -> dict[str, Any]:
