@@ -481,10 +481,17 @@ Each key is a model id, and its entry takes a `reason` and an optional `resume_a
 A model with no resume time stays paused until an operator removes its entry.
 A model whose resume time has passed is not paused any more.
 
-The evaluator re-reads this file before every item.
+The evaluator re-reads every pause file before every item.
 So an operator or a cost guard can pause or resume a model while the evaluator runs, and the evaluator needs no restart.
-The repeatable `--pause-model MODEL[=RESUME_UTC]` option pauses a model for one invocation, and it wins over the file for the same model.
-`--no-pause-file` ignores the file.
+
+`--pause-file` is repeatable, because the standing orders and a guard's own decisions have different owners.
+Give the committed file first and the guard's file second: a later file wins for the same model.
+The cost guard of `docs/BENCHMARK_GUARD.md` owns its file, marks its entries with `"owner": "benchmark-cost-guard"`, and removes only its own.
+An entry an operator wrote stays exactly as written.
+Without the option the evaluator reads the committed file alone.
+
+The repeatable `--pause-model MODEL[=RESUME_UTC]` option pauses a model for one invocation, and it wins over every file for the same model.
+`--no-pause-file` ignores every file.
 
 The pause protects a real quota, so the pause file applies to `run-plan` and `watch`.
 A dry run makes no call and uses no quota, so `dry-run-plan` reads only an explicit `--pause-model`.
@@ -499,8 +506,8 @@ Read a run's totals through `CostJournal.latest_item_rows`, which keeps the last
 
 This is the interface for a cost guard:
 
-- write the pause file (schema above) to pause a model;
-- read `--action pause-status` to prove which models are held now;
+- write its own pause file (schema above) and give the evaluator that path as a second `--pause-file`;
+- read `--action pause-status` with the same files to prove which models are held now;
 - read `cost-journal.jsonl` in the work directory for the per-item cost, and `--action cost-summary` for the totals, the per-item averages and the projection.
 
 ```bash
@@ -536,7 +543,8 @@ The answer has schema `abstention-eval-pause-status-v1`, with `paused_now` and t
    Add `--backfill` to evaluate the chapter 2 items too.
    Backfill is off by default.
    Add `--once` for one pass, or `--deadline-seconds` for a bounded test.
-   Add `--pause-file` or `--pause-model` to hold one model's trials.
+   Add `--pause-file` (repeatable) or `--pause-model` to hold one model's trials.
+   Give the cost guard's own pause file as a second `--pause-file`.
 
 3. Read the cost summary.
 

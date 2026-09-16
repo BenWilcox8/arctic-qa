@@ -360,10 +360,13 @@ def add_parser(commands: argparse._SubParsersAction) -> None:
     parser.add_argument(
         "--pause-file",
         type=Path,
-        default=DEFAULT_PAUSE_FILE,
+        action="append",
+        default=[],
         help=(
-            "The paused-model file. The evaluator re-reads it before every item, "
-            "so a cost guard can pause or resume a model while it runs."
+            "A paused-model file (repeatable). The evaluator re-reads every one "
+            "before every item, so a cost guard can pause or resume a model "
+            "while it runs. A later file wins for the same model. Without this "
+            f"option the evaluator reads {DEFAULT_PAUSE_FILE}."
         ),
     )
     parser.add_argument(
@@ -653,7 +656,7 @@ def _watch(args: argparse.Namespace) -> dict[str, Any]:
         scratch_root=args.scratch_dir.resolve() if args.scratch_dir else None,
         code_commit=args.code_commit or git_head(),
         ledger_run_prefixes=tuple(args.ledger_run_prefix),
-        pause_file=_pause_file(args),
+        pause_files=_pause_files(args),
         pause_models=parse_pause_models(args.pause_model),
         progress=_progress,
         log=_watch_log,
@@ -696,28 +699,33 @@ def _pause_status(args: argparse.Namespace) -> dict[str, Any]:
     prove the pause is in force. The evaluator re-reads the same file before
     every item, so it needs no restart.
     """
-    path = _pause_file(args)
+    paths = _pause_files(args)
     record = _pause_record(args)
     return {
         "schema": "abstention-eval-pause-status-v1",
-        "pause_file": str(path) if path is not None else None,
+        "pause_file": str(paths[0]) if paths else None,
+        "pause_files": [str(path) for path in paths],
         "paused_now": sorted(paused_models(record)),
         "entries": record["paused_models"],
     }
 
 
-def _pause_file(args: argparse.Namespace) -> Path | None:
-    """The paused-model file of this invocation, or None when it is off."""
+def _pause_files(args: argparse.Namespace) -> list[Path]:
+    """The paused-model files of this invocation, in the order they are read.
+
+    A cost guard owns its own file, and the committed file holds the standing
+    orders of the captain. So the evaluator reads a list, and a later file
+    wins for the same model. Without the option it reads the committed file.
+    """
     if args.no_pause_file:
-        return None
-    return args.pause_file
+        return []
+    return list(args.pause_file) or [DEFAULT_PAUSE_FILE]
 
 
 def _pause_record(args: argparse.Namespace) -> dict[str, Any]:
     """Merge the paused-model file with the repeated ``--pause-model`` options."""
-    path = _pause_file(args)
     return merge_pause(
-        load_pause(path) if path is not None else None,
+        *(load_pause(path) for path in _pause_files(args)),
         parse_pause_models(args.pause_model),
     )
 

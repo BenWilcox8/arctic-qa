@@ -1160,14 +1160,54 @@ def test_cli_pause_status_shows_the_shipped_pause_and_the_options(
     assert cli_main(base) == 0
     status = json.loads(capsys.readouterr().out)
     assert status["schema"] == "abstention-eval-pause-status-v1"
-    assert status["paused_now"] == ["claude-fable-5-1"]
+    # The committed file holds the captain's standing order. Other entries
+    # come and go as an operator or the guard pauses a model, so this asserts
+    # the standing one and not the whole list.
+    assert "claude-fable-5-1" in status["paused_now"]
     assert (
         status["entries"]["claude-fable-5-1"]["resume_at_utc"] == "2026-09-16T23:00:00Z"
     )
-    # The command line adds a model, and --no-pause-file drops the file.
+    assert status["pause_files"] == ["config/benchmark-evaluation-model-pause-v1.json"]
+    # The command line adds a model, and --no-pause-file drops every file.
     assert cli_main([*base, "--no-pause-file", "--pause-model", "gpt-5.6-sol"]) == 0
     only = json.loads(capsys.readouterr().out)
-    assert only["pause_file"] is None and only["paused_now"] == ["gpt-5.6-sol"]
+    assert only["pause_file"] is None and only["pause_files"] == []
+    assert only["paused_now"] == ["gpt-5.6-sol"]
+    # A cost guard owns its own file; a later file wins for the same model.
+    guard = tmp_path / "guard-model-pause.json"
+    atomic_json(
+        guard,
+        {
+            "schema": "benchmark-evaluation-model-pause-v1",
+            "paused_models": {
+                "gemini-3.8-flash": {
+                    "owner": "benchmark-cost-guard",
+                    "reason": "the Gemini allocation is nearly spent",
+                },
+                "claude-fable-5-1": {
+                    "owner": "benchmark-cost-guard",
+                    "reason": "the Fable window reopened",
+                    "resume_at_utc": "2026-09-16T00:00:00Z",
+                },
+            },
+        },
+    )
+    assert (
+        cli_main(
+            [
+                *base,
+                "--pause-file",
+                "config/benchmark-evaluation-model-pause-v1.json",
+                "--pause-file",
+                str(guard),
+            ]
+        )
+        == 0
+    )
+    merged = json.loads(capsys.readouterr().out)
+    # The guard's entry for the same model wins, and its resume time frees it.
+    assert merged["paused_now"] == ["gemini-3.7-flash", "gemini-3.8-flash"]
+    assert merged["entries"]["claude-fable-5-1"]["owner"] == "benchmark-cost-guard"
 
 
 def test_the_model_pause_survives_the_gemini_ceiling_check(tmp_path: Path) -> None:

@@ -633,14 +633,17 @@ The resume time needs no second command: the file states it once and the evaluat
 
 | Control | Effect |
 | --- | --- |
-| `config/benchmark-evaluation-model-pause-v1.json` | The standing pause. Re-read before every item. |
-| `--pause-file <path>` | Another pause file. |
-| `--no-pause-file` | Ignore the file. |
-| `--pause-model MODEL[=RESUME_UTC]` | Pause one model for this invocation. It wins over the file. |
-| `--action pause-status` | Show which models are held now. |
+| `config/benchmark-evaluation-model-pause-v1.json` | The standing pause of the captain. Re-read before every item. |
+| `--pause-file <path>` | Another pause file. Repeatable; a later file wins for the same model. |
+| `--no-pause-file` | Ignore every file. |
+| `--pause-model MODEL[=RESUME_UTC]` | Pause one model for this invocation. It wins over every file. |
+| `--action pause-status` | Show which models are held now, and which files it read. |
 
 This is also the documented interface for the cost guard of `arctic-benchmark-guard-site-r1`:
-the guard writes the pause file to hold a model, reads `--action pause-status` to prove the pause is in force, and reads `cost-journal.jsonl` and `--action cost-summary` for the numbers.
+the guard writes its own pause file to hold a model, reads `--action pause-status` to prove the pause is in force, and reads `cost-journal.jsonl` and `--action cost-summary` for the numbers.
+`docs/BENCHMARK_GUARD.md` on `main` states the guard's half of that contract, and it matches this one.
+The guard owns its file and marks its entries with `"owner": "benchmark-cost-guard"`, so `--pause-file` is repeatable: the launcher gives the committed file and the guard's file, and a later file wins for the same model.
+An entry an operator wrote stays exactly as written.
 The schemas are `benchmark-evaluation-model-pause-v1`, `abstention-eval-pause-status-v1`, `abstention-eval-cost-row-v1` and `abstention-eval-cost-summary-v1`.
 The "Paused models" section of `docs/ABSTENTION_EVALUATION.md` holds the full contract.
 
@@ -670,7 +673,8 @@ The new tests cover:
 - The model pause: the pause record merges the file and the command line, the resume time frees the model with no edit, an invalid model or timestamp is refused, and the file needs its `paused_models` block.
 - The paused model in a plan run: 42 of the 48 trials run, the six Fable trials stay pending, the invalid count stays zero, no recorded row names the paused model, and a pass after the resume time runs those six and re-calls nothing else.
 - The paused model in the streaming evaluator: the item's row names the held model and counts its trials, the item is not complete, a second pass before the resume holds the trials again, the pass after it completes the item, the totals read one row per item, and the finished item is never evaluated again.
-- The `pause-status` action: the shipped pause, the command-line pause, and `--no-pause-file`.
+- The `pause-status` action: the standing pause, the command-line pause, `--no-pause-file`, and two pause files where the guard's entry wins for the same model and its resume time frees it.
+- The model pause on the path that has a broker: the ceiling precheck of the Gemini vendor keeps its own record, so a paused model stays held while Gemini keeps its slot. This is the defect of section 5.5.
 - The evaluation ceiling: the shipped v3 policy differs from v2 in the ceiling and its names only, the registered step is the only one, and the construction reserve still covers it.
 - The applied ceiling transition: the larger ceiling is refused without it, the event is immutable and names its predecessor, a later start needs no file, a paid call binds the event hash, and a fork of the chain is refused.
 - Fourteen refusals of an altered transition: an unregistered change set, another ledger, a changed ledger snapshot, another gate, a changed or absent source, a changed target, another predecessor, an absent commit or reason, an invalid time, an absent or changed review record, another schema, and a policy that also moves a control field. No refused attempt writes an event.

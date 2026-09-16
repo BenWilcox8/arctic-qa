@@ -24,8 +24,10 @@ Paused models. A model can be paused without a stop of the run. Captain
 order 2026-09-16: "pause the fable evaluation because I only have ~80% fable
 usage left today; I will run the fable benchmarking after the reset at 6:00pm
 today". The watcher reads
-``config/benchmark-evaluation-model-pause-v1.json`` (and the repeatable
-``--pause-model`` option) and never dispatches a trial of a paused model. The
+every paused-model file it is given (the committed
+``config/benchmark-evaluation-model-pause-v1.json`` by default, a cost guard's
+own file through a second ``--pause-file``) and the repeatable
+``--pause-model`` option, and never dispatches a trial of a paused model. The
 held trials stay pending: they are not recorded and not counted as invalid.
 The item's journal row names the paused models and counts the held trials, so
 the item is not complete, and a later pass, after the resume time, runs only
@@ -548,7 +550,7 @@ def watch(
     scratch_root: Path | None = None,
     code_commit: str | None = None,
     ledger_run_prefixes: tuple[str, ...] = (),
-    pause_file: Path | None = None,
+    pause_files: tuple[Path, ...] | list[Path] = (),
     pause_models: dict[str, Any] | None = None,
     progress: Callable[[dict[str, Any]], None] | None = None,
     log: Callable[[dict[str, Any]], None] | None = None,
@@ -565,11 +567,12 @@ def watch(
     example the subscription vendors while the Gemini arm waits for its own
     reviewed gate; the journal then lists the rest as paused.
 
-    ``pause_file`` is the paused-model file, re-read before every item, so an
-    operator or a cost guard can pause or resume a model while the watcher
-    runs. ``pause_models`` holds the models the command line paused, and it
-    wins over the file for the same model. A paused model's trials are held,
-    not recorded; the item is revisited after the resume time.
+    ``pause_files`` are the paused-model files, re-read before every item, so
+    an operator or a cost guard can pause or resume a model while the watcher
+    runs. A later file wins for the same model, and ``pause_models`` holds the
+    models the command line paused, which wins over every file. A paused
+    model's trials are held, not recorded; the item is revisited after the
+    resume time.
     """
     if not MINIMUM_POLL_SECONDS <= int(poll_seconds) <= MAXIMUM_POLL_SECONDS:
         raise ValueError(
@@ -659,7 +662,7 @@ def watch(
             # Re-read the pause file before every item: a cost guard can pause
             # a model at any moment, and a resume time can pass mid-run.
             pause = merge_pause(
-                load_pause(pause_file) if pause_file is not None else None,
+                *(load_pause(path) for path in pause_files),
                 pause_models,
             )
             held_now = paused_models(pause)
@@ -816,7 +819,7 @@ def watch(
         "paused_models": sorted(
             paused_models(
                 merge_pause(
-                    load_pause(pause_file) if pause_file is not None else None,
+                    *(load_pause(path) for path in pause_files),
                     pause_models,
                 )
             )
