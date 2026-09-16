@@ -619,15 +619,12 @@ class Activation:
         self.write_launcher()
         before = self.validate_ledger(POLICY_V11, self.gate, self.ledger_transition)
         assert before["integrity_valid"] is True and before["halted"] is False, before
-        gate = read_json(self.gate)
-        gate["activation_state"] = "started"
-        os.chmod(self.gate, 0o644)
-        write_json(self.gate, gate)
-        os.chmod(self.gate, 0o444)
-        # The gate hash is bound into every receipt, so the transition
-        # authorization must still name it. Re-validate after the state change.
-        after_gate = self.validate_ledger(POLICY_V11, self.gate, self.ledger_transition)
-        assert after_gate["integrity_valid"] is True, after_gate
+        # The gate is never rewritten after its transition is applied. Its
+        # hash is bound into the transition authorization and into every
+        # receipt, so a changed byte refuses the ledger. `activation_state`
+        # therefore stays `authorized_not_started` for the life of the gate,
+        # as it does on every gate of this run; the launch record below is
+        # what says the producer started.
         run(
             [
                 "tmux",
