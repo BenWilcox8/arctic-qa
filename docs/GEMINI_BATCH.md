@@ -4,25 +4,36 @@ This module continues the scientific pipeline with the Gemini Batch API.
 It reuses the current prompts, schemas, deterministic validators, database, accepted export, and publication exporter.
 Preparation makes no network call and does not change the shared paid-call ledger.
 
-Real batch submission is not active.
-The captain must authorize the campaign scope before an operator submits the first round.
-The full run is paused for geography-policy review.
-Do not submit a batch or resume paid work during this pause.
+The batch campaign has a separate USD 25 allocation.
+The first USD 50 live campaign keeps its own cumulative ledger and liabilities.
+The root operator must coordinate the shared ledger before the first submission.
 
 ## Price and model evidence
 
-The configured model is `gemini-3.8-flash`.
+Most requests use `gemini-3.8-flash`.
 Google lists Batch API support on the [model page](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash).
 Google lists the Batch API request format on the [Batch API page](https://ai.google.dev/gemini-api/docs/batch-api).
+
+Only a deterministic answer mismatch prepares an answer-judge request.
+That request uses `gemini-3.1-flash-lite`.
+Google lists its limits and Batch API support on the [Flash-Lite model page](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite).
 
 The [official pricing page](https://ai.google.dev/gemini-api/docs/pricing) gives these rates through December 31, 2026:
 
 - Input tokens cost USD 0.375 per million tokens.
 - Output and thinking tokens cost USD 1.875 per million tokens.
 
+Flash-Lite judge requests use these batch rates:
+
+- Input tokens cost USD 0.125 per million tokens.
+- Output tokens cost USD 0.75 per million tokens.
+
+The [thinking documentation](https://ai.google.dev/gemini-api/docs/generate-content/thinking) defines minimal thinking for Gemini 3 models.
+
 The module accepts no tools, caching, media output, or ancillary service charge.
 It does not assume that ancillary charges use the batch discount.
-It rejects a model other than the configured model.
+Each round contains requests for one registered model.
+The round manifest records that model and its exact batch price.
 
 ## Durable files
 
@@ -44,7 +55,7 @@ Each private mapping also records the attempt, prompt hash, configuration hash, 
 ## Select the ranked continuation
 
 Wait for an exact paused or terminal progress record and settled accounting.
-Wait for the geography-policy review to fix the policy scope.
+Use the currently approved scientific eligibility policy for the new campaign.
 Then create a final continuation plan from the ranked 800-paper input.
 
 The selector reads the campaign database, eligibility jobs, shared ledger, and progress file.
@@ -58,8 +69,8 @@ PYTHONPATH=src python -m arctic_qa.gemini_batch select-continuation \
   --access-run-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/production-campaign-r1/quality-order-r1/materialized-top-800 \
   --db /mnt/crdata/research-abstention/arctic-qa/state.sqlite3 \
   --campaign-id arctic-qa-production-campaign-001 \
-  --prior-run-id first-production-6fbdf41-r1 \
-  --eligibility-run-dir /mnt/crdata/research-abstention/arctic-qa/gemini-eligibility-r1/first-production-6fbdf41-r1 \
+  --prior-run-id first-production-6dc430d-live-rerun-r8 \
+  --eligibility-run-dir /mnt/crdata/research-abstention/arctic-qa/gemini-eligibility-r1/first-production-6dc430d-live-rerun-r8 \
   --shared-ledger-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
   --production-progress-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/progress.json \
   --output-file "$BATCH_STATE/final-continuation-plan.json" \
@@ -82,16 +93,16 @@ PYTHONPATH=src python -m arctic_qa.gemini_batch prepare \
   --db /mnt/crdata/research-abstention/arctic-qa/state.sqlite3 \
   --namespace /mnt/crdata/research-abstention/arctic-qa \
   --run-id FUTURE_BATCH_INVOCATION_ID \
-  --campaign-id arctic-qa-production-campaign-001 \
+  --campaign-id FUTURE_BATCH_CAMPAIGN_ID \
   --access-run-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/production-campaign-r1/quality-order-r1/materialized-top-800 \
   --continuation-plan "$BATCH_STATE/final-continuation-plan.json" \
   --eligibility-run-dir "$BATCH_STATE/eligibility" \
-  --eligibility-prompt-file config/gemini-eligibility-prompt-v4.txt \
-  --eligibility-schema-file schemas/gemini-eligibility.v2.schema.json \
-  --eligibility-policy-file /mnt/crdata/research-abstention/arctic-qa/corpus-search-r1/protocol/protocol-v2.json \
+  --eligibility-prompt-file config/gemini-eligibility-prompt-v6.txt \
+  --eligibility-schema-file schemas/gemini-eligibility.v3.schema.json \
+  --eligibility-policy-file /mnt/crdata/research-abstention/arctic-qa/corpus-search-r1/protocol/protocol-v3.json \
   --price-config-file config/gemini-eligibility-v1.json \
   --shared-ledger-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
-  --overall-ceiling-usd 250
+  --batch-allocation-usd 25
 '
 ```
 
@@ -106,9 +117,20 @@ Dependent stages require separate rounds.
 One batch job has a target turnaround of 24 hours.
 Therefore, the complete pipeline has no one-day completion promise.
 
-### Current provisional preview
+The batch allocation includes every prepared request in the campaign.
+Each request reserves input tokens plus its maximum output token limit.
+The output limit includes thinking tokens.
+The shared ledger amount appears in each budget preview, but it does not reduce the separate USD 25 batch allocation.
+Submission permits only reviewed no-replay recovery holds after the producer stops.
+Those holds remain fully reserved and count against every cap.
+Unreviewed submitted or ambiguous requests, integrity halts, and in-flight requests still stop submission.
 
-The current preview uses the active ranked 800-paper campaign.
+### Archived provisional preview
+
+The following preview is retained as historical evidence only.
+It is not an active campaign input and cannot be submitted.
+The new USD 25 campaign must use a fresh final continuation plan.
+This archived preview predates the current live r8 invocation.
 The selector marked this snapshot as provisional because synchronous production is still active.
 
 Snapshot `r2` excludes 78 processed or touched papers and retains 722 untouched papers.
@@ -121,7 +143,7 @@ The eligibility round has these values:
 - Reserved cost: USD `0.08677125`
 - Shared ledger use at preparation: USD `14.974336`
 - Projected cumulative use: USD `15.06110725`
-- Overall construction ceiling: USD `250`
+- Batch allocation ceiling: USD `25`
 - Live call made: `false`
 - Submission enabled: `false`
 
@@ -137,8 +159,8 @@ Do not activate this preview automatically.
 
 ## Authorize and submit one round
 
-Wait until the current synchronous campaign is settled.
-Make sure that its ledger has no reservation, ambiguous charge, or in-flight request.
+Wait until the current synchronous campaign stops.
+Make sure that its ledger has zero in-flight requests and that every retained reservation or ambiguous charge has an exact reviewed no-replay recovery record.
 
 After captain approval, create an authorization file for each exact round manifest.
 The operator can create these files within the approved campaign budget, order, and model scope.
@@ -165,7 +187,7 @@ PYTHONPATH=src python -m arctic_qa.gemini_batch submit \
   --credential-file /home/ben/.config/arctic-qa/gemini-api-key \
   --price-config-file config/gemini-eligibility-v1.json \
   --shared-ledger-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
-  --overall-ceiling-usd 250
+  --batch-allocation-usd 25
 '
 ```
 
@@ -241,9 +263,9 @@ It can also create the reviewer, benchmark, scoring, CSV, and prompt companion p
 PYTHONPATH=src python -m arctic_qa.gemini_batch export \
   --db /mnt/crdata/research-abstention/arctic-qa/state.sqlite3 \
   --namespace /mnt/crdata/research-abstention/arctic-qa \
-  --campaign-id arctic-qa-production-campaign-001 \
+  --campaign-id FUTURE_BATCH_CAMPAIGN_ID \
   --publication-output-dir /PRIVATE/PUBLICATION_PACKAGE \
-  --prompt-template config/gemini-eligibility-prompt-v4.txt
+  --prompt-template config/gemini-eligibility-prompt-v6.txt
 ```
 
 An empty accepted export is an honest result.

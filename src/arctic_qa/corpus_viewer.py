@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+from .benchmark_guard import benchmark_report
 from .metadata_prefilter import DISPOSITIONS
 from .util import sha256_file
 
@@ -53,6 +54,7 @@ GEMINI_FILTERS = {
     "screening_error",
     "too_large_not_ready",
     "ambiguous_charge",
+    "unresolved_rescreenable",
 }
 PROJECT_PROGRESS_STATUSES = {"completed", "in_progress", "not_finished"}
 PROJECT_PROGRESS_SCHEMA = "project-progress-overview-v1"
@@ -61,6 +63,14 @@ RESEARCH_TIMELINE_SCHEMA = "research-fleet-timeline-v1"
 RESEARCH_TIMELINE_MAX_BYTES = 262_144
 PUBLICATION_MANIFEST_MAX_BYTES = 131_072
 PUBLICATION_FILE_MAX_BYTES = 2_000_000
+LIVE_DATASET_POINTER_SCHEMA = "arctic-qa-live-dataset-pointer-v1"
+LIVE_DATASET_SNAPSHOT_SCHEMA = "arctic-qa-live-dataset-snapshot-v1"
+LIVE_DATASET_MANIFEST_MAX_BYTES = 131_072
+LIVE_DATASET_FILE_MAX_BYTES = 64_000_000
+LIVE_DATASET_FILES = {
+    "benchmark": "accepted-benchmark.jsonl",
+    "reviewer": "accepted-reviewer.jsonl",
+}
 PUBLICATION_DATA_FILES = {
     "benchmark_csv": "text/csv; charset=utf-8",
     "benchmark_jsonl": "application/x-ndjson; charset=utf-8",
@@ -238,8 +248,11 @@ class CorpusArtifacts:
         dataset_metadata_file: Path | None = None,
         production_plan_file: Path | None = None,
         publication_package_dir: Path | None = None,
+        live_dataset_dir: Path | None = None,
         project_overview_file: Path | None = None,
         research_timeline_file: Path | None = None,
+        benchmark_journal_dir: Path | None = None,
+        benchmark_guard_state_file: Path | None = None,
         pipeline_trace_store: Any | None = None,
         stale_after_seconds: int = 86400,
         process_stale_after_seconds: int = 300,
@@ -285,11 +298,18 @@ class CorpusArtifacts:
         self.publication_package_dir = (
             publication_package_dir.resolve() if publication_package_dir else None
         )
+        self.live_dataset_dir = live_dataset_dir.resolve() if live_dataset_dir else None
         self.project_overview_file = (
             project_overview_file.resolve() if project_overview_file else None
         )
         self.research_timeline_file = (
             research_timeline_file.resolve() if research_timeline_file else None
+        )
+        self.benchmark_journal_dir = (
+            benchmark_journal_dir.resolve() if benchmark_journal_dir else None
+        )
+        self.benchmark_guard_state_file = (
+            benchmark_guard_state_file.resolve() if benchmark_guard_state_file else None
         )
         self.pipeline_trace_store = pipeline_trace_store
         self.stale_after_seconds = stale_after_seconds
@@ -387,6 +407,11 @@ class CorpusArtifacts:
             _file_fingerprint(
                 self.publication_package_dir / "manifest.json"
                 if self.publication_package_dir
+                else None
+            ),
+            _file_fingerprint(
+                self.live_dataset_dir / "current.json"
+                if self.live_dataset_dir
                 else None
             ),
             _file_fingerprint(self.project_overview_file),
@@ -959,7 +984,9 @@ class CorpusArtifacts:
                             or not isinstance(predecessor.get("run_id"), str)
                             or not predecessor["run_id"]
                             or predecessor["run_id"] == future_run.get("run_id")
-                            or not isinstance(predecessor.get("run_manifest_sha256"), str)
+                            or not isinstance(
+                                predecessor.get("run_manifest_sha256"), str
+                            )
                             or not re.fullmatch(
                                 r"[0-9a-f]{64}", predecessor["run_manifest_sha256"]
                             )
@@ -1019,6 +1046,15 @@ class CorpusArtifacts:
                         else {}
                     ),
                 }
+            if self.pipeline_trace_store and result.get("telemetry") == "observed":
+                latest_counts = self.pipeline_trace_store.latest_run_counts()
+                if latest_counts is not None:
+                    result["counts"] = {
+                        **dict(result.get("counts") or {}),
+                        "accepted_qa": latest_counts["accepted_qa"],
+                        "generation_rejected": latest_counts["generation_rejected"],
+                    }
+                    result["accepted_qa_scope"] = "current_incremental_invocation"
             return result
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
             if (
@@ -1173,6 +1209,170 @@ class CorpusArtifacts:
             raise KeyError("unknown trial publication download")
         return allowed[key]["path"].read_bytes(), allowed[key]["content_type"]
 
+    def _live_dataset_snapshot(self, *, include_paths: bool = False) -> dict[str, Any]:
+        root = self.live_dataset_dir
+        if root is None:
+            return {
+                "state": "not_selected",
+                "message": "No live dataset snapshot is selected.",
+                "item_count": 0,
+                "files": [],
+            }
+        pointer_path = root / "current.json"
+        if not pointer_path.is_file():
+            raise RuntimeError("the live dataset pointer is unavailable")
+        if pointer_path.stat().st_size > LIVE_DATASET_MANIFEST_MAX_BYTES:
+            raise RuntimeError("the live dataset pointer is too large")
+        pointer = _read_json(pointer_path)
+        if pointer.get("schema") != LIVE_DATASET_POINTER_SCHEMA:
+            raise RuntimeError("the live dataset pointer is invalid")
+        snapshot_id = pointer.get("snapshot_id")
+        expected_manifest = f"snapshots/{snapshot_id}/manifest.json"
+        if (
+            not isinstance(snapshot_id, str)
+            or not re.fullmatch(r"live-dataset-snapshot-[a-f0-9]{32}", snapshot_id)
+            or pointer.get("manifest") != expected_manifest
+        ):
+            raise RuntimeError("the live dataset pointer target is invalid")
+        snapshot_dir = (root / "snapshots" / snapshot_id).resolve()
+        try:
+            snapshot_dir.relative_to(root)
+        except ValueError as error:
+            raise RuntimeError(
+                "the live dataset snapshot is outside its root"
+            ) from error
+        manifest_path = snapshot_dir / "manifest.json"
+        if (
+            not manifest_path.is_file()
+            or manifest_path.stat().st_size > LIVE_DATASET_MANIFEST_MAX_BYTES
+            or sha256_file(manifest_path) != pointer.get("manifest_sha256")
+        ):
+            raise RuntimeError("the live dataset manifest does not match its pointer")
+        manifest = _read_json(manifest_path)
+        if (
+            manifest.get("schema") != LIVE_DATASET_SNAPSHOT_SCHEMA
+            or manifest.get("snapshot_id") != snapshot_id
+            or manifest.get("item_count") != pointer.get("item_count")
+            or manifest.get("updated_at_utc") != pointer.get("updated_at_utc")
+        ):
+            raise RuntimeError("the live dataset manifest is invalid")
+        preview = manifest.get("preview")
+        if preview is not None and (
+            not isinstance(preview, dict)
+            or preview.get("label") != "Machine-validated preview"
+            or not isinstance(preview.get("notice"), str)
+            or not preview["notice"]
+        ):
+            raise RuntimeError("the live dataset preview is invalid")
+        files = []
+        records = manifest.get("files")
+        if not isinstance(records, dict):
+            raise RuntimeError("the live dataset file list is invalid")
+        for key, filename in LIVE_DATASET_FILES.items():
+            record = records.get(key)
+            if not isinstance(record, dict) or record.get("path") != filename:
+                raise RuntimeError("the live dataset file record is invalid")
+            path = snapshot_dir / filename
+            if (
+                not path.is_file()
+                or path.stat().st_size > LIVE_DATASET_FILE_MAX_BYTES
+                or path.stat().st_size != record.get("size_bytes")
+                or sha256_file(path) != record.get("sha256")
+            ):
+                raise RuntimeError("a live dataset file is unavailable or invalid")
+            files.append(
+                {
+                    "key": key,
+                    "filename": filename,
+                    "size_bytes": path.stat().st_size,
+                    "content_type": "application/x-ndjson; charset=utf-8",
+                    "path": path,
+                }
+            )
+        return {
+            "state": "available",
+            "message": "Current-contract accepted question families.",
+            "snapshot_id": snapshot_id,
+            "updated_at_utc": manifest["updated_at_utc"],
+            "item_count": manifest["item_count"],
+            "selection": manifest.get("selection"),
+            "preview": preview,
+            "files": files
+            if include_paths
+            else [
+                {name: value for name, value in row.items() if name != "path"}
+                for row in files
+            ],
+        }
+
+    def live_dataset_records(self, parameters: dict[str, list[str]]) -> dict[str, Any]:
+        snapshot = self._live_dataset_snapshot(include_paths=True)
+        files = {row["key"]: row["path"] for row in snapshot["files"]}
+
+        def rows(path: Path) -> list[dict[str, Any]]:
+            result = []
+            with path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    if line.strip():
+                        value = json.loads(line)
+                        if not isinstance(value, dict):
+                            raise RuntimeError("a live dataset row is invalid")
+                        result.append(value)
+            return result
+
+        benchmark = rows(files["benchmark"])
+        reviewer = rows(files["reviewer"])
+        review_by_id = {row.get("item_id"): row for row in reviewer}
+        benchmark_ids = [row.get("item_id") for row in benchmark]
+        if (
+            len(benchmark) != snapshot["item_count"]
+            or len(reviewer) != snapshot["item_count"]
+            or len(set(benchmark_ids)) != len(benchmark_ids)
+            or set(benchmark_ids) != set(review_by_id)
+        ):
+            raise RuntimeError("the live benchmark and reviewer rows do not join")
+        query = (parameters.get("q") or [""])[0].strip().casefold()
+        if len(query) > 200:
+            raise ValueError("q is too long")
+        joined = [
+            {"benchmark": row, "reviewer": review_by_id[row["item_id"]]}
+            for row in benchmark
+        ]
+        if query:
+            joined = [
+                row
+                for row in joined
+                if query
+                in json.dumps(row, ensure_ascii=False, sort_keys=True).casefold()
+            ]
+        try:
+            page = int((parameters.get("page") or ["1"])[0])
+            page_size = int((parameters.get("page_size") or ["10"])[0])
+        except ValueError as error:
+            raise ValueError("page and page_size must be integers") from error
+        if page < 1 or page_size not in PAGE_SIZES:
+            raise ValueError("the live dataset page is invalid")
+        total = len(joined)
+        pages = max(1, (total + page_size - 1) // page_size)
+        page = min(page, pages)
+        start = (page - 1) * page_size
+        return {
+            "snapshot_id": snapshot["snapshot_id"],
+            "updated_at_utc": snapshot["updated_at_utc"],
+            "total": total,
+            "page": page,
+            "pages": pages,
+            "page_size": page_size,
+            "records": joined[start : start + page_size],
+        }
+
+    def live_dataset_download(self, key: str) -> bytes:
+        snapshot = self._live_dataset_snapshot(include_paths=True)
+        allowed = {row["key"]: row for row in snapshot["files"]}
+        if key not in allowed:
+            raise KeyError("unknown live dataset download")
+        return allowed[key]["path"].read_bytes()
+
     @staticmethod
     def _trace_parameter(
         parameters: dict[str, list[str]], name: str, *, required: bool = False
@@ -1220,7 +1420,12 @@ class CorpusArtifacts:
         if self.pipeline_trace_store is None:
             raise RuntimeError("pipeline trace data is not configured")
         paper_key = self._trace_parameter(parameters, "paper_key", required=True)
-        result = self.pipeline_trace_store.paper_detail(paper_key)
+        run_id = self._trace_parameter(parameters, "run_id")
+        result = (
+            self.pipeline_trace_store.paper_detail(paper_key, run_id=run_id)
+            if run_id
+            else self.pipeline_trace_store.paper_detail(paper_key)
+        )
         if (
             not isinstance(result, dict)
             or result.get("schema") != "pipeline-trace-paper-v1"
@@ -1233,7 +1438,12 @@ class CorpusArtifacts:
             raise RuntimeError("pipeline trace data is not configured")
         paper_key = self._trace_parameter(parameters, "paper_key", required=True)
         stage_key = self._trace_parameter(parameters, "stage_key", required=True)
-        result = self.pipeline_trace_store.stage_payload(paper_key, stage_key)
+        run_id = self._trace_parameter(parameters, "run_id")
+        result = (
+            self.pipeline_trace_store.stage_payload(paper_key, stage_key, run_id=run_id)
+            if run_id
+            else self.pipeline_trace_store.stage_payload(paper_key, stage_key)
+        )
         if (
             not isinstance(result, dict)
             or result.get("schema") != "pipeline-trace-stage-v1"
@@ -1529,7 +1739,12 @@ class CorpusArtifacts:
             "source": "viewer_validated_pipeline_records",
             "telemetry": streaming.get("telemetry", "absent"),
             "scientific_count_scope": "current_incremental_invocation",
-            "accepted_qa_scope": "shared_ledger_cumulative",
+            # The progress file carries the campaign total. Only the pipeline
+            # trace store can narrow it to the latest invocation, so the label
+            # follows the data instead of claiming a scope the count lacks.
+            "accepted_qa_scope": streaming.get(
+                "accepted_qa_scope", "shared_ledger_cumulative"
+            ),
             "spent_usd": broker.get("spent_usd") if observed else None,
             "reserved_usd": broker.get("reserved_usd") if observed else None,
             "ambiguous_reserved_usd": (
@@ -1540,7 +1755,7 @@ class CorpusArtifacts:
             "eligible": integer(counts, "eligible"),
             "excluded": integer(counts, "excluded"),
             "unresolved": integer(counts, "unresolved"),
-            "accepted_qa": integer(broker, "accepted_question_count"),
+            "accepted_qa": integer(counts, "accepted_qa"),
         }
 
     def _apply_source_overlay(
@@ -2246,6 +2461,15 @@ class CorpusArtifacts:
                 "message": f"Trial publication package error: {error}",
                 "files": [],
             }
+        try:
+            live_dataset = self._live_dataset_snapshot()
+        except RuntimeError as error:
+            live_dataset = {
+                "state": "invalid",
+                "message": f"Live dataset error: {error}",
+                "item_count": 0,
+                "files": [],
+            }
         payload: dict[str, Any] = {
             "generated_at_utc": _utc_now(),
             "selected_run": self.run_id,
@@ -2264,6 +2488,7 @@ class CorpusArtifacts:
             "gemini_screening": gemini,
             "streaming_pipeline": streaming,
             "publication_package": publication_package,
+            "live_dataset": live_dataset,
             "project_overview": project_overview,
             "research_timeline": research_timeline,
             "artifacts": artifacts,
@@ -2406,6 +2631,20 @@ class CorpusArtifacts:
             },
         ]
         return payload
+
+    def live_benchmark(self) -> dict[str, Any]:
+        """Return the live-benchmarking view, rebuilt from the files each request.
+
+        The per-model table and the per-question cost rows come from the
+        streaming evaluator's cost journal. The budget, the extrapolation, the
+        quota readings and the pause state come from the guard-state file that
+        `arctic_qa.benchmark_guard` writes. This route reads files only: it
+        never makes a paid call and never writes.
+        """
+        return benchmark_report(
+            journal_dir=self.benchmark_journal_dir,
+            guard_state_file=self.benchmark_guard_state_file,
+        )
 
     def candidates(self, parameters: dict[str, list[str]]) -> dict[str, Any]:
         self.refresh()
@@ -2570,6 +2809,15 @@ class CorpusRequestHandler(BaseHTTPRequestHandler):
                         parse_qs(parsed.query, keep_blank_values=True)
                     ),
                 )
+            elif parsed.path == "/api/live-dataset":
+                self._json(
+                    HTTPStatus.OK,
+                    self.artifacts.live_dataset_records(
+                        parse_qs(parsed.query, keep_blank_values=True)
+                    ),
+                )
+            elif parsed.path == "/api/live-benchmark":
+                self._json(HTTPStatus.OK, self.artifacts.live_benchmark())
             elif parsed.path == "/api/pipeline-trace":
                 self._json(
                     HTTPStatus.OK,
@@ -2603,6 +2851,15 @@ class CorpusRequestHandler(BaseHTTPRequestHandler):
                     raise KeyError("unknown trial publication download")
                 body, content_type = self.artifacts.publication_download(key)
                 self._send(HTTPStatus.OK, body, content_type)
+            elif parsed.path.startswith("/downloads/live-dataset/"):
+                key = parsed.path.removeprefix("/downloads/live-dataset/")
+                if key not in LIVE_DATASET_FILES:
+                    raise KeyError("unknown live dataset download")
+                self._send(
+                    HTTPStatus.OK,
+                    self.artifacts.live_dataset_download(key),
+                    "application/x-ndjson; charset=utf-8",
+                )
             elif parsed.path == "/healthz":
                 state = self.artifacts.state()
                 status = (
@@ -2656,6 +2913,7 @@ def serve_corpus_viewer(
     dataset_metadata_file: Path | None,
     production_plan_file: Path | None,
     publication_package_dir: Path | None,
+    live_dataset_dir: Path | None,
     project_overview_file: Path | None,
     research_timeline_file: Path | None,
     host: str,
@@ -2666,6 +2924,8 @@ def serve_corpus_viewer(
     pipeline_db_file: Path | None = None,
     pipeline_receipts_dir: Path | None = None,
     pipeline_eligibility_roots: tuple[Path, ...] = (),
+    benchmark_journal_dir: Path | None = None,
+    benchmark_guard_state_file: Path | None = None,
 ) -> None:
     if not 0 <= port <= 65535:
         raise ValueError("port must be between 0 and 65535")
@@ -2697,8 +2957,11 @@ def serve_corpus_viewer(
         dataset_metadata_file=dataset_metadata_file,
         production_plan_file=production_plan_file,
         publication_package_dir=publication_package_dir,
+        live_dataset_dir=live_dataset_dir,
         project_overview_file=project_overview_file,
         research_timeline_file=research_timeline_file,
+        benchmark_journal_dir=benchmark_journal_dir,
+        benchmark_guard_state_file=benchmark_guard_state_file,
         pipeline_trace_store=pipeline_trace_store,
         stale_after_seconds=stale_after_seconds,
         process_stale_after_seconds=process_stale_after_seconds,
@@ -2734,8 +2997,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dataset-metadata-file", type=Path)
     parser.add_argument("--production-plan-file", type=Path)
     parser.add_argument("--publication-package-dir", type=Path)
+    parser.add_argument("--live-dataset-dir", type=Path)
     parser.add_argument("--project-overview-file", type=Path)
     parser.add_argument("--research-timeline-file", type=Path)
+    parser.add_argument("--benchmark-journal-dir", type=Path)
+    parser.add_argument("--benchmark-guard-state-file", type=Path)
     parser.add_argument("--pipeline-namespace", type=Path)
     parser.add_argument("--pipeline-db-file", type=Path)
     parser.add_argument("--pipeline-receipts-dir", type=Path)
@@ -2764,8 +3030,11 @@ def main(argv: list[str] | None = None) -> int:
         dataset_metadata_file=args.dataset_metadata_file,
         production_plan_file=args.production_plan_file,
         publication_package_dir=args.publication_package_dir,
+        live_dataset_dir=args.live_dataset_dir,
         project_overview_file=args.project_overview_file,
         research_timeline_file=args.research_timeline_file,
+        benchmark_journal_dir=args.benchmark_journal_dir,
+        benchmark_guard_state_file=args.benchmark_guard_state_file,
         pipeline_namespace=args.pipeline_namespace,
         pipeline_db_file=args.pipeline_db_file,
         pipeline_receipts_dir=args.pipeline_receipts_dir,

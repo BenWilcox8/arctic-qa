@@ -132,6 +132,34 @@ CREATE TABLE IF NOT EXISTS findings (
     created_at TEXT NOT NULL,
     UNIQUE(run_id, paper_family_id, selection_policy_version)
 );
+CREATE TABLE IF NOT EXISTS finding_bank (
+    bank_row_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    paper_family_id TEXT NOT NULL,
+    bank_key TEXT NOT NULL,
+    extraction_entity_id TEXT NOT NULL,
+    rank INTEGER NOT NULL,
+    span_ids_json TEXT NOT NULL,
+    candidate_json TEXT NOT NULL,
+    admission_status TEXT NOT NULL,
+    admission_reason_code TEXT,
+    frozen_finding_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_finding_bank_family
+    ON finding_bank(run_id, paper_family_id, bank_key, admission_status);
+CREATE TABLE IF NOT EXISTS finding_prescreen_shadow (
+    prescreen_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    paper_family_id TEXT NOT NULL,
+    contract_version TEXT NOT NULL,
+    verdict_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(run_id, source_id, contract_version)
+);
 CREATE TABLE IF NOT EXISTS candidates (
     item_id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL,
@@ -185,6 +213,12 @@ class Database:
         if existing:
             row = self.connection.execute("SELECT version FROM schema_info").fetchone()
             if row and row[0] == SCHEMA_VERSION:
+                # The version is current, but a table added to SCHEMA under the
+                # same version (the chapter 3 finding bank) is created here.
+                # Every statement in SCHEMA is IF NOT EXISTS, so this is a
+                # no-op on a complete database.
+                with self.transaction():
+                    self.connection.executescript(SCHEMA)
                 return
             if self.path.stat().st_size:
                 backup_dir.mkdir(parents=True, exist_ok=True)

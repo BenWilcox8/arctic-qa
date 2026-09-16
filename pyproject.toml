@@ -27,3 +27,9 @@ arctic_qa = ["data/*.json", "corpus_viewer.html"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+# `data/` holds the one-off analysis scripts that finished tasks recorded as
+# evidence beside their reports. They are never imported and must stay exactly
+# as they ran, so the linter and the formatter leave them alone.
+extend-exclude = ["data"]

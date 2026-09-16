@@ -1,0 +1,113 @@
+{
+  "schema": "arctic-ch3-routing-replay-v1",
+  "families": 56,
+  "recorded_candidates": 139,
+  "recorded_repairs": 80,
+  "stopped_repairs": 4,
+  "stop_outcomes": {
+    "gate_contradiction_unroutable": 3,
+    "no_rung": 1
+  },
+  "stopped_by_recorded_kind": {
+    "context_widened_revision": 2,
+    "question_revision": 2
+  },
+  "suppressed_accepted_items": [],
+  "repeat_detector_stops": 1,
+  "repeat_detector_stops_by_kind": {
+    "context_widened_revision": 1
+  },
+  "detector_suppressed_context_widened_revisions": 1,
+  "detector_suppressed_accepted_items": [],
+  "rerouted_repairs": {
+    "surgical_correction -> question_revision": 1,
+    "alternative_finding -> question_revision": 4,
+    "question_revision -> surgical_correction": 1,
+    "question_revision -> frozen_scope_rebind": 3,
+    "context_widened_revision -> frozen_scope_rebind": 2,
+    "question_revision -> scope_display_repair": 3,
+    "question_revision -> context_widened_revision": 3,
+    "surgical_correction -> frozen_scope_rebind": 1,
+    "context_widened_revision -> question_revision": 1,
+    "surgical_correction -> scope_display_repair": 1,
+    "context_widened_revision -> scope_display_repair": 1
+  },
+  "rejected_candidates_examined": 133,
+  "guard_would_stop": {
+    "gate_contradiction_unroutable": 3
+  },
+  "scope_defect_demands": {
+    "display_verbatim": 20,
+    "not_in_evidence": 32
+  },
+  "candidates_with_a_scope_defect": 48,
+  "numeric_repair_rides_along": 12,
+  "agreement_triggers_barred": 4,
+  "guard_stopped_candidates": [
+    {
+      "item_id": "aqa-2c32a5d8907f8343afbe",
+      "outcome": "gate_contradiction_unroutable",
+      "reason_codes": [
+        "scope_qualifier_not_displayed"
+      ]
+    },
+    {
+      "item_id": "aqa-d63cb2893719e9cb344d",
+      "outcome": "gate_contradiction_unroutable",
+      "reason_codes": [
+        "scope_qualifier_not_displayed"
+      ]
+    },
+    {
+      "item_id": "aqa-28c6d5253470c8681a8f",
+      "outcome": "gate_contradiction_unroutable",
+      "reason_codes": [
+        "scope_qualifier_not_displayed"
+      ]
+    }
+  ],
+  "stopped_attempts": [
+    {
+      "family_id": "family-7edb49fb4704319feb7b",
+      "item_id": "aqa-a924258eebdf6e5157b0",
+      "recorded_kind": "context_widened_revision",
+      "recorded_trigger": "scope_qualifier_not_displayed",
+      "parent_reason_codes": [
+        "scope_qualifier_not_displayed"
+      ],
+      "stop_outcome": "gate_contradiction_unroutable"
+    },
+    {
+      "family_id": "family-a2bb181fa382d479c5c5",
+      "item_id": "aqa-b8d0cf201a521d1aa2c4",
+      "recorded_kind": "context_widened_revision",
+      "recorded_trigger": "scope_value_not_source_supported",
+      "parent_reason_codes": [
+        "answer_scope_not_source_bound",
+        "scope_qualifier_not_displayed",
+        "scope_value_not_source_supported"
+      ],
+      "stop_outcome": null
+    },
+    {
+      "family_id": "family-b477aebf6760eb686872",
+      "item_id": "aqa-509189f0dab0116ca767",
+      "recorded_kind": "question_revision",
+      "recorded_trigger": "scope_qualifier_not_displayed",
+      "parent_reason_codes": [
+        "scope_qualifier_not_displayed"
+      ],
+      "stop_outcome": "gate_contradiction_unroutable"
+    },
+    {
+      "family_id": "family-fe612777c3c58e1ceae3",
+      "item_id": "aqa-aa3475e2ff683d6a04ec",
+      "recorded_kind": "question_revision",
+      "recorded_trigger": "scope_qualifier_not_displayed",
+      "parent_reason_codes": [
+        "scope_qualifier_not_displayed"
+      ],
+      "stop_outcome": "gate_contradiction_unroutable"
+    }
+  ]
+}

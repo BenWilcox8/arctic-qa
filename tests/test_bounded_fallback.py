@@ -1,0 +1,1587 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from arctic_qa import generation as generation_contract
+from arctic_qa import streaming as streaming_module
+from arctic_qa.db import Database, now
+from arctic_qa.errors import BudgetError, CandidateRejectedError
+from arctic_qa.streaming import _Progress, _progress_generation
+from arctic_qa.util import canonical_json, stable_id
+
+
+R14_FIXTURE = json.loads(
+    (Path(__file__).parents[1] / "fixtures" / "r14-audit-priorities-r1.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+
+def _database(tmp_path: Path) -> Database:
+    database = Database(tmp_path / "state.sqlite3")
+    database.migrate(tmp_path / "backups")
+    return database
+
+
+def _candidate(*, attempt: dict, item_id: str, source_id: str, family_id: str) -> dict:
+    return {
+        "schema_version": generation_contract.CANDIDATE_SCHEMA_VERSION,
+        "item_id": item_id,
+        "finding_id": stable_id("finding", item_id),
+        "finding_policy_version": attempt["finding_policy_version"],
+        "source": {
+            "source_id": source_id,
+            "paper_family_id": family_id,
+            "content_hash": "c" * 64,
+            "chunk_id": "chunk-1",
+            "section_id": "results",
+        },
+        "question": "What changed?",
+        "answer": {"source_span_id": f"span-{item_id}"},
+        "reconstruction": {},
+        "answer_verification": {},
+        "option_verdicts": [],
+        "provenance": {
+            "prompt_version": generation_contract.PROMPT_VERSION,
+            "generation_attempt_contract_version": (
+                generation_contract.GENERATION_ATTEMPT_CONTRACT_VERSION
+            ),
+            "answer_agreement_contract_version": (
+                generation_contract.ANSWER_AGREEMENT_CONTRACT_VERSION
+            ),
+            "question_verification_contract_version": (
+                generation_contract.QUESTION_VERIFICATION_CONTRACT_VERSION
+            ),
+            "standalone_verification_contract_version": (
+                generation_contract.STANDALONE_VERIFICATION_CONTRACT_VERSION
+            ),
+            "numeric_rule_contract_version": (
+                generation_contract.NUMERIC_RULE_CONTRACT_VERSION
+            ),
+            "direct_value_contract_version": (
+                generation_contract.DIRECT_SOURCE_VALUE_CONTRACT_VERSION
+            ),
+            "scope_contract_version": generation_contract.SCOPE_CONTRACT_VERSION,
+            "scope_role_semantics_version": (
+                generation_contract.SCOPE_ROLE_SEMANTICS_VERSION
+            ),
+            "scope_role_binding_contract_version": (
+                generation_contract.SCOPE_ROLE_BINDING_CONTRACT_VERSION
+            ),
+            "evidence_combination_contract_version": (
+                generation_contract.EVIDENCE_COMBINATION_CONTRACT_VERSION
+            ),
+            "generation_attempt": attempt,
+        },
+    }
+
+
+def _insert_candidate(
+    database: Database, candidate: dict, *, run_id: str, family_id: str, status: str
+) -> None:
+    with database.transaction():
+        database.connection.execute(
+            """INSERT INTO candidates
+            (item_id,run_id,source_id,paper_family_id,generation_arm,candidate_json,
+             status,created_at,updated_at)
+            VALUES (?,?,?,?,?,?,?, ?,?)""",
+            (
+                candidate["item_id"],
+                run_id,
+                candidate["source"]["source_id"],
+                family_id,
+                "answer_first",
+                canonical_json(candidate),
+                status,
+                now(),
+                now(),
+            ),
+        )
+
+
+def test_generation_counts_include_both_question_revisions(tmp_path: Path) -> None:
+    database = _database(tmp_path)
+    parent_attempt_id: str | None = None
+    parent_item_id: str | None = None
+    for revision_index in range(3):
+        attempt = streaming_module._generation_attempt(
+            campaign_id="campaign",
+            family_id="family",
+            finding_attempt_index=1,
+            question_revision_index=revision_index,
+            attempt_kind="primary" if revision_index == 0 else "question_revision",
+            parent_attempt_id=parent_attempt_id,
+            parent_item_id=parent_item_id,
+            trigger_reason_code=(
+                "question_context_missing" if revision_index else None
+            ),
+            excluded_finding_span_ids=[],
+        )
+        item_id = f"item-{revision_index}"
+        candidate = _candidate(
+            attempt=attempt,
+            item_id=item_id,
+            source_id="source",
+            family_id="family",
+        )
+        _insert_candidate(
+            database,
+            candidate,
+            run_id="campaign",
+            family_id="family",
+            status="rejected",
+        )
+        parent_attempt_id = attempt["attempt_id"]
+        parent_item_id = item_id
+
+    metrics = streaming_module._generation_counts(database, "campaign")
+
+    assert metrics["question_revision_count"] == 2
+
+
+def test_fallback_allows_two_revisions_before_an_alternative_finding() -> None:
+    primary = streaming_module._generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        finding_attempt_index=1,
+        question_revision_index=0,
+        attempt_kind="primary",
+        parent_attempt_id=None,
+        parent_item_id=None,
+        trigger_reason_code=None,
+        excluded_finding_span_ids=[],
+    )
+    path = {
+        "attempt": primary,
+        "candidate": {
+            "item_id": "item-primary",
+            "candidate_json": canonical_json(
+                {"answer": {"source_span_id": "span-primary"}}
+            ),
+        },
+    }
+    paths = {(1, 0): path}
+
+    revision = streaming_module._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths=paths,
+        failed_path=path,
+        reason_codes=["question_context_missing"],
+    )
+
+    assert revision is not None
+    assert revision["attempt_kind"] == "surgical_correction"
+    assert revision["finding_attempt_index"] == 1
+    assert revision["question_revision_index"] == 1
+    paths[(1, 1)] = {
+        "attempt": revision,
+        "candidate": {
+            "item_id": "item-revision",
+            "candidate_json": canonical_json(
+                {"answer": {"source_span_id": "span-primary"}}
+            ),
+        },
+    }
+
+    second_revision = streaming_module._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths=paths,
+        failed_path=paths[(1, 1)],
+        reason_codes=["question_context_missing"],
+    )
+
+    assert second_revision is not None
+    assert second_revision["attempt_kind"] == "context_widened_revision"
+    assert second_revision["finding_attempt_index"] == 1
+    assert second_revision["question_revision_index"] == 2
+    assert second_revision["parent_attempt_id"] == revision["attempt_id"]
+    paths[(1, 2)] = {
+        "attempt": second_revision,
+        "candidate": {
+            "item_id": "item-second-revision",
+            "candidate_json": canonical_json(
+                {"answer": {"source_span_id": "span-primary"}}
+            ),
+        },
+    }
+
+    alternative = streaming_module._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths=paths,
+        failed_path=paths[(1, 2)],
+        reason_codes=["reconstruction_disagreement"],
+    )
+
+    assert alternative is not None
+    assert alternative["attempt_kind"] == "alternative_finding"
+    assert alternative["finding_attempt_index"] == 2
+    assert alternative["question_revision_index"] == 0
+    assert alternative["parent_attempt_id"] == second_revision["attempt_id"]
+
+    assert (
+        len(
+            {
+                primary["attempt_id"],
+                revision["attempt_id"],
+                second_revision["attempt_id"],
+                alternative["attempt_id"],
+            }
+        )
+        == 4
+    )
+
+
+def test_answer_bearing_required_phrase_routes_immediately_to_alternative() -> None:
+    primary = streaming_module._generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        finding_attempt_index=1,
+        question_revision_index=0,
+        attempt_kind="primary",
+        parent_attempt_id=None,
+        parent_item_id=None,
+        trigger_reason_code=None,
+        excluded_finding_span_ids=[],
+    )
+    path = {
+        "attempt": primary,
+        "candidate": {
+            "item_id": "item-primary",
+            "candidate_json": canonical_json(
+                {"answer": {"source_span_id": "span-primary"}}
+            ),
+        },
+    }
+
+    alternative = streaming_module._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths={(1, 0): path},
+        failed_path=path,
+        reason_codes=["finding_answer_phrase_in_required_question_phrases"],
+    )
+
+    assert alternative is not None
+    assert alternative["attempt_kind"] == "alternative_finding"
+    assert alternative["finding_attempt_index"] == 2
+    assert alternative["question_revision_index"] == 0
+    assert alternative["excluded_finding_span_ids"] == ["span-primary"]
+
+
+def test_option_failures_route_to_two_bounded_option_repairs() -> None:
+    primary = streaming_module._generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        finding_attempt_index=1,
+        question_revision_index=0,
+        attempt_kind="primary",
+        parent_attempt_id=None,
+        parent_item_id=None,
+        trigger_reason_code=None,
+        excluded_finding_span_ids=[],
+    )
+    paths = {
+        (1, 0): {
+            "attempt": primary,
+            "candidate": {
+                "item_id": "item-primary",
+                "candidate_json": canonical_json(
+                    {"answer": {"source_span_id": "span-primary"}}
+                ),
+            },
+        }
+    }
+
+    for revision_index in (1, 2):
+        repair = streaming_module._next_generation_attempt(
+            campaign_id="campaign",
+            family_id="family",
+            paths=paths,
+            failed_path=paths[(1, revision_index - 1)],
+            reason_codes=["insufficient_verified_distractors"],
+        )
+        assert repair is not None
+        assert repair["attempt_kind"] == "option_repair"
+        assert repair["question_revision_index"] == revision_index
+        paths[(1, revision_index)] = {
+            "attempt": repair,
+            "candidate": {
+                "item_id": f"item-{revision_index}",
+                "candidate_json": canonical_json(
+                    {"answer": {"source_span_id": "span-primary"}}
+                ),
+            },
+        }
+
+    alternative = streaming_module._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths=paths,
+        failed_path=paths[(1, 2)],
+        reason_codes=["insufficient_verified_distractors"],
+    )
+    assert alternative is not None
+    assert alternative["attempt_kind"] == "alternative_finding"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "eligible_arctic_scope_missing_from_finding",
+        "eligible_arctic_finding_out_of_scope",
+        "revision_unchanged_payload",
+    ],
+)
+def test_finding_and_no_progress_failures_escape_immediately(reason: str) -> None:
+    primary = streaming_module._generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        finding_attempt_index=1,
+        question_revision_index=0,
+        attempt_kind="primary",
+        parent_attempt_id=None,
+        parent_item_id=None,
+        trigger_reason_code=None,
+        excluded_finding_span_ids=[],
+    )
+    path = {
+        "attempt": primary,
+        "candidate": {
+            "item_id": "item-primary",
+            "candidate_json": canonical_json(
+                {"answer": {"source_span_id": "span-primary"}}
+            ),
+        },
+    }
+
+    alternative = streaming_module._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths={(1, 0): path},
+        failed_path=path,
+        reason_codes=[reason],
+    )
+
+    assert alternative is not None
+    assert alternative["attempt_kind"] == "alternative_finding"
+
+
+def test_independent_leakage_and_scope_failures_repair_leakage_first() -> None:
+    primary = streaming_module._generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        finding_attempt_index=1,
+        question_revision_index=0,
+        attempt_kind="primary",
+        parent_attempt_id=None,
+        parent_item_id=None,
+        trigger_reason_code=None,
+        excluded_finding_span_ids=[],
+    )
+    path = {"attempt": primary, "candidate": None}
+
+    assert streaming_module._routing_reason_codes(
+        ["standalone_answer_leakage", "relation_scope_mismatch"]
+    ) == ["standalone_answer_leakage", "relation_scope_mismatch"]
+    assert (
+        streaming_module._primary_failure_layer(
+            ["standalone_answer_leakage", "relation_scope_mismatch"]
+        )
+        == "leakage"
+    )
+    repair = streaming_module._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths={(1, 0): path},
+        failed_path=path,
+        reason_codes=["standalone_answer_leakage", "relation_scope_mismatch"],
+    )
+
+    assert repair is not None
+    assert repair["trigger_reason_code"] == "standalone_answer_leakage"
+    assert repair["attempt_kind"] == "question_revision"
+
+
+def test_generation_lineage_allows_six_bounded_paths() -> None:
+    paths: dict[tuple[int, int], dict] = {}
+    parent_attempt_id: str | None = None
+    parent_item_id: str | None = None
+    for finding_index in (1, 2):
+        for revision_index in range(3):
+            kind = (
+                "primary"
+                if (finding_index, revision_index) == (1, 0)
+                else "alternative_finding"
+                if (finding_index, revision_index) == (2, 0)
+                else "question_revision"
+            )
+            attempt = streaming_module._generation_attempt(
+                campaign_id="campaign",
+                family_id="family",
+                finding_attempt_index=finding_index,
+                question_revision_index=revision_index,
+                attempt_kind=kind,
+                parent_attempt_id=parent_attempt_id,
+                parent_item_id=parent_item_id,
+                trigger_reason_code="reconstruction_disagreement"
+                if parent_attempt_id
+                else None,
+                excluded_finding_span_ids=(
+                    ["span-primary"]
+                    if (finding_index, revision_index) == (2, 0)
+                    else []
+                ),
+            )
+            item_id = f"item-{finding_index}-{revision_index}"
+            paths[(finding_index, revision_index)] = {
+                "attempt": attempt,
+                "candidate": {"item_id": item_id, "candidate_json": "{}"},
+            }
+            parent_attempt_id = attempt["attempt_id"]
+            parent_item_id = item_id
+
+    streaming_module._validate_generation_lineage(paths)
+    assert len(paths) == streaming_module.MAX_CANDIDATE_PATHS == 6
+    with pytest.raises(ValueError, match="bounded generation path limit"):
+        streaming_module._validate_generation_lineage({**paths, (3, 0): paths[(1, 0)]})
+
+
+def test_fallback_does_not_progress_from_a_contract_mismatch() -> None:
+    primary = streaming_module._generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        finding_attempt_index=1,
+        question_revision_index=0,
+        attempt_kind="primary",
+        parent_attempt_id=None,
+        parent_item_id=None,
+        trigger_reason_code=None,
+        excluded_finding_span_ids=[],
+    )
+    path = {
+        "attempt": primary,
+        "candidate": {
+            "item_id": "item-primary",
+            "candidate_json": canonical_json(
+                {"answer": {"source_span_id": "span-primary"}}
+            ),
+        },
+    }
+
+    assert (
+        streaming_module._next_generation_attempt(
+            campaign_id="campaign",
+            family_id="family",
+            paths={(1, 0): path},
+            failed_path=path,
+            reason_codes=["generation_contract_version_mismatch"],
+        )
+        is None
+    )
+
+
+def test_fallback_routes_the_primary_layer_and_stops_after_two_revisions() -> None:
+    primary = streaming_module._generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        finding_attempt_index=1,
+        question_revision_index=0,
+        attempt_kind="primary",
+        parent_attempt_id=None,
+        parent_item_id=None,
+        trigger_reason_code=None,
+        excluded_finding_span_ids=[],
+    )
+    paths = {
+        (1, 0): {
+            "attempt": primary,
+            "candidate": {"item_id": "item-primary", "candidate_json": "{}"},
+        }
+    }
+    first_revision = streaming_module._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths=paths,
+        failed_path=paths[(1, 0)],
+        reason_codes=["reconstruction_disagreement"],
+    )
+    assert first_revision is not None
+    paths[(1, 1)] = {
+        "attempt": first_revision,
+        "candidate": {"item_id": "item-first", "candidate_json": "{}"},
+    }
+    second_revision = streaming_module._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths=paths,
+        failed_path=paths[(1, 1)],
+        reason_codes=["reconstruction_disagreement"],
+    )
+    assert second_revision is not None
+    paths[(1, 2)] = {
+        "attempt": second_revision,
+        "candidate": {"item_id": "item-second", "candidate_json": "{}"},
+    }
+
+    assert (
+        streaming_module._next_generation_attempt(
+            campaign_id="campaign",
+            family_id="family",
+            paths=paths,
+            failed_path=paths[(1, 2)],
+            reason_codes=["reconstruction_disagreement"],
+        )
+        is not None
+    )
+    # Evidence outranks context, so two layers in one event repair the evidence
+    # layer instead of ending the family.
+    mixed = streaming_module._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths={(1, 0): paths[(1, 0)]},
+        failed_path=paths[(1, 0)],
+        reason_codes=["reconstruction_disagreement", "question_context_missing"],
+    )
+    assert mixed is not None
+    assert mixed["trigger_reason_code"] == "reconstruction_disagreement"
+    assert (
+        streaming_module._next_generation_attempt(
+            campaign_id="campaign",
+            family_id="family",
+            paths=paths,
+            failed_path=paths[(1, 2)],
+            reason_codes=["provider_response_ambiguous"],
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("failure_reason", "accept_on", "expected_kinds"),
+    [
+        ("question_context_missing", 2, ["primary", "surgical_correction"]),
+        (
+            "reconstruction_disagreement",
+            3,
+            ["primary", "question_revision", "context_widened_revision"],
+        ),
+    ],
+)
+def test_progress_generation_continues_with_a_fresh_path_after_rejection(
+    tmp_path: Path,
+    monkeypatch,
+    failure_reason: str,
+    accept_on: int,
+    expected_kinds: list[str],
+) -> None:
+    database = _database(tmp_path)
+    namespace = tmp_path / "namespace"
+    namespace.mkdir()
+    manifest = namespace / "run-manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    progress = _Progress(
+        namespace / "progress.json",
+        run_id="campaign",
+        invocation_run_id="invocation",
+        run_manifest_file=manifest,
+        counts={},
+    )
+    calls: list[dict] = []
+    source_id = "source"
+    family_id = "family"
+
+    def fake_generate(database, namespace, **kwargs):
+        attempt = kwargs["generation_attempt"]
+        calls.append(attempt)
+        item_id = stable_id("candidate", attempt["attempt_id"])
+        candidate = _candidate(
+            attempt=attempt,
+            item_id=item_id,
+            source_id=source_id,
+            family_id=family_id,
+        )
+        _insert_candidate(
+            database,
+            candidate,
+            run_id="campaign",
+            family_id=family_id,
+            status="candidate",
+        )
+        return candidate
+
+    def fake_validate(database, namespace, candidate):
+        accepted = len(calls) == accept_on
+        status = "machine_accepted_unverified" if accepted else "rejected"
+        reasons = [] if accepted else [failure_reason]
+        labels = {"mcq_eligible": accepted}
+        with database.transaction():
+            database.connection.execute(
+                "UPDATE candidates SET status=? WHERE item_id=?",
+                (status, candidate["item_id"]),
+            )
+            database.connection.execute(
+                """INSERT INTO validation_events
+                (event_id,item_id,stage,label,reason_codes_json,details_json,created_at)
+                VALUES (?,?,?,?,?,?,?)""",
+                (
+                    stable_id("validation", candidate["item_id"]),
+                    candidate["item_id"],
+                    "automated_acceptance",
+                    status,
+                    canonical_json(reasons),
+                    canonical_json(
+                        {
+                            "candidate_hash": stable_id(
+                                "candidate-payload", canonical_json(candidate)
+                            ),
+                            "labels": labels,
+                        }
+                    ),
+                    now(),
+                ),
+            )
+        return SimpleNamespace(
+            as_dict=lambda: {
+                "final_label": status,
+                "labels": labels,
+                "reasons": reasons,
+            }
+        )
+
+    monkeypatch.setattr(streaming_module, "generate_candidate", fake_generate)
+    monkeypatch.setattr(streaming_module, "validate_candidate", fake_validate)
+
+    result = _progress_generation(
+        database,
+        namespace,
+        progress,
+        campaign_id="campaign",
+        candidate_key="candidate-key",
+        source_id=source_id,
+        family_id=family_id,
+        selected={},
+        title="Fixture",
+        author=object(),
+        verifier=object(),
+    )
+
+    assert result["disposition"] == "accepted"
+    assert [attempt["attempt_kind"] for attempt in calls] == expected_kinds
+    assert all(
+        attempt["parent_attempt_id"] == previous["attempt_id"]
+        for previous, attempt in zip(calls, calls[1:])
+    )
+    assert all(not attempt["excluded_finding_span_ids"] for attempt in calls)
+    assert (
+        database.one(
+            """SELECT COUNT(*) AS count FROM candidates WHERE run_id=?
+            AND status NOT IN ('incomplete_infra','generation_incomplete',
+            'generation_settled')""",
+            ("campaign",),
+        )["count"]
+        == accept_on
+    )
+    # audit 4.6 e: every generation call leaves a settled call record beside the
+    # candidate it produced, so a dead call is never invisible.
+    assert (
+        database.one(
+            """SELECT COUNT(*) AS count FROM candidates WHERE run_id=?
+            AND status='generation_settled'""",
+            ("campaign",),
+        )["count"]
+        == accept_on
+    )
+
+
+def test_existing_findings_seed_alternative_exclusions(tmp_path: Path) -> None:
+    database = _database(tmp_path)
+    campaign_id = "campaign"
+    family_id = "family"
+    source_id = "source"
+    with database.transaction():
+        for finding_index, span_id in ((1, "frozen-primary"), (2, "frozen-alt")):
+            database.connection.execute(
+                """INSERT INTO findings
+                (finding_id,run_id,source_id,paper_family_id,chunk_id,
+                 selection_policy_version,answer_json,status,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?)""",
+                (
+                    f"finding-{finding_index}",
+                    campaign_id,
+                    source_id,
+                    family_id,
+                    "chunk-1",
+                    f"{generation_contract.SCOPE_ROLE_FINDING_POLICY_VERSION}:finding-"
+                    f"{finding_index}",
+                    canonical_json({"source_span_id": span_id}),
+                    "frozen",
+                    now(),
+                ),
+            )
+
+    paths = streaming_module._generation_paths(
+        database,
+        campaign_id=campaign_id,
+        source_id=source_id,
+        family_id=family_id,
+    )
+
+    assert paths[(2, 0)]["attempt"]["excluded_finding_span_ids"] == ["frozen-primary"]
+
+
+def test_r14_predecessor_attempts_consume_successor_retry_slots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = _database(tmp_path)
+    parent_attempt_id = None
+    parent_item_id = None
+    for revision_index, item_id in enumerate(R14_FIXTURE["bumblebee_item_ids"]):
+        old_attempt = {
+            "contract_version": "bounded-paper-progression-v2",
+            "attempt_id": f"old-attempt-{revision_index}",
+            "attempt_kind": "primary" if revision_index == 0 else "question_revision",
+            "finding_attempt_index": 1,
+            "question_revision_index": revision_index,
+            "parent_attempt_id": parent_attempt_id,
+            "parent_item_id": parent_item_id,
+            "trigger_reason_code": (
+                "insufficient_verified_distractors" if revision_index else None
+            ),
+            "finding_policy_version": (
+                generation_contract.SCOPE_ROLE_FINDING_POLICY_VERSION + ":finding-1"
+            ),
+            "excluded_finding_span_ids": [],
+        }
+        candidate = _candidate(
+            attempt=old_attempt,
+            item_id=item_id,
+            source_id="source",
+            family_id="family",
+        )
+        candidate["schema_version"] = "2.5.0"
+        candidate["provenance"].update(
+            {
+                "prompt_version": "arctic-qa-generation-v20",
+                "standalone_verification_contract_version": (
+                    "source-blind-standalone-gate-v1"
+                ),
+            }
+        )
+        _insert_candidate(
+            database,
+            candidate,
+            run_id="campaign",
+            family_id="family",
+            status="incomplete_non_mcq",
+        )
+        candidate_json = canonical_json(candidate)
+        with database.transaction():
+            database.connection.execute(
+                """INSERT INTO validation_events
+                (event_id,item_id,stage,label,reason_codes_json,details_json,created_at)
+                VALUES (?,?,?,?,?,?,?)""",
+                (
+                    stable_id("validation", item_id),
+                    item_id,
+                    "automated_acceptance",
+                    "machine_accepted_unverified",
+                    "[]",
+                    canonical_json(
+                        {
+                            "candidate_hash": stable_id(
+                                "candidate-payload", candidate_json
+                            ),
+                            "labels": {"mcq_eligible": False},
+                        }
+                    ),
+                    now(),
+                ),
+            )
+        parent_attempt_id = old_attempt["attempt_id"]
+        parent_item_id = item_id
+
+    paths = streaming_module._generation_paths(
+        database,
+        campaign_id="campaign",
+        source_id="source",
+        family_id="family",
+    )
+
+    assert sorted(paths) == [(1, 0), (1, 1), (1, 2)]
+    assert paths[(1, 1)]["attempt"]["attempt_kind"] == "question_revision"
+    assert paths[(1, 2)]["attempt"]["attempt_kind"] == "question_revision"
+    assert paths[(1, 2)]["attempt"]["attempt_id"] == "old-attempt-2"
+    assert all(
+        path["predecessor_contract"] == "bounded-paper-progression-v2"
+        for path in paths.values()
+    )
+    alternative = streaming_module._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths=paths,
+        failed_path=paths[(1, 2)],
+        reason_codes=["insufficient_verified_distractors"],
+    )
+    assert alternative is not None
+    assert alternative["attempt_kind"] == "alternative_finding"
+    assert alternative["parent_attempt_id"] == "old-attempt-2"
+
+    historical_bytes = {
+        row["item_id"]: row["candidate_json"]
+        for row in database.rows(
+            "SELECT item_id,candidate_json FROM candidates ORDER BY item_id"
+        )
+    }
+    provider_boundaries: list[dict] = []
+
+    def stop_before_provider(database, namespace, **kwargs):
+        provider_boundaries.append(kwargs["generation_attempt"])
+        raise BudgetError("the paid request exceeds USD 0.25")
+
+    monkeypatch.setattr(streaming_module, "generate_candidate", stop_before_provider)
+    namespace = tmp_path / "namespace"
+    namespace.mkdir()
+    manifest = namespace / "run-manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    result = _progress_generation(
+        database,
+        namespace,
+        _Progress(
+            namespace / "progress.json",
+            run_id="campaign",
+            invocation_run_id="successor-invocation",
+            run_manifest_file=manifest,
+            counts={},
+        ),
+        campaign_id="campaign",
+        candidate_key="r14-bumblebee",
+        source_id="source",
+        family_id="family",
+        selected={},
+        title="R14 bumblebee fixture",
+        author=object(),
+        verifier=object(),
+    )
+
+    assert result["reason_codes"] == ["request_cost_bound_exceeded"]
+    assert len(provider_boundaries) == 1
+    assert provider_boundaries[0] == alternative
+    assert database.one("SELECT COUNT(*) AS count FROM calls")["count"] == 0
+    assert {
+        row["item_id"]: row["candidate_json"]
+        for row in database.rows(
+            """SELECT item_id,candidate_json FROM candidates
+            WHERE status NOT IN ('incomplete_infra','generation_incomplete',
+            'generation_settled') ORDER BY item_id""",
+        )
+    } == historical_bytes
+
+
+def test_predecessor_acceptance_starts_a_fresh_current_contract_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = _database(tmp_path)
+    old_attempt = {
+        "contract_version": "bounded-paper-progression-v2",
+        "attempt_id": "old-accepted-attempt",
+        "attempt_kind": "primary",
+        "finding_attempt_index": 1,
+        "question_revision_index": 0,
+        "parent_attempt_id": None,
+        "parent_item_id": None,
+        "trigger_reason_code": None,
+        "finding_policy_version": (
+            generation_contract.SCOPE_ROLE_FINDING_POLICY_VERSION + ":finding-1"
+        ),
+        "excluded_finding_span_ids": [],
+    }
+    predecessor = _candidate(
+        attempt=old_attempt,
+        item_id="old-accepted-item",
+        source_id="source",
+        family_id="family",
+    )
+    predecessor["schema_version"] = "2.5.0"
+    predecessor["provenance"].update(
+        {
+            "prompt_version": "arctic-qa-generation-v20",
+            "standalone_verification_contract_version": (
+                "source-blind-standalone-gate-v1"
+            ),
+        }
+    )
+    _insert_candidate(
+        database,
+        predecessor,
+        run_id="campaign",
+        family_id="family",
+        status="machine_accepted_unverified",
+    )
+    predecessor_json = canonical_json(predecessor)
+    provider_boundaries: list[dict] = []
+
+    def stop_before_provider(database, namespace, **kwargs):
+        provider_boundaries.append(kwargs["generation_attempt"])
+        raise BudgetError("the paid request exceeds USD 0.25")
+
+    monkeypatch.setattr(streaming_module, "generate_candidate", stop_before_provider)
+    namespace = tmp_path / "namespace"
+    namespace.mkdir()
+    manifest = namespace / "run-manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+
+    result = _progress_generation(
+        database,
+        namespace,
+        _Progress(
+            namespace / "progress.json",
+            run_id="campaign",
+            invocation_run_id="successor-invocation",
+            run_manifest_file=manifest,
+            counts={},
+        ),
+        campaign_id="campaign",
+        candidate_key="accepted-predecessor",
+        source_id="source",
+        family_id="family",
+        selected={},
+        title="Accepted predecessor",
+        author=object(),
+        verifier=object(),
+    )
+
+    assert result["reason_codes"] == ["request_cost_bound_exceeded"]
+    assert len(provider_boundaries) == 1
+    current_attempt = provider_boundaries[0]
+    assert (
+        current_attempt["contract_version"]
+        == generation_contract.GENERATION_ATTEMPT_CONTRACT_VERSION
+    )
+    assert current_attempt["attempt_kind"] == "primary"
+    assert current_attempt["parent_attempt_id"] is None
+    assert database.one("SELECT COUNT(*) AS count FROM calls")["count"] == 0
+    stored = database.one(
+        "SELECT candidate_json FROM candidates WHERE item_id='old-accepted-item'"
+    )
+    assert stored["candidate_json"] == predecessor_json
+
+
+def test_existing_findings_restore_primary_before_alternative_parent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = _database(tmp_path)
+    campaign_id = "arctic-qa-production-campaign-001"
+    family_id = "family-17e0f0a4909fdaed6d59"
+    source_id = "src-17e0f0a4909fdaed6d59"
+    with database.transaction():
+        for finding_id, finding_index, span_id in (
+            ("finding-909ca59694ed5085a475", 1, "frozen-primary"),
+            ("finding-6ad815d8ce5278267308", 2, "frozen-alternative"),
+        ):
+            database.connection.execute(
+                """INSERT INTO findings
+                (finding_id,run_id,source_id,paper_family_id,chunk_id,
+                 selection_policy_version,answer_json,status,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?)""",
+                (
+                    finding_id,
+                    campaign_id,
+                    source_id,
+                    family_id,
+                    "chunk-1",
+                    f"{generation_contract.SCOPE_ROLE_FINDING_POLICY_VERSION}:finding-"
+                    f"{finding_index}",
+                    canonical_json({"source_span_id": span_id}),
+                    "frozen",
+                    now(),
+                ),
+            )
+
+    paths = streaming_module._generation_paths(
+        database,
+        campaign_id=campaign_id,
+        source_id=source_id,
+        family_id=family_id,
+    )
+
+    assert (
+        paths[(2, 0)]["attempt"]["parent_attempt_id"]
+        == paths[(1, 0)]["attempt"]["attempt_id"]
+    )
+
+    namespace = tmp_path / "namespace"
+    namespace.mkdir()
+    manifest = namespace / "run-manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    progress = _Progress(
+        namespace / "progress.json",
+        run_id=campaign_id,
+        invocation_run_id="saved-transition-offline",
+        run_manifest_file=manifest,
+        counts={},
+    )
+
+    attempted: list[dict] = []
+
+    def stop_before_provider_call(*args, **kwargs):
+        attempted.append(kwargs["attempt"])
+        raise RuntimeError("offline provider boundary")
+
+    monkeypatch.setattr(
+        streaming_module, "_generate_candidate_attempt", stop_before_provider_call
+    )
+
+    with pytest.raises(RuntimeError, match="offline provider boundary"):
+        _progress_generation(
+            database,
+            namespace,
+            progress,
+            campaign_id=campaign_id,
+            candidate_key="10.1007/s00382-018-4279-z",
+            source_id=source_id,
+            family_id=family_id,
+            selected={},
+            title="Summers with low Arctic sea ice",
+            author=object(),
+            verifier=object(),
+        )
+
+    assert attempted == [paths[(1, 0)]["attempt"]]
+
+
+def test_generation_path_restore_error_stops_running_progress(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = _database(tmp_path)
+    namespace = tmp_path / "namespace"
+    namespace.mkdir()
+    manifest = namespace / "run-manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    progress_file = namespace / "progress.json"
+    progress = _Progress(
+        progress_file,
+        run_id="campaign",
+        invocation_run_id="invocation",
+        run_manifest_file=manifest,
+        counts={},
+    )
+    progress.write("running", "eligibility", "Streaming pipeline started.")
+
+    def fail_to_restore_paths(*args, **kwargs):
+        raise ValueError("the generation attempt parent is missing")
+
+    monkeypatch.setattr(streaming_module, "_generation_paths", fail_to_restore_paths)
+
+    with pytest.raises(ValueError, match="generation attempt parent is missing"):
+        _progress_generation(
+            database,
+            namespace,
+            progress,
+            campaign_id="campaign",
+            candidate_key="candidate-key",
+            source_id="source",
+            family_id="family",
+            selected={},
+            title="Fixture",
+            author=object(),
+            verifier=object(),
+        )
+
+    persisted = json.loads(progress_file.read_text(encoding="utf-8"))
+    assert persisted["state"] == "error"
+    assert persisted["current_stage"] == "generation"
+    assert persisted["recent_papers"][-1]["final_state"] == "error"
+
+
+def test_malformed_alternative_state_becomes_a_paper_rejection(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = _database(tmp_path)
+    namespace = tmp_path / "namespace"
+    namespace.mkdir()
+    manifest = namespace / "run-manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    progress = _Progress(
+        namespace / "progress.json",
+        run_id="campaign",
+        invocation_run_id="invocation",
+        run_manifest_file=manifest,
+        counts={},
+    )
+    primary = streaming_module._generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        finding_attempt_index=1,
+        question_revision_index=0,
+        attempt_kind="primary",
+        parent_attempt_id=None,
+        parent_item_id=None,
+        trigger_reason_code=None,
+        excluded_finding_span_ids=[],
+    )
+    alternative = streaming_module._generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        finding_attempt_index=2,
+        question_revision_index=0,
+        attempt_kind="alternative_finding",
+        parent_attempt_id=primary["attempt_id"],
+        parent_item_id=None,
+        trigger_reason_code="generation_rejected",
+        excluded_finding_span_ids=[],
+    )
+    paths = {
+        (1, 0): {"attempt": primary, "candidate": None},
+        (2, 0): {
+            "attempt": alternative,
+            "candidate": None,
+            "partial_finding": True,
+        },
+    }
+    monkeypatch.setattr(
+        streaming_module,
+        "_generation_paths",
+        lambda *args, **kwargs: paths,
+    )
+
+    def raise_invalid_state(*args, **kwargs):
+        raise ValueError("alternative finding state is invalid")
+
+    monkeypatch.setattr(
+        streaming_module, "_generate_candidate_attempt", raise_invalid_state
+    )
+
+    result = _progress_generation(
+        database,
+        namespace,
+        progress,
+        campaign_id="campaign",
+        candidate_key="candidate-key",
+        source_id="source",
+        family_id="family",
+        selected={},
+        title="Fixture",
+        author=object(),
+        verifier=object(),
+    )
+
+    assert result["disposition"] == "generation_rejected"
+    assert result["reason_codes"] == ["alternative_finding_state_invalid"]
+    assert database.one(
+        "SELECT reason_code FROM rejection_ledger WHERE source_id=?",
+        ("source",),
+    ) == {"reason_code": "alternative_finding_state_invalid"}
+
+
+def test_budget_stop_is_terminal_when_generation_resumes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = _database(tmp_path)
+    namespace = tmp_path / "namespace"
+    namespace.mkdir()
+    manifest = namespace / "run-manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    progress = _Progress(
+        namespace / "progress.json",
+        run_id="campaign",
+        invocation_run_id="invocation",
+        run_manifest_file=manifest,
+        counts={},
+    )
+    calls = 0
+
+    def fake_budget_generate(database, namespace, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise BudgetError(streaming_module.PER_REQUEST_CAP_REASON)
+
+    monkeypatch.setattr(streaming_module, "generate_candidate", fake_budget_generate)
+
+    arguments = {
+        "campaign_id": "campaign",
+        "candidate_key": "candidate-key",
+        "source_id": "source",
+        "family_id": "family",
+        "selected": {},
+        "title": "Fixture",
+        "author": object(),
+        "verifier": object(),
+    }
+    first = _progress_generation(database, namespace, progress, **arguments)
+    second = _progress_generation(database, namespace, progress, **arguments)
+
+    assert first == {
+        "disposition": "generation_rejected",
+        "reason_codes": ["request_cost_bound_exceeded"],
+        "resumed": False,
+    }
+    assert second == {
+        "disposition": "generation_rejected",
+        "reason_codes": ["request_cost_bound_exceeded"],
+        "resumed": True,
+    }
+    assert calls == 1
+    assert (
+        database.one(
+            "SELECT stage FROM rejection_ledger WHERE source_id=?", ("source",)
+        )["stage"]
+        == "generation_budget"
+    )
+
+
+def _primary_path(
+    *, candidate_json: str = '{"answer": {"source_span_id": "span-primary"}}'
+) -> dict:
+    primary = streaming_module._generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        finding_attempt_index=1,
+        question_revision_index=0,
+        attempt_kind="primary",
+        parent_attempt_id=None,
+        parent_item_id=None,
+        trigger_reason_code=None,
+        excluded_finding_span_ids=[],
+    )
+    return {
+        "attempt": primary,
+        "candidate": {"item_id": "item-primary", "candidate_json": candidate_json},
+    }
+
+
+def _next(paths: dict, failed: dict, reasons: list[str], **kwargs) -> dict | None:
+    return streaming_module._next_generation_attempt(
+        campaign_id="campaign",
+        family_id="family",
+        paths=paths,
+        failed_path=failed,
+        reason_codes=reasons,
+        **kwargs,
+    )
+
+
+def test_r1_three_codes_from_three_gates_still_earn_a_repair() -> None:
+    """family-d95f466cad4776a758b9: three codes, one attempt, five paths unused."""
+    path = _primary_path()
+
+    repair = _next(
+        {(1, 0): path},
+        path,
+        [
+            "standalone_undefined_period_or_event",
+            "source_bound_numeric_rule_missing",
+            "question_context_missing",
+        ],
+    )
+
+    assert repair is not None
+    assert repair["question_revision_index"] == 1
+    assert repair["trigger_reason_code"] == "standalone_undefined_period_or_event"
+
+
+def test_r1_layer_priority_puts_leakage_before_every_other_layer() -> None:
+    assert streaming_module._LAYER_PRIORITY[0] == "leakage"
+    assert (
+        streaming_module._primary_failure_layer(
+            ["question_context_missing", "question_answer_leakage"]
+        )
+        == "leakage"
+    )
+    assert (
+        streaming_module._primary_failure_layer(
+            ["question_context_missing", "source_bound_numeric_rule_missing"]
+        )
+        == "context"
+    )
+    assert (
+        streaming_module._primary_failure_layer(
+            ["question_context_missing", "reconstruction_disagreement"]
+        )
+        == "evidence"
+    )
+
+
+def test_r1_a_numeric_contract_kill_routes_to_the_answer_rule_repair() -> None:
+    path = _primary_path()
+
+    repair = _next({(1, 0): path}, path, ["source_bound_numeric_rule_missing"])
+
+    assert repair is not None
+    assert repair["attempt_kind"] == "answer_rule_repair"
+    assert repair["trigger_reason_code"] == "source_bound_numeric_rule_missing"
+
+
+def test_r1_the_answer_rule_repair_runs_once_only() -> None:
+    path = _primary_path()
+    paths = {(1, 0): path}
+    first = _next(paths, path, ["source_bound_numeric_rule_missing"])
+    assert first is not None
+    paths[(1, 1)] = {
+        "attempt": first,
+        "candidate": {"item_id": "item-rule", "candidate_json": "{}"},
+    }
+
+    second = _next(paths, paths[(1, 1)], ["source_bound_numeric_rule_missing"])
+
+    assert second is None or second["attempt_kind"] != "answer_rule_repair"
+
+
+def test_r2_a_repeated_demand_widens_the_context_then_leaves_the_finding() -> None:
+    """family-7ad42191e4ec5c7eb2fe: six attempts, one trigger, every time."""
+    path = _primary_path()
+    paths = {(1, 0): path}
+
+    first = _next(paths, path, ["standalone_undefined_location"])
+    assert first is not None
+    assert first["attempt_kind"] == "surgical_correction"
+    paths[(1, 1)] = {
+        "attempt": first,
+        "candidate": {
+            "item_id": "item-1",
+            "candidate_json": canonical_json(
+                {"answer": {"source_span_id": "span-primary"}}
+            ),
+        },
+    }
+
+    second = _next(paths, paths[(1, 1)], ["standalone_undefined_location"])
+    assert second is not None
+    assert second["attempt_kind"] == "context_widened_revision"
+    paths[(1, 2)] = {
+        "attempt": second,
+        "candidate": {
+            "item_id": "item-2",
+            "candidate_json": canonical_json(
+                {"answer": {"source_span_id": "span-primary"}}
+            ),
+        },
+    }
+
+    third = _next(paths, paths[(1, 2)], ["standalone_undefined_location"])
+    assert third is not None
+    assert third["attempt_kind"] == "alternative_finding"
+    assert third["excluded_finding_span_ids"] == ["span-primary"]
+
+
+def test_r2_a_demand_the_source_cannot_meet_moves_to_another_finding() -> None:
+    path = _primary_path()
+
+    routed = _next(
+        {(1, 0): path},
+        path,
+        ["standalone_undefined_location"],
+        slot_evidence=frozenset({"period", "sample"}),
+    )
+
+    assert routed is not None
+    assert routed["attempt_kind"] == "alternative_finding"
+    assert routed["trigger_reason_code"] == "slot_evidence_unavailable"
+
+
+def test_r2_a_demand_the_source_can_meet_still_spends_a_rewrite() -> None:
+    path = _primary_path()
+
+    routed = _next(
+        {(1, 0): path},
+        path,
+        ["standalone_undefined_location"],
+        slot_evidence=frozenset({"place"}),
+    )
+
+    assert routed is not None
+    assert routed["attempt_kind"] == "surgical_correction"
+
+
+def test_slot_evidence_reads_place_period_sample_and_acronym() -> None:
+    quotes = [
+        "The study site was the Villum Research Station in Greenland.",
+        "Sampling ran through 2015 with n = 457 individuals.",
+        "Hydroperoxymethyl thioformate (HPMTF) was measured.",
+    ]
+
+    slots = streaming_module._slot_evidence_types(quotes)
+
+    assert slots == frozenset({"place", "period", "sample", "acronym"})
+    assert (
+        streaming_module._slot_evidence_types(["no setting stated here"]) == frozenset()
+    )
+
+
+def test_recon_r4_a_standalone_root_collapses_its_downstream_symptoms() -> None:
+    collapsed = streaming_module._routing_reason_codes(
+        [
+            "standalone_undefined_location",
+            "relation_scope_mismatch",
+            "answer_verifier_scope_not_source_bound",
+            "reconstruction_scope_not_source_bound",
+            "answer_ambiguous",
+            "question_claim_type_disagreement",
+        ]
+    )
+
+    assert collapsed == ["standalone_undefined_location"]
+
+
+def test_recon_r4_never_collapses_the_paper_support_signal() -> None:
+    collapsed = streaming_module._routing_reason_codes(
+        ["standalone_undefined_location", "source_entailment_not_verified"]
+    )
+
+    assert "source_entailment_not_verified" in collapsed
+
+
+def test_a_leakage_root_does_not_collapse_an_independent_scope_defect() -> None:
+    collapsed = streaming_module._routing_reason_codes(
+        ["standalone_answer_leakage", "relation_scope_mismatch"]
+    )
+
+    assert collapsed == ["standalone_answer_leakage", "relation_scope_mismatch"]
+
+
+def test_the_six_path_bound_and_the_option_repair_set_do_not_move() -> None:
+    assert streaming_module.MAX_CANDIDATE_PATHS == 6
+    assert streaming_module.OPTION_REPAIR_REASONS == frozenset(
+        {
+            "insufficient_verified_distractors",
+            "option_set_not_mutually_exclusive",
+            "option_set_answer_not_choosable",
+        }
+    )
+
+
+def test_a_spent_answer_rule_rung_leaves_the_finding() -> None:
+    path = _primary_path()
+    paths = {(1, 0): path}
+    first = _next(paths, path, ["source_bound_numeric_rule_missing"])
+    assert first is not None
+    paths[(1, 1)] = {
+        "attempt": first,
+        "candidate": {
+            "item_id": "item-rule",
+            "candidate_json": canonical_json(
+                {"answer": {"source_span_id": "span-primary"}}
+            ),
+        },
+    }
+
+    second = _next(paths, paths[(1, 1)], ["source_bound_numeric_rule_missing"])
+
+    assert second is not None
+    assert second["attempt_kind"] == "alternative_finding"
+    assert second["excluded_finding_span_ids"] == ["span-primary"]
+
+
+def test_slot_place_detection_fails_open_on_a_bare_proper_noun() -> None:
+    """A false 'no place' would discard a finding the source can support."""
+    assert "place" in streaming_module._slot_evidence_types(
+        ["Sampling ran at Svalbard through the melt season."]
+    )
+    assert "place" in streaming_module._slot_evidence_types(
+        ["Observations were taken at 78.9 N in the open water."]
+    )
+    assert "place" not in streaming_module._slot_evidence_types(
+        ["Samples were kept in the dark at four degrees."]
+    )
+
+
+def test_a_crashed_generation_call_leaves_an_incomplete_infra_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audit 4.9 C8: family c4aa016e's attempt vanished with no record."""
+    database = _database(tmp_path)
+    namespace = tmp_path / "namespace"
+    namespace.mkdir()
+    manifest = namespace / "run-manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+
+    def crashing_generate(database, namespace, **kwargs):
+        raise RuntimeError("the provider connection dropped")
+
+    monkeypatch.setattr(streaming_module, "generate_candidate", crashing_generate)
+
+    with pytest.raises(RuntimeError):
+        _progress_generation(
+            database,
+            namespace,
+            _Progress(
+                namespace / "progress.json",
+                run_id="campaign",
+                invocation_run_id="invocation",
+                run_manifest_file=manifest,
+                counts={},
+            ),
+            campaign_id="campaign",
+            candidate_key="candidate-key",
+            source_id="source",
+            family_id="family",
+            selected={},
+            source_version_id="a" * 64,
+            title="Fixture",
+            author=object(),
+            verifier=object(),
+        )
+
+    rows = database.rows("SELECT item_id,status,candidate_json FROM candidates")
+    assert [row["status"] for row in rows] == ["incomplete_infra"]
+    record = json.loads(rows[0]["candidate_json"])
+    assert record["provenance"]["request_identity"] == {
+        "run_id": "campaign",
+        "paper_id": "source",
+        "family_id": "family",
+        "source_version_id": "a" * 64,
+        "attempt_id": record["provenance"]["generation_attempt"]["attempt_id"],
+    }
+
+
+def test_a_typed_generation_rejection_settles_its_call_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audit 4.6 e: the 26 dead chapter 2 calls stop being invisible."""
+    database = _database(tmp_path)
+    namespace = tmp_path / "namespace"
+    namespace.mkdir()
+    manifest = namespace / "run-manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+
+    def rejecting_generate(database, namespace, **kwargs):
+        raise CandidateRejectedError("writer_response_invalid", "no payload")
+
+    monkeypatch.setattr(streaming_module, "generate_candidate", rejecting_generate)
+
+    result = _progress_generation(
+        database,
+        namespace,
+        _Progress(
+            namespace / "progress.json",
+            run_id="campaign",
+            invocation_run_id="invocation",
+            run_manifest_file=manifest,
+            counts={},
+        ),
+        campaign_id="campaign",
+        candidate_key="candidate-key",
+        source_id="source",
+        family_id="family",
+        selected={},
+        source_version_id="a" * 64,
+        title="Fixture",
+        author=object(),
+        verifier=object(),
+    )
+
+    assert result["disposition"] == "generation_rejected"
+    statuses = [
+        row["status"]
+        for row in database.rows("SELECT status FROM candidates ORDER BY item_id")
+    ]
+    assert set(statuses) == {"generation_incomplete"}
+    assert (
+        streaming_module._incomplete_infra_records(database, "campaign", "family") == []
+    )

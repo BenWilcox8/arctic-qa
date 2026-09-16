@@ -218,7 +218,11 @@ def materialize_frozen_access_run(
         for position, line in enumerate(handle, start=1):
             frozen = json.loads(line)
             candidate_key = frozen["candidate_key"]
-            family_key = str(frozen.get("family_key") or candidate_key)
+            family_key = str(
+                frozen.get("paper_family_id")
+                or frozen.get("family_key")
+                or candidate_key
+            )
             if candidate_key in candidate_keys:
                 raise ValueError("the frozen source manifest has a duplicate candidate")
             candidate_keys.add(candidate_key)
@@ -248,6 +252,7 @@ def materialize_frozen_access_run(
                 "doi": frozen.get("doi"),
                 "extraction_sha256": extraction_sha256,
                 "family_key": family_key,
+                "paper_family_id": frozen.get("paper_family_id"),
                 "frozen_manifest_position": position,
                 "position": position,
                 "priority_tier": frozen.get("priority_tier"),

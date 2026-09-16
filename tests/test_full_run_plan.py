@@ -137,6 +137,7 @@ def test_cli_materializes_frozen_jsonl_as_supported_access_run(tmp_path: Path) -
                 "candidate_key": "10.1234/frozen-one",
                 "doi": "10.1234/frozen-one",
                 "family_key": "10.1234/frozen-one",
+                "paper_family_id": "family-frozen-one",
                 "title": "Frozen Arctic source",
                 "authors": ["A. Author"],
                 "year": 2024,
@@ -256,8 +257,10 @@ def test_cli_materializes_frozen_jsonl_as_supported_access_run(tmp_path: Path) -
     assert manifest["schema"] == "article-access-manifest-v1"
     assert manifest["target_total"] == 1
     assert manifest["selection"][0]["candidate_key"] == "10.1234/frozen-one"
+    assert manifest["selection"][0]["paper_family_id"] == "family-frozen-one"
     assert item["schema"] == "article-access-item-v1"
     assert item["position"] == 1
+    assert item["paper_family_id"] == "family-frozen-one"
     assert item["source_content_hash"] == source_hash
     assert item["extraction_sha256"] == extraction_hash
     assert item["source_path"] == str(source)

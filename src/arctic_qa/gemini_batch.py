@@ -20,8 +20,9 @@ from .db import Database, now
 from .errors import CandidateRejectedError, ProviderError
 from .exporting import export_run
 from .generation import generate_candidate
-from .gemini_eligibility import _config, _decimal
+from .gemini_eligibility import _config, _decimal, model_config_for_stage
 from .model_broker import (
+    SharedGeminiBroker,
     _normalized_usage,
     activate_exclusive_batch_mode,
     broker_request_key,
@@ -30,6 +31,8 @@ from .providers import ProviderResult, provider_prompt_hash
 from .publication_export import export_publication_package
 from .streaming import (
     _import_source,
+    _is_current_contract_candidate,
+    _progress_generation,
     _run_eligibility,
     _validate_brokered_eligibility,
     _validate_pair,
@@ -50,11 +53,19 @@ BATCH_SCHEMA = "arctic-gemini-batch-state-v1"
 REQUEST_SCHEMA = "arctic-gemini-batch-request-v1"
 ROUND_SCHEMA = "arctic-gemini-batch-round-v1"
 AUTHORIZATION_SCHEMA = "arctic-gemini-batch-submit-authorization-v1"
+DEFAULT_BATCH_ALLOCATION_USD = Decimal("25")
 MODEL = "gemini-3.8-flash"
 BATCH_INPUT_USD_PER_MILLION = Decimal("0.375")
 BATCH_OUTPUT_USD_PER_MILLION = Decimal("1.875")
 PRICING_VALID_THROUGH = "2026-12-31"
 PRICING_SOURCE = "https://ai.google.dev/gemini-api/docs/pricing"
+# Batch mode is half the standard price, per PRICING_SOURCE (checked
+# 2026-09-15). The agreement judge model is pinned per price config revision:
+# flash-lite through v7, the Pro judge from v8 (chapter 3, yield audit 4.5 R5).
+BATCH_AGREEMENT_PRICE_RECORDS = {
+    "gemini-3.1-flash-lite": ("0.125", "0.75"),
+    "gemini-3.1-pro-preview": ("1.00", "6.00"),
+}
 MODEL_SOURCE = "https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash"
 BATCH_SOURCE = "https://ai.google.dev/gemini-api/docs/batch-api"
 TERMINAL_JOB_STATES = {
@@ -109,6 +120,116 @@ def _cost(input_tokens: int, output_tokens: int) -> Decimal:
     ) / Decimal("1000000")
 
 
+def _batch_pricing(config: dict[str, Any]) -> dict[str, str]:
+    return {
+        "input_usd_per_million_tokens": str(
+            Decimal(config["input_usd_per_million_tokens"]) / 2
+        ),
+        "output_usd_per_million_tokens_including_thinking": str(
+            Decimal(config["output_usd_per_million_tokens_including_thinking"]) / 2
+        ),
+        "valid_through": str(config["price_valid_through"]),
+        "source": str(config["price_source"]),
+    }
+
+
+def _priced_cost(
+    pricing: dict[str, Any], input_tokens: int, output_tokens: int
+) -> Decimal:
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in (input_tokens, output_tokens)
+    ):
+        raise ValueError("batch token counts must be nonnegative integers")
+    return (
+        Decimal(input_tokens) * Decimal(pricing["input_usd_per_million_tokens"])
+        + Decimal(output_tokens)
+        * Decimal(pricing["output_usd_per_million_tokens_including_thinking"])
+    ) / Decimal("1000000")
+
+
+def _validate_batch_shared_ledger(
+    shared_ledger_file: Path, ledger: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    """Validate shared paid-call custody before a batch uses its budget.
+
+    The live broker owns the continuation evidence rules. This read-only
+    guard reuses those rules and permits only reviewed no-replay holds, whose
+    full reservations remain in the shared totals and therefore in all batch
+    projections. Every other unresolved request is a submission stop.
+    """
+    integrity_file = shared_ledger_file.with_name(
+        f".{shared_ledger_file.name}.integrity-halt.json"
+    )
+    if integrity_file.exists():
+        raise ValueError("the shared paid-call ledger has an integrity halt")
+    try:
+        liabilities = SharedGeminiBroker.validate_no_replay_liabilities(
+            ledger=ledger,
+            receipts_dir=shared_ledger_file.parent / "model-receipts",
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            "the shared paid-call ledger has an unaccounted retained liability "
+            f"or failed recovery validation: {error}"
+        ) from error
+    try:
+        reserved_expected = sum(
+            (
+                _money(
+                    request.get("reserved_usd"), "retained reservation", positive=True
+                )
+                for request in ledger["requests"].values()
+                if request.get("state") == "orphaned_no_replay"
+            ),
+            Decimal("0"),
+        )
+        ambiguous_expected = sum(
+            (
+                _money(
+                    request.get("reserved_usd"), "ambiguous reservation", positive=True
+                )
+                for request in ledger["requests"].values()
+                if request.get("state") == "ambiguous_charge"
+            ),
+            Decimal("0"),
+        )
+        reserved_actual = _money(ledger.get("reserved_usd"), "shared ledger reserved")
+        ambiguous_actual = _money(
+            ledger.get("ambiguous_reserved_usd"), "shared ledger ambiguous"
+        )
+    except (AttributeError, KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            "the shared paid-call ledger has an unaccounted retained liability "
+            f"or failed accounting validation: {error}"
+        ) from error
+    if reserved_actual != reserved_expected or ambiguous_actual != ambiguous_expected:
+        raise ValueError(
+            "the shared paid-call ledger has an unaccounted retained liability; "
+            "recovery holds must remain fully accounted for"
+        )
+    if ledger.get("halted") is not False:
+        raise ValueError("the shared paid-call ledger is halted")
+    inflight = ledger.get("inflight")
+    if isinstance(inflight, bool) or not isinstance(inflight, int) or inflight != 0:
+        raise ValueError("the shared paid-call producer still has inflight work")
+    for request_key, request in ledger["requests"].items():
+        state = request.get("state")
+        if state == "submitted" or state == "counting":
+            raise ValueError(
+                "the shared paid-call ledger has an unreviewed submitted liability"
+            )
+        if (
+            state in {"orphaned_no_replay", "ambiguous_charge"}
+            and request_key not in liabilities
+        ):
+            raise ValueError(
+                "the shared paid-call ledger has a retained liability without "
+                "validated no-replay recovery evidence"
+            )
+    return liabilities
+
+
 class BatchStore:
     def __init__(
         self,
@@ -145,6 +266,30 @@ class BatchStore:
             raise ValueError(
                 "the standard output price does not match the batch price record"
             )
+        # The reviewed price config pins the agreement model per revision
+        # (flash-lite through v7, the Pro judge from v8); the batch evidence
+        # is the documented method list bound in that record.
+        agreement_config = model_config_for_stage(self.config, "answer_agreement")
+        if "batchGenerateContent" not in agreement_config.get(
+            "documented_supported_methods", []
+        ):
+            raise ValueError(
+                "the configured answer agreement model lacks batch support evidence"
+            )
+        agreement_record = BATCH_AGREEMENT_PRICE_RECORDS.get(
+            str(agreement_config["model"])
+        )
+        if agreement_record is None:
+            raise ValueError(
+                "the configured answer agreement model lacks batch support evidence"
+            )
+        if _batch_pricing(agreement_config) != {
+            "input_usd_per_million_tokens": agreement_record[0],
+            "output_usd_per_million_tokens_including_thinking": agreement_record[1],
+            "valid_through": agreement_config["price_valid_through"],
+            "source": PRICING_SOURCE,
+        }:
+            raise ValueError("the answer agreement batch price record changed")
         if (
             self.overall_ceiling_usd <= 0
             or self.maximum_request_usd <= 0
@@ -189,6 +334,24 @@ class BatchStore:
                 ),
                 "valid_through": PRICING_VALID_THROUGH,
                 "source": PRICING_SOURCE,
+            },
+            "registered_models": {
+                "default": {
+                    "model": MODEL,
+                    "pricing": _batch_pricing(self.config),
+                    "model_source": self.config["model_source"],
+                },
+                "answer_agreement": {
+                    "model": model_config_for_stage(self.config, "answer_agreement")[
+                        "model"
+                    ],
+                    "pricing": _batch_pricing(
+                        model_config_for_stage(self.config, "answer_agreement")
+                    ),
+                    "model_source": model_config_for_stage(
+                        self.config, "answer_agreement"
+                    )["model_source"],
+                },
             },
             "shared_ledger_file": str(self.shared_ledger_file),
             "overall_ceiling_usd": str(self.overall_ceiling_usd),
@@ -239,6 +402,8 @@ class BatchStore:
         pricing = state.get("pricing") or {}
         if pricing != self._initial_state()["pricing"]:
             raise ValueError("the batch pricing record changed")
+        if state.get("registered_models") != self._initial_state()["registered_models"]:
+            raise ValueError("the batch model registry changed")
 
     def read(self) -> dict[str, Any]:
         with self.lock_file.open("a+") as lock:
@@ -264,6 +429,7 @@ class BatchStore:
             ledger.get("requests"), dict
         ):
             raise ValueError("the shared paid-call ledger is invalid")
+        _validate_batch_shared_ledger(self.shared_ledger_file, ledger)
         for name in (
             "prior_construction_spend_usd",
             "spent_usd",
@@ -342,6 +508,10 @@ class BatchStore:
                 key,
             )
         )
+        first_model = self.prepared_record(keys[0])["model"]
+        keys = [
+            key for key in keys if self.prepared_record(key)["model"] == first_model
+        ]
         lines = []
         total = Decimal("0")
         stages: dict[str, int] = {}
@@ -350,6 +520,13 @@ class BatchStore:
             lines.append({"key": key, "request": request["request"]})
             total += Decimal(request["reserved_usd"])
             stages[request["stage"]] = stages.get(request["stage"], 0) + 1
+        pricing_records = {
+            canonical_json(self.prepared_record(key)["batch_pricing"]) for key in keys
+        }
+        model_sources = {self.prepared_record(key)["model_source"] for key in keys}
+        if len(pricing_records) != 1 or len(model_sources) != 1:
+            raise ValueError("one batch round must use one model price record")
+        round_pricing = json.loads(next(iter(pricing_records)))
         round_id = stable_id("batch-round", run_identity, keys, length=32)
         directory = self.root / "rounds" / round_id
         requests_file = directory / "requests.jsonl"
@@ -369,10 +546,11 @@ class BatchStore:
             "shared_ledger_sha256_at_prepare": sha256_file(self.shared_ledger_file),
             "requests_file": str(requests_file),
             "requests_file_sha256": sha256_file(requests_file),
-            "model": MODEL,
+            "model": first_model,
+            "pricing": round_pricing,
             "price_config_sha256": sha256_file(self.price_config_file),
             "pricing_source": PRICING_SOURCE,
-            "model_source": MODEL_SOURCE,
+            "model_source": next(iter(model_sources)),
             "batch_source": BATCH_SOURCE,
             "submission_enabled": False,
         }
@@ -431,9 +609,13 @@ class BatchStore:
             "batch_actual_usd": str(batch_actual),
             "batch_unsettled_liability_usd": str(batch_liability),
             "new_reservation_usd": str(new_reservation),
+            "projected_batch_total_usd": str(
+                batch_actual + batch_liability + new_reservation
+            ),
             "projected_total_usd": str(
                 shared_used + batch_actual + batch_liability + new_reservation
             ),
+            "batch_allocation_usd": str(self.overall_ceiling_usd),
             "overall_ceiling_usd": str(self.overall_ceiling_usd),
         }
 
@@ -461,19 +643,12 @@ class BatchStore:
         if not str(authorization.get("authorized_by") or "").strip():
             raise ValueError("the batch submission authorization lacks an author")
         ledger = self.shared_ledger()
-        if (
-            ledger.get("halted")
-            or int(ledger.get("inflight", 0)) != 0
-            or any(
-                _money(ledger[name], name) != 0
-                for name in ("reserved_usd", "ambiguous_reserved_usd")
-            )
-        ):
-            raise ValueError("the shared paid-call ledger is not settled")
+        if ledger.get("halted") or ledger.get("inflight") != 0:
+            raise ValueError("the shared paid-call producer has not stopped")
         preview = self.budget_preview(manifest["request_keys"])
-        if Decimal(preview["projected_total_usd"]) > self.overall_ceiling_usd:
+        if Decimal(preview["projected_batch_total_usd"]) > self.overall_ceiling_usd:
             raise ValueError(
-                "the batch reservation exceeds the shared construction ceiling"
+                "the batch reservation exceeds the batch allocation construction ceiling"
             )
         paper_costs: dict[str, Decimal] = {}
         for paper in ledger.get("papers", {}).values():
@@ -569,6 +744,12 @@ class BatchProvider:
     def model(self) -> str:
         return MODEL
 
+    def model_for_role(self, role: str) -> str:
+        stage = ROLE_STAGES.get(role)
+        if stage is None:
+            return self.model
+        return str(model_config_for_stage(self.config, stage)["model"])
+
     @property
     def broker(self) -> BatchProvider:
         return self
@@ -609,9 +790,11 @@ class BatchProvider:
         stage = ROLE_STAGES.get(role)
         if stage is None:
             raise ValueError(f"the generation role has no batch stage: {role}")
-        payload = _request_payload(system, prompt, parameters, self.config)
+        request_config = model_config_for_stage(self.config, stage)
+        model = str(request_config["model"])
+        payload = _request_payload(system, prompt, parameters, request_config)
         key = broker_request_key(
-            model=self.model,
+            model=model,
             run_id=self.invocation_run_id,
             phase=self.phase,
             stage=stage,
@@ -623,7 +806,11 @@ class BatchProvider:
         state = self.store.read()
         summary = state["requests"].get(key)
         if summary and summary["state"] == "completed":
-            return _provider_result(_read(self.store.receipt_path(key)), self.model)
+            return _provider_result(
+                _read(self.store.receipt_path(key)),
+                model,
+                allow_enum=role == "answer_judge",
+            )
         if summary and summary["state"] in {"error_unsettled", "submission_ambiguous"}:
             raise ProviderError(
                 f"batch request {key} has unresolved provider liability"
@@ -636,7 +823,8 @@ class BatchProvider:
                 )
             input_bound = len(canonical_json(payload).encode("utf-8"))
             output_bound = int(payload["generationConfig"]["maxOutputTokens"])
-            reserved = _cost(input_bound, output_bound)
+            batch_pricing = _batch_pricing(request_config)
+            reserved = _priced_cost(batch_pricing, input_bound, output_bound)
             record = {
                 "schema": REQUEST_SCHEMA,
                 "request_key": key,
@@ -651,12 +839,19 @@ class BatchProvider:
                 "attempt": 1,
                 "prompt_sha256": sha256_bytes(prompt.encode()),
                 "prompt_identity": provider_prompt_hash(
-                    self, system, prompt, "arctic-qa-batch-v1", parameters
+                    self,
+                    system,
+                    prompt,
+                    "arctic-qa-batch-v1",
+                    parameters,
+                    role=role,
                 ),
-                "model": self.model,
-                "config_id": self.config["config_id"],
+                "model": model,
+                "model_source": request_config["model_source"],
+                "config_id": request_config["config_id"],
                 "price_config_sha256": sha256_file(self.store.price_config_file),
-                "maximum_input_tokens": self.config["maximum_input_tokens"],
+                "batch_pricing": batch_pricing,
+                "maximum_input_tokens": request_config["maximum_input_tokens"],
                 "maximum_output_tokens_including_thinking": output_bound,
                 "input_token_bound": input_bound,
                 "reserved_usd": str(reserved),
@@ -667,16 +862,21 @@ class BatchProvider:
             span_match = re.search(r'"span_id":"([^"]+)"', prompt)
             if span_match is None:
                 raise ValueError("the option request has no source span")
+            # The capture placeholder rejects the option, so rank-order
+            # verification continues and every option request of the round
+            # is prepared at once. The whole-set request is prepared in the
+            # round after the option receipts are read, because its prompt
+            # depends on which options verified.
             return ProviderResult(
                 payload={
+                    "rationale": "Temporary offline request capture record.",
+                    "admitting_interpretation": "",
                     "contradiction_established": False,
-                    "alternative_answer_search_passed": False,
-                    "true_in_different_context": False,
+                    "option_standalone_interpretable": False,
                     "question_admits_option_as_correct": False,
                     "source_span_id": span_match.group(1),
-                    "rationale": "Temporary offline request capture record.",
                 },
-                returned_model=self.model,
+                returned_model=model,
                 request_id=f"capture-{key}",
                 input_tokens=0,
                 output_tokens=0,
@@ -698,9 +898,45 @@ class BatchProvider:
             and receipt.get("request_sha256") != request_sha256
         ):
             raise ValueError("the batch receipt request hash changed")
-        if receipt.get("stage") != ROLE_STAGES[role]:
+        if receipt.get("stage") != ROLE_STAGES[role] or receipt.get(
+            "model"
+        ) != self.model_for_role(role):
             raise ValueError("the batch receipt stage changed")
-        return receipt, _provider_result(receipt, self.model)
+        return receipt, _provider_result(
+            receipt,
+            self.model_for_role(role),
+            allow_enum=role == "answer_judge",
+        )
+
+    def receipt_reference(
+        self,
+        role: str,
+        system: str,
+        prompt: str,
+        parameters: dict[str, Any],
+    ) -> dict[str, str]:
+        """Return the immutable batch receipt for an exact completed call."""
+        if not all((self.paper_id, self.family_id, self.source_version_id)):
+            raise ValueError("the batch provider is not bound to a paper")
+        stage = ROLE_STAGES[role]
+        request_config = model_config_for_stage(self.config, stage)
+        payload = _request_payload(system, prompt, parameters, request_config)
+        key = broker_request_key(
+            model=str(request_config["model"]),
+            run_id=self.invocation_run_id,
+            phase=self.phase,
+            stage=stage,
+            paper_id=str(self.paper_id),
+            family_id=str(self.family_id),
+            source_version_id=str(self.source_version_id),
+            payload=payload,
+        )
+        path = self.effective_receipt_path(key)
+        return {
+            "request_key": key,
+            "receipt_file": str(path),
+            "receipt_sha256": sha256_file(path),
+        }
 
     def effective_receipt_path(self, request_key: str) -> Path:
         path = self.store.receipt_path(request_key)
@@ -746,31 +982,43 @@ def _capture_remaining_options(
     source_id: str,
     run_id: str,
     provider: BatchProvider,
+    generation_attempt: dict[str, Any] | None = None,
 ) -> None:
     memory = Database(Path(":memory:"))
     db.connection.backup(memory.connection)
     try:
         capture = replace(provider, capture_option_requests=True)
         try:
-            generate_candidate(
-                memory,
-                namespace,
-                source_id=source_id,
-                run_id=run_id,
-                arm="answer_first",
-                author=capture,
-                verifier=capture,
-                budget_mode="tokens",
-                budget_limit=Decimal("1000000"),
-                reservation=Decimal("100"),
-                timeout=30,
-                retries=0,
-                rate_limit_seconds=0,
-            )
+            arguments = {
+                "source_id": source_id,
+                "run_id": run_id,
+                "arm": "answer_first",
+                "author": capture,
+                "verifier": capture,
+                "budget_mode": "tokens",
+                "budget_limit": Decimal("1000000"),
+                "reservation": Decimal("100"),
+                "timeout": 30,
+                "retries": 0,
+                "rate_limit_seconds": 0,
+            }
+            if generation_attempt is not None:
+                arguments["generation_attempt"] = generation_attempt
+            generate_candidate(memory, namespace, **arguments)
         except BatchPendingError:
             pass
     finally:
         memory.close()
+
+
+class _BatchProgress:
+    """Provide the generation progress callbacks without a live progress file."""
+
+    def paper(self, **_: Any) -> None:
+        return None
+
+    def error(self, *_: Any) -> None:
+        return None
 
 
 def _terminal_dispositions(
@@ -782,7 +1030,7 @@ def _terminal_dispositions(
     connection.row_factory = sqlite3.Row
     try:
         rows = connection.execute(
-            """SELECT s.stable_id,s.source_id,c.item_id,c.status
+            """SELECT s.stable_id,s.source_id,c.item_id,c.status,c.candidate_json
             FROM candidates c JOIN sources s ON s.source_id=c.source_id
             WHERE c.run_id=?
             AND c.status IN ('rejected','machine_accepted_unverified','incomplete_non_mcq')
@@ -793,6 +1041,8 @@ def _terminal_dispositions(
         connection.close()
     dispositions: dict[str, dict[str, str]] = {}
     for row in rows:
+        if not _is_current_contract_candidate(json.loads(row["candidate_json"])):
+            continue
         dispositions.setdefault(
             str(row["stable_id"]),
             {
@@ -844,6 +1094,7 @@ def select_continuation(
         ledger.get("requests"), dict
     ):
         raise ValueError("the shared paid-call ledger is invalid")
+    liabilities = _validate_batch_shared_ledger(shared_ledger_file, ledger)
     receipts: dict[str, list[dict[str, str]]] = {}
     for request_key, request in sorted(ledger["requests"].items()):
         if request.get("run_id") != prior_run_id:
@@ -932,16 +1183,9 @@ def select_continuation(
         row["request_key"]
         for rows in receipts.values()
         for row in rows
-        if row["state"] != "completed"
+        if row["state"] != "completed" and row["request_key"] not in liabilities
     )
-    ledger_settled = (
-        int(ledger.get("inflight", 0)) == 0
-        and _money(ledger.get("reserved_usd"), "reserved") == 0
-        and _money(ledger.get("ambiguous_reserved_usd"), "ambiguous") == 0
-    )
-    provisional = (
-        progress.get("state") == "running" or not ledger_settled or bool(unsettled)
-    )
+    provisional = progress.get("state") == "running" or bool(unsettled)
     if require_stopped and provisional:
         raise ValueError("the production campaign has not reached a settled stop")
     identity = {
@@ -1059,6 +1303,7 @@ def prepare_pipeline(
         "rejected": 0,
         "incomplete": 0,
         "unavailable": 0,
+        "paper_cost_cap_reached": 0,
     }
     for selected in selection[:limit]:
         candidate_key = selected.get("candidate_key")
@@ -1118,34 +1363,30 @@ def prepare_pipeline(
                 db, namespace, access, selected, eligibility, family_id=family_id
             )
             terminal = _terminal_candidate(db, campaign_id, source_id)
-            if terminal:
-                state = (
-                    "accepted"
-                    if terminal["status"] == "machine_accepted_unverified"
-                    else (
-                        "incomplete"
-                        if terminal["status"] == "incomplete_non_mcq"
-                        else "rejected"
-                    )
-                )
-                counts[state] += 1
-                papers.append({**result, "source_id": source_id, "state": state})
+            if terminal and terminal["status"] == "machine_accepted_unverified":
+                counts["accepted"] += 1
+                papers.append({**result, "source_id": source_id, "state": "accepted"})
                 continue
+            pending_attempt: dict[str, Any] | None = None
+
+            def remember_pending(attempt: dict[str, Any]) -> None:
+                nonlocal pending_attempt
+                pending_attempt = attempt
+
             try:
-                candidate = generate_candidate(
+                generation = _progress_generation(
                     db,
                     namespace,
+                    _BatchProgress(),
+                    campaign_id=campaign_id,
+                    candidate_key=str(candidate_key),
                     source_id=source_id,
-                    run_id=campaign_id,
-                    arm="answer_first",
+                    family_id=family_id,
+                    selected=selected,
+                    title=access.get("title"),
                     author=paper_provider,
                     verifier=paper_provider,
-                    budget_mode="tokens",
-                    budget_limit=Decimal("1000000"),
-                    reservation=Decimal("100"),
-                    timeout=30,
-                    retries=0,
-                    rate_limit_seconds=0,
+                    pending_handler=remember_pending,
                 )
             except BatchPendingError:
                 if any(
@@ -1159,26 +1400,23 @@ def prepare_pipeline(
                         source_id=source_id,
                         run_id=campaign_id,
                         provider=paper_provider,
+                        generation_attempt=pending_attempt,
                     )
                 raise
-            validation = _finish_candidate(db, namespace, candidate)
-            state = (
-                "accepted"
-                if validation["final_label"] == "machine_accepted_unverified"
-                and validation["labels"]["mcq_eligible"]
-                else (
-                    "incomplete"
-                    if validation["final_label"] == "machine_accepted_unverified"
-                    else "rejected"
-                )
-            )
+            state = {
+                "accepted": "accepted",
+                "incomplete_non_mcq": "incomplete",
+                "generation_rejected": "rejected",
+                # The per-paper cost cap ends one family, not the batch.
+                "paper_cost_cap_reached": "paper_cost_cap_reached",
+            }[generation["disposition"]]
             counts[state] += 1
             papers.append(
                 {
                     **result,
                     "source_id": source_id,
                     "state": state,
-                    "item_id": candidate["item_id"],
+                    "reason": generation["reason_codes"],
                 }
             )
         except BatchPendingError:
@@ -1204,7 +1442,12 @@ def prepare_pipeline(
         "source_selection_count": source_selection_count,
         "continuation_plan_sha256": continuation_plan_sha256,
         "continuation_plan_provisional": continuation_plan_provisional,
-        "model": MODEL,
+        "models": sorted(
+            {
+                MODEL,
+                str(model_config_for_stage(store.config, "answer_agreement")["model"]),
+            }
+        ),
         "price_config_sha256": sha256_file(store.price_config_file),
     }
     round_manifest = store.make_round(
@@ -1334,7 +1577,9 @@ def submit_round(
             Path(manifest["requests_file"]), f"arctic-{manifest['round_id']}"
         )
         file_name = str(uploaded["file"]["name"])
-        created = transport.create(MODEL, file_name, f"arctic-{manifest['round_id']}")
+        created = transport.create(
+            str(manifest["model"]), file_name, f"arctic-{manifest['round_id']}"
+        )
     except Exception:
         # The job-creation outcome can be unknown. Keep the full reservation.
         raise
@@ -1459,7 +1704,8 @@ def ingest_results(
             raise ValueError("a batch result response is not an object")
         request = store.prepared_record(key)
         usage = _normalized_usage(response)
-        actual = _cost(
+        actual = _priced_cost(
+            request["batch_pricing"],
             usage["promptTokenCount"],
             usage["candidatesTokenCount"] + usage["thoughtsTokenCount"],
         )
@@ -1485,6 +1731,7 @@ def ingest_results(
             "state": "completed",
             "reserved_usd": request["reserved_usd"],
             "actual_cost_usd": str(actual),
+            "batch_pricing": request["batch_pricing"],
             "usage": usage,
             "response": response,
             "raw_results_file": str(raw_path),
@@ -1571,7 +1818,12 @@ def _add_store_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--state-dir", required=True)
     parser.add_argument("--price-config-file", required=True)
     parser.add_argument("--shared-ledger-file", required=True)
-    parser.add_argument("--overall-ceiling-usd", default="250")
+    parser.add_argument(
+        "--overall-ceiling-usd",
+        "--batch-allocation-usd",
+        dest="overall_ceiling_usd",
+        default=str(DEFAULT_BATCH_ALLOCATION_USD),
+    )
     parser.add_argument("--maximum-request-usd", default="0.25")
     parser.add_argument("--maximum-paper-usd", default="1")
 

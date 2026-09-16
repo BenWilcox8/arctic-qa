@@ -108,5 +108,9 @@ def write_geography_correction_overlay(
         "decision_source": decision_source,
         "decision_at_utc": rows[0]["decision_at_utc"],
     }
-    atomic_json(output_dir / "geography-correction-overlay-manifest.json", manifest, immutable=True)
+    atomic_json(
+        output_dir / "geography-correction-overlay-manifest.json",
+        manifest,
+        immutable=True,
+    )
     return {**manifest, "output_dir": str(output_dir.resolve())}

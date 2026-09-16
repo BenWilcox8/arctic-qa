@@ -25,7 +25,7 @@ from .util import canonical_json, redact, stable_id
 
 @dataclass(frozen=True)
 class ProviderResult:
-    payload: dict[str, Any]
+    payload: Any
     returned_model: str
     request_id: str | None
     input_tokens: int | None
@@ -75,13 +75,19 @@ class FakeProvider:
             raise ProviderError(
                 f"fake provider expected role {event.get('role')}, received {role}"
             )
+        # A role's static instructions ride in the system instruction and its
+        # evidence in the prompt, so a script marker may sit in either part.
+        request_text = f"{system}\n{prompt}"
         if any(
-            value not in prompt for value in event.get("require_prompt_contains", [])
+            value not in request_text
+            for value in event.get("require_prompt_contains", [])
         ):
             raise ProviderError(
                 f"fake provider prompt for {role} is missing required markers"
             )
-        if any(value in prompt for value in event.get("forbid_prompt_contains", [])):
+        if any(
+            value in request_text for value in event.get("forbid_prompt_contains", [])
+        ):
             raise ProviderError(
                 f"fake provider prompt for {role} contains a forbidden marker"
             )
@@ -284,8 +290,9 @@ def call_provider(
     retries: int,
     rate_limit_seconds: float,
 ) -> ProviderResult:
+    requested_model = provider_model(provider, role)
     prompt_hash = provider_prompt_hash(
-        provider, system, prompt, prompt_version, parameters
+        provider, system, prompt, prompt_version, parameters, role=role
     )
     completed = db.one(
         """SELECT * FROM calls WHERE run_id=? AND entity_id=? AND role=? AND prompt_hash=? AND status='completed'
@@ -351,7 +358,7 @@ def call_provider(
                     entity_id,
                     role,
                     provider.name,
-                    provider.model,
+                    requested_model,
                     prompt_version,
                     prompt_hash,
                     canonical_json(parameters),
@@ -456,6 +463,8 @@ def provider_prompt_hash(
     prompt: str,
     prompt_version: str,
     parameters: dict[str, Any],
+    *,
+    role: str | None = None,
 ) -> str:
     identity = getattr(provider, "request_identity", None)
     return stable_id(
@@ -464,10 +473,18 @@ def provider_prompt_hash(
         prompt,
         prompt_version,
         provider.name,
-        provider.model,
+        provider_model(provider, role),
         identity() if callable(identity) else None,
         parameters,
     )
+
+
+def provider_model(provider: Provider, role: str | None = None) -> str:
+    """Return a role-specific requested model when the provider registers one."""
+    selector = getattr(provider, "model_for_role", None)
+    if role is not None and callable(selector):
+        return str(selector(role))
+    return str(provider.model)
 
 
 def _call_externally_metered(
@@ -510,7 +527,7 @@ def _call_externally_metered(
                     entity_id,
                     role,
                     provider.name,
-                    provider.model,
+                    provider_model(provider, role),
                     prompt_version,
                     prompt_hash,
                     canonical_json(parameters),
@@ -805,6 +822,14 @@ def _hydrate_source_span_ids(value: Any, prompt: str) -> Any:
                 )
                 if selected is not None:
                     item["source_span_id"] = selected["span_id"]
+                    # A fixture cites the same selected span for its scope
+                    # values (candidate schema 2.8.0 scope_evidence).
+                    for entry in item.get("scope_evidence") or []:
+                        if (
+                            isinstance(entry, dict)
+                            and entry.get("span_id") == "{{span_id}}"
+                        ):
+                            entry["span_id"] = selected["span_id"]
             for child in item.values():
                 walk(child)
         elif isinstance(item, list):

@@ -14,6 +14,7 @@ REPO = Path(__file__).resolve().parents[1]
 FIXTURES = REPO / "fixtures"
 sys.path.insert(0, str(REPO / "src"))
 
+from arctic_qa import validation as validation_module  # noqa: E402
 from arctic_qa.util import canonical_json, sha256_bytes, stable_id  # noqa: E402
 
 
@@ -79,16 +80,31 @@ def bind_option_verdicts(
         canonical_json(item["answer"]),
     )
     item["option_verdicts"] = []
+    # A span-form verdict receipt resolves under the current span contract.
+    contract = validation_module.SOURCE_SPAN_CONTRACT_VERSION
+    text_sha256 = sha256_bytes(quote.encode("utf-8"))
+    span = {
+        "evidence_quote": quote,
+        "locator": locator,
+        "evidence_text_sha256": text_sha256,
+        "span_contract_version": contract,
+        "source_span_id": stable_id(
+            contract,
+            locator["chunk_id"],
+            locator["start_offset"],
+            locator["end_offset"],
+            text_sha256,
+        ),
+    }
     for option in item["distractors"]:
         option_hash = stable_id("option", qa_hash, option["text"], option["type"])
         payload = {
-            "contradiction_established": True,
-            "alternative_answer_search_passed": True,
-            "true_in_different_context": False,
-            "question_admits_option_as_correct": False,
-            "evidence_quote": quote,
-            "locator": locator,
             "rationale": "Test-only source-bound contradiction.",
+            "admitting_interpretation": "",
+            "contradiction_established": True,
+            "option_standalone_interpretable": True,
+            "question_admits_option_as_correct": False,
+            "source_span_id": span["source_span_id"],
         }
         prompt_hash = stable_id("test-prompt", option_hash)
         request_id = stable_id("test-request", option_hash)
@@ -99,6 +115,7 @@ def bind_option_verdicts(
                 "option_hash": option_hash,
                 "option_text": option["text"],
                 **payload,
+                **span,
                 "provenance": {
                     "role": "option_verifier",
                     "provider": "fake",
@@ -137,6 +154,72 @@ def bind_option_verdicts(
                         canonical_json(payload),
                     ),
                 )
+    bind_option_set_verdict(item, receipt_root=receipt_root)
+
+
+def bind_option_set_verdict(item: dict, *, receipt_root: Path | None = None) -> None:
+    """Bind a passing whole-set verdict over every distractor of the item."""
+    qa_hash = stable_id(
+        "qa",
+        item["question"],
+        item.get("question_context", ""),
+        canonical_json(item["answer"]),
+    )
+    option_hashes = [
+        stable_id("option", qa_hash, option["text"], option["type"])
+        for option in item["distractors"]
+    ]
+    set_hash = stable_id("option-set", qa_hash, *option_hashes)
+    payload = {
+        "rationale": "Test-only whole-set verdict.",
+        "overlapping_option_pairs": [],
+        "options_mutually_exclusive": True,
+        "answer_choosable_from_displayed_text": True,
+    }
+    prompt_hash = stable_id("test-set-prompt", set_hash)
+    request_id = stable_id("test-set-request", set_hash)
+    item["option_set_verdict"] = {
+        "source_hash": item["source"]["content_hash"],
+        "qa_hash": qa_hash,
+        "option_hashes": option_hashes,
+        "set_hash": set_hash,
+        **payload,
+        "provenance": {
+            "role": "option_set_verifier",
+            "provider": "fake",
+            "requested_model": "fake-verifier",
+            "returned_model": "fake-verifier",
+            "request_id": request_id,
+            "prompt_version": "test-only",
+            "prompt_hash": prompt_hash,
+        },
+    }
+    if receipt_root is None:
+        return
+    run_id = item["provenance"]["run_id"]
+    entity_id = stable_id(
+        "option-set-verdict",
+        stable_id("unit", item["finding_id"], item["provenance"]["generation_arm"]),
+        set_hash,
+    )
+    with database(receipt_root) as connection:
+        connection.execute(
+            """INSERT INTO calls
+            (call_id,run_id,entity_id,role,provider,requested_model,
+             returned_model,prompt_version,prompt_hash,parameters_json,
+             request_id,attempt,status,response_json,started_at,completed_at)
+            VALUES (?,?,?,'option_set_verifier','fake','fake-verifier',
+                    'fake-verifier','test-only',?, '{}',?,1,'completed',?,
+                    'test-only','test-only')""",
+            (
+                stable_id("test-set-call", run_id, entity_id),
+                run_id,
+                entity_id,
+                prompt_hash,
+                request_id,
+                canonical_json(payload),
+            ),
+        )
 
 
 def source_locator_for_quote(root: Path, source_id: str, quote: str) -> dict:
@@ -184,13 +267,12 @@ def sync_option_receipt(root: Path, item: dict, index: int) -> None:
     payload = {
         key: verdict[key]
         for key in (
-            "contradiction_established",
-            "alternative_answer_search_passed",
-            "true_in_different_context",
-            "question_admits_option_as_correct",
-            "evidence_quote",
-            "locator",
             "rationale",
+            "admitting_interpretation",
+            "contradiction_established",
+            "option_standalone_interpretable",
+            "question_admits_option_as_correct",
+            "source_span_id",
         )
     }
     provenance = verdict["provenance"]
@@ -215,7 +297,7 @@ def bind_qa_verification_receipts(root: Path, item: dict) -> None:
     entity_id = stable_id(
         "unit", item["finding_id"], item["provenance"]["generation_arm"]
     )
-    calls = {}
+    calls = dict(item["provenance"].get("verification_calls") or {})
     for role, record in (
         ("reconstructor", item["reconstruction"]),
         ("answer_verifier", item["answer_verification"]),
@@ -298,6 +380,39 @@ def generate_command(
         "--retries",
         str(retries),
     )
+
+
+def agreement_fallback_script(
+    tmp_path: Path,
+    *,
+    verdict: str | None,
+    reconstructed_answer: str = "a depth of two metres",
+) -> Path:
+    events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-verifier.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    events[1]["response"]["answer"] = reconstructed_answer
+    events[1]["response"].pop("numeric")
+    judge = {
+        "role": "answer_judge",
+        "require_prompt_contains": [
+            "DATA",
+            '"proposed_answer":"2.0 m"',
+            f'"reconstructed_answer":"{reconstructed_answer}"',
+        ],
+        "forbid_prompt_contains": ["SOURCE_DATA", "ANSWER_RECORD"],
+        **({"response": verdict} if verdict is not None else {"kind": "malformed"}),
+    }
+    events.insert(3, judge)
+    path = tmp_path / f"agreement-{verdict or 'malformed'}.jsonl"
+    path.write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n",
+        encoding="utf-8",
+    )
+    return path
 
 
 def test_absent_mount_is_rejected(tmp_path: Path) -> None:
@@ -482,9 +597,16 @@ def test_validation_requires_positive_source_entailment(tmp_path: Path) -> None:
 def test_true_distractors_and_equivalent_units_are_not_false(tmp_path: Path) -> None:
     smoke(tmp_path)
     item = candidate(tmp_path)
-    item["distractors"][0]["text"] = "2 m"
-    item["distractors"][0]["numeric"] = {"canonical_value": "200", "unit": "cm"}
+    # The metadata must describe the option's own display, so the equivalent
+    # unit is displayed too. A "2 m" display with "200 cm" metadata is now a
+    # display mismatch, which the case below covers.
+    item["distractors"][0]["text"] = "0.002 km"
+    item["distractors"][0]["numeric"] = {"canonical_value": "0.002", "unit": "km"}
+    # An admission needs its reading: the flag alone is a malformed verdict.
     item["option_verdicts"][1]["question_admits_option_as_correct"] = True
+    item["option_verdicts"][1]["admitting_interpretation"] = (
+        "Read 'reported water depth' as the depth at the second station."
+    )
     sync_option_receipt(tmp_path, item, 1)
     item["distractors"][2]["text"] = "2.0 m"
     item["distractors"][3]["text"] = "None of the above"
@@ -494,6 +616,12 @@ def test_true_distractors_and_equivalent_units_are_not_false(tmp_path: Path) -> 
     assert result["labels"]["mcq_eligible"] is False
     reasons = [reason for row in result["distractors"] for reason in row["reasons"]]
     assert "distractor_is_equivalent_numeric_answer" in reasons
+    assert (
+        validation_module._numeric_display_issue(
+            "2 m", {"canonical_value": "200", "unit": "cm"}
+        )
+        == "numeric_display_ambiguous"
+    )
     assert "option_correct_under_question_interpretation" in reasons
     assert "distractor_matches_answer" in reasons
     assert "forbidden_meta_option" in reasons
@@ -880,21 +1008,19 @@ def test_source_bound_typed_distractor_controls(
     item["question"] = f"What {scope_phrase} was documented?"
     item["reconstruction"] = {
         "answer": answer_text,
-        "evidence_quote": quote,
-        "locator": locator,
         "scope": item["answer"]["scope"],
         "question_claim_type": item["answer"]["claim_type"],
         "ambiguity_label": "one_answer",
         "alternatives": [],
     }
+    bind_source_span(item["reconstruction"], quote, locator)
     item["answer_verification"].update(
         {
-            "evidence_quote": quote,
-            "locator": locator,
             "scope": item["answer"]["scope"],
             "question_claim_type": item["answer"]["claim_type"],
         }
     )
+    bind_source_span(item["answer_verification"], quote, locator)
     bind_qa_verification_receipts(tmp_path, item)
     item["distractors"] = []
     for option in options:
@@ -1199,7 +1325,7 @@ def test_smoke_resume_does_not_duplicate_calls(tmp_path: Path) -> None:
         count = connection.execute(
             "SELECT COUNT(*) FROM calls WHERE run_id='resume-run'"
         ).fetchone()[0]
-    assert count == 9
+    assert count == 11
 
 
 def test_shared_content_keeps_per_source_provenance(tmp_path: Path) -> None:
@@ -1301,17 +1427,62 @@ def test_generation_runs_qa_gates_before_exact_option_verification(
             ("ordered-verification-run",),
         ).fetchall()
     roles = [row["role"] for row in calls]
-    assert roles[:5] == [
+    assert roles[:6] == [
         "extractor",
         "question_writer",
+        "standalone_verifier",
         "reconstructor",
         "answer_verifier",
         "distractor_writer",
     ]
-    assert roles[5:] == ["option_verifier"] * 4
-    assert item["schema_version"] == "2.0.0"
+    # Six proposals, verified in rank order until four are verified, then one
+    # source-blind whole-set verdict (ch2 yield audit 4.8).
+    assert roles[6:] == ["option_verifier"] * 4 + ["option_set_verifier"]
+    assert item["schema_version"] == "2.8.0"
+    expected_standalone = {
+        "contract_version": "source-blind-scientific-referent-v6",
+        "pass": True,
+        "answer_leakage_absent": True,
+        "unresolved_phrases": [],
+        "competing_readings": [],
+        "missing_detail_types": [],
+        "reasons": [],
+        "review_rationale": (
+            "The displayed task defines the measured variable and needs no "
+            "source-only referent."
+        ),
+    }
+    expected_standalone["verdict_fingerprint"] = (
+        validation_module.standalone_verdict_fingerprint(expected_standalone)
+    )
+    assert item["standalone_verification"] == expected_standalone
+    assert item["option_set_verdict"]["options_mutually_exclusive"] is True
+    assert item["provenance"]["option_verification_deferred"] == [
+        {"option_text": "1.5 m", "reason_code": "option_verification_deferred"},
+        {"option_text": "6.0 m", "reason_code": "option_verification_deferred"},
+    ]
+    assert item["answer_agreement"] == {
+        "contract_version": "deterministic-first-answer-agreement-v1",
+        "method": "deterministic",
+        "confidence_category": "authoritative_deterministic",
+        "deterministic_match": True,
+        "agreement": True,
+        "judge": None,
+    }
+    assert "answer_judge" not in roles
     assert item["finding_id"]
     assert item["answer"]["selection_rationale"]
+    assert item["answer"]["source_span_ids"]
+    assert item["answer"]["evidence_components"]
+    assert item["decision_evidence"][0]["roles"] == [
+        "answer",
+        "reconstruction",
+        "answer_verification",
+    ]
+    assert (
+        item["decision_evidence"][0]["evidence_quote"]
+        == (item["answer"]["evidence_quote"])
+    )
     assert item["question_rationale"]
     assert item["question_context"] == ""
     assert item["reconstruction"]["reconstruction_rationale"]
@@ -1329,6 +1500,448 @@ def test_generation_runs_qa_gates_before_exact_option_verification(
     assert receipt["validation"]["labels"]["mcq_eligible"] is True
 
 
+@pytest.mark.parametrize("reported_version", ["2024-09-01", None])
+def test_controller_bound_standalone_version_preserves_receipt_and_exports(
+    tmp_path: Path, reported_version: str | None
+) -> None:
+    setup = smoke(tmp_path, "controller-version-setup")
+    run_id = "controller-version-export"
+    verifier_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-verifier.jsonl").read_text().splitlines()
+    ]
+    if reported_version is None:
+        verifier_events[0]["response"].pop("contract_version")
+    else:
+        verifier_events[0]["response"]["contract_version"] = reported_version
+    verifier_path = tmp_path / "controller-version-verifier.jsonl"
+    verifier_path.write_text(
+        "\n".join(json.dumps(event) for event in verifier_events) + "\n",
+        encoding="utf-8",
+    )
+    command = list(
+        generate_command(
+            setup["screen"]["source_id"],
+            run_id,
+            FIXTURES / "fake-author.jsonl",
+        )
+    )
+    command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(verifier_path)
+
+    generated = json.loads(cli(tmp_path, *command).stdout)
+    validation = json.loads(
+        cli(tmp_path, "validate", "--item-id", generated["item_id"]).stdout
+    )
+    exported = json.loads(cli(tmp_path, "export", "--run-id", run_id).stdout)
+    with database(tmp_path) as connection:
+        raw = connection.execute(
+            "SELECT response_json FROM calls WHERE run_id=? AND role='standalone_verifier'",
+            (run_id,),
+        ).fetchone()[0]
+
+    assert json.loads(raw).get("contract_version") == reported_version
+    assert generated["standalone_verification"]["contract_version"] == (
+        "source-blind-scientific-referent-v6"
+    )
+    assert validation["final_label"] == "machine_accepted_unverified"
+    assert exported["short_answer_count"] == 1
+
+    mutated = json.loads(json.dumps(generated))
+    mutated["standalone_verification"]["review_rationale"] = (
+        "A different substantive rationale."
+    )
+    mutated_path = write_candidate(tmp_path, mutated, "controller-version-mutated.json")
+    rejected = json.loads(
+        cli(tmp_path, "validate", "--candidate", str(mutated_path)).stdout
+    )
+
+    assert rejected["final_label"] == "rejected"
+    assert rejected["reasons"] == ["qa_verification_call_receipt_missing"]
+
+
+def test_source_blind_gate_rejects_undefined_metric_acronym_and_event(
+    tmp_path: Path,
+) -> None:
+    receipt = smoke(tmp_path, "standalone-gate-setup")
+    author_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-author.jsonl").read_text().splitlines()
+    ]
+    author_events[1]["response"]["question"] = (
+        "According to the table, what Chl a anomaly was reported at this time?"
+    )
+    author_path = tmp_path / "undefined-standalone-author.jsonl"
+    author_path.write_text(
+        "\n".join(json.dumps(event) for event in author_events) + "\n",
+        encoding="utf-8",
+    )
+    verifier_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-verifier.jsonl").read_text().splitlines()
+    ]
+    verifier_events[0] = {
+        "role": "standalone_verifier",
+        "require_prompt_contains": [
+            "According to the table",
+            "Chl a",
+            "at this time",
+        ],
+        "forbid_prompt_contains": [
+            "SOURCE_DATA",
+            "ANSWER_RECORD",
+            "RECONSTRUCTION",
+            "2.0 m",
+        ],
+        "response": {
+            "contract_version": "source-blind-standalone-gate-v1",
+            "pass": False,
+            "answer_leakage_absent": True,
+            "unresolved_phrases": ["Chl a", "at this time"],
+            "competing_readings": [],
+            "missing_detail_types": [
+                "measured_variable",
+                "acronym",
+                "period_or_event",
+            ],
+            "reasons": [
+                "undefined_measured_variable",
+                "undefined_acronym",
+                "undefined_period_or_event",
+                "source_dependent_locator",
+            ],
+            "review_rationale": (
+                "The displayed task omits the measurement definition and event."
+            ),
+        },
+    }
+    verifier_path = tmp_path / "undefined-standalone-verifier.jsonl"
+    verifier_path.write_text(
+        "\n".join(json.dumps(event) for event in verifier_events) + "\n",
+        encoding="utf-8",
+    )
+    command = list(
+        generate_command(receipt["screen"]["source_id"], "standalone-gate", author_path)
+    )
+    command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(verifier_path)
+
+    generated = json.loads(cli(tmp_path, *command).stdout)
+
+    assert generated["status"] == "qa_gate_failed"
+    assert generated["distractors"] == []
+    assert {
+        "standalone_undefined_measured_variable",
+        "standalone_undefined_acronym",
+        "standalone_undefined_period_or_event",
+        "standalone_source_dependent_locator",
+    } <= set(generated["qa_gate_reasons"])
+    assert generated["standalone_verification"]["unresolved_phrases"] == [
+        "Chl a",
+        "at this time",
+    ]
+
+
+def test_answer_agreement_fallback_accepts_historical_false_disagreement(
+    tmp_path: Path,
+) -> None:
+    receipt = smoke(tmp_path, "agreement-fallback-setup")
+    command = list(
+        generate_command(
+            receipt["screen"]["source_id"],
+            "agreement-fallback-yes",
+            FIXTURES / "fake-author.jsonl",
+        )
+    )
+    command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(
+        agreement_fallback_script(tmp_path, verdict="yes")
+    )
+
+    generated = json.loads(cli(tmp_path, *command).stdout)
+
+    assert generated["qa_gate_reasons"] == []
+    agreement = generated["answer_agreement"]
+    assert agreement["deterministic_match"] is False
+    assert agreement["method"] == "llm_judge"
+    assert agreement["confidence_category"] == "lower_confidence_llm_equivalent"
+    assert agreement["judge"]["verdict"] == "yes"
+    assert agreement["judge"]["input"] == {
+        "question": generated["question"],
+        "proposed_answer": "2.0 m",
+        "reconstructed_answer": "a depth of two metres",
+    }
+    assert agreement["judge"]["receipt"]["call_id"]
+    assert "answer_judge" in generated["provenance"]["verification_calls"]
+    path = write_candidate(tmp_path, generated, "agreement-fallback-yes.json")
+    validation = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+    assert validation["final_label"] == "machine_accepted_unverified"
+
+    missing = json.loads(json.dumps(generated))
+    missing.pop("answer_agreement")
+    missing_path = write_candidate(tmp_path, missing, "agreement-missing.json")
+    unresolved = json.loads(
+        cli(tmp_path, "validate", "--candidate", str(missing_path)).stdout
+    )
+    assert unresolved["final_label"] == "unresolved"
+    assert unresolved["reasons"] == ["answer_agreement_unresolved"]
+
+    failed_source_gate = json.loads(json.dumps(generated))
+    failed_source_gate["answer_verification"]["source_entailment_model_verified"] = (
+        False
+    )
+    failed_path = write_candidate(
+        tmp_path, failed_source_gate, "agreement-source-gate.json"
+    )
+    source_result = json.loads(
+        cli(tmp_path, "validate", "--candidate", str(failed_path)).stdout
+    )
+    assert source_result["final_label"] == "unresolved"
+    assert source_result["reasons"] == ["source_entailment_not_verified"]
+
+
+def test_answer_agreement_fallback_no_rejects_clear_contradiction(
+    tmp_path: Path,
+) -> None:
+    receipt = smoke(tmp_path, "agreement-fallback-no-setup")
+    command = list(
+        generate_command(
+            receipt["screen"]["source_id"],
+            "agreement-fallback-no",
+            FIXTURES / "fake-author.jsonl",
+        )
+    )
+    command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(
+        agreement_fallback_script(tmp_path, verdict="no", reconstructed_answer="5.0 m")
+    )
+
+    generated = json.loads(cli(tmp_path, *command).stdout)
+
+    assert generated["status"] == "qa_gate_failed"
+    assert generated["qa_gate_reasons"] == ["reconstruction_disagreement"]
+    assert generated["answer_agreement"]["confidence_category"] == "disagreement"
+    assert generated["answer_agreement"]["judge"]["verdict"] == "no"
+    path = write_candidate(tmp_path, generated, "agreement-fallback-no.json")
+    validation = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+    assert validation["final_label"] == "rejected"
+    assert validation["reasons"] == ["reconstruction_disagreement"]
+
+
+def test_malformed_answer_agreement_fallback_is_not_a_no(
+    tmp_path: Path,
+) -> None:
+    receipt = smoke(tmp_path, "agreement-fallback-malformed-setup")
+    command = list(
+        generate_command(
+            receipt["screen"]["source_id"],
+            "agreement-fallback-malformed",
+            FIXTURES / "fake-author.jsonl",
+            retries=0,
+        )
+    )
+    command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(
+        agreement_fallback_script(tmp_path, verdict="maybe")
+    )
+
+    result = cli(tmp_path, *command, expected=2)
+
+    error = json.loads(result.stderr)
+    assert error["code"] == "PROVIDER_ERROR"
+    assert error["message"] == "The provider returned invalid structured JSON."
+    with database(tmp_path) as connection:
+        call = connection.execute(
+            "SELECT status,error_code FROM calls WHERE run_id=? AND role='answer_judge'",
+            ("agreement-fallback-malformed",),
+        ).fetchone()
+    assert dict(call) == {"status": "failed", "error_code": "MALFORMED_RESPONSE"}
+
+
+def test_generation_binds_a_direct_value_to_verifier_provenance(
+    tmp_path: Path,
+) -> None:
+    receipt = smoke(tmp_path, "direct-value-setup")
+    events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-author.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    events[0]["response"]["candidate_findings"][0]["answer"]["numeric_rule"] = {
+        "canonical_value": "2.0",
+        "unit": "m",
+        "tolerance": "0",
+        "tolerance_basis": "2.0 m",
+        "reported_precision": "0.1",
+        # numeric-rule-source-support-v3 states one vocabulary for every
+        # scalar rule, including a directly published exact scalar.
+        "rounding_rule": "none",
+        "conversion_rule": "direct source literal",
+    }
+    author = tmp_path / "direct-value-author.jsonl"
+    author.write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n",
+        encoding="utf-8",
+    )
+
+    generated = json.loads(
+        cli(
+            tmp_path,
+            *generate_command(
+                receipt["screen"]["source_id"], "direct-value-run", author
+            ),
+        ).stdout
+    )
+
+    provenance = generated["provenance"]
+    assert generated["qa_gate_reasons"] == []
+    assert provenance["direct_value_contract_version"] == "direct-source-value-v1"
+    assert (
+        provenance["direct_value_request_id"]
+        == provenance["verification_calls"]["answer_verifier"]["request_id"]
+    )
+    assert "direct_value_contract_version" not in generated["answer"]["numeric_rule"]
+    path = write_candidate(tmp_path, generated, "direct-value-candidate.json")
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+    assert result["final_label"] == "machine_accepted_unverified"
+
+
+def test_full_validator_accepts_a_typed_directional_short_form(
+    tmp_path: Path,
+) -> None:
+    smoke(tmp_path, "typed-directional-full-path")
+    item = candidate(tmp_path)
+    quote = "The reported trend increased."
+    locator = source_locator_for_quote(tmp_path, item["source"]["source_id"], quote)
+    scope = {
+        "geography": None,
+        "population": None,
+        "period": None,
+        "method": "reported trend",
+        "comparison": None,
+        "uncertainty": None,
+    }
+    item["question"] = "How did the reported trend change?"
+    item["answer"].update(
+        {
+            "text": "The reported trend increased.",
+            "variants": [],
+            "scope": scope,
+            "required_question_phrases": ["reported trend"],
+            "deterministic_rule": {
+                "kind": "directional_relation",
+                "source_value": "trend increased",
+            },
+        }
+    )
+    item["answer"].pop("numeric_rule", None)
+    bind_source_span(item["answer"], quote, locator)
+    item["reconstruction"] = {
+        "answer": "increased",
+        "scope": scope,
+        "question_claim_type": item["answer"]["claim_type"],
+        "ambiguity_label": "one_answer",
+        "alternatives": [],
+    }
+    bind_source_span(item["reconstruction"], quote, locator)
+    item["answer_verification"].update(
+        {
+            "scope": scope,
+            "question_claim_type": item["answer"]["claim_type"],
+        }
+    )
+    bind_source_span(item["answer_verification"], quote, locator)
+    bind_qa_verification_receipts(tmp_path, item)
+    item["distractors"] = []
+    item["option_verdicts"] = []
+    path = write_candidate(tmp_path, item, "typed-directional-candidate.json")
+
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+
+    assert result["final_label"] == "machine_accepted_unverified"
+    assert result["labels"]["reconstruction_agreement"] is True
+
+
+def test_full_validator_accepts_typed_numeric_text_with_complete_scope(
+    tmp_path: Path,
+) -> None:
+    smoke(tmp_path, "typed-numeric-full-path")
+    item = candidate(tmp_path)
+    quote = (
+        "The reported water depth was 2.0 m with a source-grounded tolerance of 0.1 m."
+    )
+    locator = source_locator_for_quote(tmp_path, item["source"]["source_id"], quote)
+    scope = item["answer"]["scope"]
+    item["answer"]["text"] = "The reported water depth was 2.0 m."
+    item["answer"]["variants"] = []
+    bind_source_span(item["answer"], quote, locator)
+    item["reconstruction"] = {
+        "answer": "2.0 metres",
+        "numeric": {"canonical_value": "2.0", "unit": "m"},
+        "scope": scope,
+        "question_claim_type": item["answer"]["claim_type"],
+        "ambiguity_label": "one_answer",
+        "alternatives": ["2.0 m"],
+    }
+    bind_source_span(item["reconstruction"], quote, locator)
+    item["answer_verification"].update(
+        {
+            "scope": scope,
+            "question_claim_type": item["answer"]["claim_type"],
+        }
+    )
+    bind_source_span(item["answer_verification"], quote, locator)
+    bind_qa_verification_receipts(tmp_path, item)
+    item["distractors"] = []
+    item["option_verdicts"] = []
+    path = write_candidate(tmp_path, item, "typed-numeric-candidate.json")
+
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+
+    assert result["final_label"] == "machine_accepted_unverified"
+    assert result["labels"]["reconstruction_agreement"] is True
+
+
+def test_validation_refuses_a_v14_candidate_that_never_ran_the_standalone_gate(
+    tmp_path: Path,
+) -> None:
+    """r15 audit section 4.8 item 5: schema 2.0.0 declares no standalone contract."""
+    smoke(tmp_path, "legacy-evidence-contract")
+    item = candidate(tmp_path)
+    item["schema_version"] = "2.0.0"
+    item["provenance"]["prompt_version"] = "arctic-qa-generation-v14"
+    item["provenance"]["scope_contract_version"] = "selected-evidence-literal-scope-v2"
+    item["provenance"]["numeric_rule_contract_version"] = (
+        validation_module.PREDECESSOR_NUMERIC_RULE_CONTRACT_VERSION
+    )
+    item["provenance"].pop("option_display_contract_version", None)
+    item["provenance"].pop("evidence_combination_contract_version")
+    path = write_candidate(tmp_path, item, "legacy-evidence-candidate.json")
+
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+
+    assert result["final_label"] == "rejected"
+    assert result["reasons"] == ["unsafe_legacy_candidate_schema"]
+
+
+def test_validation_refuses_a_v15_candidate_that_never_ran_the_standalone_gate(
+    tmp_path: Path,
+) -> None:
+    smoke(tmp_path, "legacy-v15-contract")
+    item = candidate(tmp_path)
+    item["schema_version"] = "2.1.0"
+    item["provenance"]["prompt_version"] = "arctic-qa-generation-v15"
+    item["provenance"]["scope_contract_version"] = "selected-evidence-literal-scope-v3"
+    item["provenance"]["numeric_rule_contract_version"] = (
+        validation_module.PREDECESSOR_NUMERIC_RULE_CONTRACT_VERSION
+    )
+    item["provenance"].pop("option_display_contract_version", None)
+    item["provenance"].pop("scope_role_semantics_version")
+    item["provenance"].pop("scope_role_binding_contract_version")
+    path = write_candidate(tmp_path, item, "legacy-v15-candidate.json")
+
+    result = json.loads(cli(tmp_path, "validate", "--candidate", str(path)).stdout)
+
+    assert result["final_label"] == "rejected"
+    assert result["reasons"] == ["unsafe_legacy_candidate_schema"]
+
+
 def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> None:
     receipt = smoke(tmp_path, "setup-run")
     source_id = receipt["screen"]["source_id"]
@@ -1338,11 +1951,11 @@ def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> No
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    events[0]["response"]["alternatives"] = ["another source-supported answer"]
-    events[0]["response"]["scope"]["method"] = "a conflicting method"
+    events[1]["response"]["alternatives"] = ["another source-supported answer"]
+    events[1]["response"]["scope"]["method"] = "a conflicting method"
     verifier = tmp_path / "ambiguous-verifier.jsonl"
     verifier.write_text(
-        "\n".join(json.dumps(event) for event in events[:2]) + "\n",
+        "\n".join(json.dumps(event) for event in events[:3]) + "\n",
         encoding="utf-8",
     )
     command = list(
@@ -1355,17 +1968,21 @@ def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> No
     command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(verifier)
     generated = json.loads(cli(tmp_path, *command).stdout)
     assert generated["status"] == "qa_gate_failed"
-    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v14"
+    assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v23"
     assert (
         generated["provenance"]["numeric_rule_contract_version"]
-        == "numeric-rule-source-support-v2"
+        == validation_module.NUMERIC_RULE_CONTRACT_VERSION
+        == "numeric-rule-source-support-v4"
     )
     assert (
         generated["provenance"]["scope_contract_version"]
-        == "selected-evidence-literal-scope-v2"
+        == "selected-evidence-literal-scope-v4"
     )
     assert generated["distractors"] == []
     assert generated["qa_gate_reasons"] == [
+        # The injected alternative is a real competing answer, so the wired
+        # evidence-bearing check reports it alongside the scope defect.
+        "reconstruction_alternative_answer_present",
         "reconstruction_scope_not_source_bound",
     ]
     candidate_path = tmp_path / "qa-gate-failed-candidate.json"
@@ -1385,6 +2002,7 @@ def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> No
     assert roles == [
         "extractor",
         "question_writer",
+        "standalone_verifier",
         "reconstructor",
         "answer_verifier",
     ]
@@ -1520,7 +2138,10 @@ def test_second_source_version_cannot_select_another_family_finding(
     ("mutation", "reason"),
     [
         ("fabricated_reconstruction_quote", "reconstruction_evidence_not_located"),
-        ("stated_alternative", "alternative_answer_unresolved"),
+        # r15 audit RECON-2: the evidence-bearing competing-alternatives check
+        # is wired as a hard reject, so it decides before the bare boolean.
+        ("stated_alternative", "reconstruction_alternative_answer_present"),
+        ("unresolved_alternative_search", "alternative_answer_unresolved"),
         ("causal_question", "causal_overclaim"),
     ],
 )
@@ -1533,6 +2154,8 @@ def test_reconstruction_and_independent_claim_type_are_enforced(
         item["reconstruction"]["evidence_quote"] = "A fabricated quotation."
     elif mutation == "stated_alternative":
         item["reconstruction"]["alternatives"] = ["another supported answer"]
+        item["answer_verification"]["alternative_answer_search_passed"] = False
+    elif mutation == "unresolved_alternative_search":
         item["answer_verification"]["alternative_answer_search_passed"] = False
     else:
         item["answer_verification"]["question_claim_type"] = "causal"
@@ -1616,7 +2239,13 @@ def test_negated_or_compound_numeric_options_fail_closed(
         value for value in result["distractors"] if value["text"] == displayed_text
     )
     assert row["accepted"] is False
-    assert "numeric_display_ambiguous" in row["reasons"]
+    # The display rule now runs on every option, so a negated or compound
+    # option carrying numeric metadata reports the same honest code as an
+    # atomic one instead of a numeric-parsing code.
+    assert row["reasons"][0] in {
+        "displayed_assertion_negated",
+        "displayed_assertion_compound",
+    }
     assert result["labels"]["mcq_eligible"] is False
 
 
@@ -1625,7 +2254,13 @@ def test_truth_in_another_scope_does_not_invalidate_a_scoped_distractor(
 ) -> None:
     smoke(tmp_path)
     item = candidate(tmp_path)
-    item["option_verdicts"][0]["true_in_different_context"] = True
+    # The verdict may record that the value holds elsewhere. Only a stated
+    # admitting reading, with the flag, makes the option correct.
+    item["option_verdicts"][0]["rationale"] = (
+        "The value holds at another site, but the question wording does not "
+        "permit that reading, so the selected span contradicts the option."
+    )
+    item["option_verdicts"][0]["admitting_interpretation"] = ""
     item["option_verdicts"][0]["question_admits_option_as_correct"] = False
     sync_option_receipt(tmp_path, item, 0)
     path = write_candidate(tmp_path, item, "different-scope-truth.json")
@@ -1992,3 +2627,276 @@ def test_v2_database_migrates_with_recoverable_backup(tmp_path: Path) -> None:
         }
     assert "run_id" in finding_columns
     assert "sqlite_autoindex_findings_2" in finding_indexes
+
+
+# ---------------------------------------------------------------------------
+# ch2 yield audit 4.2 and 4.8: the re-ask bounds and the fail-fast, end to end
+# ---------------------------------------------------------------------------
+
+
+def _fixture_events(name: str) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in (FIXTURES / name).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _write_events(path: Path, events: list[dict]) -> Path:
+    path.write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8"
+    )
+    return path
+
+
+def _generate_with_scripts(
+    tmp_path: Path,
+    run_id: str,
+    *,
+    author_events: list[dict] | None = None,
+    verifier_events: list[dict] | None = None,
+    expected: int = 0,
+) -> subprocess.CompletedProcess[str]:
+    receipt = smoke(tmp_path, f"{run_id}-setup")
+    author_path = FIXTURES / "fake-author.jsonl"
+    if author_events is not None:
+        author_path = _write_events(tmp_path / f"{run_id}-author.jsonl", author_events)
+    command = list(
+        generate_command(receipt["screen"]["source_id"], run_id, author_path)
+    )
+    if verifier_events is not None:
+        verifier_path = _write_events(
+            tmp_path / f"{run_id}-verifier.jsonl", verifier_events
+        )
+        command[command.index(str(FIXTURES / "fake-verifier.jsonl"))] = str(
+            verifier_path
+        )
+    return cli(tmp_path, *command, expected=expected)
+
+
+def _unevidenced_standalone_event(*, reask: bool, phrases: list[str]) -> dict:
+    event = {
+        "role": "standalone_verifier",
+        "require_prompt_contains": ["DISPLAYED_TASK"],
+        "forbid_prompt_contains": ["SOURCE_DATA", "ANSWER_RECORD"],
+        "response": {
+            "pass": False,
+            "answer_leakage_absent": True,
+            "unresolved_phrases": phrases,
+            "competing_readings": [],
+            "missing_detail_types": ["location"],
+            "reasons": ["undefined_location"],
+            "review_rationale": "The task names no site for the measured depth.",
+        },
+    }
+    if reask:
+        event["require_prompt_contains"] += [
+            "CONTRACT_VIOLATION",
+            "copy into unresolved_phrases the exact words of the DISPLAYED TEXT",
+        ]
+    else:
+        event["forbid_prompt_contains"].append("CONTRACT_VIOLATION")
+    return event
+
+
+def _standalone_calls(root: Path, run_id: str) -> int:
+    with database(root) as connection:
+        return connection.execute(
+            "SELECT COUNT(*) FROM calls WHERE run_id=? AND role='standalone_verifier'",
+            (run_id,),
+        ).fetchone()[0]
+
+
+def test_unevidenced_standalone_verdict_is_reasked_once_then_operational(
+    tmp_path: Path,
+) -> None:
+    run_id = "standalone-unevidenced"
+    events = _fixture_events("fake-verifier.jsonl")
+    events[0:1] = [
+        _unevidenced_standalone_event(reask=False, phrases=[]),
+        _unevidenced_standalone_event(reask=True, phrases=[]),
+    ]
+    generated = json.loads(
+        _generate_with_scripts(tmp_path, run_id, verifier_events=events).stdout
+    )
+
+    assert generated["status"] == "qa_gate_failed"
+    assert "standalone_verdict_unevidenced" in generated["qa_gate_reasons"]
+    assert "standalone_undefined_location" not in generated["qa_gate_reasons"]
+    assert generated["provenance"]["standalone_verification_reask"] == {
+        "reason": "standalone_verdict_unevidenced",
+        "first_verdict_fingerprint": validation_module.standalone_verdict_fingerprint(
+            generated["standalone_verification"]
+        ),
+        "reask_count": 1,
+    }
+    assert generated["distractors"] == []
+    # Exactly two judge calls: the verdict and its one re-ask.
+    assert _standalone_calls(tmp_path, run_id) == 2
+
+
+def test_a_reask_that_supplies_evidence_keeps_the_referent_code(
+    tmp_path: Path,
+) -> None:
+    run_id = "standalone-reask-evidenced"
+    events = _fixture_events("fake-verifier.jsonl")
+    events[0:1] = [
+        _unevidenced_standalone_event(reask=False, phrases=[]),
+        _unevidenced_standalone_event(reask=True, phrases=["the reported water depth"]),
+    ]
+    generated = json.loads(
+        _generate_with_scripts(tmp_path, run_id, verifier_events=events).stdout
+    )
+
+    assert generated["status"] == "qa_gate_failed"
+    assert "standalone_undefined_location" in generated["qa_gate_reasons"]
+    assert "standalone_verdict_unevidenced" not in generated["qa_gate_reasons"]
+    assert generated["standalone_verification"]["unresolved_phrases"] == [
+        "the reported water depth"
+    ]
+    assert generated["provenance"]["standalone_verification_reask"]["reask_count"] == 1
+    assert _standalone_calls(tmp_path, run_id) == 2
+
+
+def test_an_evidenced_standalone_verdict_is_never_reasked(tmp_path: Path) -> None:
+    run_id = "standalone-evidenced"
+    events = _fixture_events("fake-verifier.jsonl")
+    events[0:1] = [
+        _unevidenced_standalone_event(reask=False, phrases=["the reported water depth"])
+    ]
+    generated = json.loads(
+        _generate_with_scripts(tmp_path, run_id, verifier_events=events).stdout
+    )
+
+    assert generated["status"] == "qa_gate_failed"
+    assert generated["provenance"]["standalone_verification_reask"] is None
+    assert _standalone_calls(tmp_path, run_id) == 1
+
+
+def _malformed_option_event(base: dict, *, reask: bool) -> dict:
+    event = json.loads(json.dumps(base))
+    event["response"]["question_admits_option_as_correct"] = True
+    event["response"]["admitting_interpretation"] = ""
+    if reask:
+        event["require_prompt_contains"] += [
+            "CONTRACT_VIOLATION",
+            "Write the second reading in admitting_interpretation",
+        ]
+    else:
+        event.setdefault("forbid_prompt_contains", []).append("CONTRACT_VIOLATION")
+    return event
+
+
+def _option_calls(root: Path, run_id: str) -> int:
+    with database(root) as connection:
+        return connection.execute(
+            "SELECT COUNT(*) FROM calls WHERE run_id=? AND role='option_verifier'",
+            (run_id,),
+        ).fetchone()[0]
+
+
+def test_malformed_option_admission_is_reasked_once(tmp_path: Path) -> None:
+    run_id = "option-reask-repaired"
+    events = _fixture_events("fake-verifier.jsonl")
+    repaired = json.loads(json.dumps(events[3]))
+    repaired["require_prompt_contains"] += [
+        "CONTRACT_VIOLATION",
+        "Write the second reading in admitting_interpretation",
+    ]
+    events[3:4] = [_malformed_option_event(events[3], reask=False), repaired]
+    generated = json.loads(
+        _generate_with_scripts(tmp_path, run_id, verifier_events=events).stdout
+    )
+
+    assert generated["provenance"]["option_verification_reasks"] == [
+        {
+            "option_text": "2.5 m",
+            "reason": "option_admission_unexplained",
+            "reask_count": 1,
+        }
+    ]
+    verdict = next(
+        row for row in generated["option_verdicts"] if row["option_text"] == "2.5 m"
+    )
+    assert verdict["question_admits_option_as_correct"] is False
+    assert [row["text"] for row in generated["distractors"]] == [
+        "2.5 m",
+        "3.0 m",
+        "4.0 m",
+        "5.0 m",
+    ]
+    validation = json.loads(
+        cli(tmp_path, "validate", "--item-id", generated["item_id"]).stdout
+    )
+    assert validation["labels"]["mcq_eligible"] is True
+    # Four verdicts plus the one re-ask.
+    assert _option_calls(tmp_path, run_id) == 5
+
+
+def test_a_second_malformed_option_answer_stands_as_the_rejection(
+    tmp_path: Path,
+) -> None:
+    run_id = "option-reask-malformed-twice"
+    events = _fixture_events("fake-verifier.jsonl")
+    fifth = json.loads(json.dumps(events[6]))
+    fifth["require_prompt_contains"] = [
+        "1.5 m" if marker == "5.0 m" else marker
+        for marker in fifth["require_prompt_contains"]
+    ]
+    option_set = events[7]
+    option_set["require_prompt_contains"] = [
+        "1.5 m" if marker == "2.5 m" else marker
+        for marker in option_set["require_prompt_contains"]
+    ]
+    option_set["forbid_prompt_contains"].append("2.5 m")
+    events[3:4] = [
+        _malformed_option_event(events[3], reask=False),
+        _malformed_option_event(events[3], reask=True),
+    ]
+    events.insert(8, fifth)
+    generated = json.loads(
+        _generate_with_scripts(tmp_path, run_id, verifier_events=events).stdout
+    )
+
+    assert generated["provenance"]["option_verification_reasks"][0]["reask_count"] == 1
+    assert [row["text"] for row in generated["distractors"]] == [
+        "2.5 m",
+        "3.0 m",
+        "4.0 m",
+        "5.0 m",
+        "1.5 m",
+    ]
+    validation = json.loads(
+        cli(tmp_path, "validate", "--item-id", generated["item_id"]).stdout
+    )
+    rejected = next(row for row in validation["distractors"] if row["text"] == "2.5 m")
+    assert rejected["accepted"] is False
+    assert "option_admission_unexplained" in rejected["reasons"]
+    assert validation["labels"]["mcq_eligible"] is True
+    assert sum(row["accepted"] for row in validation["distractors"]) == 4
+    # Five verdicts plus exactly one re-ask, never a second one.
+    assert _option_calls(tmp_path, run_id) == 6
+
+
+def test_an_empty_post_prefilter_pool_fails_fast_with_the_codes_on_record(
+    tmp_path: Path,
+) -> None:
+    run_id = "option-pool-empty"
+    author_events = _fixture_events("fake-author.jsonl")
+    for index, proposal in enumerate(author_events[2]["response"]["distractors"]):
+        # A meta option and a negated option: both are free display rejects.
+        proposal["text"] = "None of the above" if index % 2 else "not 2.0 m"
+    result = _generate_with_scripts(
+        tmp_path, run_id, author_events=author_events, expected=2
+    )
+
+    error = json.loads(result.stderr)
+    assert error["code"] == "VALIDATION_ERROR"
+    assert "forbidden_meta_option" in error["message"]
+    assert "displayed_assertion_negated" in error["message"]
+    assert _option_calls(tmp_path, run_id) == 0
+    with database(tmp_path) as connection:
+        persisted = connection.execute(
+            "SELECT COUNT(*) FROM candidates WHERE run_id=?", (run_id,)
+        ).fetchone()[0]
+    assert persisted == 0

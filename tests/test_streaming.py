@@ -15,20 +15,21 @@ import pytest
 from arctic_qa import cli as cli_module
 from arctic_qa import generation as generation_module
 from arctic_qa import streaming as streaming_module
-from arctic_qa.broker_provider import BrokerProvider
+from arctic_qa.broker_provider import ROLE_STAGES, BrokerProvider
 from arctic_qa.db import Database
-from arctic_qa.errors import AmbiguousChargeError, BudgetError
+from arctic_qa.errors import AmbiguousChargeError, BudgetError, PaperCostCapError
 from arctic_qa.exporting import export_run
 from arctic_qa.generation import ROLE_SCHEMAS, resume_candidate_distractors
 from arctic_qa.model_broker import (
     AUTHORIZED_CAP_REASON,
+    PAPER_COST_CAP_REASON,
     PER_REQUEST_CAP_REASON,
     SharedGeminiBroker,
 )
 from arctic_qa.paths import DataPaths
 from arctic_qa.providers import FakeProvider
-from arctic_qa.streaming import run_stream
-from arctic_qa.util import sha256_file, stable_id
+from arctic_qa.streaming import BENCHMARK_CANDIDATE_PREDICATE, run_stream
+from arctic_qa.util import canonical_json, sha256_file, stable_id
 from arctic_qa import validation as validation_module
 
 
@@ -57,6 +58,63 @@ def test_exact_integer_count_is_source_bound_without_a_written_zero_tolerance() 
     }
 
     assert validation_module.numeric_rule_is_source_bound(answer) is True
+
+
+def test_exact_integer_count_with_compound_unit_is_source_bound() -> None:
+    answer = {
+        "text": "250 fungal OTUs",
+        "evidence_quote": (
+            "250 fungal OTUs of 76,691 reads were included in the final matrix."
+        ),
+        "numeric_rule": {
+            "canonical_value": "250",
+            "unit": "fungal OTUs",
+            "tolerance": "0",
+            "tolerance_basis": "count",
+            "reported_precision": "exact integer",
+            "rounding_rule": "none",
+            "conversion_rule": "direct count of fungal OTUs",
+        },
+    }
+
+    assert validation_module.numeric_rule_is_source_bound(answer) is True
+
+
+@pytest.mark.parametrize(
+    ("displayed", "evidence", "canonical_value", "unit"),
+    [
+        (
+            "250 fungal OTUs",
+            "250 bacterial OTUs of 76,691 reads were included in the final matrix.",
+            "250",
+            "fungal OTUs",
+        ),
+        (
+            "250 fungal OTUs",
+            "250 fungal OTUs of 76,691 reads were included in the final matrix.",
+            "251",
+            "fungal OTUs",
+        ),
+    ],
+)
+def test_exact_integer_count_compound_unit_rejects_unit_or_cardinality_near_miss(
+    displayed: str, evidence: str, canonical_value: str, unit: str
+) -> None:
+    answer = {
+        "text": displayed,
+        "evidence_quote": evidence,
+        "numeric_rule": {
+            "canonical_value": canonical_value,
+            "unit": unit,
+            "tolerance": "0",
+            "tolerance_basis": "count",
+            "reported_precision": "exact integer",
+            "rounding_rule": "none",
+            "conversion_rule": "direct count of fungal OTUs",
+        },
+    }
+
+    assert validation_module.numeric_rule_is_source_bound(answer) is False
 
 
 def test_unqualified_exact_percentage_remains_not_source_bound() -> None:
@@ -152,19 +210,20 @@ def test_compound_unit_rule_without_source_tolerance_remains_rejected() -> None:
 def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
     properties = generation_module.NUMERIC_RULE_SCHEMA["properties"]
 
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v14"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v23"
+    # Chapter 3: v4 reads standard uncertainty notation (yield audit 4.3 d).
     assert (
         generation_module.NUMERIC_RULE_CONTRACT_VERSION
-        == "numeric-rule-source-support-v2"
+        == "numeric-rule-source-support-v4"
     )
     assert (
-        generation_module.SCOPE_CONTRACT_VERSION == "selected-evidence-literal-scope-v2"
+        generation_module.SCOPE_CONTRACT_VERSION == "selected-evidence-literal-scope-v4"
     )
     distractor_array = generation_module.ROLE_SCHEMAS["distractor_writer"][
         "properties"
     ]["distractors"]
-    assert distractor_array["minItems"] == 4
-    assert distractor_array["maxItems"] == 6
+    assert distractor_array["minItems"] == 6
+    assert distractor_array["maxItems"] == 8
     assert "Avoid explicit negation" in generation_module.DISTRACTOR_WRITER_INSTRUCTIONS
     assert "exactly one displayed number and unit" in (
         generation_module.DISTRACTOR_WRITER_INSTRUCTIONS
@@ -182,7 +241,13 @@ def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
     assert "selected source span" in properties["canonical_value"]["description"]
     assert "selected source span" in properties["tolerance"]["description"]
     assert "Exact source text" in properties["tolerance_basis"]["description"]
-    assert "Do not invent" in properties["rounding_rule"]["description"]
+    assert "Do not invent another wording" in properties["rounding_rule"]["description"]
+    # One vocabulary: the strings the rule enforces are the strings the schema
+    # and the prompt state.
+    assert "same unit as the unit field" in properties["tolerance_basis"]["description"]
+    assert "decimal increment" in properties["reported_precision"]["description"]
+    assert "'<N> decimal places'" in properties["rounding_rule"]["description"]
+    assert "'direct source literal'" in properties["conversion_rule"]["description"]
 
 
 def test_generation_prompt_requires_atomic_answers_and_aligned_questions() -> None:
@@ -190,7 +255,7 @@ def test_generation_prompt_requires_atomic_answers_and_aligned_questions() -> No
     question_instructions = generation_module.QUESTION_ALIGNMENT_INSTRUCTIONS
     answer_text_schema = generation_module.ANSWER_SCHEMA["properties"]["text"]
 
-    assert generation_module.FINDING_POLICY_VERSION.endswith("-v5")
+    assert generation_module.FINDING_POLICY_VERSION.endswith("-v6")
     assert "only the concise answer" in answer_instructions
     assert "Do not restate the question" in answer_instructions
     assert "unrelated values" in answer_instructions
@@ -198,6 +263,7 @@ def test_generation_prompt_requires_atomic_answers_and_aligned_questions() -> No
     assert "higher at Site A" in answer_instructions
     assert "necessary unit" in answer_instructions
     assert "matching numeric metadata" in answer_instructions
+    assert "complete source-supported count noun phrase" in answer_instructions
     assert "exactly the content of answer.text" in question_instructions
     assert "one component of a multi-value answer" in question_instructions
     assert "multiple values" in question_instructions
@@ -206,7 +272,7 @@ def test_generation_prompt_requires_atomic_answers_and_aligned_questions() -> No
 
 
 def test_generation_schemas_require_concise_review_justifications() -> None:
-    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v14"
+    assert generation_module.PROMPT_VERSION == "arctic-qa-generation-v23"
     assert (
         generation_module.MODEL_JUSTIFICATION_CONTRACT_VERSION
         == "model-justification-v1"
@@ -228,7 +294,15 @@ def test_generation_schemas_require_concise_review_justifications() -> None:
             ].lower()
         )
 
-    answer_schema = generation_module.ROLE_SCHEMAS["extractor"]["properties"]["answer"]
+    candidate_schema = generation_module.ROLE_SCHEMAS["extractor"]["properties"][
+        "candidate_findings"
+    ]["items"]
+    assert "ranking_rationale" in candidate_schema["required"]
+    assert (
+        "concise"
+        in candidate_schema["properties"]["ranking_rationale"]["description"].lower()
+    )
+    answer_schema = candidate_schema["properties"]["answer"]
     assert "selection_rationale" in answer_schema["required"]
     assert (
         "concise"
@@ -289,7 +363,7 @@ def test_numeric_format_alias_is_not_a_competing_reconstruction_answer() -> None
     )
 
 
-def test_reconstruction_match_accepts_bounded_semantic_form() -> None:
+def test_reconstruction_match_accepts_only_exact_normalized_form() -> None:
     answer = {
         "text": "All wetland sequences lacked this loop.",
         "variants": [],
@@ -298,11 +372,17 @@ def test_reconstruction_match_accepts_bounded_semantic_form() -> None:
     assert validation_module.reconstruction_matches(
         answer,
         {
+            "answer": "Yes, all wetland sequences lacked this loop.",
+        },
+    )
+    assert not validation_module.reconstruction_matches(
+        answer,
+        {
             "answer": "Yes, all wetland sequences lacked this loop corresponding "
             "to the conserved motif.",
         },
     )
-    assert validation_module.reconstruction_matches(
+    assert not validation_module.reconstruction_matches(
         {"text": "The organic mass component was 24 % over February-May."},
         {"answer": "24 %"},
     )
@@ -360,11 +440,18 @@ def test_position_1043_counterfactual_keeps_scope_rejection() -> None:
     verification = {
         "source_entailment_model_verified": True,
         "relation_scope_match": True,
+        "scope_value_contradicted_by_source": False,
+        "contradicted_scope_field": "",
+        "scope_representation_note": "",
         "ambiguity_resolved": True,
         "alternative_answer_search_passed": True,
         "question_context_required": False,
         "question_context_source_supported": True,
         "question_context_answer_leakage_absent": True,
+        "question_verification_contract_version": generation_module.QUESTION_VERIFICATION_CONTRACT_VERSION,
+        "question_context_referent_resolved": True,
+        "question_context_missing_detail": "",
+        "question_answer_leakage_absent": True,
         "question_claim_type": "observation",
         "evidence_quote": quote,
         "locator": locator,
@@ -378,7 +465,13 @@ def test_position_1043_counterfactual_keeps_scope_rejection() -> None:
     assert "reconstruction_alternative_answer_present" not in reasons
     assert "source_bound_numeric_rule_missing" not in reasons
     assert "answer_scope_not_source_bound" in reasons
-    assert "reconstruction_scope_not_source_bound" in reasons
+    # reconstruction-record-v2 (chapter 3, yield audit 4.3 f): the blind
+    # reconstructor's "ramping experiments with fast to intermediate rates"
+    # entails the answer's "ramping experiments" and its unpaired method value
+    # sits in the span, so the reconstruction record no longer rejects on
+    # wording. The answer and verifier records keep the verbatim binding.
+    assert "reconstruction_scope_not_source_bound" not in reasons
+    assert "reconstruction_scope_contradicts_answer" not in reasons
     assert "answer_verifier_scope_not_source_bound" in reasons
     assert "reconstruction_scope_mismatch" not in reasons
     assert "answer_verifier_scope_mismatch" not in reasons
@@ -440,6 +533,80 @@ def test_export_identity_changes_with_rejection_content(tmp_path: Path) -> None:
     assert Path(paths.namespace / first["files"]["rejections"]).read_bytes() == (
         first_rejections
     )
+
+
+def test_streaming_export_excludes_predecessor_contract_candidates(
+    tmp_path: Path,
+) -> None:
+    result = run_cli(
+        tmp_path,
+        "smoke",
+        "--fixture-dir",
+        str(FIXTURES),
+        "--run-id",
+        "current-export",
+    )
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    current = database.one(
+        "SELECT candidate_json FROM candidates WHERE item_id=?", (result["item_id"],)
+    )
+    predecessor = json.loads(current["candidate_json"])
+    predecessor["item_id"] = "historical-v20-item"
+    predecessor["schema_version"] = "2.5.0"
+    predecessor["provenance"]["prompt_version"] = "arctic-qa-generation-v20"
+    predecessor_json = canonical_json(predecessor)
+    current_validation = database.one(
+        "SELECT * FROM validation_events WHERE item_id=? ORDER BY rowid DESC LIMIT 1",
+        (result["item_id"],),
+    )
+    details = json.loads(current_validation["details_json"])
+    details["candidate_hash"] = stable_id("candidate-payload", predecessor_json)
+    with database.transaction():
+        database.connection.execute(
+            """INSERT INTO candidates
+            (item_id,run_id,source_id,paper_family_id,generation_arm,candidate_json,
+             status,created_at,updated_at)
+            SELECT ?,run_id,source_id,?,generation_arm,?,status,created_at,updated_at
+            FROM candidates WHERE item_id=?""",
+            (
+                predecessor["item_id"],
+                "historical-v20-family",
+                predecessor_json,
+                result["item_id"],
+            ),
+        )
+        database.connection.execute(
+            """INSERT INTO validation_events
+            (event_id,item_id,stage,label,reason_codes_json,details_json,created_at)
+            VALUES (?,?,?,?,?,?,?)""",
+            (
+                "historical-v20-validation",
+                predecessor["item_id"],
+                current_validation["stage"],
+                current_validation["label"],
+                current_validation["reason_codes_json"],
+                canonical_json(details),
+                current_validation["created_at"],
+            ),
+        )
+
+    exported = export_run(
+        database,
+        paths.namespace,
+        "current-export",
+        seed="current-contract-only",
+        candidate_schema_version=generation_module.CANDIDATE_SCHEMA_VERSION,
+        generation_prompt_version=generation_module.PROMPT_VERSION,
+    )
+    records = [
+        json.loads(line)
+        for line in (paths.namespace / exported["files"]["short_answer"])
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+
+    assert [record["item_id"] for record in records] == [result["item_id"]]
 
 
 def streaming_fixture(tmp_path: Path) -> tuple[Path, Path]:
@@ -670,7 +837,16 @@ class ScriptedBrokerTransport:
         role = next(
             name for name, expected in ROLE_SCHEMAS.items() if schema == expected
         )
-        self.role_prompts.append((role, body["contents"][0]["parts"][0]["text"]))
+        # A role's static instructions ride in systemInstruction and its
+        # evidence in the user prompt, so the recorded request holds both.
+        self.role_prompts.append(
+            (
+                role,
+                body["systemInstruction"]["parts"][0]["text"]
+                + "\n"
+                + body["contents"][0]["parts"][0]["text"],
+            )
+        )
         provider = (
             self.author
             if role
@@ -867,10 +1043,12 @@ def test_streaming_cli_moves_one_eligible_paper_to_validated_export(
     assert result["state"] == "completed"
     assert result["counts"] == {
         "accepted_base_questions": 1,
+        "candidate_processing_fault": 0,
         "eligibility_rejected": 0,
         "eligibility_unresolved": 0,
         "generation_rejected": 0,
         "incomplete_non_mcq": 0,
+        "paper_cost_cap_reached": 0,
         "processed": 1,
     }
 
@@ -886,8 +1064,9 @@ def test_finding_prompt_requires_one_exact_source_span(
         .splitlines()
     ]
     author_events[0]["require_prompt_contains"] = [
-        "Select one source_span_id.",
-        "Do not combine text from different spans.",
+        "Select one source_span_id for each candidate.",
+        "one exact selectable interval",
+        "Do not combine span IDs yourself.",
     ]
     author_script = tmp_path / "exact-finding-prompt-author.jsonl"
     author_script.write_text(
@@ -913,12 +1092,18 @@ def test_finding_prompt_requires_one_exact_source_span(
     assert result["counts"]["accepted_base_questions"] == 1
     assert result["export"]["short_answer_count"] == 1
     assert result["export"]["mcq_count"] == 2
-    assert result["provider_policy"] == {
+    assert {
+        key: value
+        for key, value in result["provider_policy"].items()
+        if key != "model_roles"
+    } == {
         "model": "fake-gemini-3.8-flash",
         "same_model_roles": True,
         "correlated_error_disclosed": True,
         "live_provider": False,
     }
+    assert result["provider_policy"]["model_roles"]["enforced"] is False
+    assert result["provider_policy"]["model_roles"]["same_model_roles"] is True
     progress = json.loads(
         (tmp_path / "arctic-qa" / "streaming-dataset-r1" / "progress.json").read_text(
             encoding="utf-8"
@@ -940,6 +1125,7 @@ def test_finding_prompt_requires_one_exact_source_span(
         "excluded": 0,
         "unresolved": 0,
         "generation_rejected": 0,
+        "paper_cost_cap_reached": 0,
         "accepted_qa": 1,
     }
     assert progress["recent_papers"] == [
@@ -961,16 +1147,16 @@ def test_finding_span_id_resolves_to_exact_source_evidence(tmp_path: Path) -> No
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    answer = author_events[0]["response"]["answer"]
+    answer = author_events[0]["response"]["candidate_findings"][0]["answer"]
     answer.pop("evidence_quote", None)
     answer.pop("locator", None)
     answer["source_span_id"] = "{{span_id}}"
     author_events[0]["require_prompt_contains"] = [
         '"evidence_spans"',
         '"span_id"',
-        '"span_contract_version":"finding-evidence-span-v2"',
+        '"span_contract_version":"finding-evidence-span-v3"',
         '"text_sha256"',
-        "Select one source_span_id.",
+        "Select one source_span_id for each candidate.",
     ]
     author_script = tmp_path / "finding-span-author.jsonl"
     author_script.write_text(
@@ -1006,8 +1192,8 @@ def test_finding_span_id_resolves_to_exact_source_evidence(tmp_path: Path) -> No
         record["evidence"]["locator"]["end_offset"]
         > record["evidence"]["locator"]["start_offset"]
     )
-    assert record["evidence"]["span_contract_version"] == "finding-evidence-span-v2"
-    assert record["evidence"]["source_span_id"].startswith("finding-evidence-span-v2-")
+    assert record["evidence"]["span_contract_version"] == "finding-evidence-span-v3"
+    assert record["evidence"]["source_span_id"].startswith("finding-evidence-span-v3-")
     assert len(record["evidence"]["text_sha256"]) == 64
 
 
@@ -1042,7 +1228,7 @@ def test_streaming_resolves_every_role_evidence_from_source_spans(
         distractor.pop("locator", None)
         distractor["source_span_id"] = "{{span_id}}"
     author_events[2]["require_prompt_contains"] = [
-        '"span_contract_version":"finding-evidence-span-v2"',
+        '"span_contract_version":"finding-evidence-span-v3"',
         "Select source_span_id for each evidence record.",
     ]
     verifier_events = [
@@ -1052,6 +1238,9 @@ def test_streaming_resolves_every_role_evidence_from_source_spans(
         .splitlines()
     ]
     for event in verifier_events:
+        # The two source-blind judges select no evidence span by design.
+        if event["role"] in {"standalone_verifier", "option_set_verifier"}:
+            continue
         response = event["response"]
         response.pop("evidence_quote", None)
         response.pop("locator", None)
@@ -1325,10 +1514,12 @@ def test_streaming_advances_after_uncertain_brokered_eligibility(
     assert result["state"] == "completed"
     assert result["counts"] == {
         "accepted_base_questions": 0,
+        "candidate_processing_fault": 0,
         "eligibility_rejected": 1,
         "eligibility_unresolved": 1,
         "generation_rejected": 0,
         "incomplete_non_mcq": 0,
+        "paper_cost_cap_reached": 0,
         "processed": 2,
     }
     assert result["paper_results"][0] == {
@@ -1349,6 +1540,7 @@ def test_streaming_advances_after_uncertain_brokered_eligibility(
         "excluded": 1,
         "unresolved": 1,
         "generation_rejected": 0,
+        "paper_cost_cap_reached": 0,
         "accepted_qa": 0,
     }
     assert observed_progress_counts
@@ -1471,8 +1663,8 @@ def test_streaming_maximum_comes_from_immutable_input_count(tmp_path: Path) -> N
         run_stream(**{**arguments, "max_papers": 502})
 
 
-def test_streaming_uses_one_shared_broker_for_all_ten_stages(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_streaming_uses_one_shared_broker_for_all_eleven_calls(
+    tmp_path: Path,
 ) -> None:
     access, eligibility = streaming_fixture(tmp_path)
     eligibility_inputs = broker_eligibility_inputs(tmp_path)
@@ -1505,16 +1697,31 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
     )
 
     assert result["counts"]["accepted_base_questions"] == 1
-    assert result["provider_policy"] == {
+    assert {
+        key: value
+        for key, value in result["provider_policy"].items()
+        if key != "model_roles"
+    } == {
         "model": "gemini-3.8-flash",
-        "same_model_roles": True,
-        "correlated_error_disclosed": True,
+        "same_model_roles": False,
+        "correlated_error_disclosed": False,
         "live_provider": True,
     }
+    # A live test phase discloses the effective per-role models without a
+    # profile. Only the production phase must name a separated role profile.
+    # The chapter 2 price config meters every judge stage on a different
+    # model from the writer, so the disclosure reports separated roles.
+    roles = result["provider_policy"]["model_roles"]
+    assert roles["enforced"] is False
+    assert roles["same_model_roles"] is False
+    assert roles["effective_role_models"]["question_writer"] == "gemini-3.8-flash"
+    assert roles["effective_role_models"]["standalone_verifier"] == (
+        "gemini-3.1-pro-preview"
+    )
     status = broker.status()
-    assert status["generation_submissions"] == 10
+    assert status["generation_submissions"] == 12
     assert status["accepted_question_count"] == 1
-    assert transport.custody_checks == 20
+    assert transport.custody_checks == 24
     access_item = json.loads(next((access / "items").glob("*.json")).read_text())
     family_id = stable_id("family", access_item["candidate_key"])
     assert set(status["papers"]) == {family_id}
@@ -1529,10 +1736,11 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
         "eligibility": 1,
         "finding_answer_extraction": 1,
         "question_generation": 1,
+        "standalone_verification": 1,
         "blinded_reconstruction": 1,
         "answer_verification": 1,
         "distractor_generation": 1,
-        "option_verification": 4,
+        "option_verification": 5,
     }
 
     assert (
@@ -1566,19 +1774,39 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
         "page_id": None,
         "section_id": "extracted-text",
     }
-    assert transport.methods.count("generateContent") == 10
+    assert transport.methods.count("generateContent") == 12
     prompts = dict(transport.role_prompts)
     assert (
         "Select one atomic claim from a complete prose finding sentence"
         in prompts["extractor"]
     )
+    assert "Do not select a title, heading, caption" in prompts["extractor"]
+    assert "SOURCE_DATA" not in prompts["standalone_verifier"]
+    assert "ANSWER_RECORD" not in prompts["standalone_verifier"]
+    assert "RECONSTRUCTION" not in prompts["standalone_verifier"]
     assert (
-        "Do not select a title, heading, figure or table caption"
-        in prompts["extractor"]
+        "Populate every scope qualifier that a reader without the paper needs to "
+        "interpret the result" in prompts["extractor"]
     )
     assert (
-        "Each non-null scope value must also appear in required_question_phrases"
-        in prompts["extractor"]
+        "A scope value that comes from an interpretation span belongs in "
+        "question_context" in prompts["extractor"]
+    )
+    assert (
+        "CONTEXT_ONLY_SOURCE supports question_context statements only."
+        in (prompts["question_writer"])
+    )
+    assert (
+        "CONTEXT_ONLY_SOURCE supports question_context statements only."
+        in (prompts["reconstructor"])
+    )
+    assert (
+        "CONTEXT_ONLY_SOURCE supports question_context statements only."
+        in (prompts["answer_verifier"])
+    )
+    assert (
+        "CONTEXT_ONLY_SOURCE supports question_context statements only."
+        in (prompts["option_verifier"])
     )
     assert (
         "Populate only scope qualifiers stated verbatim in the QUESTION"
@@ -1592,9 +1820,6 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
         "Do not assume any proposed scope value is true" in prompts["answer_verifier"]
     )
 
-    monkeypatch.setattr(
-        generation_module, "PROMPT_VERSION", "arctic-qa-generation-test-next"
-    )
     resumed = run_stream(
         database,
         paths.namespace,
@@ -1610,8 +1835,8 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
 
     assert resumed["resumed_papers"] == 1
     assert resumed["counts"]["accepted_base_questions"] == 1
-    assert broker.status()["generation_submissions"] == 10
-    assert transport.methods.count("generateContent") == 10
+    assert broker.status()["generation_submissions"] == 12
+    assert transport.methods.count("generateContent") == 12
     jobs = [
         json.loads(path.read_text()) for path in (eligibility / "jobs").glob("*.json")
     ]
@@ -1620,6 +1845,73 @@ def test_streaming_uses_one_shared_broker_for_all_ten_stages(
         sum(job.get("execution_authority") == "shared_gemini_broker" for job in jobs)
         == 1
     )
+
+
+def test_same_campaign_regenerates_a_stale_terminal_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    access, eligibility = streaming_fixture(tmp_path)
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+    first = run_stream(
+        database,
+        paths.namespace,
+        run_id="historical-invocation",
+        campaign_id="same-campaign",
+        access_run_dir=access,
+        eligibility_run_dir=eligibility,
+        author=FakeProvider("fake-gemini", FIXTURES / "fake-author.jsonl"),
+        verifier=FakeProvider("fake-gemini", FIXTURES / "fake-verifier.jsonl"),
+        max_papers=1,
+    )
+    old_item = first["paper_results"][0]
+    assert old_item["disposition"] == "accepted"
+    monkeypatch.setattr(
+        generation_module, "PROMPT_VERSION", "arctic-qa-generation-test-next"
+    )
+    rerun_author = tmp_path / "rerun-author.jsonl"
+    author_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-author.jsonl").read_text().splitlines()
+    ]
+    rerun_author.write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in author_events
+            if event.get("role") != "extractor"
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    second = run_stream(
+        database,
+        paths.namespace,
+        run_id="rerun-invocation",
+        campaign_id="same-campaign",
+        access_run_dir=access,
+        eligibility_run_dir=eligibility,
+        author=FakeProvider("fake-gemini", rerun_author),
+        verifier=FakeProvider("fake-gemini", FIXTURES / "fake-verifier.jsonl"),
+        max_papers=1,
+    )
+
+    candidates = database.rows(
+        "SELECT item_id,candidate_json FROM candidates "
+        f"WHERE run_id='same-campaign' AND {BENCHMARK_CANDIDATE_PREDICATE} "
+        "ORDER BY created_at,item_id"
+    )
+    assert second["resumed_papers"] == 1
+    assert second["counts"]["generation_rejected"] == 1
+    assert len(candidates) == 2
+    assert {
+        json.loads(row["candidate_json"])["provenance"]["prompt_version"]
+        for row in candidates
+    } == {
+        "arctic-qa-generation-v23",
+        "arctic-qa-generation-test-next",
+    }
 
 
 def test_new_campaign_regenerates_a_paper_with_historical_accepted_output(
@@ -1642,7 +1934,8 @@ def test_new_campaign_regenerates_a_paper_with_historical_accepted_output(
         max_papers=1,
     )
     historical_item = database.one(
-        "SELECT item_id FROM candidates WHERE run_id='historical-trial-campaign'"
+        "SELECT item_id FROM candidates WHERE run_id='historical-trial-campaign' "
+        f"AND {BENCHMARK_CANDIDATE_PREDICATE}"
     )["item_id"]
     assert historical["counts"]["accepted_base_questions"] == 1
 
@@ -1668,18 +1961,19 @@ def test_new_campaign_regenerates_a_paper_with_historical_accepted_output(
     )
 
     production_item = database.one(
-        "SELECT item_id FROM candidates WHERE run_id='new-production-campaign'"
+        "SELECT item_id FROM candidates WHERE run_id='new-production-campaign' "
+        f"AND {BENCHMARK_CANDIDATE_PREDICATE}"
     )["item_id"]
     assert production["counts"]["accepted_base_questions"] == 1
     assert production["resumed_papers"] == 0
     assert production_item != historical_item
-    assert broker.status()["generation_submissions"] == 10
-    assert transport.methods.count("generateContent") == 10
+    assert broker.status()["generation_submissions"] == 12
+    assert transport.methods.count("generateContent") == 12
     assert (
         database.one(
             "SELECT COUNT(*) AS count FROM calls WHERE run_id='new-production-campaign'"
         )["count"]
-        == 10
+        == 12
     )
     jobs = list((production_eligibility / "jobs").glob("*.json"))
     assert len(jobs) == 1
@@ -1805,7 +2099,7 @@ def test_streaming_live_gate_binds_reviewed_access_input_before_transport(
     result = run_stream(**arguments, access_run_dir=reviewed_access)
 
     assert result["counts"]["accepted_base_questions"] == 1
-    assert transport.methods.count("generateContent") == 10
+    assert transport.methods.count("generateContent") == 12
 
 
 def test_streaming_resumes_reconciled_eligibility_after_process_restart(
@@ -1895,9 +2189,9 @@ def test_streaming_resumes_reconciled_eligibility_after_process_restart(
     )
 
     assert result["counts"]["accepted_base_questions"] == 1
-    assert transport.methods.count("generateContent") == 10
+    assert transport.methods.count("generateContent") == 12
     status = restarted_broker.status()
-    assert status["generation_submissions"] == 10
+    assert status["generation_submissions"] == 12
     assert status["stages"]["eligibility"]["submissions"] == 1
     assert database.one(
         "SELECT status,error_code,error_text FROM calls WHERE role='eligibility'"
@@ -1933,7 +2227,7 @@ def test_low_thinking_counterfactual_completes_the_structured_stream(
     )
 
     assert result["counts"]["accepted_base_questions"] == 1
-    assert len(transport.generation_configs) == 10
+    assert len(transport.generation_configs) == 12
     assert all(
         config["thinkingConfig"] == {"thinkingLevel": "low"}
         for config in transport.generation_configs
@@ -1986,8 +2280,8 @@ def test_live_stream_cli_runs_inline_eligibility_and_qa(
     assert exit_code == 0
     result = json.loads(capsys.readouterr().out)
     assert result["counts"]["accepted_base_questions"] == 1
-    assert broker.status()["generation_submissions"] == 10
-    assert transport.methods.count("generateContent") == 10
+    assert broker.status()["generation_submissions"] == 12
+    assert transport.methods.count("generateContent") == 12
 
 
 def test_streaming_live_cli_obeys_disabled_broker_gate_before_credentials(
@@ -2076,23 +2370,52 @@ def test_failed_reconstruction_never_reaches_distractor_generation(
     tmp_path: Path,
 ) -> None:
     access, eligibility = streaming_fixture(tmp_path)
+    author_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-author.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    alternative_author_script = tmp_path / "ambiguous-alternative-author.jsonl"
+    alternative_author_script.write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in [
+                author_events[0],
+                author_events[1],
+                author_events[1],
+                author_events[0],
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     verifier_events = [
         json.loads(line)
         for line in (FIXTURES / "fake-verifier.jsonl")
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    verifier_events[0]["response"]["ambiguity_label"] = "multiple_answers"
-    verifier_events[0]["response"]["alternatives"] = ["1.9 m"]
+    verifier_events[1]["response"]["ambiguity_label"] = "multiple_answers"
+    verifier_events[1]["response"]["alternatives"] = ["1.9 m"]
     verifier_script = tmp_path / "ambiguous-verifier.jsonl"
     verifier_script.write_text(
-        "\n".join(json.dumps(event) for event in verifier_events) + "\n",
+        "\n".join(
+            json.dumps(event)
+            for event in [
+                *verifier_events[:3],
+            ]
+        )
+        + "\n",
         encoding="utf-8",
     )
     paths = DataPaths.open(tmp_path, test_mode=True)
     database = Database(paths.database)
     database.migrate(paths.namespace / "backups")
-    transport = ScriptedBrokerTransport(verifier_script=verifier_script)
+    transport = ScriptedBrokerTransport(
+        author_script=alternative_author_script,
+        verifier_script=verifier_script,
+    )
     broker = shared_broker(tmp_path, transport)
     provider = BrokerProvider(
         broker=broker,
@@ -2116,7 +2439,7 @@ def test_failed_reconstruction_never_reaches_distractor_generation(
     assert result["counts"]["accepted_base_questions"] == 0
     assert result["counts"]["generation_rejected"] == 1
     status = broker.status()
-    assert status["generation_submissions"] == 5
+    assert status["generation_submissions"] == 8
     assert "distractor_generation" not in status["stages"]
     assert "option_verification" not in status["stages"]
 
@@ -2129,8 +2452,26 @@ def test_true_distractor_is_removed_before_streaming_export(tmp_path: Path) -> N
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    verifier_events[2]["response"]["contradiction_established"] = False
-    verifier_events[2]["response"]["question_admits_option_as_correct"] = True
+    # A rejection needs its reading (ch2 yield audit 4.8): the flag alone would
+    # be malformed and re-asked. With 2.5 m rejected, rank-order verification
+    # continues to the fifth proposal, so the script carries its event and the
+    # whole-set verdict covers the four verified options.
+    verifier_events[3]["response"]["contradiction_established"] = False
+    verifier_events[3]["response"]["question_admits_option_as_correct"] = True
+    verifier_events[3]["response"]["admitting_interpretation"] = (
+        "Read 'reported water depth' as the depth reported at the second site."
+    )
+    fifth = json.loads(json.dumps(verifier_events[6]))
+    fifth["require_prompt_contains"] = [
+        "1.5 m" if marker == "5.0 m" else marker
+        for marker in fifth["require_prompt_contains"]
+    ]
+    verifier_events.insert(7, fifth)
+    verifier_events[8]["require_prompt_contains"] = [
+        "1.5 m" if marker == "2.5 m" else marker
+        for marker in verifier_events[8]["require_prompt_contains"]
+    ]
+    verifier_events[8]["forbid_prompt_contains"].append("2.5 m")
     verifier_script = tmp_path / "true-option-verifier.jsonl"
     verifier_script.write_text(
         "\n".join(json.dumps(event) for event in verifier_events) + "\n",
@@ -2162,35 +2503,92 @@ def test_true_distractor_is_removed_before_streaming_export(tmp_path: Path) -> N
     )
 
     assert result["counts"]["accepted_base_questions"] == 1
-    assert result["export"]["mcq_count"] == 1
+    assert result["export"]["mcq_count"] == 2
     mcq_path = paths.namespace / result["export"]["files"]["mcq"]
     records = [json.loads(line) for line in mcq_path.read_text().splitlines()]
     assert all(
         option["text"] != "2.5 m" for record in records for option in record["options"]
     )
+    assert any(
+        option["text"] == "1.5 m" for record in records for option in record["options"]
+    )
 
 
 def test_short_answer_without_three_distractors_is_not_counted_as_accepted(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    def clear_test_rate_window(broker: SharedGeminiBroker) -> None:
+        ledger = json.loads(broker.ledger_file.read_text(encoding="utf-8"))
+        ledger["recent_submission_times_utc"] = []
+        write_json(broker.ledger_file, ledger)
+
+    monkeypatch.setattr(SharedGeminiBroker, "_pace", clear_test_rate_window)
     access, eligibility = streaming_fixture(tmp_path)
+    author_events = [
+        json.loads(line)
+        for line in (FIXTURES / "fake-author.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    alternative_author_script = tmp_path / "incomplete-alternative-author.jsonl"
+    alternative_author_script.write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in [
+                author_events[0],
+                author_events[1],
+                author_events[2],
+                author_events[2],
+                author_events[2],
+                author_events[0],
+                author_events[2],
+                author_events[2],
+                author_events[2],
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     verifier_events = [
         json.loads(line)
         for line in (FIXTURES / "fake-verifier.jsonl")
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    verifier_events[2]["response"]["question_admits_option_as_correct"] = True
-    verifier_events[3]["response"]["question_admits_option_as_correct"] = True
+    # Every round proposes six options and verifies them in rank order. Four
+    # rejected contradictions leave two verified, under the floor, so no
+    # whole-set verdict is bought and the candidate is incomplete_non_mcq.
+    option_events = verifier_events[3:7]
+    for text in ("1.5 m", "6.0 m"):
+        event = json.loads(json.dumps(option_events[3]))
+        event["require_prompt_contains"] = [
+            text if marker == "5.0 m" else marker
+            for marker in event["require_prompt_contains"]
+        ]
+        option_events.append(event)
+    for event in option_events[:4]:
+        event["response"]["contradiction_established"] = False
     verifier_script = tmp_path / "two-accepted-distractor-verifier.jsonl"
     verifier_script.write_text(
-        "\n".join(json.dumps(event) for event in verifier_events) + "\n",
+        "\n".join(
+            json.dumps(event)
+            for event in [
+                *verifier_events[:3],
+                *json.loads(json.dumps(option_events)),
+                *json.loads(json.dumps(option_events)),
+                *json.loads(json.dumps(option_events)),
+            ]
+        )
+        + "\n",
         encoding="utf-8",
     )
     paths = DataPaths.open(tmp_path, test_mode=True)
     database = Database(paths.database)
     database.migrate(paths.namespace / "backups")
-    transport = ScriptedBrokerTransport(verifier_script=verifier_script)
+    transport = ScriptedBrokerTransport(
+        author_script=alternative_author_script,
+        verifier_script=verifier_script,
+    )
     broker = shared_broker(tmp_path, transport)
     provider = BrokerProvider(
         broker=broker,
@@ -2226,13 +2624,33 @@ def test_short_answer_without_three_distractors_is_not_counted_as_accepted(
     )
     assert progress["counts"]["accepted_qa"] == 0
 
+    attempts = [
+        json.loads(row["candidate_json"])
+        for row in database.rows(
+            "SELECT candidate_json FROM candidates "
+            f"WHERE {BENCHMARK_CANDIDATE_PREDICATE}"
+        )
+    ]
+    assert {attempt["question"] for attempt in attempts} == {
+        "What reported water depth was documented?"
+    }
+    assert broker.status()["stages"]["question_generation"]["submissions"] == 1
+    assert broker.status()["stages"]["distractor_generation"]["submissions"] == 3
+    assert (
+        sum(
+            bool(attempt["provenance"].get("distractor_only_retry"))
+            for attempt in attempts
+        )
+        == 2
+    )
+
     base = database.one("SELECT * FROM candidates WHERE status='incomplete_non_mcq'")
     targeted_author = FakeProvider("gemini-3.8-flash", FIXTURES / "fake-author.jsonl")
     targeted_verifier = FakeProvider(
         "gemini-3.8-flash", FIXTURES / "fake-verifier.jsonl"
     )
     targeted_author.position = 2
-    targeted_verifier.position = 2
+    targeted_verifier.position = 3
     resumed = resume_candidate_distractors(
         database,
         paths.namespace,
@@ -2286,10 +2704,12 @@ def test_streaming_cli_stops_after_eligibility_rejection(tmp_path: Path) -> None
     assert result["state"] == "completed"
     assert result["counts"] == {
         "accepted_base_questions": 0,
+        "candidate_processing_fault": 0,
         "eligibility_rejected": 1,
         "eligibility_unresolved": 0,
         "generation_rejected": 0,
         "incomplete_non_mcq": 0,
+        "paper_cost_cap_reached": 0,
         "processed": 1,
     }
     assert result["export"]["short_answer_count"] == 0
@@ -2413,9 +2833,9 @@ def test_streaming_records_invalid_finding_and_advances_to_next_paper(
         .splitlines()
     ]
     invalid_extractor = json.loads(json.dumps(author_events[0]))
-    invalid_extractor["response"]["answer"]["source_span_id"] = (
-        "evidence-span-does-not-exist"
-    )
+    invalid_extractor["response"]["candidate_findings"][0]["answer"][
+        "source_span_id"
+    ] = "evidence-span-does-not-exist"
     author_script = tmp_path / "invalid-finding-then-valid-author.jsonl"
     author_script.write_text(
         "\n".join(json.dumps(event) for event in [invalid_extractor, *author_events])
@@ -2519,7 +2939,7 @@ def test_live_stream_records_schema_invalid_reconstruction_and_advances(
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    invalid_reconstruction = json.loads(json.dumps(verifier_events[0]))
+    invalid_reconstruction = json.loads(json.dumps(verifier_events[1]))
     invalid_reconstruction["response"]["numeric"] = {
         "canonical_value": "",
         "unit": "",
@@ -2533,7 +2953,12 @@ def test_live_stream_records_schema_invalid_reconstruction_and_advances(
     )
     verifier_script.write_text(
         "\n".join(
-            json.dumps(event) for event in [invalid_reconstruction, *verifier_events]
+            json.dumps(event)
+            for event in [
+                verifier_events[0],
+                invalid_reconstruction,
+                *verifier_events,
+            ]
         )
         + "\n",
         encoding="utf-8",
@@ -2572,9 +2997,9 @@ def test_live_stream_records_schema_invalid_reconstruction_and_advances(
     assert result["paper_results"][0]["reason_codes"] == [
         "reconstructor_response_invalid"
     ]
-    assert transport.methods.count("generateContent") == 14
+    assert transport.methods.count("generateContent") == 17
     status = broker.status()
-    assert status["generation_submissions"] == 14
+    assert status["generation_submissions"] == 17
     assert Decimal(status["reserved_usd"]) == 0
     assert Decimal(status["ambiguous_reserved_usd"]) == 0
     invalid_receipts = [
@@ -2604,17 +3029,17 @@ def test_live_stream_records_schema_invalid_reconstruction_and_advances(
     assert resumed["counts"]["processed"] == 2
     assert resumed["counts"]["generation_rejected"] == 1
     assert resumed["counts"]["accepted_base_questions"] == 1
-    assert transport.methods.count("generateContent") == 14
-    assert broker.status()["generation_submissions"] == 14
+    assert transport.methods.count("generateContent") == 17
+    assert broker.status()["generation_submissions"] == 17
 
 
 @pytest.mark.parametrize(
     ("role", "event_index", "reason_code"),
     [
-        ("reconstructor", 0, "reconstruction_evidence_span_not_found"),
-        ("answer_verifier", 1, "answer_verifier_evidence_span_not_found"),
+        ("reconstructor", 1, "reconstruction_evidence_span_not_found"),
+        ("answer_verifier", 2, "answer_verifier_evidence_span_not_found"),
         ("distractor_writer", 2, "distractor_evidence_span_not_found"),
-        ("option_verifier", 2, "option_verifier_evidence_span_not_found"),
+        ("option_verifier", 3, "option_verifier_evidence_span_not_found"),
     ],
 )
 def test_streaming_rejects_invalid_downstream_source_span_selection(
@@ -2795,7 +3220,7 @@ def test_streaming_cli_resumes_without_a_duplicate_model_call(tmp_path: Path) ->
     assert second["counts"]["accepted_base_questions"] == 1
     assert second["resumed_papers"] == 1
     status = run_cli(tmp_path, "status", "--run-id", "stream-resume")
-    assert status["calls"] == [{"count": 9, "status": "completed"}]
+    assert status["calls"] == [{"count": 11, "status": "completed"}]
 
 
 def test_streaming_cli_fails_closed_on_an_unbound_selection(tmp_path: Path) -> None:
@@ -2938,7 +3363,7 @@ def test_streaming_family_freeze_spans_test_and_production_phases(
     assert second["campaign_id"] == "streaming-commission"
     assert second["resumed_papers"] == 1
     status = run_cli(tmp_path, "status", "--run-id", "streaming-commission")
-    assert status["calls"] == [{"count": 9, "status": "completed"}]
+    assert status["calls"] == [{"count": 11, "status": "completed"}]
 
 
 def test_streaming_export_discloses_same_model_correlated_error(
@@ -2971,3 +3396,326 @@ def test_streaming_export_discloses_same_model_correlated_error(
         "separate_blinded_calls": True,
         "independent_error_evidence": False,
     }
+
+
+def second_streaming_paper(access: Path) -> dict[str, Any]:
+    """Add one more ready paper to the ordered selection of the fixture."""
+    first = json.loads(
+        (access / "items" / "item-000001.json").read_text(encoding="utf-8")
+    )
+    source = access / "originals" / "source-cap-2.html"
+    source.write_bytes(
+        Path(first["source_path"]).read_bytes() + b"\n<!-- second cap source -->\n"
+    )
+    extraction = access / "extracted" / "text-cap-2.txt"
+    extraction.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    second = {
+        **first,
+        "position": 2,
+        "candidate_key": "test-only:streaming-paper-2",
+        "title": "Second synthetic Arctic extraction fixture",
+        "source_path": str(source),
+        "source_content_hash": sha256(source.read_bytes()).hexdigest(),
+        "extraction_path": str(extraction),
+        "extraction_sha256": sha256(extraction.read_bytes()).hexdigest(),
+        "final_url": "https://example.invalid/public-source-2.html",
+    }
+    write_json(access / "items" / "item-000002.json", second)
+    manifest_path = access / "run-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["target_total"] = 2
+    manifest["selection"].append(
+        {
+            "position": 2,
+            "candidate_key": second["candidate_key"],
+            "subgroup": "test_only",
+            "authors": ["Arctic QA test suite"],
+            "year": 2026,
+        }
+    )
+    write_json(manifest_path, manifest)
+    return second
+
+
+def test_streaming_records_a_capped_family_and_keeps_going(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The per-paper cost cap skips one family; it never ends the run.
+
+    The chapter 3 production run of 2026-09-16 exited on the first family that
+    reached ``maximum_paper_cost_usd``, and every relaunch stopped on the same
+    paper. The cap bounds one family, so the producer records it and moves on.
+    """
+    access, eligibility = streaming_fixture(tmp_path)
+    second = second_streaming_paper(access)
+    # The second paper needs its own screening job; the fixture holds only one.
+    first_job = json.loads(
+        (eligibility / "jobs" / "fixture-job.json").read_text(encoding="utf-8")
+    )
+    parsed = json.loads(json.dumps(first_job["parsed_response"]))
+    parsed["request_id"] = "fixture-job-2"
+    parsed["input_echo"] = {
+        **parsed["input_echo"],
+        "source_version_sha256": second["source_content_hash"],
+        "extracted_text_sha256": second["extraction_sha256"],
+    }
+    write_json(
+        eligibility / "jobs" / "fixture-job-2.json",
+        {
+            **first_job,
+            "job_key": "fixture-job-2",
+            "candidate_key": second["candidate_key"],
+            "source_content_hash": second["source_content_hash"],
+            "extraction_sha256": second["extraction_sha256"],
+            "parsed_response": parsed,
+        },
+    )
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+
+    real_generate_candidate = streaming_module.generate_candidate
+    capped_sources: list[str] = []
+
+    def cap_the_first_family(db: Any, namespace: Any, **kwargs: Any):
+        source_id = kwargs["source_id"]
+        if not capped_sources:
+            capped_sources.append(source_id)
+        if source_id == capped_sources[0]:
+            raise PaperCostCapError(
+                PAPER_COST_CAP_REASON, stage="finding_answer_extraction"
+            )
+        return real_generate_candidate(db, namespace, **kwargs)
+
+    monkeypatch.setattr(streaming_module, "generate_candidate", cap_the_first_family)
+
+    result = run_stream(
+        db=database,
+        namespace=paths.namespace,
+        run_id="paper-cap-skip",
+        campaign_id="paper-cap-skip",
+        access_run_dir=access,
+        eligibility_run_dir=eligibility,
+        author=FakeProvider("fake-gemini", FIXTURES / "fake-author.jsonl"),
+        verifier=FakeProvider("fake-gemini", FIXTURES / "fake-verifier.jsonl"),
+        max_papers=2,
+    )
+
+    assert result["state"] == "completed"
+    assert result["counts"]["paper_cost_cap_reached"] == 1
+    assert result["counts"]["processed"] == 2
+    assert result["counts"]["accepted_base_questions"] == 1
+    assert result["paper_results"][0]["disposition"] == "paper_cost_cap_reached"
+    assert result["paper_results"][0]["reason_codes"] == ["paper_cost_cap_reached"]
+    # The run did not stop: the next paper was generated and accepted.
+    assert result["paper_results"][1]["disposition"] == "accepted"
+
+    row = database.one(
+        """SELECT reason_code,detail_json FROM rejection_ledger
+        WHERE stage='paper_cost_cap'""",
+        (),
+    )
+    assert row is not None
+    assert row["reason_code"] == "paper_cost_cap_reached"
+    detail = json.loads(row["detail_json"])
+    assert detail["paper_cost_cap_reached"] is True
+    assert detail["error"] == PAPER_COST_CAP_REASON
+    assert detail["broker_stage"] == "finding_answer_extraction"
+    assert detail["candidate_key"] == "test-only:streaming-paper"
+    assert detail["generation_attempt"]["attempt_kind"] == "primary"
+
+    # The in-flight call record of the capped family is settled, not left open.
+    capped_records = database.rows(
+        """SELECT status,candidate_json FROM candidates
+        WHERE run_id=? AND source_id=?""",
+        ("paper-cap-skip", capped_sources[0]),
+    )
+    assert [row["status"] for row in capped_records] == ["generation_incomplete"]
+    assert json.loads(capped_records[0]["candidate_json"])["reason_code"] == (
+        "paper_cost_cap_reached"
+    )
+
+    progress = json.loads(
+        (paths.namespace / "streaming-dataset-r1" / "progress.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert progress["state"] == "completed"
+    assert progress["counts"]["paper_cost_cap_reached"] == 1
+    assert progress["recent_papers"][0]["final_state"] == "paper_cost_cap_reached"
+    assert progress["recent_papers"][0]["final_reason"] == "paper_cost_cap_reached"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "the paid request exceeds the remaining dataset construction allocation",
+        "the paid request exceeds the away session ceiling",
+        "the paid-call broker is halted",
+    ],
+)
+def test_streaming_still_exits_on_a_whole_run_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    message: str,
+) -> None:
+    """Only a whole-run stop ends the producer, and it still ends it."""
+    access, eligibility = streaming_fixture(tmp_path)
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+
+    def whole_run_stop(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise BudgetError(message)
+
+    monkeypatch.setattr(streaming_module, "generate_candidate", whole_run_stop)
+
+    with pytest.raises(BudgetError, match=re.escape(message)):
+        run_stream(
+            db=database,
+            namespace=paths.namespace,
+            run_id="whole-run-stop",
+            campaign_id="whole-run-stop",
+            access_run_dir=access,
+            eligibility_run_dir=eligibility,
+            author=FakeProvider("fake-gemini", FIXTURES / "fake-author.jsonl"),
+            verifier=FakeProvider("fake-gemini", FIXTURES / "fake-verifier.jsonl"),
+            max_papers=1,
+        )
+
+    progress = json.loads(
+        (paths.namespace / "streaming-dataset-r1" / "progress.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert progress["state"] == "error"
+    assert (
+        database.one(
+            "SELECT COUNT(*) AS count FROM rejection_ledger WHERE stage='paper_cost_cap'",
+            (),
+        )["count"]
+        == 0
+    )
+
+
+def model_prices() -> dict[str, tuple[Decimal, Decimal]]:
+    """Return each priced model's input and output price for each million tokens."""
+    config = json.loads(
+        (REPO / "config" / "gemini-eligibility-v1.json").read_text(encoding="utf-8")
+    )
+    prices: dict[str, tuple[Decimal, Decimal]] = {}
+    for row in (config, *config["stage_models"].values()):
+        model = row.get("model") or config["model"]
+        if "input_usd_per_million_tokens" in row:
+            prices[model] = (
+                Decimal(row["input_usd_per_million_tokens"]),
+                Decimal(row["output_usd_per_million_tokens_including_thinking"]),
+            )
+    return prices
+
+
+class ExpensiveGenerationTransport(ScriptedBrokerTransport):
+    """Make every generation call costly, so the family reaches the paper cap.
+
+    Each reservation stays just under ``maximum_request_reserved_cost_usd``
+    (USD 0.25), and the screening call stays cheap, so the only refusal the run
+    can meet is the per-paper cost cap of USD 1.00, after four calls.
+    """
+
+    TARGET_RESERVATION = Decimal("0.249")
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.prices = model_prices()
+        self.input_tokens = 100
+        self.output_tokens = 10
+
+    def post(self, model: str, method: str, body: dict) -> dict:
+        if method == "countTokens":
+            config = body["generateContentRequest"]["generationConfig"]
+            screening = "criteria" in config["responseJsonSchema"].get("properties", {})
+            output_limit = int(config["maxOutputTokens"])
+            input_price, output_price = self.prices[model]
+            output_cost = Decimal(output_limit) * output_price / 1_000_000
+            self.input_tokens = (
+                100
+                if screening
+                else int(
+                    (self.TARGET_RESERVATION - output_cost) * 1_000_000 / input_price
+                )
+            )
+            self.output_tokens = min(output_limit, 100)
+            self.methods.append(method)
+            return {"totalTokens": self.input_tokens}
+        return super().post(model, method, body)
+
+    def _response(self, model: str, payload: dict, request_id: str | None) -> dict:
+        response = super()._response(model, payload, request_id)
+        response["usageMetadata"] = {
+            "promptTokenCount": self.input_tokens,
+            "candidatesTokenCount": self.output_tokens,
+            "thoughtsTokenCount": 0,
+            "totalTokenCount": self.input_tokens + self.output_tokens,
+        }
+        return response
+
+
+def test_streaming_completes_when_the_broker_refuses_a_capped_family(
+    tmp_path: Path,
+) -> None:
+    """The whole path: a real broker refusal ends one family, not the run."""
+    access, eligibility = streaming_fixture(tmp_path)
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+    transport = ExpensiveGenerationTransport()
+    broker = shared_broker(tmp_path, transport)
+    provider = BrokerProvider(
+        broker=broker,
+        phase="live_test",
+        invocation_run_id="paper-cap-live",
+    )
+
+    result = run_stream(
+        db=database,
+        namespace=paths.namespace,
+        run_id="paper-cap-live",
+        campaign_id="paper-cap-live-campaign",
+        access_run_dir=access,
+        eligibility_run_dir=eligibility,
+        author=provider,
+        verifier=provider,
+        max_papers=1,
+        **broker_eligibility_inputs(tmp_path),
+    )
+
+    assert result["state"] == "completed"
+    assert result["counts"]["paper_cost_cap_reached"] == 1
+    assert result["paper_results"][0]["disposition"] == "paper_cost_cap_reached"
+
+    row = database.one(
+        """SELECT detail_json FROM rejection_ledger WHERE stage='paper_cost_cap'""",
+        (),
+    )
+    assert row is not None
+    detail = json.loads(row["detail_json"])
+    assert detail["error"] == PAPER_COST_CAP_REASON
+    assert detail["broker_stage"] in ROLE_STAGES.values()
+    cost_state = detail["family_cost_state"]
+    assert cost_state["family_id"] == detail["family_id"]
+    assert Decimal(cost_state["maximum_paper_cost_usd"]) == Decimal("1.00")
+    # Nothing was charged past the cap, and the family holds most of it.
+    assert Decimal("0.75") < Decimal(cost_state["committed_usd"]) <= Decimal("1.00")
+    assert Decimal(cost_state["remaining_usd"]) >= 0
+
+    ledger = json.loads((tmp_path / "shared-ledger.json").read_text(encoding="utf-8"))
+    assert not ledger["halted"]
+    refused = [
+        request
+        for request in ledger["requests"].values()
+        if request.get("state") == "not_submitted"
+    ]
+    assert [request["reason"] for request in refused] == [PAPER_COST_CAP_REASON]
+    assert refused[0]["family_id"] == detail["family_id"]
+    assert refused[0]["stage"] == detail["broker_stage"]

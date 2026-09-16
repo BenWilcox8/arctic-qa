@@ -167,11 +167,14 @@
     .trace-subhead p { color: var(--muted); font-size: .8rem; margin: .2rem 0 0; }
     .trace-table-wrap { max-height: 44rem; overflow: auto; }
     .trace-table { table-layout: fixed; }
-    .trace-table .trace-paper-column { width: 46%; }
-    .trace-table .trace-state-column { width: 25%; }
-    .trace-table .trace-stage-column { width: 19%; }
-    .trace-table .trace-attempt-column { width: 10%; }
+    .trace-table .trace-paper-column { width: 40%; }
+    .trace-table .trace-state-column { width: 20%; }
+    .trace-table .trace-stage-column { width: 12%; }
+    .trace-table .trace-model-call-column { width: 9%; }
+    .trace-table .trace-candidate-column { width: 9%; }
+    .trace-table .trace-finding-column { width: 10%; }
     .trace-table button { background: transparent; border: 0; color: #0b6486; min-height: 0; padding: 0; text-align: left; text-decoration: underline; text-underline-offset: 2px; }
+    .trace-state-time { color: var(--muted); font-size: .82rem; margin-top: .28rem; }
     .trace-table .badge { justify-content: flex-start; white-space: normal; width: auto; }
     .trace-table tr.selected { background: var(--cyan); }
     .trace-table th, .trace-table td { overflow-wrap: anywhere; padding: .65rem .5rem; }
@@ -195,8 +198,18 @@
     .trace-readable-card { background: var(--paper); border: 1px solid var(--line); border-radius: 7px; min-width: 0; padding: .8rem; }
     .trace-readable-card > :first-child { margin-top: 0; }
     .trace-readable-card > :last-child { margin-bottom: 0; }
-    .trace-readable-title { align-items: flex-start; display: flex; flex-wrap: wrap; gap: .45rem .6rem; justify-content: space-between; margin-bottom: .65rem; }
-    .trace-readable-title h4 { font-size: .95rem; margin: 0; overflow-wrap: anywhere; }
+    .trace-readable-title { align-items: flex-start; display: flex; flex-wrap: wrap; gap: .45rem .6rem; justify-content: space-between; margin-bottom: .65rem; min-width: 0; }
+    .trace-readable-title h4 { font-size: .95rem; margin: 0; min-width: 0; overflow-wrap: anywhere; }
+    .trace-readable-item { background: var(--paper); border: 1px solid var(--line); border-radius: 7px; min-width: 0; overflow: hidden; }
+    .trace-readable-item > summary { align-items: flex-start; display: flex; flex-wrap: wrap; gap: .45rem .6rem; list-style: none; min-width: 0; padding: .7rem .8rem; }
+    .trace-readable-item > summary::-webkit-details-marker { display: none; }
+    .trace-readable-item > summary::before { color: var(--muted); content: "▸"; flex: 0 0 auto; font-size: 1rem; line-height: 1.4; }
+    .trace-readable-item[open] > summary { border-bottom: 1px solid var(--line); }
+    .trace-readable-item[open] > summary::before { content: "▾"; }
+    .trace-readable-item-summary-text { flex: 1 1 18rem; font-weight: 700; line-height: 1.45; min-width: 0; overflow-wrap: anywhere; }
+    .trace-readable-item > summary .badge { flex: 0 1 auto; }
+    .trace-readable-item-body { min-width: 0; padding: .75rem; }
+    .trace-readable-item-card { border: 0; padding: 0; }
     .trace-kv { display: grid; gap: .55rem; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: .55rem 0; }
     .trace-kv-item { background: var(--wash); border-radius: 5px; min-width: 0; padding: .55rem .6rem; }
     .trace-kv-item.wide { grid-column: 1 / -1; }
@@ -205,10 +218,12 @@
     .trace-question { border-left: 4px solid var(--navy); font-size: 1.02rem; font-weight: 700; line-height: 1.5; margin: .65rem 0; padding: .65rem .75rem; }
     .trace-answer { background: var(--green-bg); border-left: 4px solid var(--green); line-height: 1.5; margin: .65rem 0; padding: .65rem .75rem; }
     .trace-answer strong, .trace-question strong { display: block; font-size: .72rem; letter-spacing: .04em; margin-bottom: .25rem; text-transform: uppercase; }
-    .trace-option-list { display: grid; gap: .4rem; list-style: none; margin: .55rem 0; padding: 0; }
-    .trace-option { background: var(--wash); border: 1px solid var(--line); border-radius: 6px; display: grid; gap: .25rem; grid-template-columns: auto minmax(0, 1fr); line-height: 1.45; padding: .55rem .65rem; }
+    .trace-option-list { display: grid; gap: .4rem; list-style: none; margin: .55rem 0; min-width: 0; padding: 0; }
+    .trace-option { background: var(--wash); border: 1px solid var(--line); border-radius: 6px; display: grid; gap: .25rem; grid-template-columns: auto minmax(0, 1fr); line-height: 1.45; min-width: 0; padding: .55rem .65rem; }
     .trace-option.correct { background: var(--green-bg); border-color: var(--green); }
     .trace-option-marker { font-weight: 800; min-width: 1.6rem; }
+    .trace-option > span:not(.trace-option-marker) { min-width: 0; overflow-wrap: anywhere; }
+    .trace-option > .trace-evidence { grid-column: 1 / -1; min-width: 0; }
     .trace-evidence { background: #eef4f6; border-left: 4px solid #78909a; line-height: 1.5; margin: .55rem 0; overflow-wrap: anywhere; padding: .65rem .75rem; }
     .trace-evidence strong { display: block; font-size: .72rem; letter-spacing: .04em; margin-bottom: .25rem; text-transform: uppercase; }
     .trace-prose { min-width: 0; }
@@ -234,12 +249,31 @@
     .trace-section-note { color: var(--muted); line-height: 1.5; margin: 0 0 .7rem; }
     .trace-empty { color: var(--muted); line-height: 1.5; padding: 1.2rem; }
     .trace-error { background: var(--red-bg); color: var(--red); padding: .8rem; }
+    .benchmark-panel h3 { margin-top: 1.2rem; }
+    .benchmark-panel table { font-size: .8rem; }
+    .benchmark-panel td .badge { font-size: .68rem; }
     .telemetry-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin-top: 1rem; }
     .telemetry-grid > div { min-width: 0; }
     .telemetry-grid h3 { margin-bottom: .5rem; }
     .compact-table { border: 1px solid var(--line); border-radius: 6px; overflow: auto; }
     .compact-table table { font-size: .8rem; }
     .download-link[hidden] { display: none; }
+    .dataset-head { align-items: flex-start; display: flex; gap: 1rem; justify-content: space-between; }
+    .dataset-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin: .8rem 0; }
+    .dataset-actions a { background: var(--navy); border-radius: 5px; color: #fff; padding: .55rem .7rem; text-decoration: none; }
+    .dataset-filters { display: grid; gap: .65rem; grid-template-columns: minmax(220px, 1fr) 150px auto; margin: .8rem 0; }
+    .dataset-list { display: grid; gap: .8rem; }
+    .dataset-card { background: var(--paper); border: 1px solid var(--line); border-radius: 7px; min-width: 0; overflow: hidden; }
+    .dataset-card > summary { align-items: flex-start; display: flex; flex-wrap: wrap; gap: .45rem .6rem; list-style: none; min-width: 0; padding: .85rem .9rem; }
+    .dataset-card > summary::-webkit-details-marker { display: none; }
+    .dataset-card > summary::before { color: var(--muted); content: "▸"; flex: 0 0 auto; font-size: 1rem; line-height: 1.4; }
+    .dataset-card[open] > summary { border-bottom: 1px solid var(--line); }
+    .dataset-card[open] > summary::before { content: "▾"; }
+    .dataset-card-question { flex: 1 1 24rem; font-weight: 700; line-height: 1.45; min-width: 0; overflow-wrap: anywhere; }
+    .dataset-card-body { min-width: 0; padding: .9rem; }
+    .dataset-card-body h3 { margin: 0 0 .25rem; }
+    .dataset-card .trace-option-list { margin-bottom: .8rem; }
+    .dataset-answer { background: var(--green-bg); border-left: 4px solid var(--green); margin: .65rem 0; padding: .65rem .75rem; }
     .stages { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .7rem; margin-top: .8rem; }
     .stage { border-top: 4px solid #9bb0b8; background: var(--wash); padding: .8rem; min-width: 0; }
     .stage p { color: var(--muted); font-size: .86rem; line-height: 1.45; margin: .5rem 0 0; }
@@ -296,7 +330,7 @@
       .progress-details { grid-template-columns: 1fr; }
       .timeline-filters { grid-template-columns: 1fr; }
       .timeline-summary { grid-column: auto; }
-      .stages, .filters, .trace-filters { grid-template-columns: 1fr; }
+      .stages, .filters, .trace-filters, .dataset-filters { grid-template-columns: 1fr; }
       .filters .search, .trace-filters .search { grid-column: auto; }
       .trace-head .badge { margin-top: .75rem; }
       .trace-comparison { grid-template-columns: 1fr; }
@@ -396,7 +430,7 @@
           <g class="activity-node" id="activity-eligibility-gate"><title>Separable Arctic components remain eligible for scoped QA. Insufficient or inseparable evidence is unresolved.</title><polygon points="360,225 495,270 360,315 225,270"></polygon><text x="360" y="266">Eligible?</text><text class="activity-note" x="360" y="286">scoped Arctic component retained</text></g>
           <g class="activity-node exit" id="activity-excluded"><title>Terminal scientific eligibility exclusion. Historical decisions remain retained.</title><rect x="20" y="365" width="170" height="70" rx="10"></rect><text x="105" y="395">Excluded</text><text class="activity-note" x="105" y="416">historical decision retained</text></g>
           <g class="activity-node exit" id="activity-unresolved"><title>Terminal unresolved scientific eligibility state for insufficient or inseparable evidence. Historical decisions remain retained.</title><rect x="530" y="365" width="170" height="70" rx="10"></rect><text x="615" y="395">Unresolved</text><text class="activity-note" x="615" y="416">insufficient or inseparable</text></g>
-          <g class="activity-node" id="activity-finding"><title>Select and freeze one finding per paper family and run</title><rect x="210" y="365" width="300" height="70" rx="10"></rect><text x="360" y="395">Select one finding</text><text class="activity-note" x="360" y="416">freeze answer and source locator</text></g>
+          <g class="activity-node" id="activity-finding"><title>Try at most two findings, one initial question plus up to two question revisions per finding, and six candidate paths per paper family; stop early after full MCQ success or multiple independent disqualifying causes</title><rect x="210" y="365" width="300" height="70" rx="10"></rect><text x="360" y="395">Try at most two findings</text><text class="activity-note" x="360" y="416">initial + two question revisions, at most six paths</text></g>
           <g class="activity-node" id="activity-generation"><title>Generate the question by answer-first or direct-joint arm</title><rect x="210" y="485" width="300" height="90" rx="10"></rect><text x="360" y="518">Generate question</text><text class="activity-note" x="360" y="540">answer-first or direct-joint arm</text><text class="activity-note" x="360" y="558">same frozen finding</text></g>
           <g class="activity-node" id="activity-reconstruction"><title>Independently reconstruct the answer while the proposed answer is hidden</title><rect x="210" y="625" width="300" height="70" rx="10"></rect><text x="360" y="655">Blinded reconstruction</text><text class="activity-note" x="360" y="676">answer hidden from verifier</text></g>
           <g class="activity-node" id="activity-answer-verification"><title>Independently verify entailment, relation, scope, ambiguity, alternatives, evidence, and claim type</title><rect x="210" y="745" width="300" height="90" rx="10"></rect><text x="360" y="776">Answer verification</text><text class="activity-note" x="360" y="798">entailment · scope · ambiguity</text><text class="activity-note" x="360" y="816">alternatives · evidence · claim type</text></g>
@@ -412,14 +446,15 @@
           <g class="activity-node terminal" id="activity-end"><title>End with retained evidence and an explicit terminal state</title><rect x="260" y="1845" width="200" height="65" rx="32"></rect><text x="360" y="1874">Retained result</text><text class="activity-note" x="360" y="1894">no human acceptance implied</text></g>
         </svg>
       </div>
-      <p class="method-limits">The active latitude-first policy is v3. It uses eligibility prompt v6, eligibility schema v3, and generation prompt v14. It uses actual study sites at or above 66.56° N, on land or sea. Separable Arctic components remain for scoped QA. Insufficient or inseparable evidence is unresolved. Historical decisions remain retained. Roles: the author model proposes findings, questions, and distractors. The verifier model reconstructs answers and checks exact options. Deterministic code enforces source locators, scope, bindings, and export rules. The read-only viewer never starts a run.</p>
+      <p class="method-limits">The active latitude-first policy is v3. It uses eligibility prompt v6, eligibility schema v3, and generation prompt v20. It uses actual study sites at or above 66.56° N, on land or sea. Separable Arctic components remain for scoped QA. Insufficient or inseparable evidence is unresolved. Historical decisions remain retained. Roles: the author model proposes findings, questions, and distractors. Each finding can receive up to two question revisions, with at most two findings and six candidate paths per paper family. A source-blind verifier checks only the displayed question and context before source-aware answer checks. The verifier model then reconstructs answers and checks exact options. Deterministic code enforces source locators, scope, bindings, and export rules. The read-only viewer never starts a run.</p>
     </section>
 
     <section class="panel trace-panel" id="pipeline-inspector" aria-labelledby="pipeline-inspector-title">
       <div class="trace-head">
         <div>
           <h2 id="pipeline-inspector-title">Live per-paper pipeline inspector</h2>
-          <p>Inspect retained attempts, prompts, model responses, parsed records, evidence, checks, rejection reasons, costs, and provenance. Large payloads load only after you select a stage.</p>
+          <p>Inspect retained model calls, QA candidate versions, finding attempts, prompts, model responses, parsed records, evidence, checks, rejection reasons, costs, and provenance. Large payloads load only after you select a stage.</p>
+          <p class="trace-section-note">A single QA generation path can call multiple models and stages. Model calls count retained receipts. QA candidate versions and finding attempts count only stored IDs. The viewer does not infer either count from model-call totals.</p>
           <div class="meta" id="trace-meta">Loading retained pipeline traces...</div>
         </div>
         <span class="badge" id="trace-state">Loading</span>
@@ -428,7 +463,7 @@
         <div class="field search"><label for="trace-q">Paper title, DOI, or ID</label><input id="trace-q" name="q" maxlength="200" placeholder="Search retained pipeline papers"></div>
         <div class="field"><label for="trace-paper-state">Final state</label><select id="trace-paper-state" name="state"><option value="">All states</option><option value="machine_accepted_unverified">Machine accepted, unverified</option><option value="incomplete_non_mcq">Incomplete MCQ</option><option value="generation_rejected">Generation rejected</option><option value="eligibility_rejected">Eligibility rejected</option><option value="eligibility_unresolved">Eligibility unresolved</option><option value="eligible">Eligible</option><option value="ambiguous_charge">Ambiguous charge</option><option value="in_progress">In progress</option><option value="not_started">Not started</option></select></div>
         <div class="field"><label for="trace-stage-filter">Current stage</label><select id="trace-stage-filter" name="stage"><option value="">All stages</option><option value="eligibility">Scientific eligibility</option><option value="finding_answer_extraction">Finding extraction</option><option value="question_generation">Question generation</option><option value="blinded_reconstruction">Blinded reconstruction</option><option value="answer_verification">Answer verification</option><option value="distractor_generation">Distractor generation</option><option value="option_verification">Option verification</option><option value="repair">Repair</option></select></div>
-        <div class="field"><label for="trace-run-filter">Run ID</label><input id="trace-run-filter" name="run_id" maxlength="200" placeholder="All runs"></div>
+        <div class="field"><label>Run scope</label><span class="meta">Latest invocation selected automatically</span></div>
         <div class="field"><label for="trace-limit">Rows</label><select id="trace-limit" name="limit"><option>10</option><option selected>25</option><option>50</option><option>100</option></select></div>
         <button class="filter-action" type="submit">Apply</button>
       </form>
@@ -530,6 +565,65 @@
       </div>
     </section>
 
+    <section class="panel" id="live-dataset" aria-labelledby="live-dataset-title">
+      <div class="dataset-head">
+        <div>
+          <h2 id="live-dataset-title">Live accepted dataset</h2>
+          <p id="live-dataset-detail">Loading the current-contract publication snapshot...</p>
+          <p class="meta" id="live-dataset-preview"></p>
+          <div class="meta" id="live-dataset-meta"></div>
+        </div>
+        <span class="badge" id="live-dataset-count">Loading</span>
+      </div>
+      <div class="dataset-actions" id="live-dataset-downloads" hidden>
+        <a href="/downloads/live-dataset/benchmark" download="accepted-benchmark.jsonl">Download benchmark JSONL</a>
+        <a href="/downloads/live-dataset/reviewer" download="accepted-reviewer.jsonl">Download reviewer JSONL</a>
+      </div>
+      <form class="dataset-filters" id="live-dataset-filters">
+        <div class="field"><label for="live-dataset-q">Question, context, option, answer, DOI, or title</label><input id="live-dataset-q" name="q" maxlength="200" placeholder="Search accepted questions"></div>
+        <div class="field"><label for="live-dataset-page-size">Items per page</label><select id="live-dataset-page-size" name="page_size"><option value="10">10</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select></div>
+        <button class="filter-action" type="submit">Search dataset</button>
+      </form>
+      <div class="dataset-list" id="live-dataset-list"><div class="loading">Loading accepted questions...</div></div>
+      <div class="pager">
+        <span id="live-dataset-page-summary">Page 1</span>
+        <div class="pager-controls"><button type="button" id="live-dataset-previous">Previous</button><button type="button" id="live-dataset-next">Next</button></div>
+      </div>
+    </section>
+
+    <section class="panel benchmark-panel" id="live-benchmark" aria-labelledby="live-benchmark-title">
+      <div class="metadata-head">
+        <div>
+          <h2 id="live-benchmark-title">Live benchmarking</h2>
+          <p id="benchmark-detail">Loading the streaming abstention evaluation...</p>
+          <div class="meta" id="benchmark-meta"></div>
+        </div>
+        <span class="badge" id="benchmark-state">Loading</span>
+      </div>
+      <p class="meta" id="benchmark-scope">Every accepted question runs on the plan's models at the high reasoning preset, twice per condition and three times per repeat. Gemini calls bill the Google API credits. Claude Code and Codex calls bill the subscriptions at USD 0; their list-price equivalent is informational only.</p>
+      <div class="source-counts" id="benchmark-counts" aria-label="Live benchmarking counts"></div>
+      <h3>Gemini budget and extrapolation</h3>
+      <p class="meta" id="benchmark-budget-detail">The guard has not written a state file yet.</p>
+      <div class="source-counts" id="benchmark-budget-counts" aria-label="Gemini evaluation budget"></div>
+      <h3>Per-model results</h3>
+      <div class="table-wrap" id="benchmark-model-table"><div class="loading">Loading per-model results...</div></div>
+      <div class="telemetry-grid">
+        <div>
+          <h3>Provider quota readings</h3>
+          <div class="compact-table" id="benchmark-quota-table"><div class="loading">No guard state selected.</div></div>
+        </div>
+        <div>
+          <h3>Guard rules</h3>
+          <div class="compact-table" id="benchmark-rule-table"><div class="loading">No guard state selected.</div></div>
+        </div>
+      </div>
+      <h3>Per-question cost journal</h3>
+      <p class="meta" id="benchmark-journal-note"></p>
+      <div class="table-wrap" id="benchmark-question-table"><div class="loading">Loading the cost journal...</div></div>
+      <h3>Evaluator watch state</h3>
+      <div class="compact-table" id="benchmark-watch-table"><div class="loading">Loading the watch state...</div></div>
+    </section>
+
     <div class="grid">
       <article class="panel readiness">
         <h2>Metadata discovery</h2>
@@ -567,7 +661,7 @@
         <div class="field"><label for="pending_reason">Pending reason</label><select id="pending_reason" name="pending_reason"><option value="all">All reasons</option><option value="unreviewed">Unreviewed</option><option value="access-pending">Access pending</option><option value="geography-pending">Geography pending</option><option value="other-pending">Other pending</option></select></div>
         <div class="field"><label for="metadata_disposition">Metadata disposition</label><select id="metadata_disposition" name="metadata_disposition"><option value="all">All dispositions</option><option value="priority_seed">Priority seed</option><option value="retained_article_type">Retained article type</option><option value="flagged_nonresearch_type">Flagged nonresearch type</option><option value="unresolved_missing_type">Unresolved missing type</option><option value="unresolved_mixed_type">Unresolved mixed type</option><option value="unresolved_other_type">Unresolved other type</option></select></div>
         <div class="field"><label for="access_readiness">Access readiness</label><select id="access_readiness" name="access_readiness"><option value="all">All states</option><option value="not_checked">Not checked</option><option value="full_text_ready">Ready for eligibility</option><option value="working_landing_page_only">Landing page only</option><option value="access_pending">Access pending</option><option value="retryable_error">Retryable error</option><option value="extraction_pending">Extraction pending</option><option value="OCR_required">OCR required</option><option value="identity_pending">Identity pending</option><option value="no_source_found">No source found</option></select></div>
-        <div class="field"><label for="gemini_status">Historical Gemini setup state</label><select id="gemini_status" name="gemini_status"><option value="all">All states</option><option value="not_started">Not started</option><option value="queued">Queued</option><option value="eligible">Eligible</option><option value="excluded">Excluded</option><option value="uncertain">Uncertain</option><option value="screening_error">Validation error</option><option value="too_large_not_ready">Too large</option><option value="ambiguous_charge">Ambiguous charge</option></select></div>
+        <div class="field"><label for="gemini_status">Historical Gemini setup state</label><select id="gemini_status" name="gemini_status"><option value="all">All states</option><option value="not_started">Not started</option><option value="queued">Queued</option><option value="eligible">Eligible</option><option value="excluded">Excluded</option><option value="uncertain">Uncertain</option><option value="screening_error">Validation error</option><option value="too_large_not_ready">Too large</option><option value="ambiguous_charge">Ambiguous charge</option><option value="unresolved_rescreenable">Unresolved, re-screenable</option></select></div>
         <div class="field"><label for="page_size">Rows per page</label><select id="page_size" name="page_size"><option>10</option><option selected>25</option><option>50</option><option>100</option></select></div>
         <button class="filter-action" type="submit">Apply</button>
       </form>
@@ -591,6 +685,7 @@
       pages: 1,
       revision: null,
       timeline: [],
+      dataset: { page: 1, pages: 1, available: false },
       trace: {
         cursor: null,
         cursors: [null],
@@ -598,13 +693,18 @@
         nextCursor: null,
         selectedPaper: initialParameters.get('trace_paper'),
         selectedStage: initialParameters.get('trace_stage'),
-        detailRevision: null
+        detailRevision: null,
+        detailController: null,
+        scopeRunId: null
       }
     };
     const $ = (id) => document.getElementById(id);
     const formatNumber = (value) => new Intl.NumberFormat().format(value ?? 0);
     const label = (value) => value ? String(value).replaceAll('_', ' ').replaceAll('-', ' ') : 'Not available';
     const dateText = (value) => value ? new Date(value).toLocaleString() : 'Not available';
+    const centralStateTime = (value) => value ? new Intl.DateTimeFormat('en-US', {
+      year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit', timeZone: 'America/Chicago', timeZoneName: 'short'
+    }).format(new Date(value)) : 'Unknown';
     const timelineDateText = (value) => {
       if (!value) return 'Time not available';
       const instant = new Date(value);
@@ -634,6 +734,70 @@
         link.rel = 'noopener noreferrer';
       }
       return link;
+    }
+    function renderLiveDatasetCard(record, index = 0) {
+      const benchmark = record.benchmark || {};
+      const reviewer = record.reviewer || {};
+      const card = document.createElement('details');
+      card.className = 'dataset-card';
+      card.open = index === 0;
+      const summary = document.createElement('summary');
+      summary.append(
+        text('span', benchmark.question || 'Question not available', 'dataset-card-question'),
+        text('span', `${formatNumber((benchmark.options || []).length)} options`, 'badge unknown')
+      );
+      const body = document.createElement('div');
+      body.className = 'dataset-card-body';
+      body.append(text('h3', benchmark.question || 'Question not available'));
+      const paper = reviewer.paper || {};
+      body.append(text('div', [paper.title, paper.doi].filter(Boolean).join(' | ') || 'Paper identity not available', 'meta'));
+      if (benchmark.question_context) body.append(text('p', `Context: ${benchmark.question_context}`, 'trace-section-note'));
+      const correct = new Map((reviewer.options || []).map((option) => [option.option_id, option.is_correct]));
+      const options = document.createElement('ol');
+      options.className = 'trace-option-list';
+      (benchmark.options || []).forEach((option) => {
+        const item = document.createElement('li');
+        item.className = `trace-option${correct.get(option.option_id) ? ' correct' : ''}`;
+        item.append(text('span', `${option.position}.`, 'trace-option-marker'), text('span', option.text));
+        options.append(item);
+      });
+      body.append(options);
+      const answer = reviewer.reference_answer || {};
+      body.append(text('p', `Answer: ${answer.text || 'Not available'}`, 'dataset-answer'));
+      const evidence = reviewer.answer_evidence || {};
+      if (evidence.excerpt) {
+        const block = text('p', evidence.excerpt, 'trace-evidence');
+        block.prepend(text('strong', 'Answer evidence'));
+        if (evidence.locator) block.title = JSON.stringify(evidence.locator);
+        body.append(block);
+      }
+      const rationales = Object.entries(reviewer.rationales || {}).filter(([, value]) => value);
+      if (rationales.length) {
+        const rationaleList = document.createElement('ul');
+        rationaleList.className = 'trace-readable-list';
+        rationales.forEach(([name, value]) => rationaleList.append(text('li', `${label(name)}: ${value}`)));
+        body.append(text('strong', 'Rationales'), rationaleList);
+      }
+      body.append(rawJsonDetails('Raw benchmark and reviewer JSON', record));
+      card.append(summary, body);
+      return card;
+    }
+    async function loadLiveDataset() {
+      if (!state.dataset.available) return;
+      const parameters = new URLSearchParams(new FormData($('live-dataset-filters')));
+      parameters.set('page', state.dataset.page);
+      try {
+        const data = await fetchJson(`/api/live-dataset?${parameters}`);
+        state.dataset.page = data.page;
+        state.dataset.pages = data.pages;
+        $('live-dataset-list').replaceChildren(...data.records.map(renderLiveDatasetCard));
+        if (!data.records.length) $('live-dataset-list').append(text('div', 'No accepted question matches this search.', 'empty'));
+        $('live-dataset-page-summary').textContent = `Page ${formatNumber(data.page)} of ${formatNumber(data.pages)} | ${formatNumber(data.total)} items`;
+        $('live-dataset-previous').disabled = data.page <= 1;
+        $('live-dataset-next').disabled = data.page >= data.pages;
+      } catch (error) {
+        $('live-dataset-list').replaceChildren(text('div', error.message, 'fatal'));
+      }
     }
     const SVG_NS = 'http://www.w3.org/2000/svg';
     const progressStatusLabels = {
@@ -774,7 +938,7 @@
         ['working full text', access.full_text_ready],
         ['not ready', accessNotReady],
         ['submissions', metrics.generation_submissions],
-        ['accepted QA', metrics.accepted_qa],
+        ['accepted QA (latest invocation)', metrics.accepted_qa],
         ['spent', money(metrics.spent_usd)],
         ['unsettled', money(unsettled)],
         ['in flight', metrics.inflight]
@@ -1093,6 +1257,22 @@
       card.append(heading);
       return card;
     }
+    function readableItem(titleValue, stateValue = null, summaryValue = titleValue, open = false) {
+      const details = document.createElement('details');
+      details.className = 'trace-readable-item';
+      details.open = open;
+      const summary = document.createElement('summary');
+      summary.className = 'trace-readable-item-summary';
+      summary.append(text('span', summaryValue || titleValue, 'trace-readable-item-summary-text'));
+      if (stateValue) summary.append(text('span', label(stateValue), `badge ${stateValue}`));
+      const body = document.createElement('div');
+      body.className = 'trace-readable-item-body';
+      const card = readableCard(titleValue, stateValue);
+      card.classList.add('trace-readable-item-card');
+      body.append(card);
+      details.append(summary, body);
+      return { details, card };
+    }
     function readableKeyValues(entries) {
       const grid = document.createElement('div');
       grid.className = 'trace-kv';
@@ -1147,14 +1327,77 @@
       });
       return combined;
     }
+    function evidenceQuote(value) {
+      if (!value || typeof value !== 'object') return null;
+      for (const key of ['quote', 'evidence_quote', 'text_quote', 'text']) {
+        if (typeof value[key] === 'string' && value[key].trim()) return value[key];
+      }
+      return null;
+    }
+    function evidenceSpanIds(value, includeComponents = false) {
+      if (!value || typeof value !== 'object') return [];
+      const values = [value.span_id, value.source_span_id];
+      if (includeComponents && Array.isArray(value.source_span_ids)) values.push(...value.source_span_ids);
+      return [...new Set(values.filter((item) => typeof item === 'string' && item.trim()))];
+    }
+    function evidenceContext(value, inherited = {}) {
+      const identity = value?.identity && typeof value.identity === 'object' ? value.identity : {};
+      const source = value?.source && typeof value.source === 'object' ? value.source : {};
+      const context = { ...inherited };
+      ['paper_id', 'source_id', 'source_version_id'].forEach((key) => {
+        const aliases = key === 'source_version_id' ? ['source_version_id', 'source_version', 'source_content_hash'] : [key];
+        const item = aliases.map((name) => value?.[name] ?? identity[name] ?? source[name]).find(hasTraceValue);
+        if (hasTraceValue(item)) context[key] = String(item);
+      });
+      return context;
+    }
+    function compatibleEvidenceContext(left, right) {
+      return ['paper_id', 'source_id', 'source_version_id'].every((key) => !left[key] || !right[key] || left[key] === right[key]);
+    }
+    function createEvidenceResolver(payload) {
+      const spans = new Map();
+      const rootContext = evidenceContext(payload);
+      function add(value, inherited) {
+        if (!value || typeof value !== 'object') return;
+        const context = evidenceContext(value, inherited);
+        const quote = evidenceQuote(value);
+        if (quote) {
+          const locator = value.locator && typeof value.locator === 'object' ? value.locator : null;
+          evidenceSpanIds(value).forEach((spanId) => {
+            const records = spans.get(spanId) || [];
+            const duplicate = records.some((item) => item.quote === quote && JSON.stringify(item.locator) === JSON.stringify(locator) && JSON.stringify(item.context) === JSON.stringify(context));
+            if (!duplicate) records.push({ quote, locator, context, span_id: value.span_id || value.source_span_id || spanId, start_byte: value.start_byte, end_byte: value.end_byte });
+            spans.set(spanId, records);
+          });
+        }
+        Object.values(value).forEach((nested) => {
+          if (Array.isArray(nested)) nested.forEach((item) => add(item, context));
+          else if (nested && typeof nested === 'object') add(nested, context);
+        });
+      }
+      add(payload, rootContext);
+      return {
+        resolve(value, inherited = rootContext) {
+          if (!value || typeof value !== 'object') return { value, found: false };
+          if (evidenceQuote(value)) return { value, found: true };
+          const context = evidenceContext(value, inherited);
+          for (const spanId of evidenceSpanIds(value)) {
+            const matches = (spans.get(spanId) || []).filter((item) => compatibleEvidenceContext(item.context, context));
+            if (matches.length === 1) {
+              const match = matches[0];
+              return { value: { ...value, quote: match.quote, locator: value.locator || match.locator, start_byte: value.start_byte ?? match.start_byte, end_byte: value.end_byte ?? match.end_byte }, found: true };
+            }
+          }
+          return { value, found: false };
+        }
+      };
+    }
     function appendEvidenceLocator(target, value) {
       const fields = [];
       const locator = value?.locator;
       if (locator && typeof locator === 'object') {
         Object.entries(locator).filter(([, item]) => hasTraceValue(item) && typeof item !== 'object').forEach(([key, item]) => fields.push([label(key), traceValueText(item)]));
       } else if (hasTraceValue(locator)) fields.push(['Locator', traceValueText(locator)]);
-      const spanIds = value?.display_span_ids?.length ? value.display_span_ids : [value?.span_id].filter(Boolean);
-      if (spanIds.length) fields.push([spanIds.length > 1 ? 'Spans' : 'Span', spanIds.join(' to ')]);
       const start = evidenceOffset(value, 'start');
       const end = evidenceOffset(value, 'end');
       if (start !== null || end !== null) fields.push(['Offsets', `${start ?? '?'} to ${end ?? '?'}`]);
@@ -1164,27 +1407,37 @@
       fields.forEach(([caption, item]) => locatorNode.append(text('span', `${caption}: ${item}`)));
       target.append(locatorNode);
     }
-    function appendEvidence(target, value, caption = 'Source evidence') {
+    function appendEvidence(target, value, caption = 'Source evidence', resolver = null, options = {}) {
       if (!value || typeof value !== 'object') return;
-      const quote = value.quote || value.evidence_quote || value.text_quote;
-      const locator = value.locator;
-      if (!hasTraceValue(quote) && !hasTraceValue(locator)) return;
+      const resolution = resolver ? resolver.resolve(value) : { value, found: Boolean(evidenceQuote(value)) };
+      const evidenceValue = resolution.value;
+      const quote = evidenceQuote(evidenceValue);
+      const locator = evidenceValue.locator;
+      const requestedSpan = evidenceSpanIds(value).length > 0;
+      if (!hasTraceValue(quote) && !hasTraceValue(locator) && !requestedSpan) return;
       const evidence = document.createElement('div');
       evidence.className = 'trace-evidence';
       evidence.append(text('strong', caption));
-      if (hasTraceValue(quote)) appendReadableText(evidence, quote);
-      appendEvidenceLocator(evidence, value);
+      if (hasTraceValue(quote)) {
+        if (options.maxLength && quote.length > options.maxLength) {
+          appendReadableText(evidence, `${quote.slice(0, options.maxLength).trimEnd()}…`);
+          const complete = document.createElement('details');
+          complete.append(text('summary', 'Complete supporting quotation'));
+          appendReadableText(complete, quote);
+          evidence.append(complete);
+        } else appendReadableText(evidence, quote);
+      } else if (requestedSpan) {
+        evidence.append(text('p', 'Quotation not recorded or available for this source span.', 'trace-section-note'));
+      }
+      appendEvidenceLocator(evidence, evidenceValue);
       target.append(evidence);
     }
-    function appendEvidenceList(target, values, options = {}) {
+    function appendEvidenceList(target, values, options = {}, resolver = null) {
       combineContiguousEvidence(values).forEach((span) => {
-        const quote = String(span.quote || span.evidence_quote || span.text_quote || '');
-        const shown = options.maxLength && quote.length > options.maxLength ? `${quote.slice(0, options.maxLength).trimEnd()}…` : quote;
-        const key = hasTraceValue(span.quote) ? 'quote' : hasTraceValue(span.evidence_quote) ? 'evidence_quote' : 'text_quote';
-        appendEvidence(target, { ...span, [key]: shown }, options.caption || 'Source evidence');
+        appendEvidence(target, span, options.caption || 'Source evidence', resolver, options);
       });
     }
-    function appendOptions(target, options, caption = 'Answer choices') {
+    function appendOptions(target, options, caption = 'Answer choices', resolver = null) {
       if (!Array.isArray(options) || !options.length) return;
       target.append(text('strong', caption));
       const list = document.createElement('ol');
@@ -1197,6 +1450,7 @@
         item.append(text('span', marker, 'trace-option-marker'), text('span', traceValueText(value.text ?? value.answer ?? value.value), 'trace-kv-value'));
         const notes = [value.type ? label(value.type) : null, value.verification_label ? label(value.verification_label) : null, value.label ? label(value.label) : null].filter(Boolean);
         if (notes.length) item.append(text('span', '', 'trace-option-marker'), text('span', notes.join(' · '), 'subtle'));
+        appendEvidence(item, value.evidence || value, 'Supporting quotation', resolver);
         list.append(item);
       });
       target.append(list);
@@ -1253,11 +1507,16 @@
       }
       return record?.correct_answer;
     }
-    function renderQaReadableRecord(wrapper, index = 0) {
+    function renderQaReadableRecord(wrapper, index = 0, resolver = null) {
       const record = wrapper?.candidate || wrapper?.record || wrapper || {};
       const itemId = wrapper?.item_id || record.item_id;
       const recordState = wrapper?.status || record.status || record.release_label;
-      const card = readableCard(itemId ? `QA item ${itemId}` : `QA record ${index + 1}`, recordState);
+      const title = itemId ? `QA item ${itemId}` : `QA record ${index + 1}`;
+      const reasonSummary = wrapper?.rejection_reasons?.[0]?.plain_reason?.summary
+        || wrapper?.rejection_reasons?.[0]?.reason_code;
+      const summary = [record.question || title, reasonSummary].filter(Boolean).join(' | ');
+      const item = readableItem(title, recordState, summary, index === 0);
+      const card = item.card;
       if (hasTraceValue(record.question)) {
         appendLabeledReadableText(card, 'Question', record.question, 'trace-question');
       } else card.append(text('p', 'No question is recorded for this item.', 'trace-section-note'));
@@ -1280,8 +1539,10 @@
         ['Run', wrapper?.run_id || record.run_id]
       ];
       card.append(readableKeyValues(metadata));
-      appendOptions(card, record.options);
-      appendOptions(card, record.distractors, 'Distractors');
+      appendOptions(card, record.options, 'Answer choices', resolver);
+      appendOptions(card, record.distractors, 'Distractors', resolver);
+      appendCandidateRejectionReasons(card, wrapper);
+      appendRejectedDistractors(card, wrapper.distractor_rejections);
       const reconstruction = record.reconstruction || record.blinded_reconstruction;
       const narrativeFields = [
         ['Rationale', record.rationale],
@@ -1300,33 +1561,112 @@
       if (record.answer_verification) card.append(readableObject('Answer checks', record.answer_verification));
       if (Array.isArray(record.option_verdicts) && record.option_verdicts.length) {
         card.append(text('strong', 'Option verdicts'));
-        record.option_verdicts.forEach((verdict, verdictIndex) => card.append(readableObject(`Option ${verdictIndex + 1}`, verdict)));
+        const verdicts = document.createElement('div');
+        verdicts.className = 'trace-readable';
+        record.option_verdicts.forEach((verdict, verdictIndex) => {
+          const title = `Option ${verdictIndex + 1}`;
+          const verdictState = verdict.accepted === true ? 'success' : verdict.accepted === false ? 'rejected' : null;
+          const item = readableItem(title, verdictState, `${title} | ${label(verdict.reason_code || verdictState || 'Recorded')}`);
+          item.card.append(readableObject(title, verdict));
+          verdicts.append(item.details);
+        });
+        card.append(verdicts);
       }
-      appendEvidence(card, record.answer);
-      appendEvidence(card, record.evidence || record.answer_evidence);
+      appendEvidence(card, record.answer, 'Source evidence', resolver);
+      appendEvidence(card, record.evidence || record.answer_evidence, 'Source evidence', resolver);
+      if (Array.isArray(record.decision_evidence) && record.decision_evidence.length) {
+        card.append(text('strong', 'Combined decision evidence'));
+        appendEvidenceList(card, record.decision_evidence, { caption: 'Decision excerpt' }, resolver);
+      }
       if (record.answer?.required_question_phrases) card.append(readableList('Required question phrases', record.answer.required_question_phrases));
-      return card;
+      return item.details;
+    }
+    function recordedReasonBlock(reason, caption = 'Recorded rejection reason') {
+      const plain = reason?.plain_reason || {};
+      const block = document.createElement('div');
+      block.className = 'trace-reason';
+      block.append(text('strong', caption));
+      block.append(text('p', plain.summary || 'A rejection reason was recorded, but no plain-language explanation is available.', 'trace-reason-summary'));
+      if (plain.explanation) block.append(text('p', plain.explanation));
+      block.append(readableKeyValues([
+        ['Stage', label(reason?.stage || plain.failed_stage)],
+        ['Recorded reason', label(reason?.reason_code || plain.reason_code)],
+        ['Recorded', dateText(reason?.created_at)]
+      ]));
+      const raw = rawJsonDetails('Raw recorded reason and details', {
+        reason_code: reason?.reason_code,
+        stage: reason?.stage,
+        rejection_id: reason?.rejection_id,
+        detail: reason?.detail
+      });
+      block.append(raw);
+      return block;
+    }
+    function appendRecordedReason(target, reason, caption = 'Recorded rejection reason') {
+      target.append(recordedReasonBlock(reason, caption));
+    }
+    function appendCandidateRejectionReasons(target, wrapper) {
+      if (wrapper?.status !== 'rejected') return;
+      const reasons = wrapper.rejection_reasons || [];
+      if (!reasons.length) {
+        target.append(text('p', 'This rejected QA item has no reason recorded for its current payload.', 'trace-section-note'));
+        return;
+      }
+      const wrap = document.createElement('div');
+      wrap.className = 'trace-readable';
+      reasons.forEach((reason, index) => {
+        const title = label(reason?.reason_code || `Reason ${index + 1}`);
+        const summary = reason?.plain_reason?.summary || title;
+        const item = readableItem(title, 'rejected', `${title} | ${summary}`, index === 0);
+        item.card.append(recordedReasonBlock(reason));
+        wrap.append(item.details);
+      });
+      target.append(wrap);
+    }
+    function appendRejectedDistractors(target, records) {
+      if (!Array.isArray(records) || !records.length) return;
+      const wrap = document.createElement('div');
+      wrap.className = 'trace-readable';
+      wrap.append(text('strong', 'Rejected distractors'));
+      records.forEach((record, index) => {
+        const title = record.option_text || `Distractor ${index + 1}`;
+        const reasonSummary = (record.reason_codes || []).map(label).join(', ') || 'No reason recorded';
+        const item = readableItem(title, 'rejected', `${title} | ${reasonSummary}`);
+        const card = item.card;
+        card.append(readableKeyValues([
+          ['Stage', label(record.stage)], ['Type', label(record.option_type)], ['Recorded reasons', reasonSummary]
+        ]));
+        card.append(rawJsonDetails('Raw distractor rejection details', record));
+        wrap.append(item.details);
+      });
+      target.append(wrap);
     }
     function renderRunsReadable(records) {
       const wrap = document.createElement('div'); wrap.className = 'trace-readable';
-      records.forEach((run) => {
-        const card = readableCard(run.run_id || 'Run ID not recorded', run.state);
+      records.forEach((run, index) => {
+        const title = run.run_id || 'Run ID not recorded';
+        const item = readableItem(title, run.state, `${title} | ${label(run.current_stage)}`, index === 0);
+        const card = item.card;
         card.append(readableKeyValues([
           ['Current stage', label(run.current_stage)],
-          ['Attempts', run.attempt_count],
-          ['Latest update', dateText(run.latest_at_utc)],
-          ['Candidate items', run.candidate_item_ids?.length || 0]
+          ['Model calls (retained receipts)', run.model_call_count ?? run.attempt_count],
+          ['QA candidate versions (stored IDs)', run.qa_candidate_count ?? run.candidate_item_ids?.length],
+          ['Finding attempts (stored IDs)', run.finding_attempt_count ?? run.finding_ids?.length],
+          ['Latest update', dateText(run.latest_at_utc)]
         ]));
-        if (run.candidate_item_ids?.length) card.append(readableList('Candidate item IDs', run.candidate_item_ids));
-        card.append(text('p', `${formatNumber(run.stages?.length || 0)} retained model or processing stages.`, 'trace-section-note'));
-        wrap.append(card);
+        if (run.candidate_item_ids?.length) card.append(readableList('QA candidate version IDs', run.candidate_item_ids));
+        if (run.finding_ids?.length) card.append(readableList('Finding attempt IDs', run.finding_ids));
+        card.append(text('p', `${formatNumber(run.stages?.length || 0)} retained model-call receipts across pipeline stages.`, 'trace-section-note'));
+        wrap.append(item.details);
       });
       return wrap;
     }
-    function renderSourcesReadable(records) {
+    function renderSourcesReadable(records, resolver = null) {
       const wrap = document.createElement('div'); wrap.className = 'trace-readable';
-      records.forEach((source) => {
-        const card = readableCard(source.title || source.doi || source.source_id || 'Source record', source.access_state);
+      records.forEach((source, index) => {
+        const title = source.title || source.doi || source.source_id || 'Source record';
+        const item = readableItem(title, source.access_state, `${title} | ${label(source.availability || source.access_state)}`, index === 0);
+        const card = item.card;
         card.append(readableKeyValues([
           ['Source', source.source_id], ['Availability', label(source.availability)],
           ['DOI', source.doi], ['Authors', source.authors], ['Year', source.year],
@@ -1340,7 +1680,7 @@
         const resolved = source.scope_evidence?.resolved_evidence || [];
         resolved.forEach((group) => {
           card.append(text('strong', `Evidence for ${label(group.criterion)}`));
-          appendEvidenceList(card, group.spans || []);
+          appendEvidenceList(card, group.spans || [], {}, resolver);
         });
         if (Array.isArray(source.chunks) && source.chunks.length) {
           card.append(text('strong', `Retained source chunks (${formatNumber(source.chunks.length)})`));
@@ -1356,15 +1696,17 @@
             card.append(details);
           });
         }
-        wrap.append(card);
+        wrap.append(item.details);
       });
       return wrap;
     }
-    function renderEligibilityReadable(records) {
+    function renderEligibilityReadable(records, resolver = null) {
       const wrap = document.createElement('div'); wrap.className = 'trace-readable';
-      records.forEach((record) => {
+      records.forEach((record, index) => {
         const decision = record.validation?.decision || record.decision || record.state;
-        const card = readableCard(`Eligibility decision ${record.candidate_key || record.job_key || ''}`.trim(), decision);
+        const title = `Eligibility decision ${record.candidate_key || record.job_key || ''}`.trim();
+        const item = readableItem(title, decision, `${title} | ${label(decision)}`, index === 0);
+        const card = item.card;
         card.append(readableKeyValues([
           ['Decision', label(decision)], ['Model', record.model_version || record.model],
           ['Completed', dateText(record.completed_at_utc)], ['Cost', money(record.actual_cost_usd)],
@@ -1373,26 +1715,29 @@
         card.append(readableList('Overall reasons', record.validation?.overall_reason_codes || record.overall_reason_codes));
         const criteria = record.parsed_response?.criteria || [];
         criteria.forEach((criterion) => {
-          const criterionCard = readableCard(label(criterion.criterion_id), criterion.status);
+          const criterionItem = readableItem(label(criterion.criterion_id), criterion.status, `${label(criterion.criterion_id)} | ${label(criterion.status)}`);
+          const criterionCard = criterionItem.card;
           criterionCard.append(readableList('Reasons', criterion.reason_codes));
           criterionCard.append(readableList('Missing context', criterion.missing_context));
           const spanIds = (criterion.evidence || []).flatMap((entry) => entry.span_ids || []);
-          if (spanIds.length) criterionCard.append(readableList('Evidence span IDs', spanIds));
-          card.append(criterionCard);
+          if (spanIds.length) appendEvidenceList(criterionCard, spanIds.map((span_id) => ({ span_id })), { caption: 'Supporting quotation' }, resolver);
+          card.append(criterionItem.details);
         });
         (record.validation?.resolved_evidence || []).forEach((group) => {
           card.append(text('strong', `Located evidence for ${label(group.criterion)}`));
-          appendEvidenceList(card, group.spans || []);
+          appendEvidenceList(card, group.spans || [], {}, resolver);
         });
-        wrap.append(card);
+        wrap.append(item.details);
       });
       return wrap;
     }
-    function renderFindingsReadable(records) {
+    function renderFindingsReadable(records, resolver = null) {
       const wrap = document.createElement('div'); wrap.className = 'trace-readable';
       records.forEach((record, index) => {
         const answer = record.answer || {};
-        const card = readableCard(record.finding_id ? `Finding ${record.finding_id}` : `Frozen finding ${index + 1}`, record.status);
+        const title = record.finding_id ? `Finding ${record.finding_id}` : `Frozen finding ${index + 1}`;
+        const item = readableItem(title, record.status, `${title} | ${answer.text || label(record.status)}`, index === 0);
+        const card = item.card;
         if (hasTraceValue(answer.text)) {
           appendLabeledReadableText(card, 'Frozen answer', answer.text, 'trace-answer');
         }
@@ -1400,43 +1745,52 @@
           ['Claim type', answer.claim_type], ['Run', record.run_id], ['Source', record.source_id],
           ['Chunk', record.chunk_id], ['Scope period', answer.scope?.period], ['Scope population', answer.scope?.population]
         ]));
-        appendEvidence(card, answer);
+        appendEvidence(card, answer, 'Source evidence', resolver);
         if (answer.required_question_phrases) card.append(readableList('Required question phrases', answer.required_question_phrases));
-        wrap.append(card);
+        wrap.append(item.details);
       });
       return wrap;
     }
-    function renderCandidatesReadable(records) {
+    function renderCandidatesReadable(records, resolver = null) {
       const wrap = document.createElement('div'); wrap.className = 'trace-readable';
-      records.forEach((record, index) => wrap.append(renderQaReadableRecord(record, index)));
+      records.forEach((record, index) => wrap.append(renderQaReadableRecord(record, index, resolver)));
       return wrap;
     }
-    function renderValidationReadable(records) {
+    function renderValidationReadable(records, resolver = null) {
       const wrap = document.createElement('div'); wrap.className = 'trace-readable';
       records.forEach((record, index) => {
-        const card = readableCard(`${label(record.stage || 'Validation')} · ${record.item_id || `event ${index + 1}`}`, record.label);
+        const title = `${label(record.stage || 'Validation')} · ${record.item_id || `event ${index + 1}`}`;
+        const item = readableItem(title, record.label, `${title} | ${label(record.label || 'Recorded')}`, index === 0);
+        const card = item.card;
         card.append(readableKeyValues([['Recorded', dateText(record.created_at)], ['Event ID', record.event_id]]));
         card.append(readableList('Reasons', record.reason_codes));
         if (record.details?.labels) card.append(readableObject('Recorded checks', record.details.labels));
-        appendOptions(card, record.details?.distractors, 'Checked distractors');
-        wrap.append(card);
+        appendOptions(card, record.details?.distractors, 'Checked distractors', resolver);
+        wrap.append(item.details);
       });
       return wrap;
     }
     function renderRejectionsReadable(records) {
       const wrap = document.createElement('div'); wrap.className = 'trace-readable';
       records.forEach((record, index) => {
-        const card = readableCard(record.reason_code ? label(record.reason_code) : `Exit ${index + 1}`, 'rejected');
+        const reason = record.reason;
+        const state = reason?.plain_reason?.category === 'eligibility_unresolved' || reason?.plain_reason?.category === 'provider_output_unresolved' ? 'unresolved' : 'rejected';
+        const title = record.reason_code ? label(record.reason_code) : `Exit ${index + 1}`;
+        const reasonSummary = reason?.plain_reason?.summary || label(record.reason_code || state);
+        const item = readableItem(title, state, `${title} | ${reasonSummary}`, index === 0);
+        const card = item.card;
         card.append(readableKeyValues([
           ['Stage', label(record.stage)], ['Item', record.item_id], ['Source', record.source_id],
           ['Recorded', dateText(record.created_at)], ['Rejection ID', record.rejection_id]
         ]));
-        if (record.detail && Object.keys(record.detail).length) card.append(readableObject('Exit details', record.detail));
-        wrap.append(card);
+        if (reason) appendRecordedReason(card, reason, state === 'unresolved' ? 'Recorded unresolved exit' : 'Recorded rejection reason');
+        else card.append(text('p', 'No reason was recorded for this exit.', 'trace-section-note'));
+        if (record.detail && Object.keys(record.detail).length) card.append(rawJsonDetails('Raw exit details', record.detail));
+        wrap.append(item.details);
       });
       return wrap;
     }
-    function renderPlainReason(reason) {
+    function renderPlainReason(reason, resolver = null) {
       const card = readableCard('Why this paper stopped', reason.category);
       card.classList.add('trace-reason');
       card.append(text('p', reason.summary || 'No plain-language reason is recorded.', 'trace-reason-summary'));
@@ -1463,28 +1817,30 @@
       });
       if (reason.evidence?.length) {
         card.append(text('strong', 'Source evidence used for this check'));
-        appendEvidenceList(card, reason.evidence, { maxLength: 500 });
+        appendEvidenceList(card, reason.evidence, { maxLength: 500 }, resolver);
         card.append(text('p', 'Long quotes are shortened here. The complete retained record remains available in the sections below and in raw JSON.', 'trace-section-note'));
       } else {
         card.append(text('p', reason.evidence_note || 'No source evidence was retained for this failed check.', 'trace-section-note'));
       }
       return card;
     }
-    function renderExportsReadable(records) {
+    function renderExportsReadable(records, resolver = null) {
       const wrap = document.createElement('div'); wrap.className = 'trace-readable';
       records.forEach((entry, index) => {
         const record = entry.record || {};
         if (record.question || record.options || record.reference_answers) {
-          const card = renderQaReadableRecord({ ...entry, ...record, candidate: record }, index);
-          card.prepend(readableKeyValues([['Export', entry.export_id], ['Form', label(entry.kind)]]));
-          wrap.append(card);
+          const item = renderQaReadableRecord({ ...entry, ...record, candidate: record }, index, resolver);
+          item.querySelector('.trace-readable-item-card')?.prepend(readableKeyValues([['Export', entry.export_id], ['Form', label(entry.kind)]]));
+          wrap.append(item);
         } else {
-          const card = readableCard(`${label(entry.kind || 'Export record')} · ${entry.export_id || index + 1}`, record.release_label || record.state);
+          const title = `${label(entry.kind || 'Export record')} · ${entry.export_id || index + 1}`;
+          const item = readableItem(title, record.release_label || record.state, `${title} | ${label(record.release_label || record.state || 'Recorded')}`, index === 0);
+          const card = item.card;
           card.append(readableKeyValues([
             ['Item', record.item_id], ['Stage', label(record.stage)], ['Reason', label(record.reason_code)],
             ['Source', record.source_id], ['Task type', label(record.task_type)]
           ]));
-          wrap.append(card);
+          wrap.append(item.details);
         }
       });
       return wrap;
@@ -1496,7 +1852,7 @@
       details.append(traceField(caption, value));
       return details;
     }
-    function detailSection(caption, value, renderer, open = false) {
+    function detailSection(caption, value, renderer, open = false, resolver = null) {
       const details = document.createElement('details');
       details.className = 'trace-stage';
       const storageKey = `trace-open:section:${caption}`;
@@ -1504,7 +1860,7 @@
       const summary = text('summary', `${caption} (${Array.isArray(value) ? formatNumber(value.length) : 'retained'})`);
       const body = document.createElement('div');
       body.className = 'trace-stage-body';
-      body.append(renderer(value), rawJsonDetails(caption, value));
+      body.append(renderer(value, resolver), rawJsonDetails(caption, value));
       details.append(summary, body);
       details.addEventListener('toggle', () => {
         if (details.open) sessionStorage.setItem(storageKey, '1');
@@ -1514,6 +1870,9 @@
     }
     function traceIdentityValue(identity, key, fallback = 'Not available') {
       return identity && identity[key] !== null && identity[key] !== undefined && identity[key] !== '' ? identity[key] : fallback;
+    }
+    function traceCount(value) {
+      return hasTraceValue(value) ? formatNumber(value) : 'Not recorded';
     }
     function renderTraceTable(payload) {
       const target = $('trace-table');
@@ -1525,7 +1884,7 @@
       }
       const table = document.createElement('table');
       table.className = 'trace-table';
-      table.innerHTML = '<colgroup><col class="trace-paper-column"><col class="trace-state-column"><col class="trace-stage-column"><col class="trace-attempt-column"></colgroup><thead><tr><th>Paper</th><th>State</th><th>Stage</th><th>Attempts</th></tr></thead>';
+      table.innerHTML = '<colgroup><col class="trace-paper-column"><col class="trace-state-column"><col class="trace-stage-column"><col class="trace-model-call-column"><col class="trace-candidate-column"><col class="trace-finding-column"></colgroup><thead><tr><th>Paper</th><th>State</th><th>Stage</th><th>Model calls</th><th>QA candidates</th><th>Finding attempts</th></tr></thead>';
       const body = document.createElement('tbody');
       items.forEach((item) => {
         const row = document.createElement('tr');
@@ -1534,21 +1893,29 @@
         const select = text('button', item.title || item.doi || item.paper_id || item.source_id || 'Untitled paper');
         select.type = 'button';
         select.addEventListener('click', () => selectTracePaper(item.paper_key));
-        paper.append(select, text('div', item.doi || item.paper_id || item.source_id || 'No DOI or paper ID', 'subtle'));
+        const stateTime = text('div', centralStateTime(item.state_entered_at_utc), 'trace-state-time');
+        stateTime.dataset.stateEnteredAtUtc = item.state_entered_at_utc || '';
+        if (item.state_entered_at_utc) stateTime.title = item.state_entered_at_utc;
+        paper.append(select, stateTime);
         const finalState = document.createElement('td'); finalState.dataset.label = 'State';
         finalState.append(text('span', label(item.state), `badge ${item.state || 'unknown'}`));
         if (item.reason?.summary) finalState.append(text('div', item.reason.summary, 'trace-list-reason'));
         const stage = text('td', label(item.current_stage)); stage.dataset.label = 'Stage';
-        const attempts = text('td', formatNumber(item.attempt_count)); attempts.dataset.label = 'Attempts';
-        row.append(paper, finalState, stage, attempts);
+        const modelCalls = text('td', traceCount(item.model_call_count ?? item.attempt_count)); modelCalls.dataset.label = 'Model calls';
+        const candidates = text('td', traceCount(item.qa_candidate_count)); candidates.dataset.label = 'QA candidates';
+        const findings = text('td', traceCount(item.finding_attempt_count)); findings.dataset.label = 'Finding attempts';
+        row.append(paper, finalState, stage, modelCalls, candidates, findings);
         body.append(row);
       });
       table.append(body);
       target.append(table);
     }
+    function transportAttemptLabel(stage) {
+      const attempt = stage.transport_attempt ?? stage.attempt;
+      return hasTraceValue(attempt) ? `transport attempt ${attempt}` : 'transport attempt not recorded';
+    }
     function stageCaption(stage) {
-      const attempt = stage.attempt === null || stage.attempt === undefined ? '' : ` · attempt ${stage.attempt}`;
-      return `${label(stage.stage || stage.role || 'stage')}${attempt}`;
+      return `${label(stage.stage || stage.role || 'stage')} · ${transportAttemptLabel(stage)}`;
     }
     function stageSummary(stage) {
       const summary = document.createElement('summary');
@@ -1582,6 +1949,7 @@
       const scrollTop = target.scrollTop;
       target.replaceChildren();
       const identity = payload.identity || {};
+      const evidenceResolver = createEvidenceResolver(payload);
       const heading = text('div', '', 'trace-identity');
       heading.append(text('h3', traceIdentityValue(identity, 'title', traceIdentityValue(identity, 'doi', traceIdentityValue(identity, 'paper_id', 'Untitled paper')))));
       heading.append(text('div', `DOI ${traceIdentityValue(identity, 'doi')} · Paper ${traceIdentityValue(identity, 'paper_id')} · Source ${traceIdentityValue(identity, 'source_id')}`, 'meta'));
@@ -1596,7 +1964,7 @@
       heading.append(actions);
       target.append(heading);
       target.append(text('p', 'Machine labels report retained pipeline state. They do not establish scientific acceptance or truth.', 'trace-section-note'));
-      if (payload.plain_reason) target.append(renderPlainReason(payload.plain_reason));
+      if (payload.plain_reason) target.append(renderPlainReason(payload.plain_reason, evidenceResolver));
       const sections = [
         ['Generated QA and distractors', payload.candidates, renderCandidatesReadable, true],
         ['Frozen findings', payload.findings, renderFindingsReadable],
@@ -1607,7 +1975,7 @@
         ['Rejections and unresolved exits', payload.rejections, renderRejectionsReadable],
         ['Immutable exports', payload.exports, renderExportsReadable]
       ];
-      sections.filter(([, value]) => value && (!Array.isArray(value) || value.length)).forEach(([caption, value, renderer, open]) => target.append(detailSection(caption, value, renderer, open)));
+      sections.filter(([, value]) => value && (!Array.isArray(value) || value.length)).forEach(([caption, value, renderer, open]) => target.append(detailSection(caption, value, renderer, open, evidenceResolver)));
       const stageHeading = text('h3', 'Model and processing stages');
       stageHeading.style.marginTop = '1rem';
       target.append(stageHeading);
@@ -1627,8 +1995,9 @@
     function renderStagePayloadReadable(payload) {
       const wrap = document.createElement('div');
       wrap.className = 'trace-readable';
+      const evidenceResolver = createEvidenceResolver(payload);
       const stage = payload.stage || {};
-      const overview = readableCard(`${label(stage.stage || 'Pipeline stage')} · attempt ${stage.attempt ?? 'not recorded'}`, stage.state);
+      const overview = readableCard(`${label(stage.stage || 'Pipeline stage')} · ${transportAttemptLabel(stage)}`, stage.state);
       overview.append(readableKeyValues([
         ['Role', label(stage.role)], ['Run', stage.run_id], ['Requested model', stage.model?.requested],
         ['Returned model', stage.model?.returned], ['Prompt version', stage.model?.prompt_version],
@@ -1642,7 +2011,7 @@
       if (parsed && typeof parsed === 'object') {
         const hasQaShape = hasTraceValue(parsed.question) || hasTraceValue(parsed.answer) || Array.isArray(parsed.options) || Array.isArray(parsed.distractors);
         const parsedWrap = readableCard('Parsed model result', response.availability);
-        parsedWrap.append(hasQaShape ? renderQaReadableRecord({ candidate: parsed }) : readableObject('Structured result', parsed));
+        parsedWrap.append(hasQaShape ? renderQaReadableRecord({ candidate: parsed }, 0, evidenceResolver) : readableObject('Structured result', parsed));
         wrap.append(parsedWrap);
       }
       if (hasTraceValue(response.model_text)) {
@@ -1667,18 +2036,18 @@
       wrap.append(requestCard);
       if (Array.isArray(payload.candidates) && payload.candidates.length) {
         const candidates = readableCard(`Related QA records (${formatNumber(payload.candidates.length)})`);
-        candidates.append(renderCandidatesReadable(payload.candidates));
+        candidates.append(renderCandidatesReadable(payload.candidates, evidenceResolver));
         wrap.append(candidates);
       }
       if (Array.isArray(payload.source_context) && payload.source_context.length) {
         const sources = readableCard(`Retained source context (${formatNumber(payload.source_context.length)})`);
-        sources.append(renderSourcesReadable(payload.source_context));
+        sources.append(renderSourcesReadable(payload.source_context, evidenceResolver));
         wrap.append(sources);
       }
       if (payload.eligibility) {
         const records = Array.isArray(payload.eligibility) ? payload.eligibility : [payload.eligibility];
         const eligibility = readableCard('Eligibility context');
-        eligibility.append(renderEligibilityReadable(records));
+        eligibility.append(renderEligibilityReadable(records, evidenceResolver));
         wrap.append(eligibility);
       }
       if (payload.journal) wrap.append(readableObject('Processing journal', payload.journal));
@@ -1686,12 +2055,16 @@
       wrap.append(rawJsonDetails('selected stage', payload));
       return wrap;
     }
+    function traceRunQuery() {
+      const runId = $('trace-run-filter')?.value.trim();
+      return runId ? `&run_id=${encodeURIComponent(runId)}` : '';
+    }
     async function loadTraceStage(paperKey, stageKey, body, button) {
       if (!paperKey || !stageKey) return;
       button.disabled = true;
       button.textContent = 'Loading...';
       try {
-        const payload = await fetchJson(`/api/pipeline-trace/stage?paper_key=${encodeURIComponent(paperKey)}&stage_key=${encodeURIComponent(stageKey)}`);
+        const payload = await fetchJson(`/api/pipeline-trace/stage?paper_key=${encodeURIComponent(paperKey)}&stage_key=${encodeURIComponent(stageKey)}${traceRunQuery()}`);
         state.trace.selectedStage = stageKey;
         updateTraceLocation();
         body.querySelectorAll('.trace-readable, .trace-raw, .trace-error').forEach((node) => node.remove());
@@ -1704,30 +2077,45 @@
     }
     async function selectTracePaper(paperKey, preserveScroll = false) {
       if (!paperKey) return;
+      if (state.trace.detailController) state.trace.detailController.abort();
+      const controller = new AbortController();
+      state.trace.detailController = controller;
       state.trace.selectedPaper = paperKey;
       state.trace.selectedStage = null;
       updateTraceLocation();
       $('trace-detail-body').replaceChildren(text('div', 'Loading retained paper detail...', 'loading'));
       try {
-        const payload = await fetchJson(`/api/pipeline-trace/paper?paper_key=${encodeURIComponent(paperKey)}`);
+        const payload = await fetchJson(`/api/pipeline-trace/paper?paper_key=${encodeURIComponent(paperKey)}${traceRunQuery()}`, { signal: controller.signal });
+        if (state.trace.detailController !== controller || state.trace.selectedPaper !== paperKey) return;
         state.trace.detailRevision = traceRevision(payload);
         renderTraceDetail(payload);
         renderTraceTable(state.trace.lastList || { items: [] });
         if (!preserveScroll) $('pipeline-inspector').scrollIntoView({ block: 'start' });
       } catch (error) {
-        $('trace-detail-body').replaceChildren(text('div', error.message, 'trace-error'));
+        if (error.name !== 'AbortError' && state.trace.detailController === controller) {
+          $('trace-detail-body').replaceChildren(text('div', error.message, 'trace-error'));
+        }
+      } finally {
+        if (state.trace.detailController === controller) state.trace.detailController = null;
       }
     }
     async function refreshSelectedTrace() {
-      if (!state.trace.selectedPaper) return;
+      if (!state.trace.selectedPaper || state.trace.detailController) return;
+      const paperKey = state.trace.selectedPaper;
+      const controller = new AbortController();
+      state.trace.detailController = controller;
       try {
-        const payload = await fetchJson(`/api/pipeline-trace/paper?paper_key=${encodeURIComponent(state.trace.selectedPaper)}`);
+        const payload = await fetchJson(`/api/pipeline-trace/paper?paper_key=${encodeURIComponent(paperKey)}${traceRunQuery()}`, { signal: controller.signal });
+        if (state.trace.detailController !== controller || state.trace.selectedPaper !== paperKey) return;
         const revision = traceRevision(payload);
         if (revision !== state.trace.detailRevision) {
           state.trace.detailRevision = revision;
           renderTraceDetail(payload);
         }
-      } catch (_) { /* Keep the selected detail visible during a transient refresh error. */ }
+      } catch (_) { /* Keep the selected detail visible during a refresh error or cancellation. */ }
+      finally {
+        if (state.trace.detailController === controller) state.trace.detailController = null;
+      }
     }
     async function loadTraceList(reset = false) {
       if (reset) {
@@ -1745,6 +2133,14 @@
         const freshness = payload.freshness || {};
         const pipeline = freshness.pipeline || {};
         const ledger = freshness.ledger || {};
+        const scopeRunId = pipeline.invocation_run_id || null;
+        if (state.trace.scopeRunId !== scopeRunId) {
+          state.trace.scopeRunId = scopeRunId;
+          state.trace.detailRevision = null;
+          if (state.trace.selectedPaper) {
+            $('trace-detail-body').replaceChildren(text('div', 'Loading the latest invocation detail...', 'loading'));
+          }
+        }
         const active = pipeline.state === 'running' || Number(ledger.inflight || 0) > 0;
         const traceState = active ? 'running' : pipeline.availability === 'observed' || ledger.availability === 'observed' ? 'not_running' : 'unavailable';
         $('trace-state').textContent = active ? 'Active run observed' : traceState === 'not_running' ? 'No active run' : 'State unavailable';
@@ -1754,6 +2150,13 @@
         $('trace-previous').disabled = state.trace.page <= 1;
         $('trace-next').disabled = !state.trace.nextCursor;
         const keys = new Set((payload.items || []).map((item) => item.paper_key));
+        if (state.trace.selectedPaper && !keys.has(state.trace.selectedPaper)) {
+          state.trace.selectedPaper = null;
+          state.trace.selectedStage = null;
+          state.trace.detailRevision = null;
+          $('trace-detail-body').replaceChildren(text('div', 'No paper is selected in this run scope.', 'trace-empty'));
+          $('trace-detail-summary').textContent = 'Select a paper to inspect its retained work.';
+        }
         if (!state.trace.selectedPaper && payload.items?.length) await selectTracePaper(payload.items[0].paper_key, true);
         else if (state.trace.selectedPaper) await refreshSelectedTrace();
       } catch (error) {
@@ -1765,8 +2168,8 @@
         $('trace-next').disabled = true;
       }
     }
-    async function fetchJson(url) {
-      const response = await fetch(url, { cache: 'no-store' });
+    async function fetchJson(url, options = {}) {
+      const response = await fetch(url, { cache: 'no-store', ...options });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || `Request failed: ${response.status}`);
       return payload;
@@ -1815,7 +2218,7 @@
         const connection = gemini.connection || {};
         const historical = gemini.historical_setup || {};
         $('gemini-meta').textContent = `Model ${gemini.model || connection.model || 'not configured'} | Connection ${label(connection.state)} at ${dateText(connection.checked_at_utc)} | Actual generation requests ${formatNumber(connection.generation_requests)} | Shared away cap USD ${budget.away_session_total_ceiling_usd || 'not set'} | Live-test cap USD ${budget.live_test_suballocation_usd || 'not set'} | Reserved USD ${budget.reserved_usd || '0'} | Spent USD ${budget.spent_usd || '0'} | Ambiguous USD ${budget.ambiguous_reserved_usd || '0'} | Prior setup ${label(historical.state)} with ${formatNumber(historical.counts?.queued)} queued at ${dateText(historical.updated_at_utc)}; historical only | Updated ${dateText(gemini.updated_at_utc)}`;
-        const geminiOrder = ['queued', 'completed', 'eligible', 'excluded', 'uncertain', 'screening_error', 'too_large_not_ready', 'ambiguous_charge'];
+        const geminiOrder = ['queued', 'completed', 'eligible', 'excluded', 'uncertain', 'screening_error', 'too_large_not_ready', 'ambiguous_charge', 'unresolved_rescreenable'];
         $('gemini-counts').replaceChildren(...geminiOrder.map((name) => { const box = document.createElement('div'); box.className = 'count'; box.append(text('span', label(name)), text('strong', formatNumber(data.gemini_counts?.[name]))); return box; }));
         const streaming = data.streaming_pipeline || {};
         setBadge($('streaming-state'), streaming.state || streaming.telemetry);
@@ -1900,6 +2303,18 @@
           fragment.append(link);
           return fragment;
         }));
+        const liveDataset = data.live_dataset || {};
+        state.dataset.available = liveDataset.state === 'available';
+        $('live-dataset-detail').textContent = liveDataset.message || 'No live dataset is selected.';
+        $('live-dataset-preview').textContent = liveDataset.preview?.label
+          ? `${liveDataset.preview.label}. ${liveDataset.preview.notice}`
+          : '';
+        $('live-dataset-meta').textContent = state.dataset.available ? `Updated ${timelineDateText(liveDataset.updated_at_utc)} | ${label(liveDataset.selection?.generation_prompt_version)}` : '';
+        $('live-dataset-count').textContent = `${formatNumber(liveDataset.item_count)} items`;
+        $('live-dataset-count').className = `badge ${state.dataset.available ? 'fresh' : liveDataset.state || 'unavailable'}`;
+        $('live-dataset-downloads').hidden = !state.dataset.available;
+        $('live-dataset-filters').hidden = !state.dataset.available;
+        if (!state.dataset.available) $('live-dataset-list').replaceChildren(text('div', liveDataset.message || 'No live dataset is selected.', 'empty'));
         setBadge($('discovery-verdict'), data.readiness.metadata_discovery.verdict);
         $('discovery-condition').textContent = data.readiness.metadata_discovery.completion_condition;
         setBadge($('prefilter-verdict'), data.readiness.metadata_prefilter.verdict);
@@ -1918,11 +2333,141 @@
         $('sources').replaceChildren(...data.artifacts.map((source) => text('li', `${source.name}: ${source.available ? dateText(source.updated_at_utc) : 'unavailable'}`)));
         if (force || state.revision !== data.data_revision) {
           state.revision = data.data_revision;
-          await Promise.all([loadAccepted(), loadCandidates()]);
+          await Promise.all([loadAccepted(), loadCandidates(), loadLiveDataset()]);
         }
       } catch (error) {
         $('process-title').textContent = 'Corpus data is unavailable';
         $('process-detail').textContent = error.message;
+      }
+    }
+    function simpleTable(target, head, rows, emptyMessage) {
+      target.replaceChildren();
+      if (!rows.length) { target.append(text('div', emptyMessage, 'empty')); return; }
+      const table = document.createElement('table');
+      const header = document.createElement('tr');
+      head.forEach((caption) => header.append(text('th', caption)));
+      const thead = document.createElement('thead'); thead.append(header); table.append(thead);
+      const body = document.createElement('tbody');
+      rows.forEach((cells) => {
+        const row = document.createElement('tr');
+        cells.forEach((value, index) => {
+          const cell = document.createElement('td');
+          cell.dataset.label = head[index];
+          if (value instanceof Node) cell.append(value); else cell.textContent = value;
+          row.append(cell);
+        });
+        body.append(row);
+      });
+      table.append(body); target.append(table);
+    }
+    const ratio = (value) => value === null || value === undefined ? '-' : Number(value).toFixed(3);
+    const percentText = (value) => value === null || value === undefined ? 'Not available' : `${value}%`;
+    const usd = (value) => value === null || value === undefined ? '-' : `USD ${Number(value).toFixed(4)}`;
+    function countBox(name, value) {
+      const box = document.createElement('div'); box.className = 'count';
+      box.append(text('span', name), text('strong', value)); return box;
+    }
+    function renderLiveBenchmark(data) {
+      const guard = data.guard || {};
+      setBadge($('benchmark-state'), data.availability === 'available'
+        ? ((data.evaluator || {}).running ? 'running' : 'not_running')
+        : data.availability);
+      $('benchmark-detail').textContent = data.message;
+      const guardAge = guard.present
+        ? `Guard updated ${dateText(guard.generated_at_utc)}`
+        : 'The cost and quota guard has written no state file yet';
+      $('benchmark-meta').textContent = `${guardAge} | Journal ${data.journal_dir || 'not selected'} | Page rebuilt ${dateText(data.generated_at_utc)}`;
+      $('benchmark-counts').replaceChildren(
+        countBox('Questions evaluated', formatNumber(data.questions_evaluated)),
+        countBox('Complete questions', formatNumber(data.questions_complete)),
+        countBox('Trials recorded', formatNumber(data.trials_recorded)),
+        countBox('Models', formatNumber((data.models || []).length)),
+        countBox('Paused models', formatNumber(Object.keys(guard.paused_models || {}).length)),
+        countBox('Evaluator polls', formatNumber((data.evaluator || {}).polls))
+      );
+      const budget = guard.gemini_budget || {};
+      const phase = guard.evaluation_phase || {};
+      const expectation = guard.expectation || {};
+      $('benchmark-budget-detail').textContent = guard.present
+        ? `Gemini evaluation spend counts against the captain's USD ${budget.budget_usd || '200.00'} allocation and against the benchmark_evaluation ceiling of USD ${Number(phase.ceiling_usd ?? 0).toFixed(2)} that policy ${phase.policy_id || 'not selected'} sets. The extrapolation projects the spend so far at its own cost per question over the ${formatNumber(expectation.questions_still_expected)} questions the chapter 3 run is still expected to accept (${label(expectation.binding_bound)} bound).`
+        : 'The cost and quota guard has written no state file yet, so no budget reading is available.';
+      $('benchmark-budget-counts').replaceChildren(
+        countBox('Gemini spent', usd(budget.spend_so_far_usd)),
+        countBox('Per question', usd(budget.usd_per_question)),
+        countBox('Extrapolated total', usd(budget.extrapolated_total_usd)),
+        countBox('Budget', usd(budget.budget_usd)),
+        countBox('Ledger ceiling left', usd(phase.remaining_usd)),
+        countBox('Questions still expected', formatNumber(expectation.questions_still_expected))
+      );
+      const modelHead = ['Model', 'Vendor', 'State', 'Questions', 'N1', 'N2', 'N3', 'N4', 'N5', 'ACC', 'Precision_abs', 'Recall_abs', 'F1_abs', 'Abstention rate', 'R-Acc', 'SSR', 'Invalid rate', 'Cost per question'];
+      simpleTable($('benchmark-model-table'), modelHead, (data.models || []).map((model) => {
+        const metrics = model.metrics || {};
+        const badge = text('span', model.paused ? 'paused' : 'active', `badge ${model.paused ? 'paused' : 'running'}`);
+        const state = document.createElement('div');
+        state.append(badge);
+        if (model.pause_reason) state.append(text('div', model.pause_reason, 'meta'));
+        return [
+          model.model,
+          model.vendor_label + (model.in_plan ? '' : ' (not in the current plan)'),
+          state,
+          formatNumber(model.questions_evaluated),
+          formatNumber(model.counts.N1), formatNumber(model.counts.N2), formatNumber(model.counts.N3),
+          formatNumber(model.counts.N4), formatNumber(model.counts.N5),
+          ratio(metrics.acc), ratio(metrics.precision_abs), ratio(metrics.recall_abs), ratio(metrics.f1_abs),
+          ratio(metrics.abstention_rate), ratio(metrics.r_acc), ratio(metrics.ssr),
+          ratio(model.invalid_rate),
+          `${usd(model.cost_per_question_usd)} (${label(model.cost_per_question_basis)})`
+        ];
+      }), 'No model has answered a question yet.');
+      const quota = guard.quota || {};
+      const quotaRows = ['claude_session', 'claude_week', 'claude_fable', 'codex_weekly']
+        .filter((key) => quota[key])
+        .map((key) => [
+          label(key), percentText(quota[key].percent_remaining), dateText(quota[key].resets_at_utc),
+          dateText(quota[key].projected_exhausted_at_utc), label(quota[key].pace)
+        ]);
+      simpleTable($('benchmark-quota-table'), ['Window', 'Remaining', 'Resets', 'Projected exhausted', 'Pace'], quotaRows, 'No quota reading is available.');
+      simpleTable($('benchmark-rule-table'), ['Rule', 'Vendor', 'Fired', 'Detail'],
+        (guard.rules || []).map((item) => [
+          label(item.rule), label(item.vendor),
+          text('span', item.fired ? 'fired' : 'clear', `badge ${item.fired ? 'error' : 'available'}`),
+          item.detail
+        ]), 'No guard rule has been evaluated yet.');
+      $('benchmark-journal-note').textContent = data.questions_truncated
+        ? `The newest ${formatNumber((data.questions || []).length)} of ${formatNumber(data.questions_evaluated)} questions are shown.`
+        : 'Every evaluated question is shown, newest first.';
+      simpleTable($('benchmark-question-table'),
+        ['Question', 'Recorded', 'Complete', 'Generation USD', 'Gemini evaluation USD', 'Subscription tokens', 'List-price equivalent', 'Trials', 'Invalid rate', 'Wall seconds'],
+        (data.questions || []).map((question) => {
+          const tokens = question.subscription_tokens || {};
+          return [
+            question.item_id, dateText(question.recorded_at_utc),
+            question.complete ? 'yes' : 'no',
+            usd(question.generation_usd), usd(question.evaluation_gemini_usd),
+            `${formatNumber(tokens.input)} in / ${formatNumber(tokens.output)} out / ${formatNumber(tokens.thinking)} thinking`,
+            usd(question.subscription_list_price_equivalent_usd),
+            `${formatNumber(question.recorded_trials)} of ${formatNumber(question.planned_trials)}`,
+            ratio(question.invalid_rate),
+            question.wall_seconds === null || question.wall_seconds === undefined ? '-' : Number(question.wall_seconds).toFixed(1)
+          ];
+        }), 'The evaluator has journalled no question yet.');
+      const watch = data.evaluator || {};
+      simpleTable($('benchmark-watch-table'), ['Reading', 'Value'], [
+        ['Polling', watch.running ? 'yes' : 'no'],
+        ['Updated', dateText(watch.updated_at_utc)],
+        ['Age (seconds)', watch.age_seconds === null || watch.age_seconds === undefined ? 'Not available' : formatNumber(watch.age_seconds)],
+        ['Active vendors', (watch.active_vendors || []).map(label).join(', ') || 'none'],
+        ['Vendors paused by the evaluator', Object.keys(watch.paused_vendors || {}).map(label).join(', ') || 'none'],
+        ['Items evaluated', formatNumber(watch.evaluated_items)],
+        ['Guard errors', (guard.errors || []).join('; ') || 'none']
+      ], 'The evaluator has written no watch state yet.');
+    }
+    async function loadLiveBenchmark() {
+      try {
+        renderLiveBenchmark(await fetchJson('/api/live-benchmark'));
+      } catch (error) {
+        setBadge($('benchmark-state'), 'unavailable');
+        $('benchmark-detail').textContent = error.message;
       }
     }
     async function loadAccepted() {
@@ -1944,9 +2489,12 @@
       } catch (error) { $('candidate-table').replaceChildren(text('div', error.message, 'fatal')); }
     }
     $('filters').addEventListener('submit', (event) => { event.preventDefault(); state.page = 1; loadCandidates(); });
+    $('live-dataset-filters').addEventListener('submit', (event) => { event.preventDefault(); state.dataset.page = 1; loadLiveDataset(); });
+    $('live-dataset-previous').addEventListener('click', () => { state.dataset.page = Math.max(1, state.dataset.page - 1); loadLiveDataset(); });
+    $('live-dataset-next').addEventListener('click', () => { state.dataset.page = Math.min(state.dataset.pages, state.dataset.page + 1); loadLiveDataset(); });
     $('previous').addEventListener('click', () => { state.page = Math.max(1, state.page - 1); loadCandidates(); });
     $('next').addEventListener('click', () => { state.page = Math.min(state.pages, state.page + 1); loadCandidates(); });
-    $('refresh').addEventListener('click', () => { loadState(true); loadTraceList(false); });
+    $('refresh').addEventListener('click', () => { loadState(true); loadTraceList(false); loadLiveBenchmark(); });
     $('trace-filters').addEventListener('submit', (event) => { event.preventDefault(); loadTraceList(true); });
     $('trace-previous').addEventListener('click', () => {
       if (state.trace.page <= 1) return;
@@ -1970,7 +2518,8 @@
     });
     loadState(true);
     loadTraceList(true);
-    setInterval(() => { loadState(false); loadTraceList(false); }, 15000);
+    loadLiveBenchmark();
+    setInterval(() => { loadState(false); loadTraceList(false); loadLiveBenchmark(); }, 15000);
   </script>
 </body>
 </html>

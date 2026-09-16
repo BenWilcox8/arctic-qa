@@ -31,3 +31,39 @@ Use `--prompt-template` only for a known historical template.
 The exporter copies that template into `historical-prompt-bundle` and records its SHA-256 hash.
 Use `--historical-renderer` for an exact historical renderer source file.
 It does not label an unspecified or future template as historical.
+
+## Live accepted snapshot
+
+The live exporter reads the state database without changing it.
+It selects accepted families with the exact contracts in `config/live-dataset-current-contract-v1.json`.
+Thus, accepted rows from older contracts remain historical and do not enter the current dataset.
+
+The live exporter is a machine-validated preview for captain review.
+It requires a payload-bound final validation event and three accepted model-verified distractors.
+It preserves each distractor uncertainty and determinism result in the reviewer rows.
+It does not label a row as deterministic or human-reviewed.
+The final publication and CSV exports still require three deterministic accepted distractors.
+It writes one answer-present row for each paper family.
+If one family has multiple current candidates, the exporter selects the newest candidate state.
+
+Each content change creates an immutable directory under `snapshots/`.
+The exporter updates `current.json` atomically after both JSONL files and their manifest are durable.
+A restart with unchanged data selects the existing snapshot and does not add duplicate rows.
+
+Run one refresh with the current contract selection:
+
+```sh
+PYTHONPATH=src python -m arctic_qa.publication_export \
+  --state-db /mnt/crdata/research-abstention/arctic-qa/state.sqlite3 \
+  --output-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/live-publication \
+  --live-selection-file config/live-dataset-current-contract-v1.json \
+  --live-prompt-file src/arctic_qa/generation.py \
+  --live-prompt-file src/arctic_qa/validation.py
+```
+
+Add `--poll-seconds 15` to operate the bounded refresh service.
+The interval must be from 1 through 300 seconds.
+The service does not start model work or change the state database.
+
+The prompt files are immutable, hash-named files under `prompts/`.
+Dataset rows do not repeat prompt text.

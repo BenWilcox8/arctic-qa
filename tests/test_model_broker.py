@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import urllib.error
 from decimal import Decimal
 from pathlib import Path
 
@@ -128,6 +129,7 @@ def fixture(
     enabled: bool = True,
     transport=None,
     prior_construction_spend_usd: Decimal = Decimal("0"),
+    price_config_file: Path | None = None,
 ) -> dict:
     gate = tmp_path / "gate.json"
     write_json(
@@ -147,7 +149,9 @@ def fixture(
     credential.chmod(0o600)
     broker = SharedGeminiBroker(
         policy_file=ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
-        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        price_config_file=(
+            price_config_file or ROOT / "config" / "gemini-eligibility-v1.json"
+        ),
         execution_gate_file=gate,
         ledger_file=tmp_path / "shared-ledger.json",
         receipts_dir=tmp_path / "receipts",
@@ -459,7 +463,7 @@ def execute(
     family = family or f"family-{paper}"
     source = source or f"source-{paper}"
     key = broker_request_key(
-        model="gemini-3.8-flash",
+        model=str(broker.config_for_stage(stage)["model"]),
         run_id=run_id,
         phase=phase,
         stage=stage,
@@ -837,6 +841,117 @@ def test_count_error_is_durable_and_never_generates(tmp_path: Path):
     assert transport.methods == ["countTokens"]
 
 
+def test_reviewed_count_error_continuation_clears_halt_without_replay(
+    tmp_path: Path,
+) -> None:
+    legacy = json.loads((ROOT / "config" / "gemini-eligibility-v1.json").read_text())
+    legacy["config_id"] = "arctic-gemini-eligibility-r1-config-v3"
+    # The legacy revision registered only the answer judge stage.
+    legacy["stage_models"] = {}
+    legacy["stage_models"]["answer_agreement"] = {
+        "model": "gemini-2.5-flash-lite",
+        "maximum_input_tokens": 1_048_576,
+        "model_output_token_limit": 65_536,
+        "maximum_output_tokens": 4,
+        "thinking_budget": 0,
+        "input_usd_per_million_tokens": "0.10",
+        "output_usd_per_million_tokens_including_thinking": "0.40",
+        "price_valid_from": "2026-09-14",
+        "price_valid_through": "2026-12-31",
+        "price_source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "model_source": (
+            "https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-lite"
+        ),
+        "thinking_source": (
+            "https://ai.google.dev/gemini-api/docs/generate-content/thinking"
+        ),
+        "structured_output_source": "https://ai.google.dev/api/generate-content",
+        "authenticated_availability_endpoint": (
+            "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000"
+        ),
+        "authenticated_availability_checked_at_utc": "2026-09-14T20:25:00Z",
+        "authenticated_supported_methods": [
+            "generateContent",
+            "countTokens",
+            "createCachedContent",
+            "batchGenerateContent",
+        ],
+    }
+    legacy_path = tmp_path / "legacy-price.json"
+    write_json(legacy_path, legacy)
+
+    class Count404Transport(Transport):
+        def post(self, model: str, method: str, body: dict) -> dict:
+            self.methods.append(method)
+            raise urllib.error.HTTPError(
+                "https://example.invalid", 404, "Not Found", {}, None
+            )
+
+    transport = Count404Transport()
+    values = fixture(tmp_path, transport=transport, price_config_file=legacy_path)
+    body = payload()
+    body["generationConfig"].update(
+        {
+            "maxOutputTokens": 4,
+            "responseMimeType": "text/x.enum",
+            "responseJsonSchema": {"type": "string", "enum": ["yes", "no"]},
+            "thinkingConfig": {"thinkingBudget": 0},
+        }
+    )
+    key = broker_request_key(
+        model="gemini-2.5-flash-lite",
+        run_id="run-1",
+        phase="live_test",
+        stage="answer_agreement",
+        paper_id="p1",
+        family_id="family-p1",
+        source_version_id="source-p1",
+        payload=body,
+    )
+    receipt = values["broker"].execute(
+        phase="live_test",
+        run_id="run-1",
+        stage="answer_agreement",
+        paper_id="p1",
+        family_id="family-p1",
+        source_version_id="source-p1",
+        request_key=key,
+        payload=body,
+    )
+    review = tmp_path / "review.md"
+    review.write_text("The countTokens 404 recovery passed review.\n", encoding="utf-8")
+    evidence = tmp_path / "evidence.json"
+    write_json(
+        evidence,
+        {
+            "schema": "arctic-answer-judge-count-error-evidence-v1",
+            "request_key": key,
+            "count_tokens_http_status": 404,
+            "live_call_made": False,
+            "replay_prohibited": True,
+            "replacement_model": "gemini-3.1-flash-lite",
+        },
+    )
+
+    result = values["broker"].authorize_count_error_continuation(
+        request_key=key,
+        expected_ledger_sha256=sha256_file(values["ledger"]),
+        review_file=review,
+        evidence_file=evidence,
+    )
+
+    assert receipt["state"] == "count_error"
+    assert result["applied"] is True
+    assert values["broker"].status()["halted"] is False
+    assert transport.methods == ["countTokens"]
+    assert (
+        json.loads(values["ledger"].read_text())["requests"][key][
+            "count_error_continuation_sha256"
+        ]
+        == result["continuation_receipt_sha256"]
+    )
+
+
 def test_request_key_and_payload_features_fail_closed(tmp_path: Path):
     transport = Transport()
     broker = fixture(tmp_path, transport=transport)["broker"]
@@ -876,6 +991,41 @@ def test_one_accepted_item_per_family_survives_restart(tmp_path: Path):
         resumed.record_accepted(family_id="family-1", item_id="item-2")
     with pytest.raises(ValueError, match="another paper family"):
         resumed.record_accepted(family_id="family-2", item_id="item-1")
+
+
+def test_reviewed_run_supersedes_accepted_item_and_preserves_event_chain(
+    tmp_path: Path,
+) -> None:
+    values = fixture(tmp_path, transport=Transport())
+    broker = values["broker"]
+    broker.record_accepted(family_id="family-1", item_id="item-1")
+    gate = json.loads(values["gate"].read_text(encoding="utf-8"))
+    gate.update(
+        {
+            "accepted_item_supersession_enabled": True,
+            "authorized_new_run_id": "rerun-r1",
+        }
+    )
+    write_json(values["gate"], gate)
+    broker._stream_input_binding = {"run_id": "rerun-r1"}
+
+    status = broker.record_accepted(
+        family_id="family-1",
+        item_id="item-2",
+        invocation_run_id="rerun-r1",
+    )
+
+    assert status["accepted_question_count"] == 1
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    assert ledger["accepted_families"] == {"family-1": "item-2"}
+    events = sorted((tmp_path / "receipts").glob("accepted-*.json"))
+    assert len(events) == 2
+    assert {json.loads(path.read_text())["item_id"] for path in events} == {
+        "item-1",
+        "item-2",
+    }
+    resumed = fixture(tmp_path, transport=Transport())["broker"]
+    assert resumed.status()["accepted_question_count"] == 1
 
 
 def test_new_run_id_cannot_replay_the_same_request(tmp_path: Path):
@@ -987,6 +1137,50 @@ def test_received_response_is_recovered_after_final_receipt_write_crash(
     assert transport.methods == ["countTokens", "generateContent"]
 
 
+def test_new_run_preserves_foreign_submitted_liability_and_uses_free_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transport = Transport()
+    values = fixture(tmp_path, transport=transport)
+    broker = values["broker"]
+    original_reserve = broker._reserve
+
+    def interrupted_after_reserve(**kwargs: object) -> None:
+        original_reserve(**kwargs)
+        raise OSError("simulated stop after reservation")
+
+    monkeypatch.setattr(broker, "_reserve", interrupted_after_reserve)
+    with pytest.raises(OSError, match="simulated stop"):
+        execute(broker, run_id="stopped-run", paper="old-paper", family="old-family")
+
+    before = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    old_key, old_request = next(iter(before["requests"].items()))
+    assert old_request["state"] == "submitted"
+    assert before["inflight"] == 1
+    assert Decimal(before["reserved_usd"]) > 0
+
+    resumed = fixture(tmp_path, transport=transport)["broker"]
+    fresh = execute(
+        resumed,
+        run_id="new-reviewed-run",
+        paper="new-paper",
+        family="new-family",
+    )
+
+    assert fresh["state"] == "completed"
+    after = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    assert after["requests"][old_key] == old_request
+    assert after["inflight"] == 1
+    assert after["reserved_usd"] == before["reserved_usd"]
+    assert after["ambiguous_reserved_usd"] == "0"
+    assert after["halted"] is False
+    assert transport.methods == [
+        "countTokens",
+        "countTokens",
+        "generateContent",
+    ]
+
+
 def test_pretransport_settlement_recovers_only_a_reviewed_interrupted_reservation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1026,7 +1220,9 @@ def test_pretransport_settlement_recovers_only_a_reviewed_interrupted_reservatio
     review = tmp_path / "independent-review.md"
     evidence = tmp_path / "interruption-evidence.md"
     review.write_text("No transport occurred.\n", encoding="utf-8")
-    evidence.write_text("Reservation fsync completed before interruption.\n", encoding="utf-8")
+    evidence.write_text(
+        "Reservation fsync completed before interruption.\n", encoding="utf-8"
+    )
 
     result = broker.settle_pretransport_reservation(
         request_key=request_key,
@@ -2980,3 +3176,124 @@ def test_expanded_policy_stops_new_forty_first_family_but_allows_downstream(
     )
     assert downstream["state"] == "completed"
     assert transport.methods == ["countTokens", "generateContent"]
+
+
+def sibling_broker(
+    tmp_path: Path, values: dict, transport: Transport
+) -> SharedGeminiBroker:
+    """Return a second broker of the same ledger, as a second process has."""
+    return SharedGeminiBroker(
+        policy_file=ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
+        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=transport,
+    )
+
+
+def interrupted_request(tmp_path: Path, values: dict, monkeypatch) -> str:
+    """Leave one request submitted with a durable response, as a crash does."""
+    original = SharedGeminiBroker._completed_receipt
+    stopped = {"once": False}
+
+    def stop(self, submitted, response):
+        if stopped["once"]:
+            return original(self, submitted, response)
+        stopped["once"] = True
+        raise KeyboardInterrupt("the producer stopped before its settlement")
+
+    monkeypatch.setattr(SharedGeminiBroker, "_completed_receipt", stop)
+    with pytest.raises(KeyboardInterrupt):
+        execute(values["broker"])
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    key = next(
+        name
+        for name, row in ledger["requests"].items()
+        if row.get("state") == "submitted"
+    )
+    assert (tmp_path / "receipts" / f"{key}.received.json").is_file()
+    assert not (tmp_path / "receipts" / f"{key}.json").is_file()
+    return key
+
+
+def test_a_request_another_worker_settles_during_recovery_does_not_end_the_run(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The exact chapter 3 producer exit of 2026-09-16 13:53 UTC.
+
+    Orphan recovery reads the ledger once and then settles every interrupted
+    request it found. A concurrent evaluation worker of the same ledger settled
+    one of those requests inside that window and released its in-flight lock,
+    so the recovery reached a row that was already `completed` and raised "the
+    paid request is not submitted". The producer exited on its next paid call.
+    The recovery must record the skip and let that call continue.
+    """
+    values = fixture(tmp_path, transport=Transport())
+    key = interrupted_request(tmp_path, values, monkeypatch)
+    sibling = sibling_broker(tmp_path, values, Transport())
+    fired = {"once": False}
+
+    def probe(self, request_key: str) -> bool:
+        # The other worker settles and releases its lock exactly here: after
+        # this recovery took its ledger snapshot and before it settles.
+        if not fired["once"] and request_key == key:
+            fired["once"] = True
+            sibling._recover_orphans(active_run_id=None)
+        return False
+
+    monkeypatch.setattr(SharedGeminiBroker, "_inflight_held", probe)
+
+    receipt = execute(values["broker"], paper="p2")
+
+    assert fired["once"] is True
+    assert receipt["state"] == "completed"
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    assert ledger["requests"][key]["state"] == "completed"
+    assert ledger["halted"] is False
+    skipped = json.loads(
+        (tmp_path / "receipts" / f"{key}.settle-skipped.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert skipped["schema"] == "shared-paid-call-settle-skipped-v1"
+    assert skipped["observed_state"] == "completed"
+    assert skipped["reason"] == ("the request left its submitted state during recovery")
+    # The money of that request is settled once, by the worker that owned it.
+    spent = Decimal(ledger["requests"][key]["actual_cost_usd"])
+    assert spent > 0
+    assert Decimal(ledger["papers"]["family-p1"]["spent_usd"]) == spent
+    assert Decimal(ledger["papers"]["family-p1"]["reserved_usd"]) == Decimal("0")
+
+
+def test_settlement_of_a_never_submitted_request_records_and_continues(
+    tmp_path: Path,
+) -> None:
+    """A row that is not submitted holds no reservation to settle.
+
+    Every settlement acts on a ledger that another worker of the same ledger
+    can have moved. A row that is not `submitted` therefore records the skip
+    and returns False. No settlement can end the run.
+    """
+    values = fixture(tmp_path, transport=Transport())
+    assert execute(values["broker"])["state"] == "completed"
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    key = next(iter(ledger["requests"]))
+    before = values["ledger"].read_bytes()
+
+    assert values["broker"]._settle(key, actual=None, usage=None) is False
+    assert values["ledger"].read_bytes() == before
+    skipped = json.loads(
+        (tmp_path / "receipts" / f"{key}.settle-skipped.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert skipped["observed_state"] == "completed"
+    assert skipped["reason"] == (
+        "the request was not submitted when the settlement ran"
+    )
+    # A request key the ledger never held settles nothing and raises nothing.
+    assert values["broker"]._settle("d" * 64, actual=None, usage=None) is False
+    assert values["ledger"].read_bytes() == before

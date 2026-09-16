@@ -1,0 +1,380 @@
+{
+ "schema": "arctic-ch3-integration-dry-run-v1",
+ "note": "Scripted fake provider on the public fixture source; no paid call.",
+ "judge_call_plan_contract": "judge-call-plan-v1",
+ "option_call_plan_contract": "rank-order-option-verification-v1",
+ "option_proposal_count": 6,
+ "option_verified_target": 4,
+ "families": [
+  {
+   "family": "clean-full-suite",
+   "call_roles": [
+    "extractor",
+    "question_writer",
+    "standalone_verifier",
+    "reconstructor",
+    "answer_verifier",
+    "distractor_writer",
+    "option_verifier",
+    "option_verifier",
+    "option_verifier",
+    "option_verifier",
+    "option_set_verifier"
+   ],
+   "status": "candidate",
+   "qa_gate_reasons": [],
+   "pre_judge_gate_reasons": [],
+   "skip_reason": null,
+   "skipped_calls": [],
+   "shadow_cohort": false,
+   "calls_made_for_shadow": [],
+   "shadow_gate_reasons": null,
+   "standalone_pass": true,
+   "standalone_reask": null,
+   "reconstruction_called": true,
+   "answer_verification_called": true,
+   "option_verification_call_plan": {
+    "contract_version": "rank-order-option-verification-v1",
+    "verified_target": 4,
+    "proposed": 6,
+    "prefiltered": 0,
+    "verified": 4,
+    "verified_option_hashes": [
+     "option-b65128424ab767ebb33e",
+     "option-cf5a788e9742670336d8",
+     "option-0635f2f4e2085a91453b",
+     "option-c4079e7f236b30538103"
+    ],
+    "reserve": [
+     {
+      "option_text": "1.5 m",
+      "reason_code": "option_verification_deferred"
+     },
+     {
+      "option_text": "6.0 m",
+      "reason_code": "option_verification_deferred"
+     }
+    ]
+   },
+   "option_verification_deferred": [
+    {
+     "option_text": "1.5 m",
+     "reason_code": "option_verification_deferred"
+    },
+    {
+     "option_text": "6.0 m",
+     "reason_code": "option_verification_deferred"
+    }
+   ],
+   "option_set_verdict": {
+    "options_mutually_exclusive": true,
+    "answer_choosable_from_displayed_text": true
+   },
+   "distractors": [
+    "2.5 m",
+    "3.0 m",
+    "4.0 m",
+    "5.0 m"
+   ]
+  },
+  {
+   "family": "free-check-failure",
+   "call_roles": [
+    "extractor",
+    "question_writer",
+    "standalone_verifier"
+   ],
+   "status": "qa_gate_failed",
+   "qa_gate_reasons": [
+    "question_answer_leakage"
+   ],
+   "pre_judge_gate_reasons": [
+    "question_answer_leakage"
+   ],
+   "skip_reason": "skipped_after_free_check_failure",
+   "skipped_calls": [
+    "reconstructor",
+    "answer_verifier"
+   ],
+   "shadow_cohort": false,
+   "calls_made_for_shadow": [],
+   "shadow_gate_reasons": null,
+   "standalone_pass": true,
+   "standalone_reask": null,
+   "reconstruction_called": false,
+   "answer_verification_called": false,
+   "option_verification_call_plan": {
+    "contract_version": "rank-order-option-verification-v1",
+    "verified_target": 4,
+    "proposed": 0,
+    "prefiltered": 0,
+    "verified": 0,
+    "verified_option_hashes": [],
+    "reserve": []
+   },
+   "option_verification_deferred": [],
+   "option_set_verdict": null,
+   "distractors": []
+  },
+  {
+   "family": "standalone-failure",
+   "call_roles": [
+    "extractor",
+    "question_writer",
+    "standalone_verifier"
+   ],
+   "status": "qa_gate_failed",
+   "qa_gate_reasons": [
+    "standalone_undefined_location"
+   ],
+   "pre_judge_gate_reasons": [],
+   "skip_reason": "skipped_after_standalone_failure",
+   "skipped_calls": [
+    "reconstructor",
+    "answer_verifier"
+   ],
+   "shadow_cohort": false,
+   "calls_made_for_shadow": [],
+   "shadow_gate_reasons": null,
+   "standalone_pass": false,
+   "standalone_reask": null,
+   "reconstruction_called": false,
+   "answer_verification_called": false,
+   "option_verification_call_plan": {
+    "contract_version": "rank-order-option-verification-v1",
+    "verified_target": 4,
+    "proposed": 0,
+    "prefiltered": 0,
+    "verified": 0,
+    "verified_option_hashes": [],
+    "reserve": []
+   },
+   "option_verification_deferred": [],
+   "option_set_verdict": null,
+   "distractors": []
+  },
+  {
+   "family": "standalone-unevidenced-reask",
+   "call_roles": [
+    "extractor",
+    "question_writer",
+    "standalone_verifier",
+    "standalone_verifier",
+    "reconstructor",
+    "answer_verifier",
+    "distractor_writer",
+    "option_verifier",
+    "option_verifier",
+    "option_verifier",
+    "option_verifier",
+    "option_set_verifier"
+   ],
+   "status": "candidate",
+   "qa_gate_reasons": [],
+   "pre_judge_gate_reasons": [],
+   "skip_reason": null,
+   "skipped_calls": [],
+   "shadow_cohort": false,
+   "calls_made_for_shadow": [],
+   "shadow_gate_reasons": null,
+   "standalone_pass": true,
+   "standalone_reask": {
+    "reason": "standalone_verdict_unevidenced",
+    "first_verdict_fingerprint": "d91cb5b351b3cb1d9043a1e64a27fdd8122119c6848ace87298be6758a5f8dcb",
+    "reask_count": 1
+   },
+   "reconstruction_called": true,
+   "answer_verification_called": true,
+   "option_verification_call_plan": {
+    "contract_version": "rank-order-option-verification-v1",
+    "verified_target": 4,
+    "proposed": 6,
+    "prefiltered": 0,
+    "verified": 4,
+    "verified_option_hashes": [
+     "option-b65128424ab767ebb33e",
+     "option-cf5a788e9742670336d8",
+     "option-0635f2f4e2085a91453b",
+     "option-c4079e7f236b30538103"
+    ],
+    "reserve": [
+     {
+      "option_text": "1.5 m",
+      "reason_code": "option_verification_deferred"
+     },
+     {
+      "option_text": "6.0 m",
+      "reason_code": "option_verification_deferred"
+     }
+    ]
+   },
+   "option_verification_deferred": [
+    {
+     "option_text": "1.5 m",
+     "reason_code": "option_verification_deferred"
+    },
+    {
+     "option_text": "6.0 m",
+     "reason_code": "option_verification_deferred"
+    }
+   ],
+   "option_set_verdict": {
+    "options_mutually_exclusive": true,
+    "answer_choosable_from_displayed_text": true
+   },
+   "distractors": [
+    "2.5 m",
+    "3.0 m",
+    "4.0 m",
+    "5.0 m"
+   ]
+  },
+  {
+   "family": "unavailable-slot",
+   "call_roles": [
+    "extractor",
+    "question_writer"
+   ],
+   "status": "qa_gate_failed",
+   "qa_gate_reasons": [
+    "writer_slot_unavailable_location"
+   ],
+   "pre_judge_gate_reasons": [],
+   "skip_reason": "skipped_on_unavailable_slot",
+   "skipped_calls": [
+    "standalone_verifier",
+    "reconstructor",
+    "answer_verifier"
+   ],
+   "shadow_cohort": false,
+   "calls_made_for_shadow": [],
+   "shadow_gate_reasons": null,
+   "standalone_pass": null,
+   "standalone_reask": null,
+   "reconstruction_called": false,
+   "answer_verification_called": false,
+   "option_verification_call_plan": {
+    "contract_version": "rank-order-option-verification-v1",
+    "verified_target": 4,
+    "proposed": 0,
+    "prefiltered": 0,
+    "verified": 0,
+    "verified_option_hashes": [],
+    "reserve": []
+   },
+   "option_verification_deferred": [],
+   "option_set_verdict": null,
+   "distractors": []
+  },
+  {
+   "family": "shadow-cohort-member",
+   "call_roles": [
+    "extractor",
+    "question_writer",
+    "standalone_verifier",
+    "reconstructor",
+    "answer_verifier"
+   ],
+   "status": "qa_gate_failed",
+   "qa_gate_reasons": [
+    "question_answer_leakage"
+   ],
+   "pre_judge_gate_reasons": [
+    "question_answer_leakage"
+   ],
+   "skip_reason": "skipped_after_free_check_failure",
+   "skipped_calls": [
+    "reconstructor",
+    "answer_verifier"
+   ],
+   "shadow_cohort": true,
+   "calls_made_for_shadow": [
+    "reconstructor",
+    "answer_verifier"
+   ],
+   "shadow_gate_reasons": [
+    "question_answer_leakage"
+   ],
+   "standalone_pass": true,
+   "standalone_reask": null,
+   "reconstruction_called": true,
+   "answer_verification_called": true,
+   "option_verification_call_plan": {
+    "contract_version": "rank-order-option-verification-v1",
+    "verified_target": 4,
+    "proposed": 0,
+    "prefiltered": 0,
+    "verified": 0,
+    "verified_option_hashes": [],
+    "reserve": []
+   },
+   "option_verification_deferred": [],
+   "option_set_verdict": null,
+   "distractors": []
+  }
+ ],
+ "eligibility": [
+  {
+   "paper": "geography-rescreen",
+   "attempt_kinds": [
+    "initial",
+    "geography_rescreen"
+   ],
+   "attempt_notes": [
+    {},
+    {
+     "kind": "geography_rescreen",
+     "frozen_criterion_statuses": {
+      "published_primary_findings": "satisfied",
+      "stable_identity_version": "satisfied",
+      "access_rights_evidence": "satisfied",
+      "correction_retraction_coverage": "uncertain"
+     }
+    }
+   ],
+   "state": "completed",
+   "decision": "eligible",
+   "geography_rescreen": "applied",
+   "rescreened_from": "a"
+  },
+  {
+   "paper": "format-reask",
+   "attempt_kinds": [
+    "initial",
+    "format_repair"
+   ],
+   "attempt_notes": [
+    {},
+    {
+     "format_errors": [
+      "eligible_arctic_scope_phrase_unbound"
+     ],
+     "frozen_criterion_statuses": {
+      "published_primary_findings": "satisfied",
+      "stable_identity_version": "satisfied",
+      "access_rights_evidence": "satisfied",
+      "correction_retraction_coverage": "uncertain",
+      "study_geography": "satisfied"
+     }
+    }
+   ],
+   "state": "completed",
+   "decision": "eligible",
+   "geography_rescreen": null,
+   "rescreened_from": null
+  },
+  {
+   "paper": "failed-geography-never-rescreened",
+   "attempt_kinds": [
+    "initial"
+   ],
+   "attempt_notes": [
+    {}
+   ],
+   "state": "completed",
+   "decision": "excluded",
+   "geography_rescreen": null,
+   "rescreened_from": null
+  }
+ ]
+}

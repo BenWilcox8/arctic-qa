@@ -2,16 +2,33 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
-import tempfile
-from datetime import UTC, datetime
 import xml.etree.ElementTree as ET
+from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
 from .db import Database, now
-from .util import atomic_write, jsonl_bytes, sha256_bytes, stable_id
+from .pdf_layout import (
+    EXTRACTOR_NAME,
+    EXTRACTOR_VERSION,
+    extract_layout,
+    normalize_presentation,
+)
+from .text_structure import (
+    STRUCTURE_VERSION,
+    drop_running_heads,
+    sections_from_blocks,
+    sentence_spans,
+)
+from .util import atomic_write, jsonl_bytes, sha256_bytes, sha256_file, stable_id
+
+
+PARSER_NAME = "arctic_qa.extraction"
+PARSER_VERSION = "2.0.0"
+# The identity key of a parsed section. Changing the extractor must change it,
+# so a chapter 2 parse never collides with a stored predecessor parse.
+PARSER_KEY = "parser-v2"
 
 
 class StructuredHTMLParser(HTMLParser):
@@ -58,16 +75,26 @@ class StructuredHTMLParser(HTMLParser):
             self.buffer.append(data)
 
     def flush(self) -> None:
-        text = "\n".join(
-            line.strip() for line in "".join(self.buffer).splitlines() if line.strip()
-        )
-        if text:
+        blocks = [
+            normalize_presentation(line)
+            for line in "".join(self.buffer).splitlines()
+            if line.strip()
+        ]
+        if blocks:
             self.sections.append(
                 {
                     "heading": self.current_heading,
                     "heading_level": self.current_level,
                     "heading_path": list(self.heading_stack),
-                    "text": text,
+                    "page": None,
+                    "blocks": [
+                        {
+                            "page": None,
+                            "text": text,
+                            "object_labels": _detect_labels(text),
+                        }
+                        for text in blocks
+                    ],
                     "object_labels": sorted(set(self.labels)),
                 }
             )
@@ -82,7 +109,19 @@ def extract_source(
     *,
     char_cap: int = 6000,
     overlap_chars: int = 500,
+    corpus_root: Path | None = None,
 ) -> dict[str, Any]:
+    """Parse one stored original into sections and sentence-complete chunks.
+
+    ``corpus_root`` names where the parsed and chunk objects are written. It
+    defaults to the chapter 2 corpus root when that root exists, and to the
+    namespace otherwise. A chapter 2 root keeps the new objects out of every
+    predecessor directory while the artifact rows stay in one database.
+
+    When the chapter 2 root already holds a verified parse of the same bytes,
+    this returns that frozen parse instead of extracting again. The run then
+    reads the exact objects the chapter 2 freeze receipt hashed.
+    """
     source = db.one("SELECT * FROM sources WHERE source_id=?", (source_id,))
     if not source or not source.get("content_hash"):
         raise ValueError(f"source has no stored original: {source_id}")
@@ -92,53 +131,104 @@ def extract_source(
     )
     if not artifact:
         raise ValueError(f"original artifact is missing for source: {source_id}")
+    root = corpus_root or _default_corpus_root(namespace)
+    frozen = _frozen_parse(root, source_id, str(source["content_hash"]))
+    if frozen is not None:
+        parse_relative = Path(frozen["parse_relative_path"])
+        chunk_relative = Path(frozen["chunk_relative_path"])
+        parse_hash = str(frozen["parse_sha256"])
+        chunk_hash = str(frozen["chunk_sha256"])
+        parse_metadata = {
+            "source_id": source_id,
+            "raw_sha256": source["content_hash"],
+            "parse_sha256": parse_hash,
+            "chunk_sha256": chunk_hash,
+            "sections": frozen["sections"],
+            "chunks": frozen["chunks"],
+            "warnings": frozen["warnings"],
+            "coverage": frozen["coverage"],
+            "parser_name": frozen["parser_name"],
+            "parser_version": frozen["parser_version"],
+            "extractor_name": frozen["extractor_name"],
+            "extractor_version": frozen["extractor_version"],
+            "structure_version": frozen["structure_version"],
+            "parsed_at": frozen["parsed_at_utc"],
+            "char_cap": frozen["char_cap"],
+            "overlap_chars": frozen["overlap_chars"],
+            "corpus_root": str(root),
+            "frozen_corpus_parse": True,
+        }
+        _register(
+            db,
+            source_id,
+            parse_hash,
+            parse_relative,
+            chunk_hash,
+            chunk_relative,
+            parse_metadata,
+        )
+        return parse_metadata
     original = namespace / artifact["relative_path"]
-    sections, warnings = _extract(
+    sections, warnings, coverage = extract_document(
         original, source.get("media_type") or "application/octet-stream"
     )
-    section_rows: list[dict[str, Any]] = []
-    chunk_rows: list[dict[str, Any]] = []
-    for number, section in enumerate(sections, start=1):
-        section_id = stable_id(
-            "section",
-            source_id,
-            source["content_hash"],
-            "parser-v1",
-            number,
-            section["heading"],
-        )
-        row = {
-            "section_id": section_id,
-            "source_id": source_id,
-            "sequence": number,
-            "normalized_text_hash": sha256_bytes(
-                " ".join(section["text"].split()).encode()
-            ),
-            **section,
-        }
-        section_rows.append(row)
-        chunk_rows.extend(_chunk_section(row, char_cap, overlap_chars))
+    section_rows, chunk_rows = build_records(
+        source_id, source["content_hash"], sections, char_cap, overlap_chars
+    )
     section_body = jsonl_bytes(section_rows)
     parse_hash = sha256_bytes(section_body)
     chunk_body = jsonl_bytes(chunk_rows)
     chunk_hash = sha256_bytes(chunk_body)
     parse_relative = Path("parsed") / parse_hash[:2] / parse_hash / "sections.jsonl"
     chunk_relative = Path("chunks") / chunk_hash[:2] / chunk_hash / "chunks.jsonl"
-    atomic_write(namespace / parse_relative, section_body, immutable=True)
-    atomic_write(namespace / chunk_relative, chunk_body, immutable=True)
+    atomic_write(root / parse_relative, section_body, immutable=True)
+    atomic_write(root / chunk_relative, chunk_body, immutable=True)
     parse_metadata = {
         "source_id": source_id,
         "raw_sha256": source["content_hash"],
         "parse_sha256": parse_hash,
+        "chunk_sha256": chunk_hash,
         "sections": len(section_rows),
         "chunks": len(chunk_rows),
         "warnings": warnings,
-        "parser_name": "arctic_qa.extraction",
-        "parser_version": "1.0.0",
+        "coverage": coverage,
+        "parser_name": PARSER_NAME,
+        "parser_version": PARSER_VERSION,
+        "extractor_name": EXTRACTOR_NAME,
+        "extractor_version": EXTRACTOR_VERSION,
+        "structure_version": STRUCTURE_VERSION,
         "parsed_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "char_cap": char_cap,
         "overlap_chars": overlap_chars,
+        "corpus_root": str(root),
+        "frozen_corpus_parse": False,
     }
+    _register(
+        db,
+        source_id,
+        parse_hash,
+        parse_relative,
+        chunk_hash,
+        chunk_relative,
+        parse_metadata,
+    )
+    return parse_metadata
+
+
+def _register(
+    db: Database,
+    source_id: str,
+    parse_hash: str,
+    parse_relative: Path,
+    chunk_hash: str,
+    chunk_relative: Path,
+    parse_metadata: dict[str, Any],
+) -> None:
+    """Record the parsed and chunk objects as artifacts of this source.
+
+    Every insert is new: the digest is part of the artifact identity, so a
+    chapter 2 parse adds rows and never rewrites a predecessor row.
+    """
     with db.transaction():
         for kind, digest, relative in (
             ("sections", parse_hash, parse_relative),
@@ -158,7 +248,32 @@ def extract_source(
                     json.dumps(parse_metadata, sort_keys=True),
                 ),
             )
-    return parse_metadata
+
+
+def _default_corpus_root(namespace: Path) -> Path:
+    # Imported here because the chapter 2 module builds on this one.
+    from .chapter2_corpus import chapter2_root
+
+    return chapter2_root(namespace)
+
+
+def _frozen_parse(
+    root: Path, source_id: str, content_hash: str
+) -> dict[str, Any] | None:
+    """Return a verified frozen chapter 2 parse of these bytes, if there is one."""
+    from .chapter2_corpus import index_record
+
+    record = index_record(root, content_hash)
+    if record is None or record.get("source_id") != source_id:
+        return None
+    for relative, digest in (
+        (record["parse_relative_path"], record["parse_sha256"]),
+        (record["chunk_relative_path"], record["chunk_sha256"]),
+    ):
+        path = root / relative
+        if not path.is_file() or sha256_file(path) != digest:
+            return None
+    return record
 
 
 def load_chunks(db: Database, namespace: Path, source_id: str) -> list[dict[str, Any]]:
@@ -168,16 +283,69 @@ def load_chunks(db: Database, namespace: Path, source_id: str) -> list[dict[str,
     )
     if not artifact:
         raise ValueError(f"source has no chunks: {source_id}")
+    metadata = json.loads(artifact["metadata_json"] or "{}")
+    root = Path(metadata.get("corpus_root") or namespace)
+    path = root / artifact["relative_path"]
+    if not path.is_file():
+        path = namespace / artifact["relative_path"]
     return [
         json.loads(line)
-        for line in (namespace / artifact["relative_path"])
-        .read_text(encoding="utf-8")
-        .splitlines()
+        for line in path.read_text(encoding="utf-8").splitlines()
         if line
     ]
 
 
-def _extract(path: Path, media_type: str) -> tuple[list[dict[str, Any]], list[str]]:
+def build_records(
+    source_id: str,
+    content_hash: str,
+    sections: list[dict[str, Any]],
+    char_cap: int,
+    overlap_chars: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build the stored section and chunk rows for one parsed document."""
+    section_rows: list[dict[str, Any]] = []
+    chunk_rows: list[dict[str, Any]] = []
+    for number, section in enumerate(sections, start=1):
+        section_id = stable_id(
+            "section",
+            source_id,
+            content_hash,
+            PARSER_KEY,
+            number,
+            section["heading"],
+        )
+        text, locators = _section_text(section["blocks"])
+        labels = sorted(
+            {
+                label
+                for block in section["blocks"]
+                for label in block.get("object_labels", [])
+            }
+        )
+        row = {
+            "section_id": section_id,
+            "source_id": source_id,
+            "sequence": number,
+            "heading": section["heading"],
+            "heading_level": section["heading_level"],
+            "heading_path": section["heading_path"],
+            "page": section.get("page"),
+            "page_start": locators[0]["page"] if locators else section.get("page"),
+            "page_end": locators[-1]["page"] if locators else section.get("page"),
+            "text": text,
+            "blocks": locators,
+            "object_labels": labels,
+            "normalized_text_hash": sha256_bytes(" ".join(text.split()).encode()),
+        }
+        section_rows.append(row)
+        chunk_rows.extend(_chunk_section(row, char_cap, overlap_chars))
+    return section_rows, chunk_rows
+
+
+def extract_document(
+    path: Path, media_type: str
+) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
+    """Parse one stored original into sections, warnings and coverage counts."""
     if media_type == "application/pdf" or path.suffix.casefold() == ".pdf":
         return _extract_pdf(path)
     raw = path.read_text(encoding="utf-8", errors="replace")
@@ -185,65 +353,83 @@ def _extract(path: Path, media_type: str) -> tuple[list[dict[str, Any]], list[st
         media_type in {"application/xml", "text/xml"}
         or path.suffix.casefold() == ".xml"
     ):
-        return _extract_xml(raw)
-    if media_type in {
+        sections = _extract_xml(raw)
+    elif media_type in {
         "text/html",
         "application/xhtml+xml",
     } or path.suffix.casefold() in {".html", ".htm"}:
         parser = StructuredHTMLParser()
         parser.feed(raw)
         parser.flush()
-        return parser.sections, _warnings(
-            "\n".join(row["text"] for row in parser.sections), parser.labels
-        )
-    text = raw.replace("\r\n", "\n")
-    return [
-        {
-            "heading": "Document",
-            "heading_level": 0,
-            "heading_path": [],
-            "text": text,
-            "page": None,
-            "object_labels": [],
-        }
-    ], _warnings(text, [])
-
-
-def _extract_pdf(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
-    with tempfile.TemporaryDirectory(prefix="arctic-qa-pdf-") as directory:
-        target = Path(directory) / "text.txt"
-        result = subprocess.run(
-            ["pdftotext", "-layout", str(path), str(target)],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise ValueError(f"pdftotext failed: {result.stderr.strip()}")
-        text = target.read_text(encoding="utf-8", errors="replace")
-    pages = text.split("\f")
-    sections = [
-        {
-            "heading": f"Page {number}",
-            "heading_level": 0,
-            "heading_path": [],
-            "text": page.strip(),
-            "page": number,
-            "object_labels": _detect_labels(page),
-        }
-        for number, page in enumerate(pages, start=1)
-        if page.strip()
-    ]
-    return sections, _warnings(
-        text, [label for section in sections for label in section["object_labels"]]
+        sections = parser.sections
+    else:
+        sections = [
+            {
+                "heading": "Document",
+                "heading_level": 0,
+                "heading_path": [],
+                "page": None,
+                "blocks": [
+                    {
+                        "page": None,
+                        "text": normalize_presentation(line),
+                        "object_labels": _detect_labels(line),
+                    }
+                    for line in raw.replace("\r\n", "\n").split("\n")
+                    if line.strip()
+                ],
+            }
+        ]
+    text = "\n".join(
+        block["text"] for section in sections for block in section["blocks"]
     )
+    labels = [
+        label
+        for section in sections
+        for block in section["blocks"]
+        for label in block.get("object_labels", [])
+    ]
+    coverage = {
+        "pages": 0,
+        "blocks": sum(len(section["blocks"]) for section in sections),
+        "column_pages": 0,
+        "running_head_blocks_removed": 0,
+        "characters": len(text),
+    }
+    return sections, _warnings(text, labels), coverage
 
 
-def _extract_xml(raw: str) -> tuple[list[dict[str, Any]], list[str]]:
+def _extract_pdf(
+    path: Path,
+) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
+    blocks, multi_column = extract_layout(path)
+    pages = {int(block["page"]) for block in blocks}
+    kept, removed = drop_running_heads(blocks)
+    for block in kept:
+        block["object_labels"] = _detect_labels(block["text"])
+    sections = sections_from_blocks(kept)
+    text = "\n".join(block["text"] for block in kept)
+    warnings = _warnings(
+        text, [label for block in kept for label in block["object_labels"]]
+    )
+    if multi_column:
+        warnings.append("column_layout_detected")
+    if not kept:
+        warnings.append("no_text_layer")
+    coverage = {
+        "pages": len(pages),
+        "blocks": len(kept),
+        "column_pages": len(multi_column),
+        "running_head_blocks_removed": removed,
+        "characters": len(text),
+    }
+    return sections, sorted(set(warnings)), coverage
+
+
+def _extract_xml(raw: str) -> list[dict[str, Any]]:
     root = ET.fromstring(raw)
     sections: list[dict[str, Any]] = []
-    for number, element in enumerate(root.iter(), start=1):
+    for element in root.iter():
         name = element.tag.rsplit("}", 1)[-1]
         if name not in {"sec", "abstract", "body", "p"}:
             continue
@@ -255,75 +441,147 @@ def _extract_xml(raw: str) -> tuple[list[dict[str, Any]], list[str]]:
             ),
             name,
         )
-        text = " ".join(" ".join(element.itertext()).split())
+        text = normalize_presentation(" ".join(" ".join(element.itertext()).split()))
         if text:
             sections.append(
                 {
                     "heading": title,
                     "heading_level": 1 if name in {"sec", "abstract", "body"} else 2,
                     "heading_path": [title],
-                    "text": text,
                     "page": None,
-                    "object_labels": _detect_labels(text),
+                    "blocks": [
+                        {
+                            "page": None,
+                            "text": text,
+                            "object_labels": _detect_labels(text),
+                        }
+                    ],
                 }
             )
     if not sections:
-        text = " ".join(root.itertext())
+        text = normalize_presentation(" ".join(root.itertext()))
         sections.append(
             {
                 "heading": "Document",
                 "heading_level": 0,
                 "heading_path": [],
-                "text": text,
                 "page": None,
-                "object_labels": [],
+                "blocks": [{"page": None, "text": text, "object_labels": []}],
             }
         )
-    return sections, _warnings(
-        raw, [label for section in sections for label in section["object_labels"]]
-    )
+    return sections
+
+
+def _section_text(
+    blocks: list[dict[str, Any]],
+) -> tuple[str, list[dict[str, Any]]]:
+    parts: list[str] = []
+    locators: list[dict[str, Any]] = []
+    offset = 0
+    for index, block in enumerate(blocks, start=1):
+        text = block["text"]
+        parts.append(text)
+        locators.append(
+            {
+                "block_index": index,
+                "page": block.get("page"),
+                "start_offset": offset,
+                "end_offset": offset + len(text),
+                "object_labels": block.get("object_labels", []),
+            }
+        )
+        offset += len(text) + 1
+    return "\n".join(parts), locators
 
 
 def _chunk_section(
     section: dict[str, Any], cap: int, overlap: int
 ) -> list[dict[str, Any]]:
+    """Split one section into chunks that start and end on a sentence boundary."""
     if cap <= 0 or overlap < 0 or overlap >= cap:
         raise ValueError(
             "chunk cap must be positive and overlap must be less than the cap"
         )
     text = section["text"]
-    chunks = []
-    start = 0
+    units = sentence_spans(text)
+    chunks: list[dict[str, Any]] = []
+    index = 0
     sequence = 1
-    while start < len(text):
-        end = min(len(text), start + cap)
-        if end < len(text):
-            boundary = max(text.rfind("\n", start, end), text.rfind(". ", start, end))
-            if boundary > start + cap // 2:
-                end = boundary + 1
-        chunk_text = text[start:end]
-        chunks.append(
-            {
-                "chunk_id": stable_id("chunk", section["section_id"], start, end),
-                "source_id": section["source_id"],
-                "section_id": section["section_id"],
-                "sequence": sequence,
-                "heading": section["heading"],
-                "heading_path": section["heading_path"],
-                "page": section.get("page"),
-                "block_index": sequence,
-                "start_offset": start,
-                "end_offset": end,
-                "overlap_from_previous": overlap if start else 0,
-                "text": chunk_text,
-                "object_labels": section.get("object_labels", []),
-            }
-        )
-        if end == len(text):
-            break
-        start = end - overlap
+    carried = 0
+    while index < len(units):
+        start, stop = units[index]
+        if stop - start > cap:
+            # One sentence longer than the whole cap. Nothing can keep this
+            # chunk sentence-complete, so split it and say so on every piece.
+            position = start
+            while position < stop:
+                edge = min(position + cap, stop)
+                chunks.append(
+                    _chunk_row(section, sequence, position, edge, text, 0, False)
+                )
+                sequence += 1
+                position = edge
+            index += 1
+            carried = 0
+            continue
+        last = index
+        end = stop
+        while last + 1 < len(units) and units[last + 1][1] - start <= cap:
+            last += 1
+            end = units[last][1]
+        chunks.append(_chunk_row(section, sequence, start, end, text, carried, True))
         sequence += 1
+        if last + 1 >= len(units):
+            break
+        following = last + 1
+        carried = 0
+        if overlap:
+            rewind = following
+            span = 0
+            while rewind - 1 > index and span < overlap:
+                rewind -= 1
+                span += units[rewind][1] - units[rewind][0]
+            if rewind < following:
+                carried = units[following - 1][1] - units[rewind][0]
+                following = rewind
+        index = following
     return chunks
+
+
+def _chunk_row(
+    section: dict[str, Any],
+    sequence: int,
+    start: int,
+    end: int,
+    section_text: str,
+    carried: int,
+    complete: bool,
+) -> dict[str, Any]:
+    locators = [
+        block
+        for block in section.get("blocks", [])
+        if block["start_offset"] < end and block["end_offset"] > start
+    ] or section.get("blocks", [])[:1]
+    pages = [block["page"] for block in locators if block.get("page") is not None]
+    labels = sorted({label for block in locators for label in block["object_labels"]})
+    return {
+        "chunk_id": stable_id("chunk", section["section_id"], start, end),
+        "source_id": section["source_id"],
+        "section_id": section["section_id"],
+        "sequence": sequence,
+        "heading": section["heading"],
+        "heading_path": section["heading_path"],
+        "page": pages[0] if pages else section.get("page"),
+        "page_start": pages[0] if pages else section.get("page"),
+        "page_end": pages[-1] if pages else section.get("page"),
+        "block_index": locators[0]["block_index"] if locators else sequence,
+        "start_offset": start,
+        "end_offset": end,
+        "overlap_from_previous": carried,
+        "sentence_complete": complete,
+        "text": section_text[start:end],
+        "object_labels": labels,
+    }
 
 
 def _detect_labels(text: str) -> list[str]:
@@ -344,8 +602,10 @@ def _warnings(text: str, labels: list[str]) -> list[str]:
     replacement_rate = text.count("�") / max(1, len(text))
     if replacement_rate > 0.001:
         warnings.append("possible_encoding_corruption")
-    if re.search(r"\b\d+(?:\.\d+)?\s*[±+/-]\s*\d", text) and not re.search(
-        r"\b(?:m|cm|mm|km|°c|k|%|kg|g)\b", text, re.I
+    if re.search(
+        r"\b\d+(?:\.\d+)?\s*[" + chr(0x00B1) + r"+/-]\s*\d", text
+    ) and not re.search(
+        r"\b(?:m|cm|mm|km|" + chr(0x00B0) + r"c|k|%|kg|g)\b", text, re.I
     ):
         warnings.append("possible_lost_units")
     if "table" in labels:

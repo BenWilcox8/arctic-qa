@@ -1,0 +1,47 @@
+[
+  {
+    "label": "A: v4 schema without description keywords",
+    "started_at_utc": "2026-09-16T07:32:06.848794+00:00",
+    "finished_at_utc": "2026-09-16T07:32:08.065746+00:00",
+    "http_status": 400,
+    "payload_sha256": "b857f7ddfebce12ee1fc6aa4ffd2a8b58f847fa1cbeade018c174203babdd0c8",
+    "response_head": "{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"Request contains an invalid argument.\",\n    \"status\": \"INVALID_ARGUMENT\"\n  }\n}\n"
+  },
+  {
+    "label": "B: A plus reason_codes items as plain string (v3 shape)",
+    "started_at_utc": "2026-09-16T07:32:08.067151+00:00",
+    "finished_at_utc": "2026-09-16T07:32:13.921058+00:00",
+    "http_status": 200,
+    "payload_sha256": "0db23e7eddca4cfd453c9c1050bf9493d42d6cc5948c6f27e59d282cc053be5a",
+    "response_head": "{\n  \"candidates\": [\n    {\n      \"content\": {\n        \"parts\": [\n          {\n            \"text\": \"{\\n  \\\"correction_metadata_used\\\": {\\n    \\\"as_of\\\": null,\\n    \\\"known_status\\\": \\\"unknown\\\",\\n    \\\"provided\\\": false,\\n    \\\"source\\\": null\\n  },\\n  \\\"criteria\\\": [\\n    {\\n      \\\"criterion_id\\\": \\\"published_primary_findings\\\",\\n      \\\"evidence\\\": [],\\n      \\\"missing_context\\\": [\\\"The full text is an analytical commentary, review, and geopolitical essay compiling published fleet registries, policy doctrines, and news reports without empirical or primary research methodology or novel primary empirical findings.\\\"],\\n      \\\"reason_codes\\\": [\\\"secondary_or_review_only\\\"],\\n      \\\"status\\\": \\\"failed\\\"\\n    },\\n    {\\n      \\\"criterion_id\\\": \\\"stable_identity_version\\\",\\n      \\\"evidence\\\": [\\n        {\\n          \\\"span_ids\\\": [\\\"s000004\\\", \\\"s000026\\\"]\\n        }\\n      ],\\n      \\\"missing_context\\\": [],\\n      \\\"reason_codes\\\": [\\\"valid_doi\\\"],\\n      \\\"status\\\": \\\"satisfied\\\"\\n    },\\n    {\\n      \\\"criterion_id\\\": \\\"study_geography\\\",\\n      \\\"evidence\\\": [\\n        {\\n          \\\"span_ids\\\": [\\\"s000400\\\", \\\"s000401\\\", \\\"s000402\\\", \\\"s000403\\\", \\\"s000404\\\", \\\"s000405\\\", \\\"s000406\\\", \\\"s000407\\\", \\\"s000408\\\", \\\"s000409\\\", \\\"s000410\\\"]\\n        }\\n      ],\\n      \\\"missing_context\\\": [],\\n      \\\"reason_codes\\\": [\\\"latitude_in_range\\\", \\\"named_region_wholly_arctic\\\"],\\n      \\\"status\\\": \\\"satisfied\\\"\\n    },\\n    {\\n      \\\"criterion_id\\\": \\\"access_rights_evidence\\\",\\n      "
+  },
+  {
+    "label": "C: v4 schema unchanged except reason_codes items gains type string (descriptions and enum kept)",
+    "started_at_utc": "2026-09-16T07:32:37.839419+00:00",
+    "finished_at_utc": "2026-09-16T07:32:38.885045+00:00",
+    "http_status": 400,
+    "payload_sha256": "abd82de2da1ab782957b9028114638020889e508533caafeab05cf213b7b2bc1",
+    "usage_metadata": null,
+    "response_head": "{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"Request contains an invalid argument.\",\n    \"status\": \"INVALID_ARGUMENT\"\n  }\n}\n"
+  },
+  {
+    "label": "D: v4 schema with descriptions kept, reason_codes items plain string",
+    "started_at_utc": "2026-09-16T07:32:38.886416+00:00",
+    "finished_at_utc": "2026-09-16T07:32:44.135679+00:00",
+    "http_status": 200,
+    "payload_sha256": "b1af751d91dcafbd2e312a43ab3be85d149da5907d911a4178b45f50d2e1cd93",
+    "usage_metadata": {
+      "promptTokenCount": 23298,
+      "candidatesTokenCount": 1370,
+      "totalTokenCount": 24668,
+      "promptTokensDetails": [
+        {
+          "modality": "TEXT",
+          "tokenCount": 23298
+        }
+      ],
+      "serviceTier": "standard"
+    },
+    "response_head": "{\n  \"candidates\": [\n    {\n      \"content\": {\n        \"parts\": [\n          {\n            \"text\": \"{\\n  \\\"correction_metadata_used\\\": {\\n    \\\"as_of\\\": null,\\n    \\\"known_status\\\": \\\"unknown\\\",\\n    \\\"provided\\\": false,\\n    \\\"source\\\": null\\n  },\\n  \\\"criteria\\\": [\\n    {\\n      \\\"criterion_id\\\": \\\"published_primary_findings\\\",\\n      \\\"evidence\\\": [\\n        {\\n          \\\"span_ids\\\": [\\\"s000002\\\", \\\"s000130\\\"]\\n        }\\n      ],\\n      \\\"missing_context\\\": [],\\n      \\\"reason_codes\\\": [\\\"primary_original_finding\\\"],\\n      \\\"status\\\": \\\"satisfied\\\"\\n    },\\n    {\\n      \\\"criterion_id\\\": \\\"stable_identity_version\\\",\\n      \\\"evidence\\\": [\\n        {\\n          \\\"span_ids\\\": [\\\"s000004\\\"]\\n        }\\n      ],\\n      \\\"missing_context\\\": [],\\n      \\\"reason_codes\\\": [\\\"doi_resolved\\\"],\\n      \\\"status\\\": \\\"satisfied\\\"\\n    },\\n    {\\n      \\\"criterion_id\\\": \\\"study_geography\\\",\\n      \\\"evidence\\\": [\\n        {\\n          \\\"span_ids\\\": [\\n            \\\"s000407\\\",\\n            \\\"s000408\\\",\\n            \\\"s000409\\\",\\n            \\\"s000410\\\",\\n            \\\"s000411\\\",\\n            \\\"s000412\\\",\\n            \\\"s000413\\\",\\n            \\\"s000414\\\",\\n            \\\"s000415\\\",\\n            \\\"s000416\\\",\\n            \\\"s000417\\\",\\n            \\\"s000418\\\"\\n          ]\\n        }\\n      ],\\n      \\\"missing_context\\\": [],\\n      \\\"reason_codes\\\": [\\\"latitude_in_scope\\\"],\\n      \\\"status\\\": \\\"satisfied\\\"\\n    },\\n    {\\n      \\\"criterion_id\\\": \\\"access_rights_evidence\\\",\\n      \\\"evidence\\\""
+  }
+]

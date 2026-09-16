@@ -10,9 +10,42 @@ It retains the direct-joint code without spending on that arm.
 Automated acceptance does not establish scientific truth.
 The strongest release label is `machine_accepted_unverified`.
 
+## Combined source evidence
+
+Generation prompt v15 uses the `finding-evidence-span-v3` contract.
+The scheduler combines eligible source intervals only when they overlap or have a whitespace-only gap of at most 32 characters.
+One combined excerpt can contain at most four component spans and 3,200 characters.
+The excerpt copies the complete bounded source interval, including all intervening text.
+The scheduler does not merge intervals from different chunks, sources, source versions, or eligibility scopes.
+Nonadjacent intervals remain separate decision evidence.
+
+Each combined record keeps the merged locator and SHA-256 value.
+It also keeps the ordered component span IDs, locators, SHA-256 values, and eligibility locators.
+Each model role keeps its original evidence and rationale.
+The blinded reconstruction prompt still excludes the frozen answer.
+
+Answer agreement first uses the existing deterministic matcher.
+A deterministic match is authoritative and does not make a judge request.
+Only a deterministic mismatch calls the Gemini answer judge.
+The judge receives the question, required context, proposed answer, and reconstructed answer.
+It does not receive full papers or passage lists.
+A `yes` result records `lower_confidence_llm_equivalent` for agreement provenance only.
+A `no` result rejects the candidate for reconstruction disagreement.
+A missing or malformed result is unresolved.
+
+Answer agreement does not replace evidence validation.
+Each role's evidence must resolve to the frozen source and support its stated scope.
+The verifier must still accept entailment, relation, scope, ambiguity, and alternative-answer checks.
+These checks reduce accidental agreement and nearby-scope errors, but they do not measure scientific validity.
+
 ## Offline command
 
 Use fake scripts for an offline integration run:
+
+`--access-run-dir` accepts a chapter 1 article-access run directory.
+It also accepts the chapter 2 directory that the corpus freeze writes.
+Both use the same `article-access-manifest-v1` and `article-access-item-v1` schemas.
+Read [the chapter 2 corpus document](CHAPTER2_CORPUS.md) before you use the chapter 2 directory.
 
 ```bash
 PYTHONPATH=src python -m arctic_qa --json stream \
@@ -106,6 +139,10 @@ PYTHONPATH=src python -m arctic_qa --json stream \
   --max-papers 20
 ```
 
+Use `--role-profile` to bind the run to one profile in `config/roles.v1.json`.
+Each judge role must then use the model that profile configures.
+A run in the `away_production` phase must give this option.
+
 Use `--ledger-config-transition-file` only when an existing ledger has a reviewed configuration change.
 
 The transition must bind the current ledger, identity record, private gate, exact code revision, and independent review record.
@@ -166,9 +203,10 @@ An unknown charge stops all later calls.
 
 ## Successful-path call budget
 
-The current scheduler makes ten calls for one newly ready and accepted paper.
+The current scheduler makes ten calls for a deterministic match on one accepted paper.
 Eligibility is the first call in the same command.
 Nine QA and distractor calls immediately follow an eligible decision.
+An accepted judge fallback adds one call.
 
 | Stage | Calls | Input boundary | Output boundary |
 | --- | ---: | ---: | ---: |
@@ -177,17 +215,21 @@ Nine QA and distractor calls immediately follow an eligible decision.
 | Question generation | 1 | Counted before submission, at most 1,048,576 tokens | At most 2,048 tokens, including thinking |
 | Blinded reconstruction | 1 | Counted before submission, at most 1,048,576 tokens | At most 2,048 tokens, including thinking |
 | Answer verification | 1 | Counted before submission, at most 1,048,576 tokens | At most 2,048 tokens, including thinking |
+| Answer-agreement judge fallback | 0 or 1 | Compact question, required context, and two answers | At most 4 tokens, with thinking disabled |
 | Distractor generation | 1 | Counted before submission, at most 1,048,576 tokens | At most 2,048 tokens, including thinking |
 | Exact-option verification | 4 | Each call is counted before submission, at most 1,048,576 tokens | Each call is at most 2,048 tokens, including thinking |
-| Downstream scheduler total | 9 | Nine separately counted inputs | 18,432 maximum requested output tokens across calls |
-| Full new-paper total | 10 | Ten separately counted inputs | 26,624 maximum requested output tokens across calls |
+| Downstream scheduler total | 9 or 10 | Each input is counted separately | 18,432 or 18,436 maximum requested output tokens across calls |
+| Full new-paper total | 10 or 11 | Each input is counted separately | 26,624 or 26,628 maximum requested output tokens across calls |
 
 The broker reserves each request from its exact counted input and configured output cap.
-The approved provider configuration requires low thinking for all ten structured calls.
+The base model uses low thinking.
+The answer-agreement judge uses minimal thinking.
 The fixed output limits still include both candidate and thinking tokens.
 See [the Gemini structured-output budget correction](GEMINI_STRUCTURED_OUTPUT_BUDGET.md).
 The verified price record uses USD 0.75 per million input tokens.
 It uses USD 3.75 per million output and thinking tokens.
+The judge uses `gemini-3.1-flash-lite` at USD 0.25 per million input tokens.
+Its output costs USD 1.50 per million tokens.
 Each request must reserve no more than USD 0.25.
 Each paper must use no more than USD 1.00.
 
@@ -219,6 +261,10 @@ An invalid evidence result stays uncertain and nonaccepted.
 The result remains resumable without another request and does not block the next frozen paper.
 Completed receipts are reused only after the broker validates that each immutable event remains present in its ledger.
 Ambiguous receipts stop the scheduler.
+A refusal that names the per-paper cost cap does not stop the run.
+The producer records the family at stage `paper_cost_cap` with the reason code `paper_cost_cap_reached` and continues with the next paper.
+The refused receipt is immutable and is not resumable, so a relaunch replays it at no cost and never re-tries the capped family.
+See [the shared model broker guide](SHARED_MODEL_BROKER.md), section "The per-paper cost cap".
 Do not replay an ambiguous request.
 The `reconcile-usage` command can settle one saved omitted-zero usage response after an independent review and supervisor release.
 It preserves all original receipts and writes a new immutable reconciliation receipt.
@@ -290,7 +336,16 @@ It does not receive the reference answer, answer evidence, rationale, paper-sele
 All later option checks bind to the question and the question context.
 Existing records and receipts keep their original prompt versions and decisions.
 The pipeline does not add context to an existing record without a new versioned process.
-See [the benchmark input contract](BENCHMARK_INPUT_CONTRACT.md) for external evaluation custody.
+Generation prompt version 22 gives every role a two-part evidence bundle.
+`SOURCE_DATA` holds the selectable finding spans. `CONTEXT_ONLY_SOURCE` holds the hashed study-setting spans of the same paper.
+A context-only span supports a `question_context` statement only. No role can select one as answer evidence, as a scope value, or as a required question phrase.
+Version 22 replaces the empty-context default with a checklist of ten referent slots.
+The writer sets `question_context` to an empty string only when the question alone fixes every applicable slot.
+Candidate schema 2.7.0 records the forwarded context-only spans and the writer's `referent_slots` diagnostic.
+Generation prompt version 23 and candidate schema 2.8.0 show each model a locator-redacted projection of every context-only span.
+The extractor cites a supplied span for every non-null scope value in `scope_evidence`.
+The writer records `resolver_text` for every stated referent slot.
+See [the benchmark input contract](BENCHMARK_INPUT_CONTRACT.md) for the chapter 3 writer-context rules and for external evaluation custody.
 See [the shared model broker guide](SHARED_MODEL_BROKER.md) for the exact command and rules.
 An immutable-event failure republishes broker status with `halted` set to `true` and `integrity_valid` set to `false`.
 The broker observer updates streaming progress to bind that halted status.
@@ -302,6 +357,65 @@ That record uses a separate incomplete short-answer export.
 It does not increase the 500-item target or headline `accepted_qa` count.
 It exports an answer-present MCQ only with three accepted distractors.
 It exports an absent-answer form only with four accepted distractors and the `invalid_option_set` label.
+
+## Chapter 2 launch contract
+
+Chapter 2 (captain order of 2026-09-15) runs campaign `arctic-qa-production-campaign-002` on the column-aware chapter 2 corpus.
+The streaming input is the gate-bindable access run that `chapter2-corpus --action stream-input` writes under the chapter 2 root.
+It carries the frozen manifest hash, the frozen order hash, and the run manifest hash that the execution gate binds.
+The run names the role profile `gemini_separated`, so the writer is `gemini-3.8-flash` and every judge is a different model.
+The broker price config revision `arctic-gemini-eligibility-r1-config-v6` registers the judge stage models with verified pricing.
+The budget is one chained ledger transition: the price config change first, then the policy ceiling from USD 61.614496 to USD 108.994972, which is the USD 33.994972 spent before chapter 2 plus the USD 75.00 chapter 2 allocation.
+The run halts at exhaustion, with no replay, no retry, and no budget reset.
+The live export selects schema `2.7.0` and prompt `arctic-qa-generation-v22`, so the dataset page shows chapter 2 items only.
+
+## Chapter 3 call plan
+
+The chapter 2 yield audit (sections 4.4, 4.5 and 4.9) reordered the paid calls of one question attempt.
+The gates, the reason codes and the routing inputs did not change.
+Only the timing of the calls changed.
+
+The judge call plan (`judge-call-plan-v1`, recorded in `provenance.judge_call_plan`):
+
+1. The free checks run right after the writer, with the same names and inputs as at the QA gate.
+2. The standalone call is made for every candidate, because routing reads its codes.
+3. When a free check or the standalone gate fails, the reconstructor and the answer verifier are not called.
+   The candidate is persisted as `qa_gate_failed` with `reconstruction` and `answer_verification` set to `null`.
+   Its reason list holds the standalone codes and the free codes only, so routing reads the same input as before.
+4. When the writer's own `referent_slots` record marks a slot `unavailable_in_source`, no judge is called.
+   The reason list starts with one `writer_slot_unavailable_<slot>` code per such slot.
+5. A seeded random cohort of 5 percent (`judge-short-circuit-shadow-cohort-v1`) runs every call anyway.
+   The cohort member keeps the short-circuit reason list for routing and records the full-suite list in `shadow_gate_reasons`.
+   The draw is a hash of the policy version, the campaign and the candidate entity, so a replay selects the same members.
+
+Every role receives the evidence spans once.
+The chunk text no longer rides beside the tiled spans of the same text.
+The static instructions of the extractor, the reconstructor, the answer verifier and the option verifier ride in the system instruction, as the standalone judge's already did.
+The prompt hash binds the system instruction, so a receipt still matches its exact request.
+The finding context has a measured budget, `MAX_FINDING_CONTEXT_CHARS`.
+A paper above it is rejected with `finding_context_over_budget` before any paid call.
+
+The finding bank (`ranked-finding-bank-v1`, table `finding_bank`):
+
+- Every ranked candidate the extractor returns is persisted with its admission result and its span ids.
+- The bank is keyed to the extractor prompt, the admission contract, the span contract and the Arctic scope custody state.
+- An attempt without a frozen finding is served from the bank first.
+  A banked candidate passes the same admission path as a fresh one.
+  The extractor is called again only when the bank holds no servable candidate.
+- The extractor also returns `answer_basis_class` and `source_blind_answer_basis` per candidate.
+  Both fields stay outside the frozen answer and outside every judge payload.
+  A `study_internal_index` candidate is ranked last.
+  When only such candidates remain, the family records `no_admissible_finding`.
+- The free admission re-ask is spent only when an unexcluded eligible span remains.
+- The structural pre-screen (`structural-finding-prescreen-shadow-v1`, table `finding_prescreen_shadow`) records one shadow verdict per paper and never blocks a call.
+
+Options are verified in the writer's rank order.
+Verification stops once four distractors are verified: the floor of three for the present MCQ plus the fourth that the absent-answer form needs.
+The remaining proposals are recorded as a reserve in `provenance.option_verification_call_plan`.
+The validator's model-free option checks run before any paid option call.
+
+A production run never selects the `cost_aware` role profile.
+The `data/arctic-ch3-cost-r1/` directory holds the receipts-based measurements behind these rules.
 
 ## Viewer command
 

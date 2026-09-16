@@ -1,0 +1,33 @@
+{
+  "bumblebee_attempts": [
+    [
+      "Bombus glacialis, Bombus terrestris, and Bombus hyperboreus",
+      "Bombus glacialis, Bombus pyrrhopygus, and Bombus lapidarius",
+      "Bombus pascuorum, Bombus pyrrhopygus, and Bombus hyperboreus"
+    ],
+    [
+      "Bombus terrestris, Bombus pyrrhopygus, and Bombus hyperboreus",
+      "Bombus glacialis, Bombus pascuorum, and Bombus hyperboreus",
+      "Bombus glacialis, Bombus pyrrhopygus, and Bombus alpinus"
+    ],
+    [
+      "Bombus glacialis, Bombus pyrrhopygus, and Bombus terrestris",
+      "Bombus glacialis, Bombus polaris, and Bombus hyperboreus",
+      "Bombus pascuorum, Bombus pyrrhopygus, and Bombus hyperboreus"
+    ]
+  ],
+  "bumblebee_item_ids": [
+    "aqa-e1f7a3f5825e1ccd4e87",
+    "aqa-46eb7a72d705c2574351",
+    "aqa-30f5c65d8c8aaea70ce5"
+  ],
+  "closed_set_answer": "Bombus glacialis, B. pyrrhopygus, and B. hyperboreus",
+  "closed_set_evidence": "While three bumble bee species are known from Novaya Zemlya, i.e., Bombus glacialis, B. pyrrhopygus and B. hyperboreus.",
+  "closed_set_source_values": [
+    "Bombus glacialis",
+    "B. pyrrhopygus",
+    "B. hyperboreus"
+  ],
+  "drag_question": "In Arctic observations across different stations during a transition from ablation to refreezing at 5 m depth, how does the drag coefficient Cw vary as the stability parameter µ increases?",
+  "sill_question": "In the zonal section at about 70°N across the subpolar Arctic gyre in the Greenland and Norwegian Seas, what sill depth is specified for the bi-directional circulation regime across the Greenland-Scotland Ridge gateway?"
+}

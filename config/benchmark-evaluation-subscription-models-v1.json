@@ -1,0 +1,77 @@
+{
+  "schema": "benchmark-evaluation-subscription-models-v1",
+  "config_id": "arctic-abstention-subscription-models-v1",
+  "billing": "subscription",
+  "cost_usd_per_call": "0",
+  "note": "Models that the installed subscription harnesses accept (checked 2026-09-16 against claude 2.1.273 and codex-cli 0.154.0). No API key is used: each call bills the claude.ai login of the Claude Code binary or the ChatGPT login of the Codex binary. The evaluation gate binds this file by hash in the price-config slot. Neither harness exposes temperature; every call runs at the provider default.",
+  "vendors": {
+    "anthropic_claude_code": {
+      "binary": "/home/ben/.npm-global/bin/claude",
+      "binary_version_checked": "2.1.273",
+      "auth": "claude.ai OAuth login stored by the binary (claude auth status)",
+      "call_timeout_seconds": 600,
+      "preset_control": "claude -p --effort <preset>",
+      "output_constraint": "none: --json-schema adds a StructuredOutput tool, so the strict single-letter parser is the only constraint",
+      "model_source": "the --model help text of the binary; the id passes through to the API verbatim and the API decides",
+      "models": {
+        "claude-fable-5-1": {
+          "display_name": "Claude Fable 5.1",
+          "tier": "flagship",
+          "presets": ["low", "medium", "high", "xhigh", "max"]
+        },
+        "claude-opus-5": {
+          "display_name": "Claude Opus 5",
+          "tier": "pro",
+          "presets": ["low", "medium", "high", "xhigh", "max"]
+        },
+        "claude-sonnet-5": {
+          "display_name": "Claude Sonnet 5",
+          "tier": "standard",
+          "presets": ["low", "medium", "high", "xhigh", "max"]
+        },
+        "claude-haiku-4-5-20251001": {
+          "display_name": "Claude Haiku 4.5",
+          "tier": "small",
+          "presets": ["low", "medium", "high"]
+        }
+      }
+    },
+    "openai_codex": {
+      "binary": "/home/ben/.npm-global/bin/codex",
+      "binary_version_checked": "0.154.0",
+      "auth": "ChatGPT login stored in auth.json (codex login status)",
+      "auth_file": "/home/ben/.codex/auth.json",
+      "call_timeout_seconds": 600,
+      "preset_control": "codex exec -c model_reasoning_effort=<preset>",
+      "output_constraint": "codex exec --output-schema: one object with one enum field 'letter' (Responses API text.format json_schema)",
+      "model_source": "codex debug models (the model catalog of the binary, fetched 2026-09-16)",
+      "models": {
+        "gpt-6-astra": {
+          "display_name": "GPT-6-Astra",
+          "tier": "flagship",
+          "presets": ["low", "medium", "high", "xhigh", "max", "ultra"]
+        },
+        "gpt-5.6-sol": {
+          "display_name": "GPT-5.6-Sol",
+          "tier": "pro",
+          "presets": ["low", "medium", "high", "xhigh", "max", "ultra"]
+        },
+        "gpt-5.6-terra": {
+          "display_name": "GPT-5.6-Terra",
+          "tier": "standard",
+          "presets": ["low", "medium", "high", "xhigh", "max", "ultra"]
+        },
+        "gpt-5.6-luna": {
+          "display_name": "GPT-5.6-Luna",
+          "tier": "small",
+          "presets": ["low", "medium", "high", "xhigh", "max"]
+        },
+        "gpt-5.5": {
+          "display_name": "GPT-5.5",
+          "tier": "previous",
+          "presets": ["low", "medium", "high", "xhigh"]
+        }
+      }
+    }
+  }
+}

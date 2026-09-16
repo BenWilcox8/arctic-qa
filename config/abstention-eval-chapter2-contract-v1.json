@@ -1,0 +1,9 @@
+{
+  "schema": "arctic-qa-live-dataset-selection-v1",
+  "purpose": "Abstention evaluation population: the chapter 2 contract that the six accepted current-contract items of 2026-09-15 carry. Pass it to `abstention-eval build-set --population current --contract-file` until chapter 3 items exist under config/live-dataset-current-contract-v1.json.",
+  "candidate_schema_version": "2.7.0",
+  "generation_prompt_version": "arctic-qa-generation-v22",
+  "scope_contract_version": "selected-evidence-literal-scope-v4",
+  "selection_mode": "machine_validated_preview",
+  "minimum_model_verified_distractors": 3
+}

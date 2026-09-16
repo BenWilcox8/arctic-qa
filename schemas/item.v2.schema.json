@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://arctic-qa.local/schemas/item.v2.schema.json",
+  "title": "Arctic QA candidate with combined source evidence",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "item_id",
+    "source",
+    "question",
+    "answer",
+    "reconstruction",
+    "answer_verification",
+    "decision_evidence",
+    "provenance"
+  ],
+  "properties": {
+    "schema_version": {"const": "2.1.0"},
+    "item_id": {"type": "string", "pattern": "^aqa-[a-f0-9]+$"},
+    "source": {"type": "object"},
+    "question": {"type": "string", "minLength": 1},
+    "question_context": {"type": "string"},
+    "answer": {"$ref": "#/$defs/sourceEvidenceRecord"},
+    "reconstruction": {"$ref": "#/$defs/sourceEvidenceRecord"},
+    "answer_verification": {"$ref": "#/$defs/sourceEvidenceRecord"},
+    "decision_evidence": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/decisionEvidenceRecord"},
+      "minItems": 1
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["evidence_combination_contract_version"],
+      "properties": {
+        "evidence_combination_contract_version": {
+          "const": "contiguous-source-evidence-v1"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "locator": {
+      "type": "object",
+      "required": ["chunk_id", "start_offset", "end_offset"],
+      "properties": {
+        "chunk_id": {"type": "string", "minLength": 1},
+        "start_offset": {"type": "integer", "minimum": 0},
+        "end_offset": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "component": {
+      "type": "object",
+      "required": ["source_span_id", "locator", "text_sha256"],
+      "properties": {
+        "source_span_id": {"type": "string", "minLength": 1},
+        "locator": {"$ref": "#/$defs/locator"},
+        "text_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "eligibility_span_id": {"type": "string", "minLength": 1},
+        "eligibility_quote_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "eligibility_locator": {"type": "object"},
+        "eligibility_match_kind": {
+          "enum": ["exact", "whitespace_equivalent"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "sourceEvidenceRecord": {
+      "type": "object",
+      "required": [
+        "evidence_quote",
+        "locator",
+        "source_span_id",
+        "source_span_ids",
+        "evidence_components",
+        "evidence_text_sha256",
+        "span_contract_version"
+      ],
+      "properties": {
+        "evidence_quote": {"type": "string", "minLength": 1},
+        "locator": {"$ref": "#/$defs/locator"},
+        "source_span_id": {"type": "string", "minLength": 1},
+        "source_span_ids": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true
+        },
+        "eligibility_span_ids": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true
+        },
+        "evidence_components": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/component"},
+          "minItems": 1,
+          "maxItems": 4
+        },
+        "evidence_text_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "span_contract_version": {"const": "finding-evidence-span-v3"}
+      }
+    },
+    "decisionEvidenceRecord": {
+      "allOf": [
+        {"$ref": "#/$defs/sourceEvidenceRecord"},
+        {
+          "type": "object",
+          "required": ["roles", "role_evidence"],
+          "properties": {
+            "roles": {
+              "type": "array",
+              "items": {
+                "enum": ["answer", "reconstruction", "answer_verification"]
+              },
+              "minItems": 1,
+              "maxItems": 3,
+              "uniqueItems": true
+            },
+            "role_evidence": {"type": "array", "minItems": 1, "maxItems": 3}
+          }
+        }
+      ]
+    }
+  },
+  "additionalProperties": true
+}

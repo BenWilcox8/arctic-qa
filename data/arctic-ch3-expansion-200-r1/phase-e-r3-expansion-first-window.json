@@ -1,0 +1,258 @@
+{
+ "accepted_items": 5,
+ "benchmark_candidates": 23,
+ "call_records_by_status": {
+  "generation_incomplete": 15,
+  "generation_settled": 23,
+  "incomplete_infra": 1
+ },
+ "campaign_id": "arctic-qa-production-campaign-003",
+ "candidate_status_counts": {
+  "machine_accepted_unverified": 5,
+  "rejected": 18
+ },
+ "cost_by_family_top": [
+  {
+   "cost_usd": "0.210616",
+   "family_id": "family-b477aebf6760eb686872"
+  },
+  {
+   "cost_usd": "0.167938",
+   "family_id": "family-7e8e66a7244e0f11a560"
+  },
+  {
+   "cost_usd": "0.145394",
+   "family_id": "family-12a16685549de1048e27"
+  },
+  {
+   "cost_usd": "0.137529",
+   "family_id": "family-0b1d1d41fbf5e2e26e75"
+  },
+  {
+   "cost_usd": "0.127176",
+   "family_id": "family-df6a38392cc6c989c792"
+  },
+  {
+   "cost_usd": "0.115669",
+   "family_id": "family-b10717277aa94842586e"
+  },
+  {
+   "cost_usd": "0.090119",
+   "family_id": "family-a7f057b24abd2110c66b"
+  },
+  {
+   "cost_usd": "0.070030",
+   "family_id": "family-3480407b85193c34d507"
+  },
+  {
+   "cost_usd": "0.061737",
+   "family_id": "family-2d1bdbbb706bf10c36fc"
+  },
+  {
+   "cost_usd": "0.046952",
+   "family_id": "family-0c8a2bb32808e9d1b93b"
+  }
+ ],
+ "families_with_candidates": 11,
+ "families_with_findings": 11,
+ "free_measures": {
+  "finding_bank": {
+   "candidates_served_from_bank": 1,
+   "no_admissible_finding_rows": 0,
+   "prescreen_shadow_verdicts": {
+    "None": 20
+   },
+   "rows_by_admission_status": {
+    "admissible": 3,
+    "frozen": 13,
+    "rejected": 34
+   }
+  },
+  "judge_call_plan": {
+   "shadow_cohort_size": 0,
+   "shadow_recall_failures": [],
+   "skip_reason_counts": {
+    "None": 6,
+    "skipped_after_free_check_failure": 10,
+    "skipped_after_standalone_failure": 4,
+    "skipped_on_unavailable_slot": 3
+   }
+  },
+  "option_stage": {
+   "malformed_reasks": 0,
+   "option_set_verdict_failures": 0,
+   "prefiltered": 1,
+   "proposed": 30,
+   "reserve": 9,
+   "superlative_closure_shadow_labels": 0,
+   "verified": 20
+  },
+  "referent_slot_resolvability": {
+   "reasons": {
+    "resolver_text_equals_displayed_text": 94,
+    "resolver_text_not_displayed": 4
+   },
+   "share": 0.6622,
+   "stated_slots": 148,
+   "unresolved_slots": 98
+  },
+  "routing": {
+   "frozen_scope_rebind_outcomes": {
+    "rejected": 1
+   },
+   "gate_review_required_by_outcome": {
+    "gate_contradiction_unroutable": 1
+   },
+   "repeat_stop_codes": {},
+   "slot_lookup_calls_by_paper": {
+    "10.1007/s00216-024-05131-0": 1
+   }
+  },
+  "standalone_reask": {
+   "candidates": 23,
+   "rate": 0.0,
+   "reasks": 0,
+   "second_verdict_evidenced": 0
+  },
+  "two_pass_eligibility_shadow": {
+   "activity_spans_inside_short_view": 28,
+   "booked_usd": "0",
+   "decision_path_true": 0,
+   "rows_with_record": 43,
+   "selected_activity_spans": 100,
+   "short_view_holds_arctic_marker": 42
+  }
+ },
+ "frozen_order_sha256": "cc89bca5c3ed11155adc5d122bc659016e0016ca04261af15a8f5183796e8c09",
+ "measures": {
+  "measure_1_zero_context_share": {
+   "candidates": 23,
+   "candidates_with_zero_spans": 4,
+   "chapter2": {
+    "families": 56,
+    "families_without_span": 23
+   },
+   "families": 11,
+   "families_without_span": 2,
+   "family_share": 0.1818,
+   "share": 0.1739,
+   "slice_tested": "writer-context",
+   "target": "under 0.10"
+  },
+  "measure_2_no_date_share": {
+   "chapter2": {
+    "families": 56,
+    "families_without_date": 42
+   },
+   "families": 11,
+   "families_without_date": 3,
+   "share": 0.2727,
+   "slice_tested": "writer-context",
+   "target": "under 0.30"
+  },
+  "measure_3_screening_error_share": {
+   "attempt_rows_by_kind": {
+    "format_repair": 1,
+    "geography_rescreen": 7,
+    "initial": 35
+   },
+   "chapter2": {
+    "errors": 38,
+    "papers": 200
+   },
+   "errors_or_unresolved_on_last_row": 3,
+   "initial_row_states": {
+    "completed": 32,
+    "screening_error": 3
+   },
+   "last_row_decisions": {
+    "eligible": 21,
+    "excluded": 5,
+    "uncertain": 9
+   },
+   "last_row_states": {
+    "completed": 32,
+    "screening_error": 3
+   },
+   "papers": 35,
+   "share": 0.0857,
+   "slice_tested": "eligibility",
+   "target": "under 0.05"
+  },
+  "measure_6_usd_per_accepted_item": {
+   "accepted_items": 5,
+   "by_stage_calls": {
+    "answer_agreement": 1,
+    "answer_verification": 2,
+    "blinded_reconstruction": 2,
+    "distractor_generation": 2,
+    "eligibility": 43,
+    "finding_answer_extraction": 21,
+    "option_verification": 6,
+    "question_generation": 16,
+    "repair": 1,
+    "standalone_verification": 10
+   },
+   "by_stage_states": {
+    "answer_agreement": {
+     "completed": 1
+    },
+    "answer_verification": {
+     "completed": 2
+    },
+    "blinded_reconstruction": {
+     "completed": 2
+    },
+    "distractor_generation": {
+     "completed": 2
+    },
+    "eligibility": {
+     "completed": 43
+    },
+    "finding_answer_extraction": {
+     "completed": 21
+    },
+    "option_verification": {
+     "completed": 5,
+     "counting": 1
+    },
+    "question_generation": {
+     "completed": 16
+    },
+    "repair": {
+     "completed": 1
+    },
+    "standalone_verification": {
+     "completed": 10
+    }
+   },
+   "by_stage_usd": {
+    "answer_agreement": "0.001870",
+    "answer_verification": "0.027504",
+    "blinded_reconstruction": "0.021508",
+    "distractor_generation": "0.012489",
+    "eligibility": "0.839756",
+    "finding_answer_extraction": "0.692862",
+    "option_verification": "0.042492",
+    "question_generation": "0.111276",
+    "repair": "0.004270",
+    "standalone_verification": "0.055750"
+   },
+   "calibration_calls": 0,
+   "calibration_spent_usd": "0",
+   "chapter2": {
+    "accepted": 6,
+    "spent_usd": "19.995149"
+   },
+   "run_spent_usd": "1.809777",
+   "shadow_cohort_extra_calls": 0,
+   "slice_tested": "cost, judge-options, routing",
+   "target": "under USD 1.00",
+   "usd_per_accepted_item": "0.3620"
+  }
+ },
+ "papers_screened": 35,
+ "papers_with_paid_calls": 35,
+ "run_id": "chapter3-7dc6485-r3",
+ "schema": "arctic-ch3-phase-e-measures-v1"
+}

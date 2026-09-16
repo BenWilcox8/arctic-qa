@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from . import abstention_cli
 from .access_readiness import run_access_readiness, supervise_access_readiness
 from .broker_provider import BrokerProvider
 from .corpus_viewer import serve_corpus_viewer
@@ -26,7 +27,14 @@ from .discovery import (
 )
 from .errors import ArcticQAError
 from .exporting import export_run
+from .chapter2_corpus import CHAPTER2_DIRECTORY
+from .chapter2_corpus import DEFAULT_JOBS as CHAPTER2_DEFAULT_JOBS
+from .chapter2_corpus import freeze as chapter2_freeze
+from .chapter2_corpus import materialize_stream_input as chapter2_stream_input
+from .chapter2_corpus import prepare_root as chapter2_prepare_root
+from .chapter2_corpus import reextract as chapter2_reextract
 from .extraction import extract_source, load_chunks
+from .extraction_quality import quality_report as chapter2_quality_report
 from .generation import generate_candidate, resume_candidate_distractors
 from .geography_correction import write_geography_correction_overlay
 from .gemini_eligibility import run_gemini_eligibility
@@ -86,8 +94,11 @@ def parser() -> argparse.ArgumentParser:
     viewer.add_argument("--dataset-metadata-file", type=Path)
     viewer.add_argument("--production-plan-file", type=Path)
     viewer.add_argument("--publication-package-dir", type=Path)
+    viewer.add_argument("--live-dataset-dir", type=Path)
     viewer.add_argument("--project-overview-file", type=Path)
     viewer.add_argument("--research-timeline-file", type=Path)
+    viewer.add_argument("--benchmark-journal-dir", type=Path)
+    viewer.add_argument("--benchmark-guard-state-file", type=Path)
     viewer.add_argument("--pipeline-namespace", type=Path)
     viewer.add_argument("--pipeline-db-file", type=Path)
     viewer.add_argument("--pipeline-receipts-dir", type=Path)
@@ -174,11 +185,25 @@ def parser() -> argparse.ArgumentParser:
     )
     gemini.add_argument(
         "--action",
-        choices=("doctor", "dry-run", "run", "resume", "pause", "status"),
+        choices=(
+            "doctor",
+            "dry-run",
+            "run",
+            "resume",
+            "pause",
+            "status",
+            "geography-rescreen",
+            "geography-rescreen-dry-run",
+        ),
         required=True,
     )
     gemini.add_argument("--access-run-dir", type=Path, required=True)
     gemini.add_argument("--run-dir", type=Path, required=True)
+    gemini.add_argument(
+        "--prior-run-dir",
+        type=Path,
+        help="The completed run whose unresolved geography papers are re-screened.",
+    )
     gemini.add_argument(
         "--config-file", type=Path, default=Path("config/gemini-eligibility-v1.json")
     )
@@ -250,6 +275,86 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Permit an explicit file URL only together with global --test-mode.",
     )
+
+    chapter2 = commands.add_parser(
+        "chapter2-corpus",
+        help="Build, freeze and measure the chapter 2 column-aware corpus.",
+    )
+    chapter2.add_argument(
+        "--action",
+        choices=("prepare", "extract", "freeze", "quality", "stream-input"),
+        required=True,
+    )
+    chapter2.add_argument("--access-run-dir", type=Path, required=True)
+    chapter2.add_argument("--legacy-freeze-dir", type=Path, required=True)
+    chapter2.add_argument("--code-commit", default="unknown")
+    chapter2.add_argument("--freeze-id")
+    chapter2.add_argument("--run-id")
+    chapter2.add_argument("--jobs", type=int, default=CHAPTER2_DEFAULT_JOBS)
+    chapter2.add_argument("--limit", type=int)
+    chapter2.add_argument("--char-cap", type=int, default=6000)
+    chapter2.add_argument("--overlap-chars", type=int, default=500)
+    chapter2.add_argument("--sample-size", type=int, default=50)
+    chapter2.add_argument("--report-file", type=Path)
+
+    calibrate = commands.add_parser(
+        "calibrate-standalone",
+        help=(
+            "Record the source-blind judge against the standalone calibration set, "
+            "or replay a recorded cassette against the release rule."
+        ),
+    )
+    calibrate.add_argument("--mode", choices=("record", "replay"), required=True)
+    calibrate.add_argument("--cassette", type=Path, required=True)
+    calibrate.add_argument("--calibration-set", type=Path)
+    calibrate.add_argument(
+        "--provider",
+        choices=("fake", "broker"),
+        default="broker",
+        help="record only: the fake provider replays --provider-script; broker is the live judge.",
+    )
+    calibrate.add_argument("--provider-script", type=Path)
+    calibrate.add_argument("--run-id", default="standalone-calibration")
+    calibrate.add_argument(
+        "--phase",
+        choices=("live_test", "away_production"),
+        default="away_production",
+        help="record only: the construction phase the execution gate allows.",
+    )
+    calibrate.add_argument("--timeout", type=float, default=300.0)
+    calibrate.add_argument(
+        "--campaign-id",
+        help="record only: the campaign the execution gate authorizes.",
+    )
+    calibrate.add_argument(
+        "--access-run-dir",
+        type=Path,
+        help=(
+            "record only: the reviewed streaming input the execution gate binds; "
+            "required when the gate carries a stream-input binding."
+        ),
+    )
+    calibrate.add_argument("--eligibility-prompt-file", type=Path)
+    calibrate.add_argument("--eligibility-schema-file", type=Path)
+    calibrate.add_argument("--eligibility-policy-file", type=Path)
+    calibrate.add_argument("--streaming-budget-policy-file", type=Path)
+    calibrate.add_argument("--price-config-file", type=Path)
+    calibrate.add_argument("--execution-gate-file", type=Path)
+    calibrate.add_argument("--shared-ledger-file", type=Path)
+    calibrate.add_argument("--model-receipts-dir", type=Path)
+    calibrate.add_argument("--ledger-config-transition-file", type=Path)
+    calibrate.add_argument("--credential-file", type=Path)
+    calibrate.add_argument("--prior-construction-spend-usd", type=Decimal)
+
+    replay_gates = commands.add_parser(
+        "replay-chapter2-gates",
+        help=(
+            "Run the recorded chapter 2 candidates through the current deterministic "
+            "gates and report which candidates change outcome. No model call."
+        ),
+    )
+    replay_gates.add_argument("--evidence-dir", type=Path, required=True)
+    replay_gates.add_argument("--report-file", type=Path)
 
     extract = commands.add_parser(
         "extract", help="Extract sections and chunks from one stored source."
@@ -350,6 +455,13 @@ def parser() -> argparse.ArgumentParser:
         default=Path("schemas/gemini-eligibility.v1.schema.json"),
     )
     stream.add_argument("--eligibility-policy-file", type=Path)
+    stream.add_argument(
+        "--eligibility-rescreen-prompt-file",
+        type=Path,
+        default=Path("config/gemini-eligibility-geography-rescreen-v2.txt"),
+    )
+    stream.add_argument("--roles-file", type=Path)
+    stream.add_argument("--role-profile")
     stream.add_argument("--author-script", type=Path)
     stream.add_argument("--verifier-script", type=Path)
     stream.add_argument("--max-papers", type=int, default=1)
@@ -377,6 +489,8 @@ def parser() -> argparse.ArgumentParser:
     stream.add_argument("--credential-file", type=Path)
     stream.add_argument("--prior-construction-spend-usd", type=Decimal)
 
+    abstention_cli.add_parser(commands)
+
     reconcile = commands.add_parser(
         "reconcile-usage",
         help="Settle one saved response that proves an omitted thought count is zero.",
@@ -401,6 +515,72 @@ def parser() -> argparse.ArgumentParser:
         "--prior-construction-spend-usd", type=Decimal, required=True
     )
 
+    continuation = commands.add_parser(
+        "authorize-ambiguous-continuation",
+        help="Authorize unrelated papers after a reviewed ambiguous charge.",
+    )
+    continuation.add_argument("--request-key", required=True)
+    continuation.add_argument("--expected-ledger-sha256", required=True)
+    continuation.add_argument("--review-file", type=Path, required=True)
+    continuation.add_argument("--evidence-file", type=Path, required=True)
+    continuation.add_argument("--authorized-run-id", required=True)
+    continuation.add_argument("--operator-id", required=True)
+    continuation.add_argument(
+        "--streaming-budget-policy-file", type=Path, required=True
+    )
+    continuation.add_argument("--price-config-file", type=Path, required=True)
+    continuation.add_argument("--execution-gate-file", type=Path, required=True)
+    continuation.add_argument("--shared-ledger-file", type=Path, required=True)
+    continuation.add_argument("--model-receipts-dir", type=Path, required=True)
+    continuation.add_argument("--ledger-config-transition-file", type=Path)
+    continuation.add_argument("--credential-file", type=Path, required=True)
+    continuation.add_argument(
+        "--prior-construction-spend-usd", type=Decimal, required=True
+    )
+
+    rejection = commands.add_parser(
+        "settle-http-rejection",
+        help=(
+            "Settle one ambiguous charge that a provider rejection (HTTP 400) "
+            "created before generation; the reservation is released."
+        ),
+    )
+    rejection.add_argument("--request-key", required=True)
+    rejection.add_argument("--expected-ledger-sha256", required=True)
+    rejection.add_argument("--review-file", type=Path, required=True)
+    rejection.add_argument("--evidence-file", type=Path, required=True)
+    rejection.add_argument("--authorized-run-id", required=True)
+    rejection.add_argument("--operator-id", required=True)
+    rejection.add_argument("--streaming-budget-policy-file", type=Path, required=True)
+    rejection.add_argument("--price-config-file", type=Path, required=True)
+    rejection.add_argument("--execution-gate-file", type=Path, required=True)
+    rejection.add_argument("--shared-ledger-file", type=Path, required=True)
+    rejection.add_argument("--model-receipts-dir", type=Path, required=True)
+    rejection.add_argument("--ledger-config-transition-file", type=Path)
+    rejection.add_argument("--credential-file", type=Path, required=True)
+    rejection.add_argument(
+        "--prior-construction-spend-usd", type=Decimal, required=True
+    )
+
+    orphaned = commands.add_parser(
+        "authorize-orphaned-continuation",
+        help="Release execution occupancy for a reviewed dead-owner request.",
+    )
+    orphaned.add_argument("--request-key", required=True)
+    orphaned.add_argument("--expected-ledger-sha256", required=True)
+    orphaned.add_argument("--review-file", type=Path, required=True)
+    orphaned.add_argument("--evidence-file", type=Path, required=True)
+    orphaned.add_argument("--authorized-run-id", required=True)
+    orphaned.add_argument("--operator-id", required=True)
+    orphaned.add_argument("--streaming-budget-policy-file", type=Path, required=True)
+    orphaned.add_argument("--price-config-file", type=Path, required=True)
+    orphaned.add_argument("--execution-gate-file", type=Path, required=True)
+    orphaned.add_argument("--shared-ledger-file", type=Path, required=True)
+    orphaned.add_argument("--model-receipts-dir", type=Path, required=True)
+    orphaned.add_argument("--ledger-config-transition-file", type=Path)
+    orphaned.add_argument("--credential-file", type=Path, required=True)
+    orphaned.add_argument("--prior-construction-spend-usd", type=Decimal, required=True)
+
     settle = commands.add_parser(
         "settle-pretransport-reservation",
         help="Settle the reviewed reservation that stopped before generation transport.",
@@ -417,6 +597,24 @@ def parser() -> argparse.ArgumentParser:
     settle.add_argument("--ledger-config-transition-file", type=Path)
     settle.add_argument("--credential-file", type=Path, required=True)
     settle.add_argument("--prior-construction-spend-usd", type=Decimal, required=True)
+    count_error = commands.add_parser(
+        "authorize-count-error-continuation",
+        help="Authorize continuation after a reviewed countTokens error without replay.",
+    )
+    count_error.add_argument("--request-key", required=True)
+    count_error.add_argument("--expected-ledger-sha256", required=True)
+    count_error.add_argument("--review-file", type=Path, required=True)
+    count_error.add_argument("--evidence-file", type=Path, required=True)
+    count_error.add_argument("--streaming-budget-policy-file", type=Path, required=True)
+    count_error.add_argument("--price-config-file", type=Path, required=True)
+    count_error.add_argument("--execution-gate-file", type=Path, required=True)
+    count_error.add_argument("--shared-ledger-file", type=Path, required=True)
+    count_error.add_argument("--model-receipts-dir", type=Path, required=True)
+    count_error.add_argument("--ledger-config-transition-file", type=Path)
+    count_error.add_argument("--credential-file", type=Path, required=True)
+    count_error.add_argument(
+        "--prior-construction-spend-usd", type=Decimal, required=True
+    )
     return root
 
 
@@ -443,8 +641,11 @@ def main(argv: list[str] | None = None) -> int:
                 dataset_metadata_file=args.dataset_metadata_file,
                 production_plan_file=args.production_plan_file,
                 publication_package_dir=args.publication_package_dir,
+                live_dataset_dir=args.live_dataset_dir,
                 project_overview_file=args.project_overview_file,
                 research_timeline_file=args.research_timeline_file,
+                benchmark_journal_dir=args.benchmark_journal_dir,
+                benchmark_guard_state_file=args.benchmark_guard_state_file,
                 pipeline_namespace=args.pipeline_namespace,
                 pipeline_db_file=args.pipeline_db_file,
                 pipeline_receipts_dir=args.pipeline_receipts_dir,
@@ -455,6 +656,15 @@ def main(argv: list[str] | None = None) -> int:
                 process_stale_after_seconds=args.process_stale_after_seconds,
             )
             return 0
+        if args.command == "chapter2-corpus":
+            paths = DataPaths.open(args.data_root, test_mode=args.test_mode)
+            return _emit(args, _chapter2_corpus(args, paths))
+        if args.command == "calibrate-standalone":
+            report = _calibrate_standalone(args)
+            _emit(args, report)
+            return 0 if report.get("passed", True) else 1
+        if args.command == "replay-chapter2-gates":
+            return _emit(args, _replay_chapter2_gates(args))
         if args.command == "metadata-prefilter":
             return _emit(
                 args,
@@ -539,6 +749,7 @@ def main(argv: list[str] | None = None) -> int:
                     project_ledger_file=args.project_ledger_file,
                     max_cost_usd=args.max_cost_usd,
                     credential_file=args.credential_file,
+                    prior_run_dir=args.prior_run_dir,
                 ),
             )
         if args.command == "geography-correction-overlay":
@@ -554,10 +765,20 @@ def main(argv: list[str] | None = None) -> int:
                     decision_at_utc=args.decision_at_utc,
                 ),
             )
+        if args.command == "abstention-eval":
+            return _emit(args, abstention_cli.handle(args))
         if args.command == "reconcile-usage":
             return _emit(args, _reconcile_usage(args))
+        if args.command == "settle-http-rejection":
+            return _emit(args, _settle_http_rejection(args))
+        if args.command == "authorize-ambiguous-continuation":
+            return _emit(args, _authorize_ambiguous_continuation(args))
+        if args.command == "authorize-orphaned-continuation":
+            return _emit(args, _authorize_orphaned_continuation(args))
         if args.command == "settle-pretransport-reservation":
             return _emit(args, _settle_pretransport_reservation(args))
+        if args.command == "authorize-count-error-continuation":
+            return _emit(args, _authorize_count_error_continuation(args))
         paths, db = _open(args)
         try:
             handler = globals()[f"_{args.command}"]
@@ -577,6 +798,110 @@ def main(argv: list[str] | None = None) -> int:
         }
         print(canonical_json(payload), file=sys.stderr)
         return 2
+
+
+def _calibrate_standalone(args) -> dict[str, Any]:
+    """Record or replay the standalone calibration cassette."""
+    from .standalone_calibration import (
+        DEFAULT_CALIBRATION_SET,
+        calibration_paper_identity,
+        evaluate_cassette,
+        load_calibration_set,
+        record_cassette,
+    )
+
+    calibration = load_calibration_set(
+        (args.calibration_set or DEFAULT_CALIBRATION_SET).resolve()
+    )
+    cassette = args.cassette.resolve()
+    if args.mode == "replay":
+        return evaluate_cassette(calibration, cassette)
+    if args.provider == "fake":
+        if not args.provider_script:
+            raise ValueError("the fake provider requires --provider-script")
+        provider = make_provider(
+            "fake", "fake-standalone-judge", args.provider_script.resolve()
+        )
+        bind_row = None
+    else:
+        required = (
+            "streaming_budget_policy_file",
+            "price_config_file",
+            "execution_gate_file",
+            "shared_ledger_file",
+            "model_receipts_dir",
+            "credential_file",
+            "prior_construction_spend_usd",
+        )
+        missing = [name for name in required if getattr(args, name) is None]
+        if missing:
+            raise ValueError(
+                "live calibration recording requires: "
+                + ", ".join("--" + name.replace("_", "-") for name in missing)
+            )
+        broker = SharedGeminiBroker(
+            policy_file=args.streaming_budget_policy_file.resolve(),
+            price_config_file=args.price_config_file.resolve(),
+            execution_gate_file=args.execution_gate_file.resolve(),
+            ledger_file=args.shared_ledger_file.resolve(),
+            receipts_dir=args.model_receipts_dir.resolve(),
+            credential_file=args.credential_file.resolve(),
+            prior_construction_spend_usd=args.prior_construction_spend_usd,
+            config_transition_file=(
+                args.ledger_config_transition_file.resolve()
+                if args.ledger_config_transition_file
+                else None
+            ),
+        )
+        if broker.stream_input_binding_required():
+            binding_arguments = (
+                "campaign_id",
+                "access_run_dir",
+                "eligibility_prompt_file",
+                "eligibility_schema_file",
+                "eligibility_policy_file",
+            )
+            missing = [
+                name for name in binding_arguments if getattr(args, name) is None
+            ]
+            if missing:
+                raise ValueError(
+                    "the execution gate binds a streaming input; recording requires: "
+                    + ", ".join("--" + name.replace("_", "-") for name in missing)
+                )
+            broker.bind_stream_input(
+                args.access_run_dir.resolve(),
+                phase=args.phase,
+                run_id=args.run_id,
+                campaign_id=args.campaign_id,
+                eligibility_prompt_file=args.eligibility_prompt_file.resolve(),
+                eligibility_schema_file=args.eligibility_schema_file.resolve(),
+                eligibility_policy_file=args.eligibility_policy_file.resolve(),
+            )
+        provider = BrokerProvider(
+            broker=broker, phase=args.phase, invocation_run_id=args.run_id
+        )
+        identity = calibration_paper_identity(calibration)
+
+        def bind_row(unbound, row):
+            return unbound.bind(**identity)
+
+    report = record_cassette(
+        calibration, provider, cassette, timeout=args.timeout, bind_row=bind_row
+    )
+    return {**report, **evaluate_cassette(calibration, cassette)}
+
+
+def _replay_chapter2_gates(args) -> dict[str, Any]:
+    from .chapter2_replay import replay_chapter2_gates
+
+    report = replay_chapter2_gates(args.evidence_dir.resolve())
+    if args.report_file:
+        args.report_file.parent.mkdir(parents=True, exist_ok=True)
+        args.report_file.write_text(canonical_json(report), encoding="utf-8")
+    summary = {key: value for key, value in report.items() if key != "rows"}
+    summary["report_file"] = str(args.report_file) if args.report_file else None
+    return summary
 
 
 def _open(args) -> tuple[DataPaths, Database]:
@@ -631,6 +956,81 @@ def _reconcile_usage(args) -> dict[str, Any]:
     return broker.reconcile_omitted_thought_usage(args.request_key)
 
 
+def _authorize_ambiguous_continuation(args) -> dict[str, Any]:
+    broker = SharedGeminiBroker(
+        policy_file=args.streaming_budget_policy_file.resolve(),
+        price_config_file=args.price_config_file.resolve(),
+        execution_gate_file=args.execution_gate_file.resolve(),
+        ledger_file=args.shared_ledger_file.resolve(),
+        receipts_dir=args.model_receipts_dir.resolve(),
+        credential_file=args.credential_file.resolve(),
+        prior_construction_spend_usd=args.prior_construction_spend_usd,
+        config_transition_file=(
+            args.ledger_config_transition_file.resolve()
+            if args.ledger_config_transition_file
+            else None
+        ),
+    )
+    return broker.authorize_ambiguous_continuation(
+        request_key=args.request_key,
+        expected_ledger_sha256=args.expected_ledger_sha256,
+        review_file=args.review_file.resolve(),
+        evidence_file=args.evidence_file.resolve(),
+        authorized_run_id=args.authorized_run_id,
+        operator_id=args.operator_id,
+    )
+
+
+def _settle_http_rejection(args) -> dict[str, Any]:
+    broker = SharedGeminiBroker(
+        policy_file=args.streaming_budget_policy_file.resolve(),
+        price_config_file=args.price_config_file.resolve(),
+        execution_gate_file=args.execution_gate_file.resolve(),
+        ledger_file=args.shared_ledger_file.resolve(),
+        receipts_dir=args.model_receipts_dir.resolve(),
+        credential_file=args.credential_file.resolve(),
+        prior_construction_spend_usd=args.prior_construction_spend_usd,
+        config_transition_file=(
+            args.ledger_config_transition_file.resolve()
+            if args.ledger_config_transition_file
+            else None
+        ),
+    )
+    return broker.settle_http_rejection(
+        request_key=args.request_key,
+        expected_ledger_sha256=args.expected_ledger_sha256,
+        review_file=args.review_file.resolve(),
+        evidence_file=args.evidence_file.resolve(),
+        authorized_run_id=args.authorized_run_id,
+        operator_id=args.operator_id,
+    )
+
+
+def _authorize_orphaned_continuation(args) -> dict[str, Any]:
+    broker = SharedGeminiBroker(
+        policy_file=args.streaming_budget_policy_file.resolve(),
+        price_config_file=args.price_config_file.resolve(),
+        execution_gate_file=args.execution_gate_file.resolve(),
+        ledger_file=args.shared_ledger_file.resolve(),
+        receipts_dir=args.model_receipts_dir.resolve(),
+        credential_file=args.credential_file.resolve(),
+        prior_construction_spend_usd=args.prior_construction_spend_usd,
+        config_transition_file=(
+            args.ledger_config_transition_file.resolve()
+            if args.ledger_config_transition_file
+            else None
+        ),
+    )
+    return broker.authorize_orphaned_request_continuation(
+        request_key=args.request_key,
+        expected_ledger_sha256=args.expected_ledger_sha256,
+        review_file=args.review_file.resolve(),
+        evidence_file=args.evidence_file.resolve(),
+        authorized_run_id=args.authorized_run_id,
+        operator_id=args.operator_id,
+    )
+
+
 def _settle_pretransport_reservation(args) -> dict[str, Any]:
     broker = SharedGeminiBroker(
         policy_file=args.streaming_budget_policy_file.resolve(),
@@ -651,6 +1051,29 @@ def _settle_pretransport_reservation(args) -> dict[str, Any]:
         expected_ledger_sha256=args.expected_ledger_sha256,
         review_file=args.review_file.resolve(),
         traceback_evidence_file=args.traceback_evidence_file.resolve(),
+    )
+
+
+def _authorize_count_error_continuation(args) -> dict[str, Any]:
+    broker = SharedGeminiBroker(
+        policy_file=args.streaming_budget_policy_file.resolve(),
+        price_config_file=args.price_config_file.resolve(),
+        execution_gate_file=args.execution_gate_file.resolve(),
+        ledger_file=args.shared_ledger_file.resolve(),
+        receipts_dir=args.model_receipts_dir.resolve(),
+        credential_file=args.credential_file.resolve(),
+        prior_construction_spend_usd=args.prior_construction_spend_usd,
+        config_transition_file=(
+            args.ledger_config_transition_file.resolve()
+            if args.ledger_config_transition_file
+            else None
+        ),
+    )
+    return broker.authorize_count_error_continuation(
+        request_key=args.request_key,
+        expected_ledger_sha256=args.expected_ledger_sha256,
+        review_file=args.review_file.resolve(),
+        evidence_file=args.evidence_file.resolve(),
     )
 
 
@@ -728,6 +1151,69 @@ def _fetch(args, paths: DataPaths, db: Database) -> dict[str, Any]:
     )
     result["manifest"] = write_source_manifest(db, paths.namespace)
     return result
+
+
+def _chapter2_corpus(args, paths: DataPaths) -> dict[str, Any]:
+    root = paths.namespace / CHAPTER2_DIRECTORY
+    if args.action == "prepare":
+        return chapter2_prepare_root(
+            root,
+            access_run_dir=args.access_run_dir,
+            legacy_freeze_dir=args.legacy_freeze_dir,
+            code_commit=args.code_commit,
+        )
+    if args.action == "extract":
+        chapter2_prepare_root(
+            root,
+            access_run_dir=args.access_run_dir,
+            legacy_freeze_dir=args.legacy_freeze_dir,
+            code_commit=args.code_commit,
+        )
+        return chapter2_reextract(
+            root,
+            access_run_dir=args.access_run_dir,
+            jobs=args.jobs,
+            limit=args.limit,
+            char_cap=args.char_cap,
+            overlap_chars=args.overlap_chars,
+            on_result=_chapter2_progress(root),
+        )
+    if args.action == "quality":
+        return chapter2_quality_report(
+            root,
+            access_run_dir=args.access_run_dir,
+            sample_size=args.sample_size,
+            report_file=args.report_file,
+        )
+    if not args.freeze_id or not args.run_id:
+        raise ValueError("the chapter 2 freeze needs a freeze id and a run id")
+    if args.action == "stream-input":
+        return chapter2_stream_input(root, freeze_id=args.freeze_id, run_id=args.run_id)
+    return chapter2_freeze(
+        root,
+        access_run_dir=args.access_run_dir,
+        legacy_freeze_dir=args.legacy_freeze_dir,
+        freeze_id=args.freeze_id,
+        run_id=args.run_id,
+        code_commit=args.code_commit,
+    )
+
+
+def _chapter2_progress(root: Path):
+    path = root / "progress" / "reextraction-progress.json"
+
+    def report(result: dict[str, Any], counts: dict[str, int]) -> None:
+        atomic_json(
+            path,
+            {
+                "schema": "arctic-qa-chapter2-reextraction-status-v1",
+                "counts": dict(counts),
+                "latest": result,
+                "updated_at_utc": result.get("at_utc"),
+            },
+        )
+
+    return report
 
 
 def _extract(args, paths: DataPaths, db: Database) -> dict[str, Any]:
@@ -1003,6 +1489,14 @@ def _stream(args, paths: DataPaths, db: Database) -> dict[str, Any]:
             if args.eligibility_policy_file
             else None
         ),
+        eligibility_rescreen_prompt_file=(
+            args.eligibility_rescreen_prompt_file.resolve()
+            if args.eligibility_rescreen_prompt_file
+            and args.eligibility_rescreen_prompt_file.is_file()
+            else None
+        ),
+        roles_file=args.roles_file.resolve() if args.roles_file else None,
+        role_profile=args.role_profile,
     )
 
 

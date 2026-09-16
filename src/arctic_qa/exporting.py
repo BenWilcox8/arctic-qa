@@ -5,18 +5,31 @@ from pathlib import Path
 from typing import Any
 
 from .db import Database
+from .distractor_order import apply_order, resolve_order
 from .util import atomic_json, atomic_write, jsonl_bytes, sha256_bytes, stable_id
 
 
 def export_run(
-    db: Database, namespace: Path, run_id: str, *, seed: str
+    db: Database,
+    namespace: Path,
+    run_id: str,
+    *,
+    seed: str,
+    candidate_schema_version: str | None = None,
+    generation_prompt_version: str | None = None,
 ) -> dict[str, Any]:
+    if (candidate_schema_version is None) is not (generation_prompt_version is None):
+        raise ValueError(
+            "candidate and prompt contract filters must be supplied together"
+        )
     rows = db.rows(
         "SELECT * FROM candidates WHERE run_id=? AND status='machine_accepted_unverified' ORDER BY item_id",
         (run_id,),
     )
     incomplete_rows = db.rows(
-        "SELECT * FROM candidates WHERE run_id=? AND status='incomplete_non_mcq' ORDER BY item_id",
+        """SELECT * FROM candidates
+        WHERE run_id=? AND status='incomplete_non_mcq'
+        ORDER BY paper_family_id,updated_at DESC,item_id DESC""",
         (run_id,),
     )
     short_answers: list[dict[str, Any]] = []
@@ -24,6 +37,12 @@ def export_run(
     mcqs: list[dict[str, Any]] = []
     for row in rows:
         candidate = json.loads(row["candidate_json"])
+        if not _matches_generation_contract(
+            candidate,
+            candidate_schema_version=candidate_schema_version,
+            generation_prompt_version=generation_prompt_version,
+        ):
+            continue
         validation = db.one(
             """SELECT * FROM validation_events
             WHERE item_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1""",
@@ -42,11 +61,26 @@ def export_run(
             item for item in validation_details["distractors"] if item["accepted"]
         ]
         if validation_details["labels"].get("mcq_eligible") and len(accepted) >= 3:
+            # A candidate that records its fixed random distractor order
+            # exports in that order, so the answer-present MCQ drops the last
+            # ordered distractor. An older candidate keeps validation order.
+            if candidate.get("distractor_order") is not None:
+                accepted = apply_order(resolve_order(candidate), accepted)
             mcqs.append(_present_mcq(candidate, accepted[:3], seed))
             if len(accepted) >= 4:
                 mcqs.append(_absent_mcq(candidate, accepted[:4], seed))
+    incomplete_families: set[str] = set()
     for row in incomplete_rows:
         candidate = json.loads(row["candidate_json"])
+        if not _matches_generation_contract(
+            candidate,
+            candidate_schema_version=candidate_schema_version,
+            generation_prompt_version=generation_prompt_version,
+        ):
+            continue
+        if row["paper_family_id"] in incomplete_families:
+            continue
+        incomplete_families.add(row["paper_family_id"])
         candidate["release_label"] = "incomplete_non_mcq"
         incomplete_short_answers.append(_short_answer(candidate))
     mcqs = sorted(mcqs, key=lambda row: row["item_id"])
@@ -99,6 +133,21 @@ def export_run(
     return manifest
 
 
+def _matches_generation_contract(
+    candidate: dict[str, Any],
+    *,
+    candidate_schema_version: str | None,
+    generation_prompt_version: str | None,
+) -> bool:
+    if candidate_schema_version is None:
+        return True
+    provenance = candidate.get("provenance") or {}
+    return bool(
+        candidate.get("schema_version") == candidate_schema_version
+        and provenance.get("prompt_version") == generation_prompt_version
+    )
+
+
 def _short_answer(candidate: dict[str, Any]) -> dict[str, Any]:
     return {
         "item_id": candidate["item_id"],
@@ -142,6 +191,7 @@ def _present_mcq(
         "question": candidate["question"],
         "question_context": candidate.get("question_context", ""),
         "options": options,
+        "distractor_order": candidate.get("distractor_order"),
         "release_label": "machine_accepted_unverified",
         "source": candidate["source"],
         "answer_evidence": _answer_evidence(candidate["answer"]),
@@ -189,6 +239,7 @@ def _absent_mcq(
         "question": candidate["question"],
         "question_context": candidate.get("question_context", ""),
         "options": options,
+        "distractor_order": candidate.get("distractor_order"),
         "release_label": "machine_accepted_unverified",
         "source": candidate["source"],
     }

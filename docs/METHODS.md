@@ -20,6 +20,7 @@ No cited paper establishes that the complete design is optimal.
 | Alternative-evidence search limits | [SciFact-Open](https://aclanthology.org/2022.findings-emnlp.347.pdf), sections 3.1, 5, and 8 | An incomplete pool cannot prove absence. | Reject unresolved alternatives |
 | No target-adaptive retention | [AutoBencher](https://arxiv.org/html/2407.08351v1), section 4.1 and appendix A | Adaptive search can select model-specific weaknesses. | Fixed corpus eligibility before generation |
 | Structured article preference | [NISO JATS 1.4](https://www.niso.org/standards-committees/jats) | JATS availability varies by publisher. | JATS, then HTML, then PDF |
+| Column-aware PDF reading order | Recursive XY cut, the standard page segmentation method; no locator is recorded here because the implementation was written from the page geometry, not from a paper | The cut needs a visible gutter and fails on an irregular layout. | Reading order over poppler word geometry, with sentence-complete chunks |
 
 The geography rule uses 66.56 degrees north and a reviewed marine allowlist.
 This rule comes from the captain requirement and project configuration.
@@ -28,6 +29,10 @@ The implementation binds each geographic decision to a stored content hash and a
 Each latitude and named region must occur in the quoted study-setting text.
 The quote must also state complete scope.
 The implementation rejects invalid coordinates and computes mixed site scope.
+
+The chapter 2 corpus applies this preference again over the same stored objects.
+Every stored original of the frozen corpus is a PDF, so the JATS and HTML paths are unused there.
+The [chapter 2 corpus document](CHAPTER2_CORPUS.md) records the extractor and its measured effect.
 
 The source manifest freezes identities, versions, hashes, geography decisions, and rights fields.
 This control adapts the frozen-manifest method in the project study.
@@ -46,6 +51,14 @@ Generation from a second source version in the same family stops instead of sele
 
 The role defaults reflect vendor capabilities recorded on 2026-09-11.
 They are not winners of an Arctic QA evaluation.
+`config/roles.v1.json` holds the role assignment under contract `generation-model-roles-v1`.
+The stream loads and validates that file before the first paper.
+The writer and every judge must use different models.
+A profile that mixes providers must also keep every judge outside the writer's provider family.
+A profile may run inside one provider only when every role does, because the shared paid-call broker meters one provider; `gemini_separated` is that profile for chapter 2.
+The strongest configured judge model must hold `standalone_verifier` and `option_verifier`.
+A run that names a role profile must serve those models, and a production-phase run must name one.
+The run manifest records the resolved roles and the effective model of each role.
 
 Machine acceptance stops at `machine_accepted_unverified`.
 A false or absent source-entailment result stops acceptance.
@@ -65,3 +78,10 @@ A run-specific candidate ID prevents identical content in another run from losin
 External candidate-file validation cannot change stored state.
 Stored validation events and exports bind to the exact candidate payload hash.
 A future authorized audit can add a stronger review label without blocking this production workflow.
+
+## Abstention evaluation
+
+The abstention evaluation reuses the response taxonomy and the metrics of the previous abstention paper (N1 to N5, ACC, Precision_abs, Recall_abs, F1_abs, Abstention Rate, R-Acc, SSR).
+It adds an abstention option to every item instead of a separate abstention dataset.
+The gold-present condition drops the last distractor of a fixed random order, so both conditions show the same option count.
+The [abstention evaluation document](ABSTENTION_EVALUATION.md) records the design, the run procedure, and the captain's decisions.

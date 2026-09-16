@@ -8,8 +8,12 @@ import pytest
 
 from arctic_qa.broker_provider import BrokerProvider, _request_payload
 from arctic_qa.db import Database
-from arctic_qa.errors import ProviderError
-from arctic_qa.model_broker import SharedGeminiBroker, broker_request_key
+from arctic_qa.errors import PaperCostCapError, ProviderError
+from arctic_qa.model_broker import (
+    PAPER_COST_CAP_REASON,
+    SharedGeminiBroker,
+    broker_request_key,
+)
 from arctic_qa.providers import call_provider, provider_prompt_hash
 from arctic_qa.util import canonical_json, stable_id
 
@@ -59,14 +63,46 @@ class MalformedTransport(Transport):
         return response
 
 
-def broker_fixture(tmp_path: Path, transport: Transport) -> SharedGeminiBroker:
+class JudgeTransport(Transport):
+    def __init__(self) -> None:
+        super().__init__()
+        self.models: list[str] = []
+        self.bodies: list[dict] = []
+
+    def post(self, model: str, method: str, body: dict) -> dict:
+        self.methods.append(method)
+        self.models.append(model)
+        self.bodies.append(body)
+        if method == "countTokens":
+            return {"totalTokens": 100}
+        return {
+            "responseId": "judge-response-1",
+            "modelVersion": "gemini-3.1-flash-lite",
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "content": {"parts": [{"text": "yes"}]},
+                }
+            ],
+            "usageMetadata": {
+                "promptTokenCount": 100,
+                "candidatesTokenCount": 1,
+                "thoughtsTokenCount": 0,
+                "totalTokenCount": 101,
+            },
+        }
+
+
+def broker_fixture(
+    tmp_path: Path, transport: Transport, *, phase: str = "live_test"
+) -> SharedGeminiBroker:
     gate = tmp_path / "gate.json"
     write_json(
         gate,
         {
             "schema": "streaming-live-execution-gate-v1",
             "live_generation_enabled": True,
-            "allowed_phase": "live_test",
+            "allowed_phase": phase,
             "integrated_code_commit": "test-only-commit",
             "independent_review_verdict": "pass",
             "review_record": "test-only-review",
@@ -139,6 +175,109 @@ def test_broker_provider_binds_role_and_reuses_completed_receipt(
     status = broker.status()
     assert status["generation_submissions"] == 1
     assert status["stages"]["question_generation"]["submissions"] == 1
+
+
+def test_answer_judge_uses_the_pro_judge_and_reuses_immutable_receipt(
+    tmp_path: Path,
+) -> None:
+    transport = JudgeTransport()
+    broker = broker_fixture(tmp_path, transport)
+    provider = BrokerProvider(
+        broker=broker,
+        phase="live_test",
+        invocation_run_id="judge-live-r1",
+    ).bind(
+        paper_id="paper-1",
+        family_id="family-1",
+        source_version_id=SOURCE_VERSION,
+    )
+    schema = {"type": "string", "enum": ["yes", "no"]}
+    parameters = {
+        "temperature": 0,
+        "max_tokens": 128,
+        "response_mime_type": "text/x.enum",
+        "json_schema": schema,
+    }
+
+    first = provider.invoke("answer_judge", "System", "DATA\n{}", parameters, 30)
+    second = provider.invoke("answer_judge", "System", "DATA\n{}", parameters, 30)
+    reference = provider.receipt_reference(
+        "answer_judge", "System", "DATA\n{}", parameters
+    )
+
+    assert first.payload == "yes"
+    assert second == first
+    assert transport.methods == ["countTokens", "generateContent"]
+    # Chapter 3 (yield audit 4.5 R5): the fallback judge is the Pro judge.
+    assert transport.models == ["gemini-3.1-pro-preview"] * 2
+    generation = transport.bodies[1]["generationConfig"]
+    assert generation["responseMimeType"] == "text/x.enum"
+    assert generation["responseJsonSchema"] == schema
+    assert generation["maxOutputTokens"] == 128
+    assert generation["thinkingConfig"] == {"thinkingLevel": "low"}
+    receipt = json.loads(Path(reference["receipt_file"]).read_text(encoding="utf-8"))
+    assert receipt["model"] == "gemini-3.1-pro-preview"
+    assert receipt["stage"] == "answer_agreement"
+    # Pro pricing: USD 2.00 in and USD 12.00 out per million tokens.
+    assert receipt["actual_cost_usd"] == "0.000212"
+    assert broker.status()["stages"]["answer_agreement"]["submissions"] == 1
+
+
+def test_new_away_invocation_does_not_reuse_same_campaign_call_journal(
+    tmp_path: Path,
+) -> None:
+    transport = Transport()
+    broker = broker_fixture(tmp_path, transport, phase="away_production")
+    database = Database(tmp_path / "state.sqlite3")
+    database.migrate(tmp_path / "backups")
+    schema = {
+        "type": "object",
+        "required": ["question"],
+        "properties": {"question": {"type": "string"}},
+        "additionalProperties": False,
+    }
+    parameters = {
+        "temperature": 0,
+        "max_tokens": 1000,
+        "json_schema": schema,
+    }
+
+    for invocation_run_id in ("historical-segment", "successor-segment"):
+        provider = BrokerProvider(
+            broker=broker,
+            phase="away_production",
+            invocation_run_id=invocation_run_id,
+        ).bind(
+            paper_id="paper-1",
+            family_id="family-1",
+            source_version_id=SOURCE_VERSION,
+        )
+        for _ in range(2):
+            call_provider(
+                database,
+                provider,
+                run_id="same-campaign",
+                entity_id="same-unit",
+                role="question_writer",
+                system="System",
+                prompt="Prompt",
+                prompt_version="test-v1",
+                parameters=parameters,
+                response_schema=schema,
+                reservation=Decimal("999999"),
+                timeout=30,
+                retries=0,
+                rate_limit_seconds=0,
+            )
+
+    assert transport.methods == [
+        "countTokens",
+        "generateContent",
+        "countTokens",
+        "generateContent",
+    ]
+    assert database.one("SELECT COUNT(*) AS count FROM calls")["count"] == 2
+    assert broker.status()["generation_submissions"] == 2
 
 
 def test_call_journal_does_not_create_a_second_broker_budget(tmp_path: Path) -> None:
@@ -419,3 +558,251 @@ def test_adapter_rejects_receipt_that_is_absent_from_broker_ledger(
         provider.invoke("question_writer", "System", "Prompt", parameters, 30)
 
     assert transport.methods == []
+
+
+class ExpensivePaperTransport(Transport):
+    """Report one costly call, so a family reaches the per-paper cost cap.
+
+    The reservation stays under ``maximum_request_reserved_cost_usd``, so the
+    refusal that follows is the per-paper cap and nothing else.
+    """
+
+    INPUT_TOKENS = 280_000
+    OUTPUT_TOKENS = 900
+    THINKING_TOKENS = 100
+
+    def post(self, model: str, method: str, body: dict) -> dict:
+        self.methods.append(method)
+        if method == "countTokens":
+            return {"totalTokens": self.INPUT_TOKENS}
+        return {
+            "responseId": "expensive-response",
+            "modelVersion": "gemini-3.8-flash",
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "content": {
+                        "parts": [{"text": json.dumps({"question": "What changed?"})}]
+                    },
+                }
+            ],
+            "usageMetadata": {
+                "promptTokenCount": self.INPUT_TOKENS,
+                "candidatesTokenCount": self.OUTPUT_TOKENS,
+                "thoughtsTokenCount": self.THINKING_TOKENS,
+                "totalTokenCount": (
+                    self.INPUT_TOKENS + self.OUTPUT_TOKENS + self.THINKING_TOKENS
+                ),
+            },
+        }
+
+
+def test_paper_cost_cap_refusal_names_the_family_and_charges_nothing_past_it(
+    tmp_path: Path,
+) -> None:
+    transport = ExpensivePaperTransport()
+    broker = broker_fixture(tmp_path, transport)
+    provider = BrokerProvider(
+        broker=broker,
+        phase="live_test",
+        invocation_run_id="paper-cap-r1",
+    ).bind(
+        paper_id="paper-1",
+        family_id="family-1",
+        source_version_id=SOURCE_VERSION,
+    )
+    parameters = {
+        "temperature": 0,
+        "max_tokens": 1000,
+        "json_schema": {
+            "type": "object",
+            "required": ["question"],
+            "properties": {"question": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    }
+
+    accepted = 0
+    error: PaperCostCapError | None = None
+    for index in range(8):
+        try:
+            provider.invoke(
+                "question_writer", "System", f"Prompt {index}", parameters, timeout=30
+            )
+        except PaperCostCapError as raised:
+            error = raised
+            break
+        accepted += 1
+
+    assert error is not None
+    assert str(error) == PAPER_COST_CAP_REASON
+    assert error.stage == "question_generation"
+    assert error.code == "PAPER_COST_CAP_REACHED"
+    # The cap bounds the family, not the run: the broker is not halted and no
+    # money moved past the cap.
+    status = broker.status()
+    assert not status["halted"]
+    cost_state = broker.family_cost_state("family-1")
+    assert Decimal(cost_state["committed_usd"]) <= Decimal(
+        cost_state["maximum_paper_cost_usd"]
+    )
+    assert Decimal(cost_state["committed_usd"]) == Decimal("0.21375") * accepted
+    assert status["generation_submissions"] == accepted
+
+    # The refusal is on the record as a receipt that no call was made under.
+    refused = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted((tmp_path / "receipts").glob("*.json"))
+    ]
+    refusals = [row for row in refused if row.get("state") == "not_submitted"]
+    assert len(refusals) == 1
+    assert refusals[0]["reason"] == PAPER_COST_CAP_REASON
+    assert refusals[0]["family_id"] == "family-1"
+    assert refusals[0]["stage"] == "question_generation"
+    assert refusals[0]["live_call_made"] is False
+
+
+def test_a_capped_family_is_not_retried_on_relaunch(tmp_path: Path) -> None:
+    transport = ExpensivePaperTransport()
+    broker = broker_fixture(tmp_path, transport)
+    parameters = {
+        "temperature": 0,
+        "max_tokens": 1000,
+        "json_schema": {
+            "type": "object",
+            "required": ["question"],
+            "properties": {"question": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    }
+
+    def run_until_capped(invocation_run_id: str) -> tuple[int, PaperCostCapError]:
+        provider = BrokerProvider(
+            broker=broker,
+            phase="live_test",
+            invocation_run_id=invocation_run_id,
+        ).bind(
+            paper_id="paper-1",
+            family_id="family-1",
+            source_version_id=SOURCE_VERSION,
+        )
+        calls = 0
+        for index in range(8):
+            try:
+                provider.invoke(
+                    "question_writer",
+                    "System",
+                    f"Prompt {index}",
+                    parameters,
+                    timeout=30,
+                )
+            except PaperCostCapError as raised:
+                return calls, raised
+            calls += 1
+        raise AssertionError("the per-paper cost cap never stopped the family")
+
+    first_calls, first_error = run_until_capped("paper-cap-r1")
+    methods_after_first = list(transport.methods)
+    spend_after_first = broker.family_cost_state("family-1")["committed_usd"]
+
+    second_calls, second_error = run_until_capped("paper-cap-r2")
+
+    # The relaunch replays the completed receipts and the stored refusal. No new
+    # provider call is made, and the family's spend does not move.
+    assert second_calls == first_calls
+    assert str(second_error) == str(first_error) == PAPER_COST_CAP_REASON
+    assert second_error.stage == first_error.stage == "question_generation"
+    assert transport.methods == methods_after_first
+    assert broker.family_cost_state("family-1")["committed_usd"] == spend_after_first
+
+
+def test_a_capped_family_refusal_is_never_resumed_and_never_settled(
+    tmp_path: Path,
+) -> None:
+    """The per-paper cap refusal is final for its family.
+
+    The refused request made no call and holds no reservation, so it must
+    never be resumed under a later transition and never be settled. `execute`
+    replays the stored refusal free, even when it is reached directly, so the
+    producer records the capped family and continues with the next paper.
+    """
+    transport = ExpensivePaperTransport()
+    broker = broker_fixture(tmp_path, transport)
+    provider = BrokerProvider(
+        broker=broker,
+        phase="live_test",
+        invocation_run_id="paper-cap-r1",
+    ).bind(
+        paper_id="paper-1",
+        family_id="family-1",
+        source_version_id=SOURCE_VERSION,
+    )
+    parameters = {
+        "temperature": 0,
+        "max_tokens": 1000,
+        "json_schema": {
+            "type": "object",
+            "required": ["question"],
+            "properties": {"question": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    }
+    refused_prompt = None
+    for index in range(8):
+        try:
+            provider.invoke(
+                "question_writer", "System", f"Prompt {index}", parameters, timeout=30
+            )
+        except PaperCostCapError:
+            refused_prompt = f"Prompt {index}"
+            break
+    assert refused_prompt is not None
+
+    payload = _request_payload(
+        "System",
+        refused_prompt,
+        parameters,
+        broker.config_for_stage("question_generation"),
+    )
+    request_key = broker_request_key(
+        model=str(broker.config_for_stage("question_generation")["model"]),
+        run_id="paper-cap-r1",
+        phase="live_test",
+        stage="question_generation",
+        paper_id="paper-1",
+        family_id="family-1",
+        source_version_id=SOURCE_VERSION,
+        payload=payload,
+    )
+    ledger = json.loads((tmp_path / "shared-ledger.json").read_text(encoding="utf-8"))
+    assert ledger["requests"][request_key]["state"] == "not_submitted"
+    assert ledger["requests"][request_key]["reason"] == PAPER_COST_CAP_REASON
+    spend_before = broker.family_cost_state("family-1")["committed_usd"]
+    methods_before = list(transport.methods)
+
+    # The broker itself replays the stored refusal: no resume, no settlement,
+    # no provider call and no ledger movement.
+    replayed = broker.execute(
+        phase="live_test",
+        run_id="paper-cap-r1",
+        stage="question_generation",
+        paper_id="paper-1",
+        family_id="family-1",
+        source_version_id=SOURCE_VERSION,
+        request_key=request_key,
+        payload=payload,
+    )
+    assert replayed["state"] == "not_submitted"
+    assert replayed["reason"] == PAPER_COST_CAP_REASON
+    assert replayed["live_call_made"] is False
+    assert transport.methods == methods_before
+    assert broker.family_cost_state("family-1")["committed_usd"] == spend_before
+    assert not broker.status()["halted"]
+
+    # The resume path refuses the same receipt on its own, under any
+    # transition, and the settlement path never moves the row.
+    with pytest.raises(ValueError, match="never resumed"):
+        broker._resume_not_submitted(request_key, dict(ledger["requests"][request_key]))
+    before = (tmp_path / "shared-ledger.json").read_bytes()
+    assert broker._settle(request_key, actual=None, usage=None) is False
+    assert (tmp_path / "shared-ledger.json").read_bytes() == before

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any
@@ -9,25 +11,68 @@ from typing import Any
 from .errors import (
     AmbiguousChargeError,
     BudgetError,
+    CandidateRejectedError,
+    PaperCostCapError,
     ProviderError,
     ProviderResponseError,
+    mark_run_stop,
 )
-from .model_broker import AUTHORIZED_CAP_REASON, SharedGeminiBroker, broker_request_key
+from .model_broker import (
+    PAPER_COST_CAP_REASON,
+    RESUMABLE_NOT_SUBMITTED_REASONS,
+    SharedGeminiBroker,
+    broker_request_key,
+)
 from .providers import ProviderResult
-from .util import canonical_json, sha256_bytes
+from .gemini_eligibility import model_config_for_stage
+from .util import canonical_json, sha256_bytes, sha256_file
 
 
 ROLE_STAGES = {
     "eligibility": "eligibility",
     "extractor": "finding_answer_extraction",
     "question_writer": "question_generation",
+    "standalone_verifier": "standalone_verification",
     "direct_joint": "question_generation",
     "reconstructor": "blinded_reconstruction",
+    "answer_judge": "answer_agreement",
     "answer_verifier": "answer_verification",
     "distractor_writer": "distractor_generation",
     "option_verifier": "option_verification",
+    # The whole-set verdict is metered on the option verification stage, so
+    # the bound price config needs no transition (ch2 yield audit 4.8).
+    "option_set_verifier": "option_verification",
     "correction": "repair",
+    "slot_lookup": "repair",
 }
+
+
+# The refusals the broker raises about one candidate or one paper family, not
+# about the run. Everything else it raises is a whole-run stop: the execution
+# gate, the ledger, a ceiling, a halt, an unsettled charge.
+_PAPER_LEVEL_BROKER_ERRORS = (
+    CandidateRejectedError,
+    PaperCostCapError,
+    ProviderResponseError,
+)
+
+
+@contextmanager
+def broker_boundary() -> Iterator[None]:
+    """Mark every whole-run refusal the shared broker raises, at the seam.
+
+    The producer contains an exception one candidate raises and continues with
+    the next paper. A refusal from the broker is not that: it describes the
+    money or the authorization of the whole run. Marking it here, at the one
+    place the producer talks to the broker, means a new refusal message needs no
+    second registration to keep ending the run.
+    """
+    try:
+        yield
+    except _PAPER_LEVEL_BROKER_ERRORS:
+        raise
+    except Exception as error:
+        raise mark_run_stop(error)
 
 
 @dataclass(frozen=True)
@@ -48,6 +93,12 @@ class BrokerProvider:
     def model(self) -> str:
         return str(self.broker.config["model"])
 
+    def model_for_role(self, role: str) -> str:
+        stage = ROLE_STAGES.get(role)
+        if stage is None:
+            return self.model
+        return str(model_config_for_stage(self.broker.config, stage)["model"])
+
     def bind(
         self, *, paper_id: str, family_id: str, source_version_id: str
     ) -> BrokerProvider:
@@ -62,13 +113,20 @@ class BrokerProvider:
 
     def request_identity(self) -> dict[str, str | None]:
         return {
+            "phase": self.phase,
+            "invocation_run_id": self.invocation_run_id,
             "paper_id": self.paper_id,
             "family_id": self.family_id,
             "source_version_id": self.source_version_id,
         }
 
     def record_accepted(self, *, family_id: str, item_id: str) -> dict[str, Any]:
-        return self.broker.record_accepted(family_id=family_id, item_id=item_id)
+        with broker_boundary():
+            return self.broker.record_accepted(
+                family_id=family_id,
+                item_id=item_id,
+                invocation_run_id=self.invocation_run_id,
+            )
 
     def invoke(
         self,
@@ -92,9 +150,11 @@ class BrokerProvider:
             raise ValueError(
                 f"the generation role has no broker stage: {role}"
             ) from error
-        payload = _request_payload(system, prompt, parameters, self.broker.config)
+        request_config = model_config_for_stage(self.broker.config, stage)
+        payload = _request_payload(system, prompt, parameters, request_config)
+        model = str(request_config["model"])
         request_key = broker_request_key(
-            model=self.model,
+            model=model,
             run_id=self.invocation_run_id,
             phase=self.phase,
             stage=stage,
@@ -104,29 +164,30 @@ class BrokerProvider:
             payload=payload,
         )
         receipt_path = self.broker.receipts_dir / f"{request_key}.json"
-        if receipt_path.is_file():
-            receipt = self.broker.effective_receipt(request_key)
-            if not (
-                receipt.get("state") == "not_submitted"
-                and receipt.get("reason") == AUTHORIZED_CAP_REASON
-            ):
-                _, result = self.read_receipt(
-                    request_key=request_key,
-                    role=role,
-                    request_sha256=sha256_bytes(canonical_json(payload).encode()),
-                )
-                return result
-        receipt = self.broker.execute(
-            phase=self.phase,
-            run_id=self.invocation_run_id,
-            stage=stage,
-            paper_id=self.paper_id,
-            family_id=self.family_id,
-            source_version_id=self.source_version_id,
-            request_key=request_key,
-            payload=payload,
-        )
-        return _provider_result(receipt, self.model)
+        with broker_boundary():
+            if receipt_path.is_file():
+                receipt = self.broker.effective_receipt(request_key)
+                if not (
+                    receipt.get("state") == "not_submitted"
+                    and receipt.get("reason") in RESUMABLE_NOT_SUBMITTED_REASONS
+                ):
+                    _, result = self.read_receipt(
+                        request_key=request_key,
+                        role=role,
+                        request_sha256=sha256_bytes(canonical_json(payload).encode()),
+                    )
+                    return result
+            receipt = self.broker.execute(
+                phase=self.phase,
+                run_id=self.invocation_run_id,
+                stage=stage,
+                paper_id=self.paper_id,
+                family_id=self.family_id,
+                source_version_id=self.source_version_id,
+                request_key=request_key,
+                payload=payload,
+            )
+            return _provider_result(receipt, model, allow_enum=role == "answer_judge")
 
     def read_receipt(
         self,
@@ -157,9 +218,13 @@ class BrokerProvider:
             paper_id=self.paper_id,
             family_id=self.family_id,
             source_version_id=self.source_version_id,
-            model=self.model,
+            model=self.model_for_role(role),
         )
-        return receipt, _provider_result(receipt, self.model)
+        return receipt, _provider_result(
+            receipt,
+            self.model_for_role(role),
+            allow_enum=role == "answer_judge",
+        )
 
     def resume_reconciled(
         self,
@@ -184,9 +249,10 @@ class BrokerProvider:
             raise ValueError(
                 f"the generation role has no broker stage: {role}"
             ) from error
-        payload = _request_payload(system, prompt, parameters, self.broker.config)
+        request_config = model_config_for_stage(self.broker.config, stage)
+        payload = _request_payload(system, prompt, parameters, request_config)
         request_key = broker_request_key(
-            model=self.model,
+            model=str(request_config["model"]),
             run_id=self.invocation_run_id,
             phase=self.phase,
             stage=stage,
@@ -207,6 +273,36 @@ class BrokerProvider:
         )
         return result
 
+    def receipt_reference(
+        self,
+        role: str,
+        system: str,
+        prompt: str,
+        parameters: dict[str, Any],
+    ) -> dict[str, str]:
+        """Return the immutable broker receipt for an exact completed call."""
+        if not all((self.paper_id, self.family_id, self.source_version_id)):
+            raise ValueError("the broker provider is not bound to a paper")
+        stage = ROLE_STAGES[role]
+        request_config = model_config_for_stage(self.broker.config, stage)
+        payload = _request_payload(system, prompt, parameters, request_config)
+        request_key = broker_request_key(
+            model=str(request_config["model"]),
+            run_id=self.invocation_run_id,
+            phase=self.phase,
+            stage=stage,
+            paper_id=str(self.paper_id),
+            family_id=str(self.family_id),
+            source_version_id=str(self.source_version_id),
+            payload=payload,
+        )
+        path = self.broker.effective_receipt_path(request_key)
+        return {
+            "request_key": request_key,
+            "receipt_file": str(path),
+            "receipt_sha256": sha256_file(path),
+        }
+
 
 def _request_payload(
     system: str,
@@ -220,16 +316,24 @@ def _request_payload(
     output = parameters.get("max_tokens")
     if isinstance(output, bool) or not isinstance(output, int) or output < 1:
         raise ValueError("the broker request requires a positive output-token limit")
+    mime_type = parameters.get("response_mime_type", "application/json")
+    if mime_type not in {"application/json", "text/x.enum"}:
+        raise ValueError("the broker response MIME type is unsupported")
+    thinking = (
+        {"thinkingBudget": config["thinking_budget"]}
+        if "thinking_budget" in config
+        else {"thinkingLevel": config["thinking_level"]}
+    )
     return {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
             "candidateCount": 1,
             "temperature": parameters.get("temperature", 0),
-            "responseMimeType": "application/json",
+            "responseMimeType": mime_type,
             "responseJsonSchema": schema,
             "maxOutputTokens": output,
-            "thinkingConfig": {"thinkingLevel": config["thinking_level"]},
+            "thinkingConfig": thinking,
         },
         "store": False,
     }
@@ -261,14 +365,20 @@ def _validate_receipt(
         raise ValueError("the existing broker receipt does not match the request")
 
 
-def _provider_result(receipt: dict[str, Any], model: str) -> ProviderResult:
+def _provider_result(
+    receipt: dict[str, Any], model: str, *, allow_enum: bool = False
+) -> ProviderResult:
     state = receipt.get("state")
     if state == "ambiguous_charge":
         raise AmbiguousChargeError("the broker recorded an ambiguous model charge")
     if state == "not_submitted":
-        raise BudgetError(
-            str(receipt.get("reason") or "the broker stopped the request")
-        )
+        reason = str(receipt.get("reason") or "the broker stopped the request")
+        if reason == PAPER_COST_CAP_REASON:
+            # The refused request is never charged, and the receipt is immutable,
+            # so a relaunch replays this same refusal for free instead of
+            # re-trying the capped family.
+            raise PaperCostCapError(reason, stage=str(receipt.get("stage") or ""))
+        raise BudgetError(reason)
     if state != "completed":
         raise ProviderError(f"the broker stopped with state {state}")
     response = receipt.get("response")
@@ -293,10 +403,15 @@ def _provider_result(receipt: dict[str, Any], model: str) -> ProviderResult:
     try:
         value = json.loads(text)
     except json.JSONDecodeError as error:
-        raise ProviderResponseError(
-            "the broker response contains malformed JSON"
-        ) from error
-    if not isinstance(value, dict):
+        if not allow_enum or text not in {"yes", "no"}:
+            raise ProviderResponseError(
+                "the broker response contains malformed JSON"
+            ) from error
+        value = text
+    if allow_enum:
+        if value not in {"yes", "no"}:
+            raise ProviderResponseError("the broker enum response is invalid")
+    elif not isinstance(value, dict):
         raise ProviderResponseError("the broker response JSON is not an object")
     usage = receipt.get("usage") or {}
     actual = receipt.get("actual_cost_usd")

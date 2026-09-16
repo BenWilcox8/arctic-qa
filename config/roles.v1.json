@@ -1,27 +1,187 @@
 {
-  "schema_version": "1.0.0",
-  "effective_date": "2026-09-11",
-  "qualification": "Starting configuration. No Arctic QA comparison has validated these assignments.",
+  "schema_version": "1.3.0",
+  "contract_version": "generation-model-roles-v1",
+  "effective_date": "2026-09-16",
+  "qualification": "Starting configuration. No Arctic QA comparison has validated these assignments. Role separation removes a correlated-error source; it does not establish independent error evidence.",
+  "model_strength_rank": {
+    "claude-opus-5": 4,
+    "claude-sonnet-5": 3,
+    "gemini-3.1-pro-preview": 4,
+    "gemini-3.8-flash": 2,
+    "gemini-3.1-flash-lite": 1
+  },
   "profiles": {
     "strongest": {
-      "extractor": {"provider": "claude", "model": "claude-opus-5"},
-      "question_writer": {"provider": "claude", "model": "claude-opus-5"},
-      "direct_joint": {"provider": "claude", "model": "claude-opus-5"},
-      "distractor_writer": {"provider": "claude", "model": "claude-opus-5"},
-      "correction": {"provider": "claude", "model": "claude-opus-5"},
-      "reconstructor": {"provider": "gemini", "model": "gemini-3.1-pro-preview", "lifecycle": "preview"},
-      "answer_verifier": {"provider": "gemini", "model": "gemini-3.1-pro-preview", "lifecycle": "preview"},
-      "option_verifier": {"provider": "gemini", "model": "gemini-3.1-pro-preview", "lifecycle": "preview"}
+      "extractor": {
+        "provider": "claude",
+        "model": "claude-opus-5"
+      },
+      "question_writer": {
+        "provider": "claude",
+        "model": "claude-opus-5"
+      },
+      "direct_joint": {
+        "provider": "claude",
+        "model": "claude-opus-5"
+      },
+      "distractor_writer": {
+        "provider": "claude",
+        "model": "claude-opus-5"
+      },
+      "correction": {
+        "provider": "claude",
+        "model": "claude-opus-5"
+      },
+      "slot_lookup": {
+        "provider": "claude",
+        "model": "claude-opus-5"
+      },
+      "standalone_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "option_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "option_set_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "reconstructor": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "answer_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "answer_judge": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      }
     },
     "cost_aware": {
-      "extractor": {"provider": "claude", "model": "claude-sonnet-5"},
-      "question_writer": {"provider": "claude", "model": "claude-sonnet-5"},
-      "direct_joint": {"provider": "claude", "model": "claude-sonnet-5"},
-      "distractor_writer": {"provider": "claude", "model": "claude-sonnet-5"},
-      "correction": {"provider": "claude", "model": "claude-sonnet-5"},
-      "reconstructor": {"provider": "gemini", "model": "gemini-3.8-flash", "lifecycle": "stable"},
-      "answer_verifier": {"provider": "gemini", "model": "gemini-3.8-flash", "lifecycle": "stable"},
-      "option_verifier": {"provider": "gemini", "model": "gemini-3.8-flash", "lifecycle": "stable"}
+      "extractor": {
+        "provider": "claude",
+        "model": "claude-sonnet-5"
+      },
+      "question_writer": {
+        "provider": "claude",
+        "model": "claude-sonnet-5"
+      },
+      "direct_joint": {
+        "provider": "claude",
+        "model": "claude-sonnet-5"
+      },
+      "distractor_writer": {
+        "provider": "claude",
+        "model": "claude-sonnet-5"
+      },
+      "correction": {
+        "provider": "claude",
+        "model": "claude-sonnet-5"
+      },
+      "slot_lookup": {
+        "provider": "claude",
+        "model": "claude-sonnet-5"
+      },
+      "standalone_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "option_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "option_set_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "reconstructor": {
+        "provider": "gemini",
+        "model": "gemini-3.8-flash",
+        "lifecycle": "stable"
+      },
+      "answer_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.8-flash",
+        "lifecycle": "stable"
+      },
+      "answer_judge": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      }
+    },
+    "gemini_separated": {
+      "extractor": {
+        "provider": "gemini",
+        "model": "gemini-3.8-flash"
+      },
+      "question_writer": {
+        "provider": "gemini",
+        "model": "gemini-3.8-flash"
+      },
+      "direct_joint": {
+        "provider": "gemini",
+        "model": "gemini-3.8-flash"
+      },
+      "distractor_writer": {
+        "provider": "gemini",
+        "model": "gemini-3.8-flash"
+      },
+      "correction": {
+        "provider": "gemini",
+        "model": "gemini-3.8-flash"
+      },
+      "slot_lookup": {
+        "provider": "gemini",
+        "model": "gemini-3.8-flash"
+      },
+      "standalone_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "option_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "option_set_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "reconstructor": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "answer_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "answer_judge": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      }
     }
+  },
+  "profile_notes": {
+    "gemini_separated": "Chapter 2 launch profile. The shared paid-call broker meters one provider, so every role runs on Gemini. The writer is gemini-3.8-flash; every judge is a different model, and the source-blind and option gates carry the strongest ranked judge model, as the r15 audit requires.",
+    "answer_judge": "Chapter 3 (yield audit 4.5 R5): the answer-agreement fallback judge sees only the cases determinism could not settle, so it runs on the same Pro model as the other judges. The broker price configuration must register the answer_agreement stage on this model before a live run."
   }
 }

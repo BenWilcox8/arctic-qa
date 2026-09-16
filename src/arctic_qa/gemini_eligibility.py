@@ -6,6 +6,7 @@ import os
 import re
 import stat
 import time
+import unicodedata
 import urllib.parse
 import urllib.error
 import urllib.request
@@ -27,7 +28,175 @@ CRITERIA = (
 
 ELIGIBILITY_RESPONSE_V2 = "eligibility-response-v2"
 ELIGIBILITY_RESPONSE_V3 = "eligibility-response-v3"
+ELIGIBILITY_RESPONSE_V4 = "eligibility-response-v4"
 ELIGIBILITY_STATUS_MAPPING_VERSION = "eligibility-criterion-status-map-v1"
+
+# One definition of "the criteria that must be satisfied", read by the status
+# mapping and by the bounded geography re-screen. Chapter 2 lost the whole
+# re-screen because the two carried different sets (audit 4.7, finding E2).
+REQUIRED_CRITERIA = frozenset(
+    {
+        "published_primary_findings",
+        "stable_identity_version",
+        "study_geography",
+        "access_rights_evidence",
+    }
+)
+# The frozen corpus carries no retraction registry, so this criterion is
+# uncertain on every paper. Uncertain satisfies it; failed does not.
+CORRECTION_SATISFIABLE_STATUSES = frozenset({"satisfied", "uncertain"})
+
+# The reason codes the classifier may write. They are recorded for measurement
+# and take no part in `_status_mapping_v2` and no part in the re-screen pool
+# (audit 4.7, finding E8). An out-of-enum code is a contract note, never an
+# error, because a rejected code would create a new lost-paper class.
+ELIGIBILITY_REASON_CODES = frozenset(
+    {
+        "lat_ge_66_56",
+        "wholly_north_region",
+        "crossing_region_with_northern_evidence",
+        "modeled_arctic_domain",
+        "all_activity_outside_boundary",
+        "incidental_arctic_reference",
+        "activity_not_located",
+        "boundary_crossing_unresolved",
+        "primary_research_reported",
+        "not_primary_research",
+        "retracted_or_corrected",
+        "no_correction_or_retraction_found",
+        "access_open",
+        "access_restricted",
+        "identifier_present",
+        "identifier_absent",
+        "coverage_unknown",
+        "other",
+    }
+)
+
+# The contracts that carry hash-bound article spans, and the subset of those
+# that also carry the eligible Arctic scope record.
+SPAN_CONTRACT_VERSIONS = frozenset(
+    {ELIGIBILITY_RESPONSE_V2, ELIGIBILITY_RESPONSE_V3, ELIGIBILITY_RESPONSE_V4}
+)
+SCOPE_CONTRACT_VERSIONS = frozenset({ELIGIBILITY_RESPONSE_V3, ELIGIBILITY_RESPONSE_V4})
+
+SCOPE_DIMENSIONS = ("geography", "period", "sample", "method", "definition")
+
+# A dimension label is a claim about the span's own text, so the label is
+# checked against that text (audit 4.7, phase B). The test only refuses a label
+# the span cannot support; it never admits a span the geography rules refused.
+_DIMENSION_MARKERS = {
+    # The text extractor writes the degree sign as a bare letter "o", or drops
+    # it, so "69.4273 o N" and "70 -78 N" must still read as a latitude
+    # (chapter 3 production run, papers 1 and 20).
+    "geography": re.compile(
+        r"\d+(?:[.,]\d+)?\s*(?:°|º|∘|\bo\b|deg(?:rees)?\.?)\s*[NSEW]\b"
+        r"|\d+[.,]\d+\s*[NSEW]\b"
+        r"|\d+\s*[-\u2010\u2013\u2014]\s*\d+\s*[NSEW]\b"
+        r"|\d+(?:[.,]\d+)?\s*(?:°|º|∘|deg(?:rees)?\.?)?\s*"
+        r"(?:north|south)\b"
+        r"|\b(?:latitude|longitude|station|stations|site|sites|region|regions|"
+        r"sea|seas|ocean|island|islands|glacier|glaciers|fjord|fjords|bay|"
+        r"basin|transect|domain|grid|coast|coastal|peninsula|archipelago|"
+        r"tundra|permafrost|ice\s+cap|ice\s+sheet|shelf|catchment|watershed|"
+        r"river|rivers|parallel|parallels|"
+        r"arctic|antarctic|boreal|subarctic)\b",
+        re.IGNORECASE,
+    ),
+    "period": re.compile(
+        r"\b(?:1[89]|20)\d{2}\b"
+        r"|\b(?:january|february|march|april|may|june|july|august|september|"
+        r"october|november|december)\b",
+        re.IGNORECASE,
+    ),
+    "sample": re.compile(
+        r"\b(?:sampl\w*|collect\w*|measur\w*|specimen\w*|participant\w*|"
+        r"individual\w*|subject\w*|core|cores|replicate\w*|aliquot\w*|"
+        r"profile\w*|cohort\w*|observation\w*|record\w*|survey\w*|unit|"
+        r"units|species)\b|\bn\s*=",
+        re.IGNORECASE,
+    ),
+    "method": re.compile(
+        r"\b(?:instrument\w*|sensor\w*|satellite\w*|radar|lidar|sonar|"
+        r"spectromet\w*|chromatograph\w*|microscop\w*|model|models|modell?ed|"
+        r"simulat\w*|reanalys\w*|algorithm\w*|retrieval\w*|vessel|icebreaker|"
+        r"ship|aircraft|buoy|buoys|mooring\w*|station|platform|analyz\w*|"
+        r"analys\w*|assay\w*|sequenc\w*|method\w*|resolution|protocol\w*|"
+        r"campaign|cruise|expedition|techniqu\w*|medium|media|device\w*)\b"
+        r"|R/V",
+        re.IGNORECASE,
+    ),
+    # An acronym is defined either as "expansion (ABBR)" or as "ABBR (expansion)".
+    "definition": re.compile(
+        r"\(\s*[A-Z][A-Za-z0-9‐-]{1,15}\s*[);,]"
+        r"|\b[A-Z][A-Z0-9]{1,15}\b\s*\("
+    ),
+}
+
+# A phrase that survives a bounded repair must still name a place, a stratum or
+# a population. A bare number, a percentage, a unit or a vague label is not a
+# scope phrase (audit 4.7, phase D, the streaming format re-ask).
+_NON_SPECIFIC_PHRASE = re.compile(
+    r"^(?:[-+]?\d+(?:[.,]\d+)?\s*(?:%|percent|per\s*cent|[a-z°/²³^-]{1,12})?"
+    r"|in\s+the\s+arctic|the\s+arctic|arctic|study\s+area|the\s+study\s+area"
+    r"|this\s+study|the\s+region|the\s+site|the\s+sites|the\s+station)$",
+    re.IGNORECASE,
+)
+
+# A formatting mistake is a mistake about how the answer is written, never about
+# the science. It must not end the paper and it must not halt the batch. The
+# paper is re-asked once and then left unresolved and re-screenable.
+#
+# The set holds only the scope-shape codes. A provider envelope error, a refusal
+# and a malformed response stay terminal, because those are not the classifier
+# writing the span fields in the wrong shape.
+FORMAT_ERROR_CODES = frozenset(
+    {
+        "eligible_arctic_scope_activity_unbound",
+        "eligible_arctic_scope_missing",
+        "eligible_arctic_scope_phrase_missing",
+        "eligible_arctic_scope_phrase_not_specific",
+        "eligible_arctic_scope_phrase_unbound",
+        "eligible_arctic_scope_span_unknown",
+        # A residual safety net. Under the non-fatal rule below this code is
+        # emitted only beside a broken criterion record, so it is unreachable on
+        # its own; the entry keeps a future bare case re-askable instead of
+        # terminal (audit 4.7, finding E6).
+        "criterion_missing_context_absent",
+    }
+)
+MAXIMUM_FORMAT_ATTEMPTS = 2
+UNRESOLVED_STATE = "unresolved_rescreenable"
+
+# A code that is recorded and never decides anything. `criteria_valid` stays
+# true, the decision stands, and the run is not paused.
+NON_FATAL_CONTRACT_CODES = frozenset(
+    {
+        "criterion_missing_context_absent",
+        "reason_code_out_of_enum",
+    }
+)
+
+
+_WRAPPED_WORD = re.compile(r"(?<=[^\W\d_])[-" + chr(0x2010) + r"]\s*\n\s*")
+
+
+def _normalize_for_binding(text: str) -> str:
+    """Fold only the presentation differences that text extraction introduces.
+
+    NFKC folds the fi and ffi ligatures. The soft hyphen and a hyphen at a line
+    wrap carry no meaning. Whitespace collapses. A phrase is compared through
+    this projection; the stored span bytes never change.
+    """
+    folded = unicodedata.normalize("NFKC", text.replace(chr(0x00AD), ""))
+    return " ".join(_WRAPPED_WORD.sub("", folded).split())
+
+
+def format_repairable(errors: Any) -> bool:
+    """Say whether every validation error is a formatting mistake."""
+    if not isinstance(errors, list) or not errors:
+        return False
+    return set(errors) <= FORMAT_ERROR_CODES
 
 
 def _now() -> str:
@@ -54,7 +223,15 @@ def _config(path: Path) -> dict[str, Any]:
     value = _read(path)
     if value.get("schema") != "gemini-eligibility-config-v1":
         raise ValueError("unsupported Gemini eligibility config schema")
-    if value.get("config_id") != "arctic-gemini-eligibility-r1-config-v2":
+    if value.get("config_id") not in {
+        "arctic-gemini-eligibility-r1-config-v2",
+        "arctic-gemini-eligibility-r1-config-v3",
+        "arctic-gemini-eligibility-r1-config-v4",
+        "arctic-gemini-eligibility-r1-config-v5",
+        "arctic-gemini-eligibility-r1-config-v6",
+        "arctic-gemini-eligibility-r1-config-v7",
+        "arctic-gemini-eligibility-r1-config-v8",
+    }:
         raise ValueError("the Gemini eligibility config revision is not approved")
     if value.get("model") != "gemini-3.8-flash":
         raise ValueError("the Gemini model has no verified price record")
@@ -88,6 +265,65 @@ def _config(path: Path) -> dict[str, Any]:
         raise ValueError("the verified Gemini input limit changed")
     if value["maximum_output_tokens"] != 8192:
         raise ValueError("the configured Gemini output limit must be 8192")
+    if "call_timeout_seconds" in value:
+        _validate_call_timeout(value["call_timeout_seconds"])
+    stage_models = value.get("stage_models")
+    if value["config_id"] in {
+        "arctic-gemini-eligibility-r1-config-v3",
+        "arctic-gemini-eligibility-r1-config-v4",
+        "arctic-gemini-eligibility-r1-config-v5",
+    }:
+        if not isinstance(stage_models, dict) or set(stage_models) != {
+            "answer_agreement"
+        }:
+            raise ValueError("the Gemini stage model registry changed")
+        if value["config_id"] == "arctic-gemini-eligibility-r1-config-v3":
+            _validate_legacy_answer_agreement_config(stage_models["answer_agreement"])
+        elif value["config_id"] == "arctic-gemini-eligibility-r1-config-v4":
+            _validate_legacy_flash_lite_answer_agreement_config(
+                stage_models["answer_agreement"]
+            )
+        else:
+            _validate_answer_agreement_config(stage_models["answer_agreement"])
+    elif value["config_id"] in {
+        "arctic-gemini-eligibility-r1-config-v6",
+        "arctic-gemini-eligibility-r1-config-v7",
+        "arctic-gemini-eligibility-r1-config-v8",
+    }:
+        # Chapter 2: the source-blind judge, the option judge, the blind
+        # reconstructor and the answer verifier run on a stronger model than
+        # the writer (r15 audit section 4.2 fix 4). Every price is pinned.
+        # v7 adds one pinned per-call timeout to those judge stages; the Pro
+        # judge thinks for longer than the fixed 120 second transport timeout.
+        # v8 (chapter 3) does two things in one revision: it moves the
+        # answer-agreement fallback judge to the same Pro model, with its
+        # 128-token enum output (yield audit 4.5 R5), and it registers a 300
+        # second timeout for the writer stage, which was the last one still cut
+        # off at 120 seconds (yield audit 4.9, C8).
+        chapter3_revision = (
+            value["config_id"] == "arctic-gemini-eligibility-r1-config-v8"
+        )
+        writer_timeout_stages = {WRITER_TIMEOUT_STAGE} if chapter3_revision else set()
+        if not isinstance(stage_models, dict) or set(stage_models) != (
+            {"answer_agreement"} | PRO_JUDGE_STAGES | writer_timeout_stages
+        ):
+            raise ValueError("the Gemini stage model registry changed")
+        if chapter3_revision:
+            _validate_pro_answer_agreement_config(stage_models["answer_agreement"])
+        else:
+            _validate_answer_agreement_config(stage_models["answer_agreement"])
+        pinned_timeout = value["config_id"] in {
+            "arctic-gemini-eligibility-r1-config-v7",
+            "arctic-gemini-eligibility-r1-config-v8",
+        }
+        for stage in sorted(PRO_JUDGE_STAGES):
+            _validate_pro_judge_config(
+                stage_models[stage], pinned_timeout=pinned_timeout
+            )
+        for stage in sorted(writer_timeout_stages):
+            _validate_writer_timeout_config(stage_models[stage])
+    elif stage_models is not None:
+        raise ValueError("the legacy Gemini configuration has stage models")
     start = date.fromisoformat(value["price_valid_from"])
     end = date.fromisoformat(value["price_valid_through"])
     if not start <= date.today() <= end:
@@ -95,6 +331,249 @@ def _config(path: Path) -> dict[str, Any]:
     if not str(value.get("price_source", "")).startswith("https://ai.google.dev/"):
         raise ValueError("Gemini price source is not an official Google URL")
     return value
+
+
+PRO_JUDGE_STAGES = frozenset(
+    {
+        "standalone_verification",
+        "option_verification",
+        "blinded_reconstruction",
+        "answer_verification",
+    }
+)
+PRO_JUDGE_MODEL = "gemini-3.1-pro-preview"
+# The one per-call provider timeout every stage used before it became a stage
+# model fact. A receipt that names no timeout ran under exactly this value.
+DEFAULT_CALL_TIMEOUT_SECONDS = 120
+MAXIMUM_CALL_TIMEOUT_SECONDS = 900
+# The Pro judge thinks before it answers, so 120 seconds cut live calls off
+# while the provider was still working and left the charge unknown.
+PRO_JUDGE_CALL_TIMEOUT_SECONDS = 300
+# The writer stage was the last one still cut off at the fixed 120 second
+# transport timeout, which left the charge of a completed call unknown
+# (chapter 2 yield audit 4.9, C8). It registers a timeout and nothing else, so
+# the stage keeps the top-level writer model and its verified prices.
+WRITER_TIMEOUT_STAGE = "question_generation"
+WRITER_CALL_TIMEOUT_SECONDS = 300
+
+# Verified against https://ai.google.dev/gemini-api/docs/pricing on 2026-09-15:
+# standard tier, prompts up to 200k tokens. The input limit below keeps every
+# request inside that price tier.
+PRO_JUDGE_EXACT_CONFIG = {
+    "model": PRO_JUDGE_MODEL,
+    "lifecycle": "preview",
+    "maximum_input_tokens": 200_000,
+    "model_output_token_limit": 65_536,
+    "maximum_output_tokens": 8192,
+    "thinking_level": "low",
+    "input_usd_per_million_tokens": "2.00",
+    "output_usd_per_million_tokens_including_thinking": "12.00",
+    "price_tier": "standard, prompts up to 200k tokens",
+    "price_source": "https://ai.google.dev/gemini-api/docs/pricing",
+    "model_source": "https://ai.google.dev/gemini-api/docs/models/gemini-3.1-pro-preview",
+    "thinking_source": "https://ai.google.dev/gemini-api/docs/generate-content/thinking",
+    "structured_output_source": "https://ai.google.dev/api/generate-content",
+}
+
+
+def _validate_writer_timeout_config(value: Any) -> None:
+    """Check the one writer stage entry that registers a timeout only."""
+    if not isinstance(value, dict) or set(value) != {"call_timeout_seconds"}:
+        raise ValueError("the writer stage entry may register a timeout only")
+    if value["call_timeout_seconds"] != WRITER_CALL_TIMEOUT_SECONDS:
+        raise ValueError("the verified writer stage call timeout changed")
+
+
+def _validate_pro_judge_config(value: Any, *, pinned_timeout: bool = False) -> None:
+    if not isinstance(value, dict):
+        raise ValueError("the judge model price configuration is invalid")
+    if any(
+        value.get(name) != expected for name, expected in PRO_JUDGE_EXACT_CONFIG.items()
+    ):
+        raise ValueError("the verified judge model configuration changed")
+    if pinned_timeout:
+        if value.get("call_timeout_seconds") != PRO_JUDGE_CALL_TIMEOUT_SECONDS:
+            raise ValueError("the verified judge model call timeout changed")
+    elif "call_timeout_seconds" in value:
+        raise ValueError("the verified judge model configuration changed")
+    if value.get("documented_supported_methods") != [
+        "generateContent",
+        "countTokens",
+        "batchGenerateContent",
+    ]:
+        raise ValueError("the documented judge model methods changed")
+    checked = datetime.fromisoformat(
+        str(value.get("documented_availability_checked_at_utc") or "").replace(
+            "Z", "+00:00"
+        )
+    )
+    if checked.tzinfo is None:
+        raise ValueError("the judge model availability date is invalid")
+    start = date.fromisoformat(str(value.get("price_valid_from")))
+    end = date.fromisoformat(str(value.get("price_valid_through")))
+    if not start <= date.today() <= end:
+        raise ValueError("judge model pricing is not active; update the price record")
+
+
+def _validate_pro_answer_agreement_config(value: Any) -> None:
+    """v8: the fallback judge is the Pro judge with a 128-token enum output."""
+    if not isinstance(value, dict):
+        raise ValueError("the answer agreement price configuration is invalid")
+    if value.get("maximum_output_tokens") != 128:
+        raise ValueError("the answer agreement output limit must stay 128 tokens")
+    _validate_pro_judge_config(
+        {
+            **value,
+            "maximum_output_tokens": PRO_JUDGE_EXACT_CONFIG["maximum_output_tokens"],
+        },
+        pinned_timeout=True,
+    )
+
+
+def _validate_answer_agreement_config(value: Any) -> None:
+    if not isinstance(value, dict):
+        raise ValueError("the answer agreement price configuration is invalid")
+    exact = {
+        "model": "gemini-3.1-flash-lite",
+        "maximum_input_tokens": 1_048_576,
+        "model_output_token_limit": 65_536,
+        "maximum_output_tokens": 128,
+        "thinking_level": "minimal",
+        "input_usd_per_million_tokens": "0.25",
+        "output_usd_per_million_tokens_including_thinking": "1.50",
+        "price_source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "model_source": (
+            "https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite"
+        ),
+        "thinking_source": (
+            "https://ai.google.dev/gemini-api/docs/generate-content/thinking"
+        ),
+        "structured_output_source": "https://ai.google.dev/api/generate-content",
+    }
+    if any(value.get(name) != expected for name, expected in exact.items()):
+        raise ValueError("the verified answer agreement model configuration changed")
+    if value.get("documented_supported_methods") != [
+        "generateContent",
+        "countTokens",
+        "batchGenerateContent",
+    ]:
+        raise ValueError("the documented answer agreement methods changed")
+    checked = datetime.fromisoformat(
+        str(value.get("documented_availability_checked_at_utc") or "").replace(
+            "Z", "+00:00"
+        )
+    )
+    if checked.tzinfo is None:
+        raise ValueError("the answer agreement availability date is invalid")
+    start = date.fromisoformat(str(value.get("price_valid_from")))
+    end = date.fromisoformat(str(value.get("price_valid_through")))
+    if not start <= date.today() <= end:
+        raise ValueError("answer agreement pricing is not active")
+
+
+def _validate_legacy_answer_agreement_config(value: Any) -> None:
+    """Keep the immutable v3 route readable for reviewed ledger recovery."""
+    if not isinstance(value, dict):
+        raise ValueError("the legacy answer agreement configuration is invalid")
+    exact = {
+        "model": "gemini-2.5-flash-lite",
+        "maximum_input_tokens": 1_048_576,
+        "model_output_token_limit": 65_536,
+        "maximum_output_tokens": 4,
+        "thinking_budget": 0,
+        "input_usd_per_million_tokens": "0.10",
+        "output_usd_per_million_tokens_including_thinking": "0.40",
+    }
+    if any(value.get(name) != expected for name, expected in exact.items()):
+        raise ValueError("the legacy answer agreement configuration changed")
+
+
+def _validate_legacy_flash_lite_answer_agreement_config(value: Any) -> None:
+    """Keep the immutable v4 route readable for reviewed ledger recovery."""
+    if not isinstance(value, dict):
+        raise ValueError("the legacy answer agreement configuration is invalid")
+    exact = {
+        "model": "gemini-3.1-flash-lite",
+        "maximum_input_tokens": 1_048_576,
+        "model_output_token_limit": 65_536,
+        "maximum_output_tokens": 4,
+        "thinking_level": "minimal",
+        "input_usd_per_million_tokens": "0.25",
+        "output_usd_per_million_tokens_including_thinking": "1.50",
+        "price_source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "model_source": (
+            "https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite"
+        ),
+        "thinking_source": (
+            "https://ai.google.dev/gemini-api/docs/generate-content/thinking"
+        ),
+        "structured_output_source": "https://ai.google.dev/api/generate-content",
+    }
+    if any(value.get(name) != expected for name, expected in exact.items()):
+        raise ValueError("the legacy answer agreement configuration changed")
+    if value.get("documented_supported_methods") != [
+        "generateContent",
+        "countTokens",
+        "batchGenerateContent",
+    ]:
+        raise ValueError("the documented answer agreement methods changed")
+    checked = datetime.fromisoformat(
+        str(value.get("documented_availability_checked_at_utc") or "").replace(
+            "Z", "+00:00"
+        )
+    )
+    if checked.tzinfo is None:
+        raise ValueError("the answer agreement availability date is invalid")
+    start = date.fromisoformat(str(value.get("price_valid_from")))
+    end = date.fromisoformat(str(value.get("price_valid_through")))
+    if not start <= date.today() <= end:
+        raise ValueError("answer agreement pricing is not active")
+
+
+def normalize_for_phrase_binding(text: str) -> str:
+    """Public name of the one presentation-folding projection for phrases."""
+    return _normalize_for_binding(text)
+
+
+def model_config_for_stage(config: dict[str, Any], stage: str) -> dict[str, Any]:
+    """Return the registered model and price values for one broker stage."""
+    override = (config.get("stage_models") or {}).get(stage)
+    return {**config, **override} if isinstance(override, dict) else config
+
+
+def _validate_call_timeout(value: Any) -> int:
+    """Return one valid per-call provider timeout in whole seconds."""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= MAXIMUM_CALL_TIMEOUT_SECONDS
+    ):
+        raise ValueError("the Gemini call timeout must be a bounded whole second count")
+    return value
+
+
+def call_timeout_seconds(config: dict[str, Any], stage: str) -> int:
+    """Return the per-call provider timeout, in seconds, for one broker stage.
+
+    The timeout is a stage model fact, so it travels in the price config next
+    to the model and its rates. A stage that registers no timeout keeps the one
+    documented default, which is the fixed timeout every earlier call ran under.
+    """
+    stage_config = model_config_for_stage(config, stage)
+    if "call_timeout_seconds" not in stage_config:
+        return DEFAULT_CALL_TIMEOUT_SECONDS
+    return _validate_call_timeout(stage_config["call_timeout_seconds"])
+
+
+def maximum_call_timeout_seconds(config: dict[str, Any]) -> int:
+    """Return the longest per-call timeout any registered stage may use."""
+    stages = config.get("stage_models") or {}
+    timeouts = [call_timeout_seconds(config, stage) for stage in stages]
+    if "call_timeout_seconds" in config:
+        timeouts.append(_validate_call_timeout(config["call_timeout_seconds"]))
+    else:
+        timeouts.append(DEFAULT_CALL_TIMEOUT_SECONDS)
+    return max(timeouts)
 
 
 def _safety(path: Path) -> dict[str, Any]:
@@ -156,11 +635,7 @@ def _segments(text: str, page_chars: int = 12000) -> list[dict[str, Any]]:
 
 def _response_contract_version(schema: dict[str, Any]) -> str:
     value = (schema.get("properties") or {}).get("schema_version", {}).get("const")
-    return (
-        value
-        if value in {ELIGIBILITY_RESPONSE_V2, ELIGIBILITY_RESPONSE_V3}
-        else "eligibility-response-v1"
-    )
+    return value if value in SPAN_CONTRACT_VERSIONS else "eligibility-response-v1"
 
 
 def _line_fragments(text: str, maximum_bytes: int) -> list[str]:
@@ -300,10 +775,7 @@ def _span_manifest_v2(
 def _validation_evidence(
     text: str, extraction_sha256: str, schema: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    if _response_contract_version(schema) in {
-        ELIGIBILITY_RESPONSE_V2,
-        ELIGIBILITY_RESPONSE_V3,
-    }:
+    if _response_contract_version(schema) in SPAN_CONTRACT_VERSIONS:
         return _span_blocks_v2(text, extraction_sha256)
     return _segments(text)
 
@@ -325,7 +797,7 @@ def _persist_span_manifest_v2(
     schema: dict[str, Any],
 ) -> dict[str, str]:
     response_version = _response_contract_version(schema)
-    if response_version not in {ELIGIBILITY_RESPONSE_V2, ELIGIBILITY_RESPONSE_V3}:
+    if response_version not in SPAN_CONTRACT_VERSIONS:
         return {}
     manifest = _span_manifest_v2(
         _span_blocks_v2(text, extraction_sha256), response_version
@@ -403,6 +875,163 @@ def _identity(
     }
 
 
+def _repair_note(prior: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Build the one bounded re-ask for a formatting mistake.
+
+    The note repeats the failing codes and freezes every criterion status of the
+    first response. It repairs the shape of the answer, never its science.
+    """
+    if not prior:
+        return None
+    parsed = prior.get("parsed_response") or {}
+    statuses = {
+        str(row.get("criterion_id")): row.get("status")
+        for row in parsed.get("criteria", [])
+        if isinstance(row, dict)
+    }
+    # The chapter 2 note carried the codes and the frozen statuses and nothing
+    # else, so the model had to guess which phrase failed and against what text
+    # (audit 4.7, finding E6). The detail comes from the validator that raised
+    # the code, so the note names the exact defect.
+    detail = prior.get("validation") or {}
+    detail = detail.get("format_repair_detail") or {}
+    return {
+        "attempt": int(prior.get("attempts") or 0) + 1,
+        "format_errors": list(prior.get("format_errors") or []),
+        "frozen_criterion_statuses": statuses,
+        **(
+            {"unbound_phrases": list(detail["unbound_phrases"])}
+            if detail.get("unbound_phrases")
+            else {}
+        ),
+        **(
+            {"finding_span_text": str(detail["finding_span_text"])}
+            if detail.get("finding_span_text")
+            else {}
+        ),
+        "instruction": (
+            "Your last answer had a formatting mistake, listed in format_errors. "
+            "unbound_phrases lists each question_scope_phrases value that is not "
+            "in finding_span_text. Replace each one with a phrase you copy from "
+            "finding_span_text, or add the finding span that states it. Each "
+            "phrase must still name a station, region, stratum, population, or "
+            "modeled domain. Answer again "
+            "with the same criterion statuses, listed in "
+            "frozen_criterion_statuses, and correct only the span and phrase "
+            "fields. Do not change any criterion status."
+        ),
+    }
+
+
+def repaired_phrases_are_specific(parsed: Any) -> bool:
+    """Say whether every scope phrase of a repaired answer still names a scope.
+
+    A bounded re-ask must not buy a phrase that binds to the finding text and
+    identifies nothing. This runs on the repair answer only, so it cannot change
+    what a first-pass answer decides.
+    """
+    if not isinstance(parsed, dict):
+        return False
+    scope = parsed.get("eligible_arctic_scope")
+    if not isinstance(scope, dict):
+        return True
+    phrases = scope.get("question_scope_phrases")
+    if not isinstance(phrases, list):
+        return True
+    return all(
+        isinstance(phrase, str) and phrase_is_specific(phrase) for phrase in phrases
+    )
+
+
+def _repair_moved_a_status(prior: dict[str, Any] | None, parsed: Any) -> bool:
+    """Say whether a repair answer changed a criterion status it had to keep."""
+    note = _repair_note(prior)
+    if note is None or not isinstance(parsed, dict):
+        return False
+    frozen = note["frozen_criterion_statuses"]
+    if not frozen:
+        return False
+    current = {
+        str(row.get("criterion_id")): row.get("status")
+        for row in parsed.get("criteria", [])
+        if isinstance(row, dict)
+    }
+    return current != frozen
+
+
+SHADOW_TWO_PASS_VERSION = "eligibility-two-pass-shadow-v1"
+SHADOW_SHORT_VIEW_CHARS = 8000
+
+
+def shadow_two_pass_measurement(
+    text: str, resolved_scope: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Measure what a short first view would have deferred. It decides nothing.
+
+    A two-pass screen was proposed as a saving and refuted (audit 4.10). A
+    positive eligibility decision is load-bearing downstream, because the
+    selected activity spans feed `_require_arctic_scope_custody` and the writer
+    context bundle, so a short view cannot decide eligible. This records the
+    deferral rate and the span quality at USD 0 until the numbers exist.
+
+    The record carries `applied: False` and `booked_usd: "0"`. No caller reads it
+    as a decision, and no provider call is made for it.
+    """
+    short_view = text[:SHADOW_SHORT_VIEW_CHARS]
+    spans = (resolved_scope or {}).get("activity_spans") or []
+    quotes = [str(span.get("quote") or "") for span in spans if isinstance(span, dict)]
+    inside = [quote for quote in quotes if quote and quote in short_view]
+    return {
+        "schema": SHADOW_TWO_PASS_VERSION,
+        "applied": False,
+        "decision_path": False,
+        "booked_usd": "0",
+        "short_view_chars": len(short_view),
+        "source_chars": len(text),
+        "short_view_holds_arctic_marker": bool(
+            _DIMENSION_MARKERS["geography"].search(_normalize_for_binding(short_view))
+        ),
+        "selected_activity_spans": len(quotes),
+        "activity_spans_inside_short_view": len(inside),
+        # The only two labels a short view may carry. Neither is a status.
+        "measurement": (
+            "short_view_covers_selected_spans"
+            if quotes and len(inside) == len(quotes)
+            else "defer_to_full_text"
+        ),
+    }
+
+
+def geography_rescreen_keys(prior_run_dir: Path) -> set[str]:
+    """Return the papers a bounded geography re-screen may ask about again.
+
+    A paper qualifies only when the first screening decided uncertain and
+    study_geography is its one unsatisfied criterion, under the same required set
+    that `_status_mapping_v2` uses. A failed geography is a decision, not an
+    unresolved criterion, so a correct exclusion never returns.
+    """
+    keys: set[str] = set()
+    for directory in ("jobs", "unresolved"):
+        for path in (prior_run_dir / directory).glob("*.json"):
+            row = _read(path)
+            if str(row.get("state")) not in {"completed", UNRESOLVED_STATE}:
+                continue
+            if (row.get("validation") or {}).get("decision") not in {
+                "uncertain",
+                None,
+            }:
+                continue
+            statuses = {
+                str(item.get("criterion_id")): item.get("status")
+                for item in (row.get("parsed_response") or {}).get("criteria", [])
+                if isinstance(item, dict)
+            }
+            if not geography_rescreen_eligible(statuses):
+                continue
+            keys.add(str(row.get("candidate_key")))
+    return keys
+
+
 def _job_key(
     source: dict[str, Any],
     config: dict[str, Any],
@@ -427,6 +1056,7 @@ def _request_payload(
     config: dict[str, Any],
     request_id: str,
     policy_sha256: str,
+    repair: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     metadata = {
         key: source.get(key)
@@ -453,7 +1083,7 @@ def _request_payload(
         "metadata_sha256": sha256_bytes(canonical_json(metadata).encode()),
     }
     response_version = _response_contract_version(schema)
-    if response_version in {ELIGIBILITY_RESPONSE_V2, ELIGIBILITY_RESPONSE_V3}:
+    if response_version in SPAN_CONTRACT_VERSIONS:
         span_blocks = _span_blocks_v2(text, str(source["extraction_sha256"]))
         span_manifest = _span_manifest_v2(span_blocks, response_version)
         hashes["span_manifest_sha256"] = sha256_bytes(
@@ -468,6 +1098,11 @@ def _request_payload(
                 f"policy: {canonical_json(policy)}",
                 f"metadata: {canonical_json(metadata)}",
                 f"correction_metadata: {canonical_json(correction)}",
+                *(
+                    [f"repair_request: {canonical_json(repair)}"]
+                    if repair is not None
+                    else []
+                ),
                 "ARTICLE_SPANS_BEGIN",
                 _render_span_blocks_v2(span_blocks),
                 "ARTICLE_SPANS_END",
@@ -1150,6 +1785,43 @@ def _validate_response_v1(
     }
 
 
+def unsatisfied_required_criteria(
+    statuses: dict[str, Any], *, ignore: frozenset[str] | set[str] = frozenset()
+) -> list[str]:
+    """Name every criterion that still bars an eligible decision.
+
+    This is the one definition of the required set. `_status_mapping_v2` reads
+    it with no exemption. The bounded geography re-screen reads it with
+    study_geography exempt, because that is the criterion it re-decides. The two
+    cannot drift apart again (audit 4.7, finding E2).
+    """
+    unresolved = [
+        criterion
+        for criterion in sorted(REQUIRED_CRITERIA - set(ignore))
+        if statuses.get(criterion) != "satisfied"
+    ]
+    if (
+        statuses.get("correction_retraction_coverage")
+        not in CORRECTION_SATISFIABLE_STATUSES
+    ):
+        unresolved.append("correction_retraction_coverage")
+    return sorted(set(unresolved))
+
+
+def geography_rescreen_eligible(statuses: dict[str, Any]) -> bool:
+    """Say whether one bounded geography re-screen can still free this paper.
+
+    The paper qualifies only when study_geography is uncertain and every other
+    required criterion is already satisfied. A failed geography is a decision,
+    not an unresolved criterion, so a correct exclusion never returns.
+    """
+    if statuses.get("study_geography") != "uncertain":
+        return False
+    return not unsatisfied_required_criteria(
+        statuses, ignore=frozenset({"study_geography"})
+    )
+
+
 def _status_mapping_v2(by_id: dict[str, dict[str, Any]]) -> tuple[str, list[str]]:
     failed = sorted(
         criterion
@@ -1158,24 +1830,16 @@ def _status_mapping_v2(by_id: dict[str, dict[str, Any]]) -> tuple[str, list[str]
     )
     if failed:
         return "excluded", [f"criterion_failed:{criterion}" for criterion in failed]
-    required = {
-        "published_primary_findings",
-        "stable_identity_version",
-        "study_geography",
-        "access_rights_evidence",
+    statuses = {
+        criterion: row.get("status")
+        for criterion, row in by_id.items()
+        if isinstance(row, dict)
     }
-    unresolved = sorted(
-        criterion
-        for criterion in required
-        if by_id.get(criterion, {}).get("status") != "satisfied"
-    )
-    correction = by_id.get("correction_retraction_coverage", {}).get("status")
-    if not unresolved and correction in {"satisfied", "uncertain"}:
+    unresolved = unsatisfied_required_criteria(statuses)
+    if not unresolved:
         return "eligible", ["all_required_criteria_satisfied"]
-    if correction not in {"satisfied", "uncertain"}:
-        unresolved.append("correction_retraction_coverage")
     return "uncertain", [
-        f"criterion_unresolved:{criterion}" for criterion in sorted(set(unresolved))
+        f"criterion_unresolved:{criterion}" for criterion in unresolved
     ]
 
 
@@ -1290,9 +1954,7 @@ def _span_catalog_v2(
         errors.append("evidence_catalog_changed")
     try:
         manifest_sha256 = sha256_bytes(
-            canonical_json(
-                _span_manifest_v2(blocks, response_schema_version)
-            ).encode()
+            canonical_json(_span_manifest_v2(blocks, response_schema_version)).encode()
         )
     except (KeyError, TypeError):
         manifest_sha256 = None
@@ -1302,7 +1964,50 @@ def _span_catalog_v2(
     return catalog, sorted(set(errors))
 
 
-def _resolved_scope_span(span: dict[str, Any]) -> dict[str, Any]:
+def _dimension_verifiable(text: str) -> bool:
+    """Say whether the marker patterns can judge this span's text at all.
+
+    Every marker word is English, so a span in another script fails each
+    pattern whatever it states. Such a span is forwarded unverified, never
+    dropped (chapter 3 production run, papers 6 and 18).
+    """
+    letters = [character for character in text if character.isalpha()]
+    if not letters:
+        return True
+    latin = sum(1 for character in letters if character.isascii())
+    return latin * 2 >= len(letters)
+
+
+def _dimension_supported(text: str, dimension: str) -> bool:
+    """Say whether a span's own text states the dimension it is labelled with.
+
+    The label is a claim, so it is checked against the text. A span with no date
+    is not a period span. The test refuses a label; it never admits a span that
+    the ordered geography procedure refused.
+    """
+    marker = _DIMENSION_MARKERS.get(dimension)
+    if marker is None:
+        return False
+    return bool(marker.search(_normalize_for_binding(text)))
+
+
+def phrase_is_specific(phrase: str) -> bool:
+    """Say whether a scope phrase still names a place, stratum or population.
+
+    A bare number, a percentage, a bare unit and a vague label such as "In the
+    Arctic" identify nothing to a downstream reader. Prompt v7 already stated the
+    rule; this makes it checkable on a repaired answer (audit 4.7, phase D).
+    """
+    value = _normalize_for_binding(phrase).strip()
+    return bool(value) and not _NON_SPECIFIC_PHRASE.match(value)
+
+
+def _resolved_scope_span(
+    span: dict[str, Any],
+    *,
+    dimension: str | None = None,
+    dimension_verified: bool = True,
+) -> dict[str, Any]:
     return {
         "span_id": span["span_id"],
         "locator": {
@@ -1314,6 +2019,47 @@ def _resolved_scope_span(span: dict[str, Any]) -> dict[str, Any]:
         "end_byte": span["end_byte"],
         "quote": span["text"],
         "source_bytes_sha256": span["span_sha256"],
+        **({"dimension": dimension} if dimension else {}),
+        # Only the exception is recorded. A span without this key carries a
+        # label the marker patterns could judge and did support.
+        **(
+            {"dimension_verified": False}
+            if dimension and not dimension_verified
+            else {}
+        ),
+    }
+
+
+def _measurement_relaxed_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Drop the reason-code enum from the schema the Python validator applies.
+
+    Schema v4 first shipped the vocabulary as an enum inside the array items;
+    the provider rejects that shape (HTTP 400 INVALID_ARGUMENT, 2026-09-16),
+    so the shipped schema now states the vocabulary in the item description
+    and this function is a no-op on it. The enum is a measurement
+    vocabulary: it takes no part in `_status_mapping_v2` and no part in the
+    re-screen pool (audit 4.7, finding E8). Enforcing it here would turn a
+    vocabulary slip into a lost paper, which is the defect finding E1 removed.
+    An out-of-enum code is recorded as a contract note instead.
+    """
+    criterion = ((schema.get("$defs") or {}).get("criterion") or {}).get(
+        "properties"
+    ) or {}
+    if "enum" not in ((criterion.get("reason_codes") or {}).get("items") or {}):
+        return schema
+    relaxed = json.loads(json.dumps(schema))
+    del relaxed["$defs"]["criterion"]["properties"]["reason_codes"]["items"]["enum"]
+    return relaxed
+
+
+def _frozen_criterion_row(criterion: str, status: Any) -> dict[str, Any]:
+    """Build the row a re-screen keeps from the first screening."""
+    return {
+        "criterion_id": criterion,
+        "status": status,
+        "reason_codes": [],
+        "evidence": [],
+        "missing_context": [],
     }
 
 
@@ -1324,8 +2070,14 @@ def _validate_response_span_contract(
     expected: dict[str, Any],
     response_schema: dict[str, Any],
     response_schema_version: str,
+    frozen_criterion_statuses: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    errors = _schema_errors(value, response_schema, response_schema)
+    applied_schema = (
+        _measurement_relaxed_schema(response_schema)
+        if response_schema_version == ELIGIBILITY_RESPONSE_V4
+        else response_schema
+    )
+    errors = _schema_errors(value, applied_schema, applied_schema)
     required = {
         "schema_version",
         "status_mapping_version",
@@ -1335,7 +2087,7 @@ def _validate_response_span_contract(
         "correction_metadata_used",
         "input_echo",
     }
-    if response_schema_version == ELIGIBILITY_RESPONSE_V3:
+    if response_schema_version in SCOPE_CONTRACT_VERSIONS:
         required.add("eligible_arctic_scope")
     if not isinstance(value, dict) or set(value) != required:
         return {
@@ -1373,6 +2125,7 @@ def _validate_response_span_contract(
         errors.append("criteria_invalid")
     by_id: dict[str, dict[str, Any]] = {}
     resolved: list[dict[str, Any]] = []
+    notes: list[str] = []
     for row in criteria:
         if not isinstance(row, dict) or set(row) != {
             "criterion_id",
@@ -1390,6 +2143,15 @@ def _validate_response_span_contract(
         if criterion in by_id:
             errors.append("criterion_repeated")
             continue
+        if frozen_criterion_statuses is not None and criterion != "study_geography":
+            # A geography re-screen decides one criterion, but the schema needs
+            # all five rows, so the model must restate the other four. The
+            # restated row is read for nothing: the status comes from the first
+            # screening (chapter 3 production run, family B).
+            by_id[criterion] = _frozen_criterion_row(
+                criterion, frozen_criterion_statuses.get(criterion)
+            )
+            continue
         by_id[criterion] = row
         if (
             row.get("status") not in {"satisfied", "failed", "uncertain"}
@@ -1401,10 +2163,16 @@ def _validate_response_span_contract(
         ):
             errors.append(f"criterion_invalid:{criterion}")
             continue
+        if (
+            response_schema_version == ELIGIBILITY_RESPONSE_V4
+            and not set(row["reason_codes"]) <= ELIGIBILITY_REASON_CODES
+        ):
+            # Measurement only. A code outside the enum never prunes the
+            # re-screen pool and never moves a status (audit 4.7, finding E8).
+            notes.append(f"reason_code_out_of_enum:{criterion}")
+        criterion_errors = len(errors)
         if row["status"] in {"satisfied", "failed"} and not row["evidence"]:
             errors.append(f"criterion_evidence_missing:{criterion}")
-        if row["status"] == "uncertain" and not row["missing_context"]:
-            errors.append(f"criterion_missing_context_absent:{criterion}")
         selected_for_criterion: set[str] = set()
         for evidence in row["evidence"]:
             if not isinstance(evidence, dict) or set(evidence) != {"span_ids"}:
@@ -1451,32 +2219,75 @@ def _validate_response_span_contract(
                         ],
                     }
                 )
+        if row["status"] == "uncertain" and not row["missing_context"]:
+            # Chapter 2 lost 22 papers to this code, and neither the prompt nor
+            # the schema stated the rule (audit 4.7, finding E1). `missing_context`
+            # is a diagnostic field: it takes no part in `_status_mapping_v2`, so
+            # an empty one cannot make a paper eligible and must not delete the
+            # decision. Prompt v8 and schema v4 now state the rule, and the check
+            # is non-fatal whenever the rest of the criterion record is complete.
+            # It stays fatal only when that criterion already produced an error,
+            # where the paper is a screening error on the other code anyway.
+            if len(errors) == criterion_errors:
+                notes.append(f"criterion_missing_context_absent:{criterion}")
+            else:
+                errors.append(f"criterion_missing_context_absent:{criterion}")
     if set(by_id) != set(CRITERIA):
         errors.append("criterion_set_invalid")
     resolved_scope: dict[str, Any] | None = None
-    if response_schema_version == ELIGIBILITY_RESPONSE_V3:
+    repair_detail: dict[str, Any] = {}
+    dropped_spans: list[dict[str, Any]] = []
+    unverified_spans: list[dict[str, Any]] = []
+    if response_schema_version in SCOPE_CONTRACT_VERSIONS:
         scope = value.get("eligible_arctic_scope")
         geography = by_id.get("study_geography", {})
+        activity_key = (
+            "activity_spans"
+            if response_schema_version == ELIGIBILITY_RESPONSE_V4
+            else "activity_span_ids"
+        )
         if not isinstance(scope, dict) or set(scope) != {
             "component",
-            "activity_span_ids",
+            activity_key,
             "finding_span_ids",
             "question_scope_phrases",
         }:
             errors.append("eligible_arctic_scope_invalid")
         else:
             component = scope.get("component")
-            activity_ids = scope.get("activity_span_ids")
             finding_ids = scope.get("finding_span_ids")
             phrases = scope.get("question_scope_phrases")
-            lists_valid = all(
+            # v4 labels every activity span with the study-setting dimension its
+            # own text states (audit 4.7, phase B). v3 carries bare span ids.
+            activity_records = scope.get(activity_key)
+            if response_schema_version == ELIGIBILITY_RESPONSE_V4:
+                records_valid = isinstance(activity_records, list) and all(
+                    isinstance(record, dict)
+                    and set(record) == {"span_id", "dimension"}
+                    and isinstance(record.get("span_id"), str)
+                    and record["span_id"]
+                    and record.get("dimension") in SCOPE_DIMENSIONS
+                    for record in activity_records
+                )
+                activity_ids = (
+                    [record["span_id"] for record in activity_records]
+                    if records_valid
+                    else None
+                )
+                if not records_valid or len(activity_ids) != len(set(activity_ids)):
+                    errors.append("eligible_arctic_scope_invalid")
+                    activity_ids = None
+            else:
+                activity_ids = activity_records
+            lists_valid = activity_ids is not None and all(
                 isinstance(values, list)
                 and len(values) == len(set(values))
                 and all(isinstance(item, str) and item for item in values)
                 for values in (activity_ids, finding_ids, phrases)
             )
             if not lists_valid:
-                errors.append("eligible_arctic_scope_invalid")
+                if activity_ids is not None:
+                    errors.append("eligible_arctic_scope_invalid")
             elif geography.get("status") == "satisfied":
                 if (
                     component not in {"whole_study", "separable_arctic_component"}
@@ -1498,29 +2309,105 @@ def _validate_response_span_contract(
                 }
                 if unknown:
                     errors.append("eligible_arctic_scope_span_unknown")
-                if not set(activity_ids) <= geography_ids:
+                if response_schema_version == ELIGIBILITY_RESPONSE_V4:
+                    # The subset test made the writer's study-setting spans a
+                    # subset of the spans that prove latitude, so a date or a
+                    # sample sentence reached the writer only by accident (audit
+                    # 4.7, phase B). The custody chain needs one geography-bearing
+                    # span, not every span, so the test becomes an intersection.
+                    if not set(activity_ids) & geography_ids:
+                        errors.append("eligible_arctic_scope_activity_unbound")
+                    # The dimension label is a claim about one auxiliary span.
+                    # A wrong label is a reason to drop that span from the
+                    # forwarded context, never a reason to end a paper whose
+                    # criteria are satisfied (chapter 3 production run, the
+                    # rule 5 interrupt). No re-ask is spent on it.
+                    for record in activity_records:
+                        span = catalog.get(record["span_id"])
+                        if span is None:
+                            continue
+                        if not _dimension_verifiable(span["text"]):
+                            unverified_spans.append(
+                                dict(record, reason="dimension_marker_not_latin_script")
+                            )
+                            notes.append(
+                                f"scope_span_dimension_unverified:{record['span_id']}"
+                            )
+                        elif not _dimension_supported(
+                            span["text"], record["dimension"]
+                        ):
+                            dropped_spans.append(
+                                dict(
+                                    record,
+                                    reason=(
+                                        "eligible_arctic_scope_dimension_unsupported"
+                                    ),
+                                )
+                            )
+                            notes.append(f"scope_span_dropped:{record['span_id']}")
+                elif not set(activity_ids) <= geography_ids:
                     errors.append("eligible_arctic_scope_activity_unbound")
                 if component == "separable_arctic_component" and not phrases:
                     errors.append("eligible_arctic_scope_phrase_missing")
-                finding_text = "\n".join(
+                # Each span already ends with its own newline, so joining with
+                # another one inserted a second newline at every boundary and no
+                # phrase crossing a physical line could ever bind (r15 audit,
+                # stage eligibility, finding E3 defect b).
+                finding_text = "".join(
                     catalog[span_id]["text"]
                     for span_id in finding_ids
                     if span_id in catalog
                 )
-                if any(phrase not in finding_text for phrase in phrases):
+                haystack = _normalize_for_binding(finding_text)
+                normalized_phrases = [
+                    _normalize_for_binding(phrase) for phrase in phrases
+                ]
+                unbound = [
+                    source
+                    for source, phrase in zip(phrases, normalized_phrases)
+                    if phrase not in haystack
+                ]
+                if unbound:
                     errors.append("eligible_arctic_scope_phrase_unbound")
+                    # The chapter 2 re-ask told the model the code and not the
+                    # diagnosis, so the model had to guess which phrase failed
+                    # and against what (audit 4.7, finding E6).
+                    repair_detail["unbound_phrases"] = list(unbound)
+                    repair_detail["finding_span_text"] = finding_text
+                dimensions = (
+                    {
+                        record["span_id"]: record["dimension"]
+                        for record in activity_records
+                    }
+                    if response_schema_version == ELIGIBILITY_RESPONSE_V4
+                    else {}
+                )
+                dropped_ids = {record["span_id"] for record in dropped_spans}
+                unverified_ids = {record["span_id"] for record in unverified_spans}
+                forwarded_ids = [
+                    span_id for span_id in activity_ids if span_id not in dropped_ids
+                ]
+                # The custody link is the activity span that also proves the
+                # latitude. Losing it to the filter is recorded, never silent.
+                if dropped_ids and not set(forwarded_ids) & geography_ids:
+                    notes.append("scope_activity_custody_dropped")
                 if not unknown and trusted_catalog:
                     resolved_scope = {
                         "component": component,
                         "activity_spans": [
-                            _resolved_scope_span(catalog[span_id])
-                            for span_id in activity_ids
+                            _resolved_scope_span(
+                                catalog[span_id],
+                                dimension=dimensions.get(span_id),
+                                dimension_verified=span_id not in unverified_ids,
+                            )
+                            for span_id in forwarded_ids
                         ],
                         "finding_spans": [
                             _resolved_scope_span(catalog[span_id])
                             for span_id in finding_ids
                         ],
-                        "question_scope_phrases": list(phrases),
+                        "question_scope_phrases": normalized_phrases,
+                        "question_scope_phrases_source": list(phrases),
                     }
             elif component != "none" or activity_ids or finding_ids or phrases:
                 errors.append("eligible_arctic_scope_must_be_empty")
@@ -1529,10 +2416,24 @@ def _validate_response_span_contract(
     return {
         "valid": not unique_errors,
         "errors": unique_errors,
+        # Recorded, never decisive. Every entry names a diagnostic defect that
+        # takes no part in `_status_mapping_v2` (audit 4.7, findings E1 and E8).
+        "contract_notes": sorted(set(notes)),
         "resolved_evidence": resolved if not catalog_errors else [],
         **(
             {"resolved_eligible_arctic_scope": resolved_scope}
-            if response_schema_version == ELIGIBILITY_RESPONSE_V3
+            if response_schema_version in SCOPE_CONTRACT_VERSIONS
+            else {}
+        ),
+        **({"format_repair_detail": repair_detail} if repair_detail else {}),
+        **(
+            {
+                "dimension_span_filter": {
+                    "dropped": dropped_spans,
+                    "unverified": unverified_spans,
+                }
+            }
+            if dropped_spans or unverified_spans
             else {}
         ),
         "decision": mapped if not unique_errors else "uncertain",
@@ -1547,15 +2448,17 @@ def validate_response(
     *,
     expected: dict[str, Any],
     response_schema: dict[str, Any],
+    frozen_criterion_statuses: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     response_version = _response_contract_version(response_schema)
-    if response_version in {ELIGIBILITY_RESPONSE_V2, ELIGIBILITY_RESPONSE_V3}:
+    if response_version in SPAN_CONTRACT_VERSIONS:
         return _validate_response_span_contract(
             value,
             segments,
             expected=expected,
             response_schema=response_schema,
             response_schema_version=response_version,
+            frozen_criterion_statuses=frozen_criterion_statuses,
         )
     return _validate_response_v1(
         value,
@@ -1566,7 +2469,12 @@ def validate_response(
 
 
 class GeminiTransport:
-    def __init__(self, api_base: str, api_key: str, timeout: float = 120) -> None:
+    def __init__(
+        self,
+        api_base: str,
+        api_key: str,
+        timeout: float = DEFAULT_CALL_TIMEOUT_SECONDS,
+    ) -> None:
         self.api_base = api_base.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
@@ -1632,7 +2540,44 @@ def _terminal_index(run_dir: Path) -> dict[str, str]:
         for path in (run_dir / directory).glob("*.json"):
             row = _read(path)
             result[path.stem] = state or str(row.get("state") or "screening_error")
+    for path in (run_dir / "unresolved").glob("*.json"):
+        row = _read(path)
+        # A paper left unresolved by a formatting mistake keeps its paid attempts
+        # bounded in this run directory. It is not a screening error, and a later
+        # prompt, schema or policy version gives it a new job key and a new
+        # screening.
+        if int(row.get("attempts") or 0) >= MAXIMUM_FORMAT_ATTEMPTS:
+            result.setdefault(path.stem, UNRESOLVED_STATE)
     return result
+
+
+def _unresolved_index(run_dir: Path) -> dict[str, dict[str, Any]]:
+    return {path.stem: _read(path) for path in (run_dir / "unresolved").glob("*.json")}
+
+
+def _record_unresolved(
+    run_dir: Path,
+    job_key: str,
+    record: dict[str, Any],
+    validation: dict[str, Any],
+) -> None:
+    """Keep a paper re-screenable after a formatting mistake.
+
+    The row goes to ``unresolved``, never to ``jobs``, so no terminal
+    screening_error is written and the batch is not stopped.
+    """
+    path = run_dir / "unresolved" / f"{job_key}.json"
+    attempts = int(_read(path).get("attempts") or 0) if path.is_file() else 0
+    atomic_json(
+        path,
+        {
+            **record,
+            "state": UNRESOLVED_STATE,
+            "attempts": attempts + 1,
+            "format_errors": list(validation.get("errors") or []),
+            "recorded_at_utc": _now(),
+        },
+    )
 
 
 def _prepare_run_manifest(
@@ -1778,8 +2723,28 @@ def _status(
         "screening_error": 0,
         "too_large_not_ready": 0,
         "ambiguous_charge": 0,
+        "unresolved_rescreenable": 0,
     }
     overlay = []
+    for path in (run_dir / "unresolved").glob("*.json"):
+        row = _read(path)
+        # A paper whose repair attempts are spent is out of this run and is not a
+        # screening error. A later prompt, schema or policy version screens it
+        # again under a new job key.
+        if int(row.get("attempts") or 0) < MAXIMUM_FORMAT_ATTEMPTS:
+            continue
+        counts["unresolved_rescreenable"] += 1
+        overlay.append(
+            {
+                "schema": "gemini-eligibility-overlay-row-v1",
+                "run_id": run_dir.name,
+                "ready_source_keys_sha256": source_keys_hash,
+                "candidate_key": row["candidate_key"],
+                "gemini_status": UNRESOLVED_STATE,
+                "gemini_decision": None,
+                "job_key": row["job_key"],
+            }
+        )
     for directory, fixed in (
         ("jobs", None),
         ("errors", "screening_error"),
@@ -1888,9 +2853,24 @@ def run_gemini_eligibility(
     max_cost_usd: Decimal,
     credential_file: Path | None = None,
     transport: GeminiTransport | Any | None = None,
+    prior_run_dir: Path | None = None,
 ) -> dict[str, Any]:
-    if action not in {"doctor", "dry-run", "run", "resume", "pause", "status"}:
+    if action not in {
+        "doctor",
+        "dry-run",
+        "run",
+        "resume",
+        "pause",
+        "status",
+        "geography-rescreen",
+        "geography-rescreen-dry-run",
+    }:
         raise ValueError("Gemini eligibility action is not supported")
+    # A geography re-screen is an ordinary bounded run over a filtered source
+    # list, with the geography-only prompt and its own run directory.
+    geography_rescreen = action.startswith("geography-rescreen")
+    if geography_rescreen:
+        action = "dry-run" if action.endswith("dry-run") else "run"
     if action in {"run", "resume"} and transport is None:
         raise ValueError(
             "standalone Gemini execution is disabled; use the shared streaming broker"
@@ -1969,7 +2949,14 @@ def run_gemini_eligibility(
             raise ValueError("a ready source extraction is not verifiable")
         sources.append(row)
 
+    if geography_rescreen:
+        if prior_run_dir is None:
+            raise ValueError("a geography re-screen needs the prior run directory")
+        eligible = geography_rescreen_keys(prior_run_dir)
+        sources = [row for row in sources if str(row["candidate_key"]) in eligible]
+
     terminals = _terminal_index(run_dir)
+    unresolved = _unresolved_index(run_dir)
     planned: list[tuple[str, dict[str, Any], str, dict[str, Any], dict[str, str]]] = []
     estimated = Decimal("0")
     for source in sources:
@@ -1984,6 +2971,7 @@ def run_gemini_eligibility(
             config=config,
             request_id=job_key,
             policy_sha256=sha256_file(policy_file),
+            repair=_repair_note(unresolved.get(job_key)),
         )
         estimate = (len(canonical_json(payload).encode()) + 3) // 4
         if job_key not in terminals:
@@ -2359,19 +3347,56 @@ def run_gemini_eligibility(
                         "resolved_evidence": [],
                         "decision": "uncertain",
                     }
+            record = {
+                **submission,
+                "completed_at_utc": _now(),
+                "model_version": raw.get("modelVersion"),
+                "response_id": raw.get("responseId"),
+                "raw_response": raw,
+                "parsed_response": parsed,
+                "validation": validation,
+                "shadow_two_pass": shadow_two_pass_measurement(
+                    text, validation.get("resolved_eligible_arctic_scope")
+                ),
+                "usage": usage,
+                "actual_cost_usd": str(actual),
+            }
+            prior = unresolved.get(job_key)
+            if (
+                validation["valid"]
+                and prior
+                and not repaired_phrases_are_specific(parsed)
+            ):
+                # A repair may not buy a phrase that binds and names nothing.
+                validation = {
+                    **validation,
+                    "valid": False,
+                    "errors": ["eligible_arctic_scope_phrase_not_specific"],
+                    "decision": "uncertain",
+                }
+                _record_unresolved(run_dir, job_key, record, validation)
+                continue
+            if validation["valid"] and _repair_moved_a_status(prior, parsed):
+                # A repair corrects the shape of an answer. A repair that moves a
+                # criterion status is a new scientific judgment, so refuse it.
+                validation = {
+                    **validation,
+                    "valid": False,
+                    "errors": ["repair_changed_criterion_status"],
+                    "decision": "uncertain",
+                }
+                _record_unresolved(run_dir, job_key, record, validation)
+                continue
+            if not validation["valid"] and format_repairable(validation["errors"]):
+                # A formatting mistake is not a scientific decision. Keep the
+                # paper re-screenable and let the batch continue.
+                _record_unresolved(run_dir, job_key, record, validation)
+                continue
             atomic_json(
                 run_dir / "jobs" / f"{job_key}.json",
                 {
-                    **submission,
+                    **record,
                     "state": "completed" if validation["valid"] else "screening_error",
-                    "completed_at_utc": _now(),
-                    "model_version": raw.get("modelVersion"),
-                    "response_id": raw.get("responseId"),
-                    "raw_response": raw,
-                    "parsed_response": parsed,
-                    "validation": validation,
-                    "usage": usage,
-                    "actual_cost_usd": str(actual),
                 },
                 immutable=True,
             )

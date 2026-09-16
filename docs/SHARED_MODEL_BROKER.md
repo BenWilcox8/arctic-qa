@@ -70,7 +70,14 @@ It must contain these fields:
 
 The broker validates the ledger and all prior receipts before it applies the transition.
 
-The ledger must have no halt, inflight request, reservation, or ambiguous charge when the broker first applies the transition.
+The ledger must have no halt or inflight request when the broker first applies the transition.
+Each remaining reservation must have validated no-replay recovery evidence.
+The transition keeps the full held amount in all budget totals.
+An uncovered reservation or ambiguous charge stops the transition.
+
+Use schema `shared-paid-call-config-transition-v3` after an earlier policy transition.
+Version 3 binds the active predecessor event and keeps the active policy unchanged.
+It changes only the registered price and model configuration.
 
 It also validates the private gate and the exact independent review record.
 
@@ -81,6 +88,8 @@ It does not change the existing ledger, identity record, request receipts, spend
 Later starts can use the immutable event without the original transition file.
 
 Before the first transitioned request, each restart validates the embedded ledger snapshot, gate, and review record again.
+
+Evaluation requests made after the application are the one change the ledger may carry at that point; a construction request made under the previous configuration still stops the start.
 
 Each transitioned request binds its ledger record and immutable receipts to the exact transition event hash.
 
@@ -179,6 +188,84 @@ The status record shows the initial and active policy hashes.
 
 It also shows the authorized cumulative live-test ceiling.
 
+### Registered construction ceiling transitions
+
+Schema v2 also moves the construction ceiling, `away_session_total_ceiling_usd`.
+
+Each allowed move is one constant in `CEILING_CHANGES` in `model_broker.py`, and `_validate_policy` lists each allowed ceiling value.
+
+The tranche of a ceiling transition must equal the new cumulative ceiling.
+
+A ceiling transition needs a complete `stream-input-binding-v1` gate.
+
+A new budget needs its constant and a chain test before any transition file can apply (`tests/test_chapter3_production_run.py`).
+
+The chapter 3 expansion change set (`CHAPTER3_EXPANSION_CHANGE`) moves four fields together: the ceiling, `away_maximum_generation_submissions`, `accepted_question_target` and `construction_review_checkpoint_usd`.
+
+The broker refuses each of these four fields alone, and it accepts the expanded counts only under the expansion ceiling.
+
+### The per-paper cost cap
+
+`maximum_paper_cost_usd` bounds one paper family, never the run.
+
+The broker refuses a request that would take the family past the cap with `PAPER_COST_CAP_REASON`.
+
+It records the refusal as a `not_submitted` receipt and charges nothing past the cap.
+
+The receipt is immutable, and the reason is not resumable.
+
+Thus, a relaunch replays the same refusal at no cost and never re-tries the capped family.
+
+The broker itself replays the refusal: `execute` returns the stored receipt before it paces, counts or resumes.
+
+`_resume_not_submitted` refuses that receipt under every transition, and a settlement never moves its row.
+
+The streaming producer reads that refusal as `errors.PaperCostCapError`.
+
+It settles the in-flight call record as `generation_incomplete`, writes a `rejection_ledger` row at stage `paper_cost_cap` with the reason code `paper_cost_cap_reached`, the family's committed spend and the stage that stopped, and continues with the next paper.
+
+Only a whole-run stop ends the producer: the allocation ceiling, the session ceiling or a halt.
+
+To raise the cap for a family, move `maximum_paper_cost_usd` through a registered budget transition. Do not change the skip.
+
+### Orphan recovery and concurrent settlement
+
+Every paid call recovers interrupted requests before it starts.
+
+The recovery reads the ledger one time, then settles each request it found.
+
+Another worker of the same ledger can settle one of those requests inside that window.
+
+Therefore the recovery reads the row again before it writes a receipt, and it skips a row that is no longer `submitted`.
+
+A settlement never ends the run: a row that is not `submitted` holds no reservation to release.
+
+Such a settlement writes `<request_key>.settle-skipped.json` beside the receipts and returns.
+
+The note has the schema `shared-paid-call-settle-skipped-v1`, the observed state and the reason.
+
+The note is an observation, never an accounting event: the money of the request stays in the ledger row the other worker wrote.
+
+A settlement that ended the run this way stopped the chapter 3 producer at 13:53 UTC on 2026-09-16.
+
+### Phase slots and windows
+
+Each phase counts its own in-flight requests against its own concurrency limit.
+
+An evaluation request in flight never takes a construction slot, and the reverse.
+
+The ledger `inflight` counter still covers every phase, and the per-minute window stays shared.
+
+When another request of the same phase holds the slot or the window, `execute` waits up to 90 seconds for room.
+
+After that wait it records the refusal as a `not_submitted` receipt with the concurrency or minute reason.
+
+A request that such a refusal stopped resumes under the next reviewed transition, like a request the live-test cap stopped.
+
+The resume needs the refused request to carry a transition hash, and the active transition must name that hash as its predecessor.
+
+The resumed request keeps its identity and runs under the active price and policy hashes.
+
 Create the request key from the exact request identity.
 
 The request identity does not use the run ID.
@@ -212,9 +299,19 @@ receipt = broker.execute(
 )
 ```
 
-Valid phases are `live_test` and `away_production`.
+Valid construction phases are `live_test` and `away_production`.
 
-Valid stages are defined in `arctic_qa.model_broker.STAGES`.
+Valid construction stages are defined in `arctic_qa.model_broker.STAGES`.
+
+The abstention evaluation uses the phase `benchmark_evaluation` and the stage family `evaluation_answer:<model>`.
+That phase has its own policy, price config, and gate, and never counts toward construction totals.
+Read `docs/ABSTENTION_EVALUATION.md` before you meter an evaluation call.
+
+An ambiguous evaluation request halts the evaluation phase only, through the ledger field `evaluation_halted`.
+Construction continues under its own ceiling.
+
+The evaluation ceiling needs its own reviewed chained transition, with schema `benchmark-evaluation-policy-transition-v1` and the registered change set of `EVALUATION_CEILING_CHANGES`.
+The "The evaluation ceiling" section of `docs/ABSTENTION_EVALUATION.md` holds that contract.
 
 The broker checks the offline-review execution gate before it reads a credential.
 
@@ -224,9 +321,15 @@ Use a stable source-version ID from the versioned full-text artifact.
 
 Do not derive this ID from a run name or a display title.
 
-The broker permits only text inputs and structured JSON output.
+The broker permits only text inputs and constrained structured output.
+Most stages use JSON objects.
+The answer-agreement fallback uses the `yes` or `no` enum.
 
-The approved Gemini configuration requires low thinking.
+The base Gemini model uses low thinking.
+The `gemini-3.1-flash-lite` answer judge uses minimal thinking.
+
+The broker selects the registered model and price by stage.
+The answer-agreement stage keeps the same request identity, receipt, resume, and budget controls.
 
 The broker does not increase the fixed output cap to make room for thinking.
 
@@ -244,13 +347,17 @@ An unknown provider outcome reserves the full amount and stops the broker.
 
 Do not retry an ambiguous request.
 
-The provider can omit `thoughtsTokenCount` when its value is zero.
+The provider can omit `thoughtsTokenCount` or `candidatesTokenCount` when its value is zero.
 
 The broker uses zero only when the other three token counts are nonnegative integers.
 
-The total must equal the sum of the prompt and candidate counts.
+The total must equal the sum of the two counts the provider reported.
+
+The broker accepts one omitted count, never two.
 
 All other missing or inconsistent usage values cause an ambiguous charge.
+
+gemini-3.7-flash omitted `candidatesTokenCount` once in three calls on 2026-09-16, with a `STOP` finish reason and a one-letter answer.
 
 The broker writes an immutable response event before it settles a successful request.
 
@@ -258,9 +365,41 @@ After a crash, it uses that event to complete the ledger and final receipt.
 
 If no response event exists, it treats the interrupted request as an ambiguous charge.
 
+## Provider rejections
+
+The broker records the provider error body of every non-2xx answer in the ambiguous receipt, as `error_body` (at most 4000 characters) and `provider_error_status`.
+
+A rejection before generation (HTTP 400, provider status `INVALID_ARGUMENT`) bills nothing.
+The reviewed `settle-http-rejection` command settles that one ambiguous charge at zero cost.
+It needs the private gate the request ran under, a review record, and an evidence file with schema `shared-paid-call-http-rejection-evidence-v1`.
+When the receipt recorded the error body, the evidence names `error_body_source` `receipt`.
+When the receipt predates the body capture, the evidence names `reproduction` with a record of one call of the exact same request (same `request_sha256`) that received the same rejection.
+The broker writes `<request-key>.http-rejection-settlement.json`, moves the reservation out of the ambiguous funds, and lifts the halt when every other ambiguous request has its reviewed continuation.
+The request key stays a settled record.
+The broker never replays it, and a corrected request has a new key.
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json settle-http-rejection \
+  --request-key REQUEST_SHA256 \
+  --expected-ledger-sha256 LEDGER_SHA256 \
+  --review-file /PRIVATE/DIRECTORY/review.md \
+  --evidence-file /PRIVATE/DIRECTORY/evidence.json \
+  --authorized-run-id RUN_ID --operator-id OPERATOR \
+  --streaming-budget-policy-file POLICY --price-config-file PRICE_CONFIG \
+  --execution-gate-file /PRIVATE/DIRECTORY/gate.json \
+  --shared-ledger-file LEDGER --model-receipts-dir RECEIPTS \
+  --ledger-config-transition-file TRANSITION \
+  --credential-file /PRIVATE/DIRECTORY/gemini.key \
+  --prior-construction-spend-usd KNOWN_VALUE
+```
+
 ## Usage reconciliation
 
-Use reconciliation only for a saved response with the exact omitted-zero pattern.
+Use reconciliation only for a saved response with an omitted-zero pattern: an absent `thoughtsTokenCount` or an absent `candidatesTokenCount`.
+
+The receipt records which count the provider omitted, in `omitted_zero_usage_field`.
+
+An evaluation request validates the evaluation gate, and a construction-only broker reads the recorded cost instead of recomputing it, because it has no evaluation price config.
 
 The reconciliation needs a private gate for the reviewed repair commit.
 

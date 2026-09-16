@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.error
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
@@ -10,7 +11,9 @@ from typing import Any
 import pytest
 
 from arctic_qa.db import Database
+from arctic_qa.discovery import manual_record
 from arctic_qa.exporting import export_run
+from arctic_qa import generation as generation_contract
 from arctic_qa.gemini_batch import (
     AUTHORIZATION_SCHEMA,
     BatchPendingError,
@@ -20,9 +23,15 @@ from arctic_qa.gemini_batch import (
     prepare_pipeline,
     select_continuation,
     submit_round,
+    _terminal_dispositions,
 )
-from arctic_qa.model_broker import SharedGeminiBroker, exclusive_batch_marker_path
+from arctic_qa.model_broker import (
+    SharedGeminiBroker,
+    broker_request_key,
+    exclusive_batch_marker_path,
+)
 from arctic_qa.paths import DataPaths
+from arctic_qa.streaming import BENCHMARK_CANDIDATE_PREDICATE
 from arctic_qa.util import canonical_json, sha256_file
 
 
@@ -40,7 +49,9 @@ class NoCallTransport:
         raise AssertionError("no interactive provider call is permitted")
 
 
-def shared_ledger(tmp_path: Path) -> tuple[SharedGeminiBroker, Path]:
+def shared_ledger(
+    tmp_path: Path, transport: object | None = None
+) -> tuple[SharedGeminiBroker, Path]:
     review = tmp_path / "review.txt"
     review.write_text("offline test review\n", encoding="utf-8")
     gate = tmp_path / "gate.json"
@@ -54,6 +65,7 @@ def shared_ledger(tmp_path: Path) -> tuple[SharedGeminiBroker, Path]:
             "integrated_code_commit": "test-only",
             "review_record": str(review),
             "review_record_sha256": sha256_file(review),
+            "authorized_new_run_id": "run-current",
         },
     )
     credential = tmp_path / "credential"
@@ -65,10 +77,10 @@ def shared_ledger(tmp_path: Path) -> tuple[SharedGeminiBroker, Path]:
         price_config_file=REPO / "config" / "gemini-eligibility-v1.json",
         execution_gate_file=gate,
         ledger_file=ledger,
-        receipts_dir=tmp_path / "shared-receipts",
+        receipts_dir=tmp_path / "model-receipts",
         credential_file=credential,
         prior_construction_spend_usd=Decimal("0"),
-        transport=NoCallTransport(),
+        transport=transport or NoCallTransport(),
     )
     return broker, ledger
 
@@ -88,6 +100,7 @@ class FakeBatchTransport:
     def __init__(self, *, fail_create: bool = False) -> None:
         self.fail_create = fail_create
         self.calls: list[str] = []
+        self.created_models: list[str] = []
 
     def upload(self, path: Path, display_name: str) -> dict[str, Any]:
         self.calls.append("upload")
@@ -96,6 +109,7 @@ class FakeBatchTransport:
 
     def create(self, model: str, file_name: str, display_name: str) -> dict[str, Any]:
         self.calls.append("create")
+        self.created_models.append(model)
         if self.fail_create:
             raise TimeoutError("unknown create outcome")
         return {"name": "batches/test-job", "state": "JOB_STATE_PENDING"}
@@ -105,6 +119,144 @@ class FakeBatchTransport:
 
     def download(self, file_name: str) -> bytes:
         return b""
+
+
+def test_batch_answer_judge_uses_the_pro_judge_price_and_payload(
+    tmp_path: Path,
+) -> None:
+    _, ledger = shared_ledger(tmp_path)
+    store = batch_store(tmp_path, ledger)
+    provider = BatchProvider(
+        store=store,
+        phase="away_production",
+        invocation_run_id="judge-batch-run",
+    ).bind(
+        paper_id="paper-one",
+        family_id="family-one",
+        source_version_id="a" * 64,
+    )
+    parameters = {
+        "temperature": 0,
+        "max_tokens": 128,
+        "response_mime_type": "text/x.enum",
+        "json_schema": {"type": "string", "enum": ["yes", "no"]},
+    }
+
+    with pytest.raises(BatchPendingError):
+        provider.invoke("answer_judge", "System", "DATA\n{}", parameters, 30)
+
+    state = store.read()
+    key = next(iter(state["requests"]))
+    request = store.prepared_record(key)
+    assert request["stage"] == "answer_agreement"
+    # Chapter 3 (yield audit 4.5 R5): the fallback judge is the Pro judge.
+    assert request["model"] == "gemini-3.1-pro-preview"
+    assert request["batch_pricing"] == {
+        "input_usd_per_million_tokens": "1.00",
+        "output_usd_per_million_tokens_including_thinking": "6.00",
+        "valid_through": "2026-12-31",
+        "source": "https://ai.google.dev/gemini-api/docs/pricing",
+    }
+    generation = request["request"]["generationConfig"]
+    assert generation["maxOutputTokens"] == 128
+    assert generation["responseMimeType"] == "text/x.enum"
+    assert generation["responseJsonSchema"] == {
+        "type": "string",
+        "enum": ["yes", "no"],
+    }
+    assert generation["thinkingConfig"] == {"thinkingLevel": "low"}
+    manifest = store.make_round(
+        run_identity={"run_id": "judge-batch-run"},
+        ordered_inputs=[
+            {
+                "position": 1,
+                "paper_id": "paper-one",
+                "family_id": "family-one",
+                "source_version_id": "a" * 64,
+            }
+        ],
+    )
+    assert manifest is not None
+    assert manifest["model"] == "gemini-3.1-pro-preview"
+    assert manifest["pricing"] == request["batch_pricing"]
+
+
+class Http500Transport:
+    def post(self, model: str, method: str, body: dict[str, Any]) -> dict[str, Any]:
+        if method == "countTokens":
+            return {"totalTokens": 100}
+        raise urllib.error.HTTPError(
+            "https://fake.invalid", 500, "upstream failure", {}, None
+        )
+
+
+def ambiguous_hold(
+    tmp_path: Path,
+    *,
+    paper_id: str = "paper-ambiguous",
+    family_id: str = "family-ambiguous",
+    source_version_id: str = "source-ambiguous",
+) -> tuple[SharedGeminiBroker, Path, dict[str, Any]]:
+    broker, ledger = shared_ledger(tmp_path, Http500Transport())
+    payload = {
+        "systemInstruction": {"parts": [{"text": "Return JSON."}]},
+        "contents": [{"role": "user", "parts": [{"text": "Paper text."}]}],
+        "generationConfig": {
+            "candidateCount": 1,
+            "responseMimeType": "application/json",
+            "responseJsonSchema": {"type": "object"},
+            "maxOutputTokens": 1000,
+            "thinkingConfig": {"thinkingLevel": "medium"},
+        },
+        "store": False,
+    }
+    request_key = broker_request_key(
+        model=broker.config["model"],
+        run_id="run-current",
+        phase="away_production",
+        stage="question_generation",
+        paper_id=paper_id,
+        family_id=family_id,
+        source_version_id=source_version_id,
+        payload=payload,
+    )
+    receipt = broker.execute(
+        phase="away_production",
+        run_id="run-current",
+        stage="question_generation",
+        paper_id=paper_id,
+        family_id=family_id,
+        source_version_id=source_version_id,
+        request_key=request_key,
+        payload=payload,
+    )
+    evidence = tmp_path / "ambiguous-evidence.json"
+    write_json(
+        evidence,
+        {
+            "schema": "shared-paid-call-ambiguous-continuation-evidence-v1",
+            "request_key": request_key,
+            "error_class": "known_http_response_unknown_charge",
+            "http_status": 500,
+            "live_call_made": True,
+            "received_receipt_absent": True,
+            "actual_cost_known": False,
+            "replay_prohibited": True,
+            "affected_family_id": family_id,
+            "authorized_run_id": "run-current",
+        },
+    )
+    review = tmp_path / "review.md"
+    review.write_text("Reviewed no-replay continuation.\n", encoding="utf-8")
+    broker.authorize_ambiguous_continuation(
+        request_key=request_key,
+        expected_ledger_sha256=sha256_file(ledger),
+        review_file=review,
+        evidence_file=evidence,
+        authorized_run_id="run-current",
+        operator_id="batch-test",
+    )
+    return broker, ledger, receipt
 
 
 def authorization(manifest_path: Path, ledger: Path, destination: Path) -> Path:
@@ -478,6 +630,91 @@ def test_continuation_selector_preserves_ranked_order_and_logs_processed_ids(
     assert final["provisional"] is False
 
 
+def test_continuation_ignores_legacy_terminal_candidates(
+    tmp_path: Path,
+) -> None:
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+
+    current_provenance = {
+        "prompt_version": generation_contract.PROMPT_VERSION,
+        "generation_attempt_contract_version": (
+            generation_contract.GENERATION_ATTEMPT_CONTRACT_VERSION
+        ),
+        "answer_agreement_contract_version": (
+            generation_contract.ANSWER_AGREEMENT_CONTRACT_VERSION
+        ),
+        "standalone_verification_contract_version": (
+            generation_contract.STANDALONE_VERIFICATION_CONTRACT_VERSION
+        ),
+        "question_verification_contract_version": (
+            generation_contract.QUESTION_VERIFICATION_CONTRACT_VERSION
+        ),
+        "numeric_rule_contract_version": generation_contract.NUMERIC_RULE_CONTRACT_VERSION,
+        "direct_value_contract_version": (
+            generation_contract.DIRECT_SOURCE_VALUE_CONTRACT_VERSION
+        ),
+        "scope_contract_version": generation_contract.SCOPE_CONTRACT_VERSION,
+        "scope_role_semantics_version": generation_contract.SCOPE_ROLE_SEMANTICS_VERSION,
+        "scope_role_binding_contract_version": (
+            generation_contract.SCOPE_ROLE_BINDING_CONTRACT_VERSION
+        ),
+        "evidence_combination_contract_version": (
+            generation_contract.EVIDENCE_COMBINATION_CONTRACT_VERSION
+        ),
+    }
+    for stable_id, candidate in (
+        (
+            "legacy-paper",
+            {"schema_version": "1.0", "provenance": {}},
+        ),
+        (
+            "current-paper",
+            {
+                "schema_version": generation_contract.CANDIDATE_SCHEMA_VERSION,
+                "finding_policy_version": (
+                    generation_contract.SCOPE_ROLE_FINDING_POLICY_VERSION
+                ),
+                "provenance": current_provenance,
+            },
+        ),
+    ):
+        source = manual_record(
+            {
+                "stable_id": stable_id,
+                "title": stable_id,
+                "year": 2026,
+                "discipline": "test",
+                "paper_family_id": stable_id,
+            },
+            "test-only",
+        )
+        database.upsert_source(source)
+        with database.transaction():
+            database.connection.execute(
+                """INSERT INTO candidates
+                (item_id,run_id,source_id,paper_family_id,generation_arm,candidate_json,status,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?)""",
+                (
+                    f"item-{stable_id}",
+                    "scientific-campaign",
+                    source["source_id"],
+                    stable_id,
+                    "answer_first",
+                    canonical_json(candidate),
+                    "rejected",
+                    "2026-09-14T00:00:00+00:00",
+                    "2026-09-14T00:00:00+00:00",
+                ),
+            )
+
+    dispositions = _terminal_dispositions(paths.database, "scientific-campaign")
+    assert set(dispositions) == {"current-paper"}
+    assert dispositions["current-paper"]["status"] == "rejected"
+    database.close()
+
+
 def access_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     access = tmp_path / "access"
     eligibility = tmp_path / "eligibility"
@@ -604,13 +841,34 @@ def scripted_payload(record: dict[str, Any]) -> dict[str, Any]:
             for line in (FIXTURES / fixture).read_text(encoding="utf-8").splitlines()
             if line.strip()
         )
+
+    def _markers(item: dict[str, Any]) -> list[str]:
+        # The scripted fixture carries one positional event per displayed
+        # option. Batch capture prepares every one of the six proposals at
+        # once, so the option verdict is matched by role and instruction
+        # markers, not by the displayed value.
+        return [
+            marker
+            for marker in item.get("require_prompt_contains", [])
+            if not (
+                record["role"] == "option_verifier"
+                and re.fullmatch(r"\d\.\d m", marker)
+            )
+        ]
+
+    # A role's static instructions ride in systemInstruction and its evidence
+    # in the user prompt, so a script marker may sit in either part.
+    request_text = (
+        record["request"]["systemInstruction"]["parts"][0]["text"] + "\n" + prompt
+    )
     event = next(
         item
         for item in events
         if item["role"] == record["role"]
-        and all(marker in prompt for marker in item.get("require_prompt_contains", []))
+        and all(marker in request_text for marker in _markers(item))
         and all(
-            marker not in prompt for marker in item.get("forbid_prompt_contains", [])
+            marker not in request_text
+            for marker in item.get("forbid_prompt_contains", [])
         )
     )
     payload = json.loads(canonical_json(event["response"]))
@@ -708,10 +966,11 @@ def test_staged_batch_pipeline_uses_real_prompts_and_exports_accepted_output(
         "eligibility": 1,
         "finding_answer_extraction": 1,
         "question_generation": 1,
+        "standalone_verification": 1,
         "blinded_reconstruction": 1,
         "answer_verification": 1,
         "distractor_generation": 1,
-        "option_verification": 4,
+        "option_verification": 7,
     }
     assert sha256_file(ledger) == original_ledger_hash
     option_requests = [
@@ -719,12 +978,305 @@ def test_staged_batch_pipeline_uses_real_prompts_and_exports_accepted_output(
         for key, row in store.read()["requests"].items()
         if row["stage"] == "option_verification"
     ]
-    assert len(option_requests) == 4
+    assert len(option_requests) == 7
     assert all(
-        "VERIFICATION_BINDING" in row["request"]["contents"][0]["parts"][0]["text"]
-        for row in option_requests
+        "VERIFICATION_BINDING" in text or "OPTION_SET_BINDING" in text
+        for text in (
+            row["request"]["contents"][0]["parts"][0]["text"] for row in option_requests
+        )
     )
-    candidate = database.one("SELECT candidate_json FROM candidates")
+    candidate = database.one(
+        f"SELECT candidate_json FROM candidates WHERE {BENCHMARK_CANDIDATE_PREDICATE}"
+    )
     value = json.loads(candidate["candidate_json"])
     assert value["question_rationale"]
     assert all(item["generation_rationale"] for item in value["distractors"])
+
+
+def test_batch_pipeline_reuses_bounded_question_revision_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The 5 percent shadow cohort is a deterministic hash of the entity id, so
+    # pin it off: this test counts the short-circuit calls, not the cohort.
+    monkeypatch.setattr(
+        generation_contract, "_in_shadow_cohort", lambda run_id, entity: False
+    )
+    access, eligibility, policy = access_fixture(tmp_path)
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+    _, ledger = shared_ledger(tmp_path)
+    store = batch_store(tmp_path, ledger)
+    seen_stage_counts: dict[str, int] = {}
+
+    def revised_response(record: dict[str, Any]) -> dict[str, Any]:
+        prompt = record["request"]["contents"][0]["parts"][0]["text"]
+        if record["role"] == "standalone_verifier" and "as 2.0 m?" in prompt:
+            payload = {
+                "contract_version": "source-blind-standalone-gate-v1",
+                "pass": False,
+                "answer_leakage_absent": False,
+                "unresolved_phrases": [],
+                "missing_detail_types": [],
+                "competing_readings": [],
+                "reasons": ["answer_leakage"],
+                "review_rationale": "The displayed question contains its answer.",
+            }
+        else:
+            payload = scripted_payload(record)
+        if record["role"] == "question_writer" and "QUESTION_REVISION" not in prompt:
+            payload["question"] = "What reported water depth was documented as 2.0 m?"
+        return {
+            "responseId": f"batch-{record['request_key'][:12]}",
+            "modelVersion": "gemini-3.8-flash",
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "content": {"parts": [{"text": canonical_json(payload)}]},
+                }
+            ],
+            "usageMetadata": {
+                "promptTokenCount": 100,
+                "candidatesTokenCount": 10,
+                "thoughtsTokenCount": 5,
+                "totalTokenCount": 115,
+            },
+        }
+
+    for _ in range(16):
+        prepared = prepare_pipeline(
+            database,
+            paths.namespace,
+            store=store,
+            run_id="batch-invocation-revision-r1",
+            campaign_id="scientific-campaign-revision-r1",
+            access_run_dir=access,
+            eligibility_run_dir=eligibility,
+            eligibility_prompt_file=REPO
+            / "config"
+            / "gemini-eligibility-prompt-v3.txt",
+            eligibility_schema_file=REPO
+            / "schemas"
+            / "gemini-eligibility.v1.schema.json",
+            eligibility_policy_file=policy,
+        )
+        if prepared["counts"]["accepted"] == 1:
+            break
+        round_manifest = prepared["round"]
+        assert round_manifest is not None
+        request_records = [
+            store.prepared_record(key) for key in round_manifest["request_keys"]
+        ]
+        for record in request_records:
+            seen_stage_counts[record["stage"]] = (
+                seen_stage_counts.get(record["stage"], 0) + 1
+            )
+        results = tmp_path / f"{round_manifest['round_id']}.revision-results.jsonl"
+        results.write_text(
+            "".join(
+                canonical_json(
+                    {"key": record["request_key"], "response": revised_response(record)}
+                )
+                + "\n"
+                for record in reversed(request_records)
+            ),
+            encoding="utf-8",
+        )
+        ingest_results(store, round_manifest["round_id"], results)
+    else:
+        pytest.fail("the batch revision pipeline did not finish")
+
+    # The first question leaks its answer, so the free check and the standalone
+    # gate fail it and the judge call plan skips its reconstruction and answer
+    # verification (chapter 2 yield audit, section 4.4). Only the revision
+    # pays the two later Pro calls.
+    assert seen_stage_counts == {
+        "eligibility": 1,
+        "question_generation": 2,
+        "finding_answer_extraction": 1,
+        "standalone_verification": 2,
+        "blinded_reconstruction": 1,
+        "answer_verification": 1,
+        "distractor_generation": 1,
+        "option_verification": 7,
+    }
+    assert (
+        database.one(
+            "SELECT COUNT(*) AS count FROM candidates "
+            "WHERE run_id=? AND status='machine_accepted_unverified'",
+            ("scientific-campaign-revision-r1",),
+        )["count"]
+        == 1
+    )
+
+
+def test_batch_allocation_is_separate_from_shared_live_spend(tmp_path: Path) -> None:
+    _, ledger_path = shared_ledger(tmp_path)
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    ledger["prior_construction_spend_usd"] = "24.99"
+    write_json(ledger_path, ledger)
+    store = batch_store(tmp_path, ledger_path, ceiling="25")
+    provider = BatchProvider(
+        store=store,
+        phase="away_production",
+        invocation_run_id="separate-allocation-run",
+    ).bind(
+        paper_id="paper-one",
+        family_id="family-one",
+        source_version_id="a" * 64,
+    )
+    with pytest.raises(BatchPendingError):
+        provider.invoke(
+            "question_writer",
+            "system",
+            "prompt",
+            {"temperature": 0, "max_tokens": 2048, "json_schema": {"type": "object"}},
+            30,
+        )
+    round_manifest = store.make_round(
+        run_identity={"run_id": "separate-allocation-run"},
+        ordered_inputs=[
+            {
+                "position": 1,
+                "paper_id": "paper-one",
+                "family_id": "family-one",
+                "source_version_id": "a" * 64,
+            }
+        ],
+    )
+    assert round_manifest is not None
+    manifest_path = Path(round_manifest["manifest_path"])
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    auth_path = authorization(manifest_path, ledger_path, tmp_path / "auth.json")
+    authorized = store.authorize_round(
+        manifest, json.loads(auth_path.read_text(encoding="utf-8"))
+    )
+    preview = store.budget_preview(manifest["request_keys"])
+    assert Decimal(preview["shared_used_usd"]) == Decimal("24.99")
+    assert Decimal(preview["batch_allocation_usd"]) == Decimal("25")
+    assert Decimal(preview["projected_batch_total_usd"]) == Decimal(
+        manifest["reserved_cost_usd"]
+    )
+    assert authorized["batch_allocation_usd"] == "25"
+
+
+def test_batch_allows_covered_recovery_liability_and_retains_its_cost(
+    tmp_path: Path,
+) -> None:
+    _, ledger_path, ambiguous = ambiguous_hold(tmp_path)
+    store = batch_store(tmp_path, ledger_path, ceiling="25")
+    provider = BatchProvider(
+        store=store,
+        phase="away_production",
+        invocation_run_id="batch-with-recovery-hold",
+    ).bind(
+        paper_id="paper-batch",
+        family_id="family-batch",
+        source_version_id="b" * 64,
+    )
+    with pytest.raises(BatchPendingError):
+        provider.invoke(
+            "question_writer",
+            "system",
+            "prompt",
+            {"temperature": 0, "max_tokens": 2048, "json_schema": {"type": "object"}},
+            30,
+        )
+    manifest = store.make_round(
+        run_identity={"run_id": "batch-with-recovery-hold"},
+        ordered_inputs=[
+            {
+                "position": 1,
+                "paper_id": "paper-batch",
+                "family_id": "family-batch",
+                "source_version_id": "b" * 64,
+            }
+        ],
+    )
+    assert manifest is not None
+    manifest_path = Path(manifest["manifest_path"])
+    authorization_path = authorization(
+        manifest_path, ledger_path, tmp_path / "auth.json"
+    )
+    preview = store.budget_preview(manifest["request_keys"])
+    expected_shared = Decimal(ambiguous["reserved_usd"])
+    assert Decimal(preview["shared_used_usd"]) == expected_shared
+    assert Decimal(preview["projected_total_usd"]) == (
+        expected_shared + Decimal(preview["new_reservation_usd"])
+    )
+    authorized = store.authorize_round(
+        json.loads(manifest_path.read_text(encoding="utf-8")),
+        json.loads(authorization_path.read_text(encoding="utf-8")),
+    )
+    assert authorized["shared_used_usd"] == str(expected_shared)
+
+
+def test_batch_rejects_an_uncovered_retained_liability(tmp_path: Path) -> None:
+    _, ledger_path = shared_ledger(tmp_path)
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    ledger["reserved_usd"] = "0.010000"
+    write_json(ledger_path, ledger)
+    with pytest.raises(ValueError, match="no-replay|recovery|liability"):
+        batch_store(tmp_path, ledger_path, ceiling="25").budget_preview([])
+
+
+def test_batch_rejects_integrity_halt_even_with_recovery_receipt(
+    tmp_path: Path,
+) -> None:
+    _, ledger_path, _ = ambiguous_hold(tmp_path)
+    write_json(
+        ledger_path.with_name(f".{ledger_path.name}.integrity-halt.json"),
+        {"schema": "shared-paid-call-integrity-halt-v1", "reason": "test"},
+    )
+    with pytest.raises(ValueError, match="integrity"):
+        batch_store(tmp_path, ledger_path, ceiling="25").budget_preview([])
+
+
+def test_continuation_selector_accepts_a_validated_recovery_hold(
+    tmp_path: Path,
+) -> None:
+    _, ledger_path, _ = ambiguous_hold(
+        tmp_path,
+        paper_id="paper-1",
+        family_id="family-1",
+        source_version_id="a" * 64,
+    )
+    access = tmp_path / "ranked-access"
+    write_json(
+        access / "run-manifest.json",
+        {
+            "schema": "article-access-manifest-v1",
+            "run_id": "ranked-one",
+            "target_total": 1,
+            "selection": [
+                {
+                    "position": 1,
+                    "candidate_key": "paper-1",
+                    "family_key": "family-1",
+                    "source_content_hash": "a" * 64,
+                    "extraction_sha256": "b" * 64,
+                }
+            ],
+        },
+    )
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+    database.close()
+    progress = tmp_path / "progress.json"
+    write_json(progress, {"state": "error"})
+
+    selected = select_continuation(
+        access_run_dir=access,
+        db_file=paths.database,
+        campaign_id="scientific-campaign",
+        prior_run_id="run-current",
+        eligibility_run_dir=tmp_path / "eligibility",
+        shared_ledger_file=ledger_path,
+        production_progress_file=progress,
+        output_file=tmp_path / "continuation.json",
+        require_stopped=True,
+    )
+
+    assert selected["provisional"] is False
+    assert selected["remaining_selection"] == []

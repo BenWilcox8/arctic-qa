@@ -423,7 +423,8 @@ The adapter stops when the price record is not active.
 
 The adapter calls `countTokens` with the completed request before generation.
 It reserves the maximum configured output and thinking cost before transmission.
-Configuration revision v2 requires low thinking for every structured Gemini request.
+Configuration revision v3 keeps low thinking for the base Gemini model.
+It uses `gemini-2.5-flash-lite` with no thinking only when deterministic answer agreement fails.
 The output caps stay unchanged.
 The CLI defaults remain prompt v3 and response schema v1 for saved request compatibility.
 Prompt versions 1, 2, and 3 and response schema v1 remain unchanged.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import threading
 import urllib.error
 import urllib.request
@@ -1074,6 +1075,147 @@ def test_production_campaign_and_trial_package_are_explicit_and_allowlisted(
         thread.join(timeout=5)
 
 
+def test_live_dataset_browser_and_downloads_are_joined_and_allowlisted(
+    tmp_path: Path,
+) -> None:
+    fixture_corpus(tmp_path)
+    live = tmp_path / "live-dataset"
+    snapshot_id = "live-dataset-snapshot-" + "a" * 32
+    snapshot = live / "snapshots" / snapshot_id
+    snapshot.mkdir(parents=True)
+    benchmark_rows = [
+        {
+            "item_id": "item-1",
+            "question_id": "question-1",
+            "question": "What changed?",
+            "question_context": "The annual mean.",
+            "options": [
+                {"option_id": "option-1", "position": 1, "text": "It increased"}
+            ],
+        },
+        {
+            "item_id": "item-2",
+            "question_id": "question-2",
+            "question": "Where was it measured?",
+            "question_context": "",
+            "options": [
+                {"option_id": "option-2", "position": 1, "text": "Beaufort Sea"}
+            ],
+        },
+    ]
+    reviewer_rows = [
+        {
+            "item_id": "item-1",
+            "paper": {"doi": "10.1/arctic", "title": "Arctic change"},
+            "reference_answer": {"text": "It increased"},
+            "answer_evidence": {"excerpt": "The annual mean increased."},
+            "options": [{"text": "It increased", "is_correct": True}],
+            "rationales": {"answer_generation": "The source states the change."},
+            "validation": [{"stage": "automated_acceptance", "details": {}}],
+        },
+        {
+            "item_id": "item-2",
+            "paper": {"doi": "10.1/beaufort", "title": "Beaufort observations"},
+            "reference_answer": {"text": "Beaufort Sea"},
+            "answer_evidence": {"excerpt": "Measurements used the Beaufort Sea."},
+            "options": [{"text": "Beaufort Sea", "is_correct": True}],
+            "rationales": {},
+            "validation": [],
+        },
+    ]
+    benchmark = "".join(json.dumps(row) + "\n" for row in benchmark_rows)
+    reviewer = "".join(json.dumps(row) + "\n" for row in reviewer_rows)
+    benchmark_path = snapshot / "accepted-benchmark.jsonl"
+    reviewer_path = snapshot / "accepted-reviewer.jsonl"
+    benchmark_path.write_text(benchmark, encoding="utf-8")
+    reviewer_path.write_text(reviewer, encoding="utf-8")
+    manifest_path = snapshot / "manifest.json"
+    write_json(
+        manifest_path,
+        {
+            "schema": "arctic-qa-live-dataset-snapshot-v1",
+            "snapshot_id": snapshot_id,
+            "updated_at_utc": "2026-09-14T01:00:00Z",
+            "item_count": 2,
+            "selection": {
+                "candidate_schema_version": "2.2.0",
+                "generation_prompt_version": "arctic-qa-generation-v16",
+                "scope_contract_version": "selected-evidence-literal-scope-v4",
+            },
+            "preview": {
+                "label": "Machine-validated preview",
+                "notice": "The reviewer rows retain validation details.",
+            },
+            "files": {
+                "benchmark": {
+                    "path": benchmark_path.name,
+                    "sha256": sha256_file(benchmark_path),
+                    "size_bytes": benchmark_path.stat().st_size,
+                },
+                "reviewer": {
+                    "path": reviewer_path.name,
+                    "sha256": sha256_file(reviewer_path),
+                    "size_bytes": reviewer_path.stat().st_size,
+                },
+            },
+        },
+    )
+    write_json(
+        live / "current.json",
+        {
+            "schema": "arctic-qa-live-dataset-pointer-v1",
+            "snapshot_id": snapshot_id,
+            "manifest": f"snapshots/{snapshot_id}/manifest.json",
+            "manifest_sha256": sha256_file(manifest_path),
+            "updated_at_utc": "2026-09-14T01:00:00Z",
+            "item_count": 2,
+        },
+    )
+    artifacts = CorpusArtifacts(
+        tmp_path,
+        "test-run",
+        tmp_path / "runtime",
+        live_dataset_dir=live,
+    )
+
+    live_state = artifacts.state()["live_dataset"]
+    assert live_state["item_count"] == 2
+    assert live_state["preview"] == {
+        "label": "Machine-validated preview",
+        "notice": "The reviewer rows retain validation details.",
+    }
+    page = artifacts.live_dataset_records(
+        {"q": ["Beaufort"], "page": ["1"], "page_size": ["10"]}
+    )
+    assert page["total"] == 1
+    assert page["records"][0]["reviewer"]["paper"]["doi"] == "10.1/beaufort"
+
+    server = CorpusServer(("127.0.0.1", 0), artifacts)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with urllib.request.urlopen(
+            f"{base}/api/live-dataset?page=1&page_size=10"
+        ) as response:
+            assert json.loads(response.read())["total"] == 2
+        with urllib.request.urlopen(
+            f"{base}/downloads/live-dataset/benchmark"
+        ) as response:
+            assert response.read() == benchmark.encode()
+        with pytest.raises(urllib.error.HTTPError) as arbitrary:
+            urllib.request.urlopen(f"{base}/downloads/live-dataset/../current.json")
+        assert arbitrary.value.code == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    reviewer_path.write_text("changed\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="unavailable or invalid"):
+        artifacts.live_dataset_records({})
+
+
 def test_successor_production_plan_binds_active_segment_to_retained_predecessor(
     tmp_path: Path,
 ) -> None:
@@ -1120,7 +1262,7 @@ def test_successor_production_plan_binds_active_segment_to_retained_predecessor(
             "eligibility_policy_version": "arctic-eligibility-policy-v3",
             "eligibility_prompt_version": "gemini-eligibility-prompt-v5",
             "eligibility_schema_version": "gemini-eligibility-v3",
-            "generation_prompt_version": "arctic-qa-generation-v14",
+            "generation_prompt_version": "arctic-qa-generation-v15",
         },
         "budget_and_ledger": {
             "remaining_to_planning_cap_usd": "50.000000",
@@ -1144,7 +1286,7 @@ def test_successor_production_plan_binds_active_segment_to_retained_predecessor(
         {"segment_id": "initial-v2", "run_id": "production-1"}
     ]
     assert campaign["methodology"]["generation_prompt_version"] == (
-        "arctic-qa-generation-v14"
+        "arctic-qa-generation-v15"
     )
 
     plan_payload["run_segment_lineage"]["active_segment"]["run_id"] = "unrelated-run"
@@ -1227,9 +1369,7 @@ class FakePipelineTraceStore:
                 "evidence_quote": "The value increased during the period.",
                 "locator": {"chunk_id": "chunk-readable"},
             },
-            "distractors": [
-                {"text": "It decreased.", "type": "contradiction"}
-            ],
+            "distractors": [{"text": "It decreased.", "type": "contradiction"}],
             "options": [
                 {"text": "It increased.", "is_correct": True},
                 {"text": "It decreased.", "is_correct": False},
@@ -1430,7 +1570,12 @@ def test_page_contains_vertical_activity_and_persistent_on_demand_inspector() ->
     assert "sessionStorage.setItem(`trace-open:" in page
     assert "/api/pipeline-trace/stage?paper_key=" in page
     assert "rawJsonDetails('selected stage', payload)" in page
+    assert "detailController: null" in page
+    assert "state.trace.detailController.abort()" in page
+    assert "state.trace.selectedPaper !== paperKey" in page
     assert "Machine acceptance is a retained engineering label" in page
+    assert 'id="live-dataset-preview"' in page
+    assert "liveDataset.preview?.label" in page
     assert (
         ".telemetry-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));"
         in page
@@ -1460,7 +1605,17 @@ def test_page_contains_readable_trace_views_and_bounded_table_widths() -> None:
     assert "Answer choices" in page
     assert "Distractors" in page
     assert ".trace-table { table-layout: fixed; }" in page
-    assert ".trace-table .trace-paper-column { width: 46%; }" in page
+    assert ".trace-table .trace-paper-column { width: 40%; }" in page
+    assert ".trace-table .trace-time-column" not in page
+    assert "Current state since (UTC)" not in page
+    assert "const centralStateTime = (value)" in page
+    assert "timeZone: 'America/Chicago'" in page
+    assert (
+        "stateTime.dataset.stateEnteredAtUtc = item.state_entered_at_utc || ''" in page
+    )
+    assert "stateTime.title = item.state_entered_at_utc" in page
+    assert "paper.append(select, stateTime);" in page
+    assert "item.state_entered_at_utc" in page
     assert "grid-template-columns: minmax(460px, .95fr) minmax(0, 1.35fr)" in page
     assert "function displayTextBlocks(value)" in page
     assert "function combineContiguousEvidence(values)" in page
@@ -1468,6 +1623,13 @@ def test_page_contains_readable_trace_views_and_bounded_table_widths() -> None:
         "evidenceOffset(previous, 'end') === evidenceOffset(current, 'start')" in page
     )
     assert "['Reconstruction rationale', record.reconstruction_rationale]" in page
+    assert "function appendCandidateRejectionReasons(target, wrapper)" in page
+    assert "function appendRejectedDistractors(target, records)" in page
+    assert "Raw recorded reason and details" in page
+    assert (
+        "This rejected QA item has no reason recorded for its current payload." in page
+    )
+    assert "Recorded unresolved exit" in page
     assert "Model response text (display formatting)" in page
     assert "keeps the exact retained response" in page
     assert "The active latitude-first policy is v3." in page
@@ -1481,3 +1643,113 @@ def test_page_contains_readable_trace_views_and_bounded_table_widths() -> None:
     assert candidate["answer"]["text"] == "The measured value increased."
     assert candidate["options"][0]["is_correct"] is True
     assert candidate["answer"]["locator"]["chunk_id"] == "chunk-readable"
+
+
+def test_readable_evidence_resolver_uses_exact_payload_quotes_by_source_version() -> (
+    None
+):
+    page_path = Path(__file__).parents[1] / "src/arctic_qa/corpus_viewer.html"
+    payload = {
+        "identity": {
+            "paper_id": "paper-a",
+            "source_id": "source-a",
+            "source_version_id": "version-a",
+        },
+        "sources": [
+            {
+                "paper_id": "paper-a",
+                "source_id": "source-a",
+                "source_version_id": "version-a",
+                "scope_evidence": {
+                    "resolved_evidence": [
+                        {
+                            "spans": [
+                                {
+                                    "span_id": "shared-span",
+                                    "quote": "<script>Exact source A quotation.</script>",
+                                    "locator": {"section_id": "Results", "page": 3},
+                                },
+                                {
+                                    "span_id": "combined-span",
+                                    "quote": "First retained passage. Second retained passage.",
+                                    "source_span_ids": [
+                                        "component-one",
+                                        "component-two",
+                                    ],
+                                },
+                            ]
+                        }
+                    ]
+                },
+            },
+            {
+                "paper_id": "paper-a",
+                "source_id": "source-b",
+                "source_version_id": "version-b",
+                "scope_evidence": {
+                    "resolved_evidence": [
+                        {
+                            "spans": [
+                                {
+                                    "span_id": "shared-span",
+                                    "quote": "Different source B quotation.",
+                                }
+                            ]
+                        }
+                    ]
+                },
+            },
+        ],
+        "candidates": [
+            {
+                "candidate": {
+                    "answer": {"source_span_id": "shared-span"},
+                    "decision_evidence": [{"source_span_id": "combined-span"}],
+                }
+            }
+        ],
+    }
+    script = r"""
+const fs = require('fs');
+const page = fs.readFileSync(process.argv[1], 'utf8');
+const start = page.indexOf('    function evidenceQuote(value)');
+const end = page.indexOf('    function appendEvidenceLocator', start);
+function hasTraceValue(value) { return value !== null && value !== undefined && value !== ''; }
+eval(page.slice(start, end));
+const payload = JSON.parse(process.argv[2]);
+const resolver = createEvidenceResolver(payload);
+const answer = resolver.resolve({ source_span_id: 'shared-span', source_id: 'source-a', source_version_id: 'version-a' });
+const otherVersion = resolver.resolve({ source_span_id: 'shared-span', source_id: 'source-b', source_version_id: 'version-b' });
+const combined = resolver.resolve({ source_span_id: 'combined-span', source_id: 'source-a', source_version_id: 'version-a' });
+const missing = resolver.resolve({ source_span_id: 'missing-span', source_id: 'source-a', source_version_id: 'version-a' });
+process.stdout.write(JSON.stringify({
+  answer: answer.value.quote,
+  otherVersion: otherVersion.value.quote,
+  combined: combined.value.quote,
+  missing: missing.found,
+  preservedId: payload.candidates[0].candidate.answer.source_span_id
+}));
+"""
+    result = subprocess.run(
+        ["node", "-e", script, str(page_path), json.dumps(payload)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    resolved = json.loads(result.stdout)
+    assert resolved == {
+        "answer": "<script>Exact source A quotation.</script>",
+        "otherVersion": "Different source B quotation.",
+        "combined": "First retained passage. Second retained passage.",
+        "missing": False,
+        "preservedId": "shared-span",
+    }
+    page = page_path.read_text(encoding="utf-8")
+    assert "node.textContent = value" in page
+    resolver = page[
+        page.index("function createEvidenceResolver") : page.index(
+            "function appendEvidenceLocator"
+        )
+    ]
+    assert "fetch(" not in resolver
+    assert "Quotation not recorded or available for this source span." in page
