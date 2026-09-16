@@ -67,6 +67,45 @@ Without the guard state file the section still shows the journal, and marks the 
 
 `docs/BENCHMARK_GUARD.md` describes the guard, its rules, and how to operate it.
 
+## Papers in analysis now
+
+The section "Papers in analysis now" stands above the per-paper pipeline inspector.
+It uses `/api/live-papers`.
+The table refreshes every 15 seconds without a page reload, together with the rest of the page.
+The route reads records only.
+It never writes to the shared ledger, the state database, or a completion label.
+It never touches the producer, a launcher, or the evaluator.
+
+The upper table holds the papers the producer analyzes at this moment.
+A paper is in that table when three conditions are true.
+Its paid calls carry the invocation run id of the current producer.
+One of those calls was submitted or completed inside the active window of 420 seconds.
+The paper has no completion label of that run and no final state in the progress record.
+
+Each row gives the paper title and identity, the stage of its most recent call, the number of calls and the money this run spent on them, and the time the paper has been in analysis.
+That time starts at the first call of the current burst of work.
+A relaunched producer replays the receipts of a paper it visited before, and a replay is separated from live work by more than the window, so the replayed calls stay out of the count.
+
+The "Thread or slot" column stays empty.
+The producer runs one thread per paper, but it writes no thread name and no slot number into any record.
+The column takes a value when a producer record carries one.
+
+The lower table holds the last 10 papers of the run that reached a final outcome, newest first.
+An accepted paper shows its accepted question count.
+A rejected paper shows its final reason code.
+A screened-out paper, an unresolved paper and a paper that reached the per-paper cost cap show the same reason field.
+The outcome comes from the completion label of the run when the paper has one, and from the progress record when it has none.
+
+The section names the producer state when no producer is running.
+It shows the message of the progress record instead of an empty table.
+A progress record that says running but is older than `--process-stale-after-seconds` is not a running producer.
+
+Three inputs select the section.
+`--shared-ledger-file` gives the paid calls.
+`--streaming-progress-file` gives the producer state and the recent papers.
+`--pipeline-db-file` gives the titles, the accepted question counts and the completion labels.
+Without the ledger and the progress record the section says that no live paper can be named.
+
 ## Per-paper pipeline inspector
 
 The optional pipeline trace adapter reads retained artifacts from explicit roots.
