@@ -326,6 +326,9 @@ class Activation:
                 f"the suite ran on {suite['commit']}, which differs in: {changed}"
             )
         assert suite["passed"] is True, suite
+        # The review record names exactly which tests ran. A launch ordered
+        # before the whole suite says so, and the whole suite follows it.
+        assert suite.get("scope"), "the suite result must name its scope"
 
         self.review.write_text(
             "\n".join(
@@ -358,7 +361,8 @@ class Activation:
                     "",
                     "## Test results on this commit",
                     "",
-                    f"- pytest tests/: {suite['summary']}",
+                    f"- scope: {suite['scope']}",
+                    f"- {suite['summary']}",
                     f"- ruff check and ruff format --check: {suite['ruff']}",
                     "",
                     f"Task report: `research/{TASK}/report.md` on the branch.",
