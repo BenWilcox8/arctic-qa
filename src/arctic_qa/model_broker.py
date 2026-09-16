@@ -2109,7 +2109,16 @@ class SharedGeminiBroker:
             # application counts as later, which errs toward a refused start.
             if not times or max(times) < applied:
                 continue
-            if request.get("phase") != EVALUATION_PHASE:
+            # A request that never reached its reservation carries no phase:
+            # the row is created before the phase is recorded, and a refusal
+            # before the reserve leaves it unset. The stage family is the
+            # authority either way, and ``execute`` refuses a request whose
+            # phase and stage family disagree, so a phase-less evaluation row
+            # is still evaluation activity. Reading it as construction stopped
+            # every start after a transition (2026-09-16 23:04 UTC).
+            if request.get("phase") != EVALUATION_PHASE and not is_evaluation_stage(
+                request.get("stage")
+            ):
                 return False
         return True
 

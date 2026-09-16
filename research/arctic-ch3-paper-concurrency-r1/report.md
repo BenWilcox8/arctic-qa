@@ -104,6 +104,39 @@ paper, about 13 papers an hour, about 3 requests a minute.
 
 <!-- MEASUREMENT -->
 
+## The cut of 2026-09-16
+
+Three refusals stood between the green suite and a running producer. None of
+them moved money, and none was in the concurrency itself.
+
+1. `apply-transition` looked for the predecessor event by name. An event file
+   is named for the canonical hash of its authorization, while the ledger
+   status reports the hash of the file, which is also what a successor names
+   as its predecessor. The search is by content now.
+2. `launch` flipped `activation_state` to `started` in the gate. The gate hash
+   is bound into the transition authorization and into every receipt, so the
+   runtime refused the ledger. The gate was restored to its bound bytes and is
+   never rewritten again; every gate of this run keeps
+   `authorized_not_started` for its life.
+3. The producer started, replayed, and exited at 23:04 UTC with `the
+   configuration transition ledger hash changed`. That one was a fault in the
+   broker, not in the activation. Before its first construction request an
+   applied transition is validated again on every start, and the ledger may
+   only carry evaluation activity since the application.
+   `_only_evaluation_activity_since` read that from the `phase` field of each
+   row. A request refused before its reservation never records a phase: the
+   count event creates the row and the reserve writes the phase. The
+   production ledger held thirty-one evaluation rows of that shape, and the
+   evaluator wrote another at 23:03:53 UTC. The tolerance now reads the stage
+   family when the phase is absent, which `execute` already holds to agree
+   with the phase. `tests/test_phase_scoped_slots.py` drives the real repeat
+   refusal to produce a phase-less row and pins both directions.
+
+The write side is untouched: a row still records its phase at the reserve and
+not before. Recording it at the count event would fix new rows only, and the
+thirty-one rows already on the production ledger need the read side to be
+right anyway.
+
 ## Follow-up, not built here
 
 A relaunched producer replays the papers its eligibility run directory already
