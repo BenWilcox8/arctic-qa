@@ -6,9 +6,17 @@ Captain standing order (2026-09-16): the chapter 3 production run and the live b
 Activation artifacts: `/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-broker-operation-lock-wait-r1/`.
 Predecessor activation: `/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-ch3-candidate-fault-containment-r1/` (report `data/arctic-ch3-candidate-fault-containment-r1/report.md`).
 
-## 1. Result
+## 1. Result in nine lines
 
-TBD
+1. The fault is repaired. Commit `f53e3e2`, and `ea00336` after local `main` is merged in. Section 3.
+2. The 18:26 UTC exit was one lock with one policy for two kinds of caller. A reviewed operation must refuse a held lock at once; an ordinary request has no operator to tell and should wait. `hold_operation_lock` gives each what it needs. Section 3.
+3. The bound raises `BrokerOperationBusyError`, which reserves nothing and submits nothing, so the producer records it against one family and continues. Every other broker refusal still ends the run. Section 3.
+4. `tests/test_broker_operation_lock_wait.py` holds the slice, 13 tests on the real `flock`, no mock. Section 4.
+5. The producer runs again as `chapter3-7dc6485-r3`, PID 1160587, pane `%41`, tmux session `arctic-ch3-production-r1`, over the whole frozen corpus of 4420 papers. Section 6.
+6. The interrupt of the old producer was clean: `SIGINT` at 18:57:51 UTC with zero construction requests in flight, exit at 18:57:53 UTC. Section 6.
+7. The fifteen-minute observation is healthy: 6 paid requests, USD 0.036829, no halt, `integrity_valid` true, and the stale cap refusal untouched. Section 6.
+8. No new money and no new ledger transition. The applied USD 200 expansion transition stands, and the successor gate names the gate that authorized it. Section 5.
+9. The evaluator cutover is prepared and not performed, by firstmate's decision of 19:10 UTC. Section 7, and `cutover.md` beside this report.
 
 ## 2. The fault
 
@@ -126,11 +134,78 @@ The suite on the deployed commit, four bounded parts in parallel:
 | `ruff check` and `ruff format --check` | clean |
 
 1411 tests passed.
-`suite-result.json` and `suite-f53e3e2.log` are in the activation directory.
+`suite-result-f53e3e2.json` and `suite-f53e3e2.log` are in the activation directory.
 
-## 6. The relaunch and the health observation
+Local `main` then moved to `341a0fd`, which carries `d64e8c4`, the evaluation-phase 503 release with the automatic vendor resume.
+Firstmate's message 001 of 19:06 UTC asked for that merge before the branch finishes.
+`main` is merged into this branch with a merge commit, and the branch head is `ea00336`.
+The merge auto-merged `model_broker.py`, and every one of the eight operation-lock call sites still goes through `hold_operation_lock`.
+The suite ran again on the merged head:
 
-TBD
+| Part | Result |
+|---|---|
+| `tests/` without the three slow files | 1170 passed in 384s |
+| `tests/test_cli_integration.py` | 98 passed in 132s |
+| `tests/test_streaming.py` | 61 passed in 513s |
+| `tests/test_model_broker.py` | 88 passed in 149s |
+| `ruff check` and `ruff format --check` | clean |
+
+1417 tests passed.
+`suite-result.json` and `suite-ea00336.log` hold that run.
+
+## 6. The interrupt, the relaunch and the health observation
+
+The `stop` step of the release script is new.
+It reads the in-flight count per phase rather than the ledger's shared counter, because an evaluation request of the evaluator crew takes no construction slot and is no reason to wait.
+It sent `SIGINT` at 18:57:51 UTC with zero construction requests in flight, the producer exited two seconds later, and the tmux session closed with it.
+
+| Interrupt | Value |
+|---|---|
+| Signal | `SIGINT` to PID 3665656 |
+| Sent at | 2026-09-16T18:57:51Z |
+| Construction requests in flight | 0 |
+| Exit confirmed | yes, 18:57:53Z |
+| Ledger after | `halted` false, `inflight` 0, `spent_usd` 70.854614, `reserved_usd` 0.021016, `ambiguous_reserved_usd` 0.123539 |
+
+The relaunch started at 18:57:56 UTC, on the same run id, the same campaign and the same frozen corpus of 4420 papers.
+
+| Process | Value |
+|---|---|
+| PID | 1160587 |
+| tmux session | `arctic-ch3-production-r1` |
+| tmux pane | `%41` |
+| Phase | `away_production` |
+| Run id | `chapter3-7dc6485-r3` |
+| Campaign | `arctic-qa-production-campaign-003` |
+| Snapshot | `runtime/app-f53e3e2-arctic-broker-operation-lock-wait-r1` |
+| Gate | `live-execution-gate-f53e3e2-lockwait.json`, sha256 `ef844c9f64bdd0ed40ea2ac07f056bc16fa0fcddc905a357bcd6dc8e9b669f7d` |
+| Max papers | 4420 |
+
+The fifteen-minute observation, 30 samples at 30-second intervals from 19:06:36 to 19:21:09 UTC:
+
+| Measure | Value |
+|---|---|
+| Verdict | healthy |
+| Producer alive at end | yes |
+| Halted at end | no |
+| `integrity_valid` at end | true |
+| Requests completed in the window | 6 |
+| Spend in the window | USD 0.036829 |
+| Accepted questions | 38 at both ends |
+| Remaining away-session allocation | USD 187.047167 |
+| `settle-skipped` notes | none |
+| Stale cap refusal | unchanged, still `not_submitted` with the paper-cost-cap reason, no live call |
+
+The cap refusal of 12:37 UTC is the one request the relaunch must not touch.
+It is byte-identical at both ends of the window, so the relaunch replayed it free and did not resume it.
+
+One thing about the shape of this window is worth writing down, because it can be read as a stall.
+A relaunched producer replays the papers its eligibility run directory already holds before it makes its first paid call.
+That replay is free and CPU-bound.
+The relaunch of 18:28 UTC made its first paid request at 18:48:23, twenty minutes later; this one made its first at about 19:19, and the window recorded six requests in its last two minutes.
+For most of the window the producer was alive, `progress.json` moved every few seconds with a new DOI, and the ledger did not move at all.
+That is the replay, not a stall.
+`AGENTS.md` now says so.
 
 ## 7. The evaluator re-snapshot, and why it is not done
 
@@ -163,14 +238,41 @@ Starting a new work directory instead abandons the ten partial items and re-pays
 The evaluator is not exposed to the fault this task repaired.
 An evaluation request runs under `EVALUATION_PHASE`, which takes the evaluation admission lock and never the exclusive operation lock, so `execute` on that path never reached the refusal that ended the producer.
 
-The options are in the task status file as a decision for firstmate.
-The recommendation is to let the unit finish the ten items after the 23:00 UTC resume on `a0b9a82`, and then restart it on the landed commit with the new snapshot, a new run id prefix, a new work directory and a new reviewed authorization.
+The options went to firstmate under the key `evaluator-resnapshot`.
+
+Firstmate answered at 19:10 UTC and chose the deferral.
+The running unit finishes every item it has started, the Fable trials that resume after 23:00 UTC included, and firstmate performs the cutover after that.
+This task prepares the cutover and executes none of it.
+No part of the evaluator was stopped, started or repointed here.
+
+`data/arctic-broker-operation-lock-wait-r1/cutover.md` is the procedure.
+It holds the preconditions, the rollback, the bound arithmetic and the answer to the ambiguous-charge question, and it names the script.
+
+| Prepared | Value |
+|---|---|
+| Runtime snapshot | `runtime/app-ea00336-arctic-abstention-stream-r4`, from the merged head |
+| Source archive sha256 | `1eb051f7f5753abc86dab023c2470d1e93cf4c12c9d3a35dde2ebb7b0312843e` |
+| Run id prefix | `abstention-stream-r11` |
+| Work directory | `abstention-eval/streaming-r11` |
+| Review record | `streaming-eval-r7-review.md`, sha256 `1fccde9d1305f02552ef4a31fca89195c5850402c4873a71cf14a98e491b8b33` |
+| Authorization, signed | `streaming-eval-r7-authorization.json`, sha256 `264bebec89a3555cf346f5f587c582731e24332516de85a41bedd17a78a7c28b` |
+| Launcher | `streaming-eval-r7-launcher.sh` |
+| Cutover script | `cutover-evaluator-r11.sh` |
+
+The script defaults to a dry run and acts only with `--apply`.
+Its dry run was exercised against the live state at 19:15 UTC and refused, correctly, at the precondition that no model may be held: `claude-fable-5-1` is held until 23:00 UTC and eleven items wait for its trials.
+The two repoints, the cost guard's `--journal-dir` and the viewer's `--benchmark-journal-dir`, were tested against both live units without applying them: the argument vector is read from systemd, the argument count is unchanged, exactly one `streaming-r10` becomes `streaming-r11`, and the viewer's one argument that holds spaces survives as one token.
+
+One thing the cutover must do is not obvious, so it is worth stating here too.
+A new work directory starts with an empty cost journal, and `pending_item_ids` excludes only what the current journal knows, so the new run would re-evaluate and re-pay for every question the old run finished.
+The script therefore copies the old `cost-journal.jsonl` forward.
+The carried rows keep their own `run_id`, so no row claims to belong to the new run, and the item bound counts them as spent headroom.
 
 ## 8. Open points
 
 | Point | Owner |
 |---|---|
 | The evaluator re-snapshot of section 7 waits on a decision. | firstmate, captain |
-| `arctic-eval-503-release-r1` holds an unmerged fix, `d64e8c4`, for the evaluation-phase ambiguous charge. This branch is off `cac4949` and does not carry it. The deployed producer does not need it, but the next re-snapshot should be taken after both land on `main`. | firstmate |
+| The deployed producer runs `f53e3e2`, which is this branch before the merge of `main` at `341a0fd`. The merge brings `d64e8c4`, the evaluation-phase 503 release with the automatic vendor resume. Its broker half touches the ambiguous-continuation authorization and the phase halt reader, neither of which the producer uses, so the deployed producer needs no second interrupt for it. A later re-snapshot picks it up. | firstmate |
 | The bound is 120 seconds and the poll is one second. No reviewed operation of this ledger has ever held the lock for longer, so the bound has never been reached in production. It is a constant in `model_broker.py` if a future operation needs more. | this task |
 | A bound-exceeded fault settles the family's completed calls as `incomplete_infra` and skips the paper, so it discards paid work for that family. With a 120-second bound against operations that take milliseconds, that path should stay unused. | this task |
