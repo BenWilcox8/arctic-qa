@@ -33,6 +33,7 @@ ROLE_STAGES = {
     # the bound price config needs no transition (ch2 yield audit 4.8).
     "option_set_verifier": "option_verification",
     "correction": "repair",
+    "slot_lookup": "repair",
 }
 
 

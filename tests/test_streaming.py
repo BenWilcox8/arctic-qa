@@ -27,7 +27,7 @@ from arctic_qa.model_broker import (
 )
 from arctic_qa.paths import DataPaths
 from arctic_qa.providers import FakeProvider
-from arctic_qa.streaming import run_stream
+from arctic_qa.streaming import BENCHMARK_CANDIDATE_PREDICATE, run_stream
 from arctic_qa.util import canonical_json, sha256_file, stable_id
 from arctic_qa import validation as validation_module
 
@@ -1883,7 +1883,8 @@ def test_same_campaign_regenerates_a_stale_terminal_candidate(
 
     candidates = database.rows(
         "SELECT item_id,candidate_json FROM candidates "
-        "WHERE run_id='same-campaign' ORDER BY created_at,item_id"
+        f"WHERE run_id='same-campaign' AND {BENCHMARK_CANDIDATE_PREDICATE} "
+        "ORDER BY created_at,item_id"
     )
     assert second["resumed_papers"] == 1
     assert second["counts"]["generation_rejected"] == 1
@@ -1917,7 +1918,8 @@ def test_new_campaign_regenerates_a_paper_with_historical_accepted_output(
         max_papers=1,
     )
     historical_item = database.one(
-        "SELECT item_id FROM candidates WHERE run_id='historical-trial-campaign'"
+        "SELECT item_id FROM candidates WHERE run_id='historical-trial-campaign' "
+        f"AND {BENCHMARK_CANDIDATE_PREDICATE}"
     )["item_id"]
     assert historical["counts"]["accepted_base_questions"] == 1
 
@@ -1943,7 +1945,8 @@ def test_new_campaign_regenerates_a_paper_with_historical_accepted_output(
     )
 
     production_item = database.one(
-        "SELECT item_id FROM candidates WHERE run_id='new-production-campaign'"
+        "SELECT item_id FROM candidates WHERE run_id='new-production-campaign' "
+        f"AND {BENCHMARK_CANDIDATE_PREDICATE}"
     )["item_id"]
     assert production["counts"]["accepted_base_questions"] == 1
     assert production["resumed_papers"] == 0
@@ -2607,7 +2610,10 @@ def test_short_answer_without_three_distractors_is_not_counted_as_accepted(
 
     attempts = [
         json.loads(row["candidate_json"])
-        for row in database.rows("SELECT candidate_json FROM candidates")
+        for row in database.rows(
+            "SELECT candidate_json FROM candidates "
+            f"WHERE {BENCHMARK_CANDIDATE_PREDICATE}"
+        )
     ]
     assert {attempt["question"] for attempt in attempts} == {
         "What reported water depth was documented?"

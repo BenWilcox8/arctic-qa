@@ -32,6 +32,10 @@
         "provider": "claude",
         "model": "claude-opus-5"
       },
+      "slot_lookup": {
+        "provider": "claude",
+        "model": "claude-opus-5"
+      },
       "standalone_verifier": {
         "provider": "gemini",
         "model": "gemini-3.1-pro-preview",
@@ -84,6 +88,10 @@
         "provider": "claude",
         "model": "claude-sonnet-5"
       },
+      "slot_lookup": {
+        "provider": "claude",
+        "model": "claude-sonnet-5"
+      },
       "standalone_verifier": {
         "provider": "gemini",
         "model": "gemini-3.1-pro-preview",
@@ -133,6 +141,10 @@
         "model": "gemini-3.8-flash"
       },
       "correction": {
+        "provider": "gemini",
+        "model": "gemini-3.8-flash"
+      },
+      "slot_lookup": {
         "provider": "gemini",
         "model": "gemini-3.8-flash"
       },

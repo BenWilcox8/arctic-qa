@@ -735,7 +735,13 @@ def test_pro_judge_stages_carry_a_pinned_longer_call_timeout(tmp_path: Path) -> 
     # the same pinned timeout. A stage that registers no timeout keeps the
     # one documented default.
     assert call_timeout_seconds(config, "answer_agreement") == 300
-    assert call_timeout_seconds(config, "question_generation") == 120
+    assert call_timeout_seconds(config, "finding_answer_extraction") == 120
+    # Chapter 2 yield audit 4.9 C8: the writer stage registers a timeout and
+    # nothing else, so it keeps the verified writer model and its prices.
+    assert config["stage_models"]["question_generation"] == {
+        "call_timeout_seconds": 300
+    }
+    assert call_timeout_seconds(config, "question_generation") == 300
     assert maximum_call_timeout_seconds(config) == 300
 
     value = json.loads(config_path.read_text())
@@ -754,9 +760,18 @@ def test_pro_judge_stages_carry_a_pinned_longer_call_timeout(tmp_path: Path) -> 
 
     value["call_timeout_seconds"] = 120
     value["config_id"] = "arctic-gemini-eligibility-r1-config-v6"
+    # The writer stage entry belongs to v8 alone, so the v6 registry check
+    # fires before the judge rule it is here to exercise.
+    value["stage_models"].pop("question_generation")
     changed = tmp_path / "v6-with-judge-timeout.json"
     write_json(changed, value)
     # v6 pins neither the judge timeout nor the Pro agreement judge, so the
     # first pinned block that differs rejects the file.
     with pytest.raises(ValueError, match="configuration changed"):
+        _config(changed)
+
+    value["config_id"] = "arctic-gemini-eligibility-r1-config-v8"
+    changed = tmp_path / "v8-without-the-writer-stage.json"
+    write_json(changed, value)
+    with pytest.raises(ValueError, match="stage model registry changed"):
         _config(changed)

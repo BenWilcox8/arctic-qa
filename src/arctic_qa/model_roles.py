@@ -24,6 +24,10 @@ AUTHOR_ROLES = (
     "direct_joint",
     "distractor_writer",
     "correction",
+    # Chapter 2 yield audit 4.6 c: one cheap retrieval call that returns the
+    # verbatim sentence stating a referent slot. It is a writer-side lookup and
+    # judges nothing, so it stays on the author side of the role split.
+    "slot_lookup",
 )
 JUDGE_ROLES = (
     "standalone_verifier",

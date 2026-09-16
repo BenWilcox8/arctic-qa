@@ -1,0 +1,56 @@
+{
+  "schema": "arctic-ch3-routing-replay-v1",
+  "families": 56,
+  "recorded_candidates": 139,
+  "recorded_repairs": 80,
+  "stopped_repairs": 1,
+  "stop_outcomes": {
+    "no_rung": 1
+  },
+  "stopped_by_recorded_kind": {
+    "context_widened_revision": 1
+  },
+  "suppressed_accepted_items": [],
+  "repeat_detector_stops": 1,
+  "repeat_detector_stops_by_kind": {
+    "context_widened_revision": 1
+  },
+  "detector_suppressed_context_widened_revisions": 1,
+  "detector_suppressed_accepted_items": [],
+  "rerouted_repairs": {
+    "surgical_correction -> scope_display_repair": 2,
+    "alternative_finding -> question_revision": 4,
+    "question_revision -> surgical_correction": 1,
+    "question_revision -> frozen_scope_rebind": 3,
+    "context_widened_revision -> frozen_scope_rebind": 2,
+    "question_revision -> scope_display_repair": 6,
+    "question_revision -> context_widened_revision": 3,
+    "surgical_correction -> frozen_scope_rebind": 1,
+    "context_widened_revision -> question_revision": 1,
+    "context_widened_revision -> scope_display_repair": 1
+  },
+  "rejected_candidates_examined": 133,
+  "guard_would_stop": {},
+  "scope_defect_demands": {
+    "display_verbatim": 34,
+    "not_in_evidence": 32
+  },
+  "candidates_with_a_scope_defect": 62,
+  "numeric_repair_rides_along": 12,
+  "agreement_triggers_barred": 4,
+  "guard_stopped_candidates": [],
+  "stopped_attempts": [
+    {
+      "family_id": "family-a2bb181fa382d479c5c5",
+      "item_id": "aqa-b8d0cf201a521d1aa2c4",
+      "recorded_kind": "context_widened_revision",
+      "recorded_trigger": "scope_value_not_source_supported",
+      "parent_reason_codes": [
+        "answer_scope_not_source_bound",
+        "scope_qualifier_not_displayed",
+        "scope_value_not_source_supported"
+      ],
+      "stop_outcome": null
+    }
+  ]
+}

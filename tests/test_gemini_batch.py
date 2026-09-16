@@ -31,6 +31,7 @@ from arctic_qa.model_broker import (
     exclusive_batch_marker_path,
 )
 from arctic_qa.paths import DataPaths
+from arctic_qa.streaming import BENCHMARK_CANDIDATE_PREDICATE
 from arctic_qa.util import canonical_json, sha256_file
 
 
@@ -978,7 +979,9 @@ def test_staged_batch_pipeline_uses_real_prompts_and_exports_accepted_output(
             row["request"]["contents"][0]["parts"][0]["text"] for row in option_requests
         )
     )
-    candidate = database.one("SELECT candidate_json FROM candidates")
+    candidate = database.one(
+        f"SELECT candidate_json FROM candidates WHERE {BENCHMARK_CANDIDATE_PREDICATE}"
+    )
     value = json.loads(candidate["candidate_json"])
     assert value["question_rationale"]
     assert all(item["generation_rationale"] for item in value["distractors"])

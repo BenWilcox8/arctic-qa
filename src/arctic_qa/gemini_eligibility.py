@@ -287,14 +287,18 @@ def _config(path: Path) -> dict[str, Any]:
         # the writer (r15 audit section 4.2 fix 4). Every price is pinned.
         # v7 adds one pinned per-call timeout to those judge stages; the Pro
         # judge thinks for longer than the fixed 120 second transport timeout.
-        # v8 (chapter 3, yield audit 4.5 R5) moves the answer-agreement
-        # fallback judge to the same Pro model, with its 128-token enum output.
+        # v8 (chapter 3) does two things in one revision: it moves the
+        # answer-agreement fallback judge to the same Pro model, with its
+        # 128-token enum output (yield audit 4.5 R5), and it registers a 300
+        # second timeout for the writer stage, which was the last one still cut
+        # off at 120 seconds (yield audit 4.9, C8).
+        chapter3_revision = value["config_id"] == "arctic-gemini-eligibility-r1-config-v8"
+        writer_timeout_stages = {WRITER_TIMEOUT_STAGE} if chapter3_revision else set()
         if not isinstance(stage_models, dict) or set(stage_models) != (
-            {"answer_agreement"} | PRO_JUDGE_STAGES
+            {"answer_agreement"} | PRO_JUDGE_STAGES | writer_timeout_stages
         ):
             raise ValueError("the Gemini stage model registry changed")
-        pro_agreement = value["config_id"] == "arctic-gemini-eligibility-r1-config-v8"
-        if pro_agreement:
+        if chapter3_revision:
             _validate_pro_answer_agreement_config(stage_models["answer_agreement"])
         else:
             _validate_answer_agreement_config(stage_models["answer_agreement"])
@@ -306,6 +310,8 @@ def _config(path: Path) -> dict[str, Any]:
             _validate_pro_judge_config(
                 stage_models[stage], pinned_timeout=pinned_timeout
             )
+        for stage in sorted(writer_timeout_stages):
+            _validate_writer_timeout_config(stage_models[stage])
     elif stage_models is not None:
         raise ValueError("the legacy Gemini configuration has stage models")
     start = date.fromisoformat(value["price_valid_from"])
@@ -333,6 +339,13 @@ MAXIMUM_CALL_TIMEOUT_SECONDS = 900
 # The Pro judge thinks before it answers, so 120 seconds cut live calls off
 # while the provider was still working and left the charge unknown.
 PRO_JUDGE_CALL_TIMEOUT_SECONDS = 300
+# The writer stage was the last one still cut off at the fixed 120 second
+# transport timeout, which left the charge of a completed call unknown
+# (chapter 2 yield audit 4.9, C8). It registers a timeout and nothing else, so
+# the stage keeps the top-level writer model and its verified prices.
+WRITER_TIMEOUT_STAGE = "question_generation"
+WRITER_CALL_TIMEOUT_SECONDS = 300
+
 # Verified against https://ai.google.dev/gemini-api/docs/pricing on 2026-09-15:
 # standard tier, prompts up to 200k tokens. The input limit below keeps every
 # request inside that price tier.
@@ -351,6 +364,14 @@ PRO_JUDGE_EXACT_CONFIG = {
     "thinking_source": "https://ai.google.dev/gemini-api/docs/generate-content/thinking",
     "structured_output_source": "https://ai.google.dev/api/generate-content",
 }
+
+
+def _validate_writer_timeout_config(value: Any) -> None:
+    """Check the one writer stage entry that registers a timeout only."""
+    if not isinstance(value, dict) or set(value) != {"call_timeout_seconds"}:
+        raise ValueError("the writer stage entry may register a timeout only")
+    if value["call_timeout_seconds"] != WRITER_CALL_TIMEOUT_SECONDS:
+        raise ValueError("the verified writer stage call timeout changed")
 
 
 def _validate_pro_judge_config(value: Any, *, pinned_timeout: bool = False) -> None:

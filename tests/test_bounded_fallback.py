@@ -9,7 +9,7 @@ import pytest
 from arctic_qa import generation as generation_contract
 from arctic_qa import streaming as streaming_module
 from arctic_qa.db import Database, now
-from arctic_qa.errors import BudgetError
+from arctic_qa.errors import BudgetError, CandidateRejectedError
 from arctic_qa.streaming import _Progress, _progress_generation
 from arctic_qa.util import canonical_json, stable_id
 
@@ -681,7 +681,20 @@ def test_progress_generation_continues_with_a_fresh_path_after_rejection(
     assert all(not attempt["excluded_finding_span_ids"] for attempt in calls)
     assert (
         database.one(
-            "SELECT COUNT(*) AS count FROM candidates WHERE run_id=?", ("campaign",)
+            """SELECT COUNT(*) AS count FROM candidates WHERE run_id=?
+            AND status NOT IN ('incomplete_infra','generation_incomplete',
+            'generation_settled')""",
+            ("campaign",),
+        )["count"]
+        == accept_on
+    )
+    # audit 4.6 e: every generation call leaves a settled call record beside the
+    # candidate it produced, so a dead call is never invisible.
+    assert (
+        database.one(
+            """SELECT COUNT(*) AS count FROM candidates WHERE run_id=?
+            AND status='generation_settled'""",
+            ("campaign",),
         )["count"]
         == accept_on
     )
@@ -864,7 +877,9 @@ def test_r14_predecessor_attempts_consume_successor_retry_slots(
     assert {
         row["item_id"]: row["candidate_json"]
         for row in database.rows(
-            "SELECT item_id,candidate_json FROM candidates ORDER BY item_id"
+            """SELECT item_id,candidate_json FROM candidates
+            WHERE status NOT IN ('incomplete_infra','generation_incomplete',
+            'generation_settled') ORDER BY item_id""",
         )
     } == historical_bytes
 
@@ -1473,4 +1488,100 @@ def test_slot_place_detection_fails_open_on_a_bare_proper_noun() -> None:
     )
     assert "place" not in streaming_module._slot_evidence_types(
         ["Samples were kept in the dark at four degrees."]
+    )
+
+
+def test_a_crashed_generation_call_leaves_an_incomplete_infra_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audit 4.9 C8: family c4aa016e's attempt vanished with no record."""
+    database = _database(tmp_path)
+    namespace = tmp_path / "namespace"
+    namespace.mkdir()
+    manifest = namespace / "run-manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+
+    def crashing_generate(database, namespace, **kwargs):
+        raise RuntimeError("the provider connection dropped")
+
+    monkeypatch.setattr(streaming_module, "generate_candidate", crashing_generate)
+
+    with pytest.raises(RuntimeError):
+        _progress_generation(
+            database,
+            namespace,
+            _Progress(
+                namespace / "progress.json",
+                run_id="campaign",
+                invocation_run_id="invocation",
+                run_manifest_file=manifest,
+                counts={},
+            ),
+            campaign_id="campaign",
+            candidate_key="candidate-key",
+            source_id="source",
+            family_id="family",
+            selected={},
+            source_version_id="a" * 64,
+            title="Fixture",
+            author=object(),
+            verifier=object(),
+        )
+
+    rows = database.rows("SELECT item_id,status,candidate_json FROM candidates")
+    assert [row["status"] for row in rows] == ["incomplete_infra"]
+    record = json.loads(rows[0]["candidate_json"])
+    assert record["provenance"]["request_identity"] == {
+        "run_id": "campaign",
+        "paper_id": "source",
+        "family_id": "family",
+        "source_version_id": "a" * 64,
+        "attempt_id": record["provenance"]["generation_attempt"]["attempt_id"],
+    }
+
+
+def test_a_typed_generation_rejection_settles_its_call_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audit 4.6 e: the 26 dead chapter 2 calls stop being invisible."""
+    database = _database(tmp_path)
+    namespace = tmp_path / "namespace"
+    namespace.mkdir()
+    manifest = namespace / "run-manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+
+    def rejecting_generate(database, namespace, **kwargs):
+        raise CandidateRejectedError("writer_response_invalid", "no payload")
+
+    monkeypatch.setattr(streaming_module, "generate_candidate", rejecting_generate)
+
+    result = _progress_generation(
+        database,
+        namespace,
+        _Progress(
+            namespace / "progress.json",
+            run_id="campaign",
+            invocation_run_id="invocation",
+            run_manifest_file=manifest,
+            counts={},
+        ),
+        campaign_id="campaign",
+        candidate_key="candidate-key",
+        source_id="source",
+        family_id="family",
+        selected={},
+        source_version_id="a" * 64,
+        title="Fixture",
+        author=object(),
+        verifier=object(),
+    )
+
+    assert result["disposition"] == "generation_rejected"
+    statuses = [
+        row["status"]
+        for row in database.rows("SELECT status FROM candidates ORDER BY item_id")
+    ]
+    assert set(statuses) == {"generation_incomplete"}
+    assert (
+        streaming_module._incomplete_infra_records(database, "campaign", "family") == []
     )
