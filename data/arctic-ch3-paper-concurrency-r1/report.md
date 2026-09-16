@@ -104,6 +104,27 @@ paper, about 13 papers an hour, about 3 requests a minute.
 
 <!-- MEASUREMENT -->
 
+## Follow-up, not built here
+
+A relaunched producer replays the papers its eligibility run directory already
+holds before its first paid call. That replay is free but it cost about 22
+minutes on every relaunch of 2026-09-16 (18:28 to 18:48, 18:58 to 19:19, and
+the 21:53 cut had still not made a paid call at 22:10).
+
+Two cheap ways to shorten it, in the order they are worth trying:
+
+1. This change already runs the replay on `--paper-workers` threads, because
+   the replay is the same per-paper chain reaching an already-settled result.
+   Measure the replay of the first concurrent relaunch before building
+   anything else.
+2. If it is still long, cache the deterministic eligibility re-validation.
+   `_validate_brokered_eligibility` recomputes the same verdict from the same
+   job row and the same prompt, schema and policy hashes on every relaunch.
+   A row keyed by the job key and those three hashes turns the recompute into
+   a read. It changes no paid call and no decision.
+
+Neither is built here; the captain asked for the concurrency first.
+
 ## Tests
 
 `tests/test_paper_concurrency.py` runs four papers at once through `run_stream` and holds the result to the one-at-a-time run of the same four papers: the counts, the paper results in selection order, the accepted candidate rows and the export counts all match, and the meter proves the calls really overlapped.

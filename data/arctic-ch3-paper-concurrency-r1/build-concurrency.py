@@ -64,6 +64,9 @@ CAMPAIGN = "arctic-qa-production-campaign-003"
 RUN_ID = os.environ.get("CH3_RUN_ID", "chapter3-7dc6485-r3")
 STREAM_INPUT_RUN_ID = "chapter3-7dc6485-r1-input"
 CEILING = "253.990121"
+# Every relaunch of 2026-09-16 spent about 22 minutes in free replay
+# before its first paid call, so the measurement waits that out.
+REPLAY_WAIT_SECONDS = 2700
 PAPER_WORKERS = int(os.environ.get("CH3_PAPER_WORKERS", "4"))
 OPTION_WORKERS = int(os.environ.get("CH3_OPTION_WORKERS", "4"))
 CHANGED_FIELDS = {
@@ -609,7 +612,33 @@ class Activation:
     # ---- observe ----------------------------------------------------------
 
     def observe(self, seconds: int = 900) -> None:
+        """Measure the window that starts at the first paid call.
+
+        A relaunched producer replays the papers its eligibility run directory
+        already holds before it makes its first paid call. That replay is free
+        and took about 22 minutes on every relaunch of 2026-09-16, so a window
+        that starts at launch measures the replay, not the run.
+        """
         state = read_json(self.state)
+        base = self.sample()
+        waited = 0.0
+        while waited < REPLAY_WAIT_SECONDS:
+            current = self.sample()
+            if current["generation_submissions"] > base["generation_submissions"]:
+                break
+            if not current["alive"]:
+                raise SystemExit(f"the producer exited during replay; see {self.log}")
+            time.sleep(15)
+            waited += 15
+        print(
+            json.dumps(
+                {
+                    "replay_seconds": round(waited),
+                    "first_paid_call_seen": waited < REPLAY_WAIT_SECONDS,
+                }
+            ),
+            flush=True,
+        )
         start = time.monotonic()
         first = self.sample()
         samples = [first]
