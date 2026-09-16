@@ -329,9 +329,14 @@ commit `3cd57a8`. One evaluation call in flight leaves the producer a free slot
 even under the older global counting, so this pass could not repeat the outage
 of the morning. The cost is wall time only: 391 s against 167 s.
 
-Firstmate confirmed that caution on 2026-09-16: the Gemini arm stays at one
-call in flight until the producer is redeployed from a commit that carries
-`3cd57a8`. After that redeployment the arm runs at the plan's four.
+That caution is lifted. The producer was redeployed on 2026-09-16 from the
+snapshot `app-9c87fc4-arctic-ch3-paper-cap-skip-r1`, which carries `3cd57a8`,
+so both phases count their slots separately on both sides. The Gemini arm runs
+at the plan's four calls in flight again.
+
+One call in flight was a command-line override on that one pass. The service
+launcher carries no override, so the next item runs at the configured
+concurrency with no edit.
 
 The two phases stayed apart, which is the point of section 3.1. Before the run
 the construction minute window held 4 entries. After 12 evaluation calls it
@@ -567,11 +572,17 @@ Then:
 
 ### 8.2 The streaming evaluator
 
-The live run is configured by three files under `/mnt/crdata/research-abstention/arctic-qa/abstention-eval/private/`:
+A run is configured by three files under `/mnt/crdata/research-abstention/arctic-qa/abstention-eval/private/`: a review record, a reviewed authorization and a launcher.
+The set of the last run is `streaming-eval-r5-*`, at commit `f64d289` on all three vendors.
+The earlier sets `streaming-eval-r2-*` and `streaming-eval-r3-*` are superseded evidence, and `r4` never ran.
 
-- `streaming-eval-r2-review.md`, the review record.
-- `streaming-eval-r2-authorization.json`, the reviewed authorization.
-- `streaming-eval-r2-launcher.sh`, the launcher.
+A new service start needs a new authorization, because the authorization binds the code commit and holds the item and Gemini USD bounds.
+Write it with `--action watch-authorization`, at the bounds the captain sets, and have it reviewed.
+The launcher carries no `--concurrency` override, so each vendor runs at the concurrency of the plan file: Gemini 4 calls in flight, Claude Code 3, Codex 3.
+Give the launcher both pause files, the committed one and the cost guard's own.
+
+The commands below name the `r2` unit, the first one this task started.
+Use the unit name of the run you start.
 
 Start it as a systemd user unit, the pattern the live publication snapshot service already uses:
 
@@ -760,7 +771,7 @@ Firstmate passed the captain's allocation for the Gemini benchmarking: USD 200 f
 ## 11. Deferred items
 
 1. The remaining 4 trials of the Gemini arm of `runs/concurrent-test-r2-gemini`. The ambiguous charge of section 7 is settled and the ledger is clean, so they can run.
-2. A live pass at the plan's four Gemini calls in flight. Section 5.6 ran one, because the producer snapshot that will make the next construction call could not be proved to carry `3cd57a8`. A producer snapshot at `3cd57a8` or later removes that caution.
+2. A live pass at the plan's four Gemini calls in flight through the streaming evaluator. Section 5.6 ran one call in flight, for the reason stated there, and the caution is lifted now. The concurrent runner already ran four in flight live in section 5.1, and the ledger concurrency has its own tests, so this is a confirmation and not a gap. The next accepted question exercises it with no edit.
 3. The evaluation ceiling of USD 200.00 is the captain's whole allocation. The streaming authorization keeps its own, much smaller, Gemini USD bound per run, so a large benchmarking pass needs a new authorization with a bound the captain sets.
 4. The evaluator derives one gate per item from one reviewed authorization. A stricter design lets a reviewer sign a contract-level gate that the broker validates directly. That design needs a new gate schema and a broker change.
 5. The scripted dry run uses one latency per vendor. A per-model latency models the real schedule better, because inside one vendor the models differ by a factor of ten.
