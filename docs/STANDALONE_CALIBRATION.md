@@ -24,6 +24,8 @@ The `core` slice holds the r15 audit rows.
 The `held_out` slice holds chapter 2 candidates that the yield audit judged.
 Do not use a `held_out` row to iterate the prompt text.
 The held-out slice measures a prompt revision after the revision is written.
+The `seen` slice holds former held-out rows that a recorded judge passed and that a later prompt revision was written on.
+A `seen` row keeps its label and still gates, but it no longer measures a revision.
 
 The set keeps the typed reason codes in `model_reasons`.
 The tests in `tests/test_standalone_calibration.py` use them to exercise the deterministic half offline.

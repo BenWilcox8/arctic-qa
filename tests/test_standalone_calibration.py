@@ -98,7 +98,7 @@ def test_calibration_set_declares_its_contract_and_two_labelers() -> None:
     assert str(STANDALONE_CALIBRATION_MUST_PASS_RATE) == "0.8"
     assert len(MUST_PASS) >= 20
     assert len(MUST_FAIL) >= 20
-    assert {row["slice"] for row in ROWS} == {"core", "held_out"}
+    assert {row["slice"] for row in ROWS} == {"core", "held_out", "seen"}
     for row in ROWS:
         labels = row["labels"]
         assert set(labels) == {"labeler_1", "labeler_2"}
@@ -123,7 +123,7 @@ def test_every_row_keeps_the_typed_reason_codes() -> None:
     for row in ROWS:
         assert isinstance(row["model_reasons"], list)
         assert set(row["model_reasons"]) <= enum
-        if row["slice"] == "held_out":
+        if row["slice"] in {"held_out", "seen"}:
             assert set(row["recorded_judge_reasons"]) <= enum
 
 
@@ -198,10 +198,14 @@ def test_the_two_predecessor_false_passes_are_closed_deterministically() -> None
     )
 
 
-def test_the_v4_prompt_states_every_rule_the_calibration_set_exercises() -> None:
+def test_the_v5_prompt_states_every_rule_the_calibration_set_exercises() -> None:
     system = generation.STANDALONE_SYSTEM
     for clause in (
         "NECESSITY TEST",
+        "whose unit, metric, or basis the displayed text never names",
+        "samples whose sample type the displayed text never states",
+        "points at a table, list, or record the reader cannot see",
+        "An empty question_context does not excuse it",
         "two readers who both understand the task can defend answers about "
         "different things",
         "A named campaign, cruise, core, or project code does not resolve a referent",

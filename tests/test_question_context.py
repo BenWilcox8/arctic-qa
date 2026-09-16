@@ -377,7 +377,7 @@ def test_standalone_contract_requires_referent_not_study_identity() -> None:
     assert "DOI, paper title" in system
     assert "Do not treat an empirical observation as a universal claim" in system
     assert generation.STANDALONE_VERIFICATION_CONTRACT_VERSION == (
-        "source-blind-scientific-referent-v4"
+        "source-blind-scientific-referent-v5"
     )
     assert "study_local_referent" not in str(
         generation.ROLE_SCHEMAS["standalone_verifier"]

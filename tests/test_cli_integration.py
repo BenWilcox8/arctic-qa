@@ -1440,7 +1440,7 @@ def test_generation_runs_qa_gates_before_exact_option_verification(
     assert roles[6:] == ["option_verifier"] * 4 + ["option_set_verifier"]
     assert item["schema_version"] == "2.8.0"
     expected_standalone = {
-        "contract_version": "source-blind-scientific-referent-v4",
+        "contract_version": "source-blind-scientific-referent-v5",
         "pass": True,
         "answer_leakage_absent": True,
         "unresolved_phrases": [],
@@ -1541,7 +1541,7 @@ def test_controller_bound_standalone_version_preserves_receipt_and_exports(
 
     assert json.loads(raw).get("contract_version") == reported_version
     assert generated["standalone_verification"]["contract_version"] == (
-        "source-blind-scientific-referent-v4"
+        "source-blind-scientific-referent-v5"
     )
     assert validation["final_label"] == "machine_accepted_unverified"
     assert exported["short_answer_count"] == 1

@@ -36,8 +36,16 @@ FAIL_LIST = (
     "'recent years', or 'at this time'.",
     "- A pointer to source material, such as 'Table 2', 'the fourth column', "
     "'Figure 6', or 'according to the study'.",
-    "- A measured variable with no name, no unit, and no stated basis, when the "
-    "answer is a value of that variable.",
+    "- A measured variable whose unit, metric, or basis the displayed text never "
+    "names, such as 'what concentration value' with no unit, when the answer is a "
+    "value of that variable. Code undefined_measured_variable.",
+    "- A quantity reported for samples whose sample type the displayed text never "
+    "states, such as 'in samples from Resolute Bay' with no word for what was "
+    "sampled. Code undefined_population_or_sample.",
+    "- A word such as 'listed', 'reported', 'identified', or 'associated' that "
+    "points at a table, list, or record the reader cannot see, such as 'which "
+    "ports are listed in association with'. An empty question_context does not "
+    "excuse it. Code source_dependent_locator.",
     "- Text that is broken, garbled, or cut in the middle of a word.",
     "- A task that states its own answer.",
 )
@@ -251,7 +259,7 @@ def _bound_verdict(**overrides: object) -> dict:
 
 def test_bound_verdict_carries_version_and_fingerprint() -> None:
     bound = _bound_verdict()
-    assert bound["contract_version"] == "source-blind-scientific-referent-v4"
+    assert bound["contract_version"] == "source-blind-scientific-referent-v5"
     assert bound["verdict_fingerprint"] == validation.standalone_verdict_fingerprint(
         bound
     )
@@ -288,7 +296,7 @@ def test_contract_table_pins_chapter2_to_v3_and_chapter3_to_v4() -> None:
         "source-blind-scientific-referent-v3"
     )
     assert contracts["2.8.0"]["standalone_verification_contract_version"] == (
-        "source-blind-scientific-referent-v4"
+        "source-blind-scientific-referent-v5"
     )
     assert "option_verification_contract_version" not in contracts["2.7.0"]
     assert contracts["2.8.0"]["option_verification_contract_version"] == (

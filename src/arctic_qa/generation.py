@@ -310,7 +310,9 @@ These tasks fail. They are not interpretable without the paper.
 - A definite description with no antecedent in the task, such as 'the southern station' with no other property, 'the identified OTUs', 'the combined expeditions', or 'this experiment'.
 - A period fixed only by the publication date, such as 'the past 20 years', 'recent years', or 'at this time'.
 - A pointer to source material, such as 'Table 2', 'the fourth column', 'Figure 6', or 'according to the study'.
-- A measured variable with no name, no unit, and no stated basis, when the answer is a value of that variable.
+- A measured variable whose unit, metric, or basis the displayed text never names, such as 'what concentration value' with no unit, when the answer is a value of that variable. Code undefined_measured_variable.
+- A quantity reported for samples whose sample type the displayed text never states, such as 'in samples from Resolute Bay' with no word for what was sampled. Code undefined_population_or_sample.
+- A word such as 'listed', 'reported', 'identified', or 'associated' that points at a table, list, or record the reader cannot see, such as 'which ports are listed in association with'. An empty question_context does not excuse it. Code source_dependent_locator.
 - Text that is broken, garbled, or cut in the middle of a word.
 - A task that states its own answer.
 

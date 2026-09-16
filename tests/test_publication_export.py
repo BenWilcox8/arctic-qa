@@ -77,7 +77,7 @@ def _live_candidate(item_id: str, question: str, *, prompt: str) -> dict:
             {
                 "standalone_verification": {
                     "contract_version": (
-                        "source-blind-scientific-referent-v4"
+                        "source-blind-scientific-referent-v5"
                         if current
                         else "source-blind-standalone-gate-v1"
                     ),
@@ -124,7 +124,7 @@ def _live_candidate(item_id: str, question: str, *, prompt: str) -> dict:
             **(
                 {
                     "standalone_verification_contract_version": (
-                        "source-blind-scientific-referent-v4"
+                        "source-blind-scientific-referent-v5"
                     )
                 }
                 if current

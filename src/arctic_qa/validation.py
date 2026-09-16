@@ -41,7 +41,11 @@ PREDECESSOR_STANDALONE_VERIFICATION_CONTRACT_VERSION = (
 CHAPTER2_STANDALONE_VERIFICATION_CONTRACT_VERSION = (
     "source-blind-scientific-referent-v3"
 )
-STANDALONE_VERIFICATION_CONTRACT_VERSION = "source-blind-scientific-referent-v4"
+# v5 (chapter 3 production run, calibration re-record): three fail clauses for
+# the classes the held-out controls exposed, an unnamed unit or metric, an
+# unstated sample type, and a locator word that points at an unseen table.
+# No pass rule changed. The verdict shape and the evidence rule are v4's.
+STANDALONE_VERIFICATION_CONTRACT_VERSION = "source-blind-scientific-referent-v5"
 PREDECESSOR_STANDALONE_CALIBRATION_SET_VERSION = "standalone-calibration-v1"
 STANDALONE_CALIBRATION_SET_VERSION = "standalone-calibration-v2"
 STANDALONE_CALIBRATION_MUST_PASS_RATE = Decimal("0.8")
