@@ -115,6 +115,8 @@ ALTERNATIVE_FINDING_REASONS = frozenset(
         "finding_span_is_table_or_caption",
         "finding_span_figure_defined_referent",
         "interpretation_span_contains_answer",
+        # Chapter 3 writer-context slice: a frozen scope value with no cited span.
+        "finding_scope_value_unsourced",
     }
 )
 IMMEDIATE_ALTERNATIVE_FINDING_REASONS = frozenset(
@@ -129,6 +131,9 @@ IMMEDIATE_ALTERNATIVE_FINDING_REASONS = frozenset(
         "finding_span_is_table_or_caption",
         "finding_span_figure_defined_referent",
         "interpretation_span_contains_answer",
+        # Chapter 3 writer-context slice: a freeze-time reject, no writer call
+        # can repair it, so the family moves to the next finding at once.
+        "finding_scope_value_unsourced",
     }
 )
 OPTION_REPAIR_REASONS = frozenset({"insufficient_verified_distractors"})

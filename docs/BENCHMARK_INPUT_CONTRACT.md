@@ -80,6 +80,45 @@ A separable Arctic component keeps its span restriction, and receives only the s
 
 The writer fills a `referent_slots` record with one entry for each of the ten referent slots.
 The record is a diagnostic. No gate reads it, and it never supplies a slot that the displayed task leaves unfixed.
+
+## Chapter 3 writer context
+
+Chapter 3 candidates use generation prompt `arctic-qa-generation-v23` and candidate schema `2.8.0`.
+The chapter 2 yield audit found that the locator filter erased 36 percent of the study-setting spans.
+Schema `2.8.0` keeps the sentence and erases only the pointer.
+
+Contract `question-context-redacted-evidence-v2` shows each model a locator-redacted projection of a context-only span.
+The redaction removes a bracket citation, a parenthetical figure or table pointer, and a parenthetical author-year citation.
+The projection must be a complete sentence with a finite verb, terminal punctuation, and at least 16 characters.
+A sentence that still points at a figure or a table is not displayed.
+The stored span keeps the raw chunk bytes under `text` and `text_sha256`, and records the projection under `display_text`.
+The validator re-derives the projection from the raw bytes and rejects a candidate when the two differ.
+The answer-leak test runs on the raw bytes and on the projection.
+The module `src/arctic_qa/context_projection.py` holds the projection rules, so the validator and generation share one implementation.
+
+The separable-component phrase test applies to a geography span and to a sample span.
+A period, method, or definition span is exempt.
+An unlabelled span (eligibility schema v3) keeps the phrase test only when it names a place.
+
+Contract `freeze-time-finding-admission-v2` requires one `scope_evidence` entry for every non-null scope value.
+The entry names the supplied span the value was copied from and the exact quote inside that span.
+A value with no entry, an entry for a span the pipeline did not supply, a quote outside that span, or a value outside the quote is rejected with `finding_scope_value_unsourced` before the finding is frozen.
+A cited context-only span is recorded in `scope_context_span_ids` and leads the bundle on every attempt on that finding.
+
+Generation adds a definition span for each acronym that the displayed text leaves opaque.
+A free string scan finds the first sentence that carries `expansion (TOKEN)` or `TOKEN (expansion)`, or that spells out an abbreviated binomial.
+The sentence is forwarded with `span_role` set to `definition`, through the same projection and the same answer-leak filter.
+
+Contract `referent-slot-resolvability-v2` replaces the presence test in the writer's slot checklist with a resolvability test.
+Each slot record carries `resolver_text`: the displayed words that pick out one referent.
+Provenance records the shadow result under `referent_slot_resolvability`.
+No gate reads it in this release.
+
+The writer prompt places a qualifier taken from `CONTEXT_ONLY_SOURCE` in `question_context` only.
+A qualifier placed in `question_context` may bind to a forwarded context-only span.
+A qualifier in the question stem still binds to the role evidence alone.
+The prompt states the verbatim scope rule, asks for one supported setting sentence, and keeps every anti-leakage rule of version 22.
+
 ## Chapter 2 gate contracts
 
 The r15 holistic acceptance audit replaced four gate contracts.

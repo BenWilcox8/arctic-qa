@@ -8,6 +8,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from .context_projection import context_only_display_text
 from .db import Database, now
 from .extraction import load_chunks
 from .util import canonical_json, normalize_text, sha256_bytes, sha256_file, stable_id
@@ -23,7 +24,8 @@ UNIT_FACTORS: dict[tuple[str, str], Decimal] = {
 }
 SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v3"
 LEGACY_SOURCE_SPAN_CONTRACT_VERSION = "finding-evidence-span-v2"
-GENERATION_PROMPT_VERSION = "arctic-qa-generation-v22"
+GENERATION_PROMPT_VERSION = "arctic-qa-generation-v23"
+PREDECESSOR_GENERATION_PROMPT_VERSION = "arctic-qa-generation-v22"
 LEGACY_GENERATION_PROMPT_VERSION = "arctic-qa-generation-v21"
 LEGACY_STANDALONE_VERIFICATION_CONTRACT_VERSION = "source-blind-standalone-gate-v1"
 PREDECESSOR_STANDALONE_VERIFICATION_CONTRACT_VERSION = (
@@ -49,9 +51,18 @@ DIRECT_SOURCE_VALUE_CONTRACT_VERSION = "direct-source-value-v1"
 MULTI_VALUE_NUMERIC_CONTRACT_VERSION = "numeric-rule-multiple-values-v1"
 SCOPE_CONTRACT_VERSION = "selected-evidence-literal-scope-v4"
 EVIDENCE_COMBINATION_CONTRACT_VERSION = "contiguous-source-evidence-v1"
-CONTEXT_ONLY_EVIDENCE_CONTRACT_VERSION = "question-context-evidence-v1"
-REFERENT_SLOT_CONTRACT_VERSION = "referent-slot-checklist-v1"
-FINDING_ADMISSION_CONTRACT_VERSION = "freeze-time-finding-admission-v1"
+PREDECESSOR_CONTEXT_ONLY_EVIDENCE_CONTRACT_VERSION = "question-context-evidence-v1"
+# v2 displays a locator-redacted projection of the span. Custody moves to
+# ``source_text_sha256`` on the raw chunk bytes (chapter 2 yield audit 4.1 a).
+CONTEXT_ONLY_EVIDENCE_CONTRACT_VERSION = "question-context-redacted-evidence-v2"
+PREDECESSOR_REFERENT_SLOT_CONTRACT_VERSION = "referent-slot-checklist-v1"
+# v2 replaces the presence test with a resolvability test and records
+# ``resolver_text`` (chapter 2 yield audit 4.1 g).
+REFERENT_SLOT_CONTRACT_VERSION = "referent-slot-resolvability-v2"
+PREDECESSOR_FINDING_ADMISSION_CONTRACT_VERSION = "freeze-time-finding-admission-v1"
+# v2 requires one ``scope_evidence`` entry per non-null scope value
+# (chapter 2 yield audit 4.1 d).
+FINDING_ADMISSION_CONTRACT_VERSION = "freeze-time-finding-admission-v2"
 DIRECT_CONVERSION_RULE = "direct source literal"
 EXACT_COUNT_CONVERSION_RULE = "direct count"
 MAX_COMBINED_EVIDENCE_CHARS = 3_200
@@ -312,8 +323,12 @@ CANDIDATE_CONTRACTS = {
             EVIDENCE_COMBINATION_CONTRACT_VERSION
         ),
     },
+    # Schema 2.7.0 is the chapter 2 contract. The generation slice of chapter 3
+    # bumps the prompt, the context-only evidence, the referent slot and the
+    # finding admission versions, so this row holds the predecessor literals and
+    # every stored chapter 2 candidate keeps its historical contract.
     "2.7.0": {
-        "prompt_version": GENERATION_PROMPT_VERSION,
+        "prompt_version": PREDECESSOR_GENERATION_PROMPT_VERSION,
         "generation_attempt_contract_version": ROUTING_CONTRACT_VERSION,
         "answer_agreement_contract_version": ANSWER_AGREEMENT_CONTRACT_VERSION,
         "standalone_verification_contract_version": (
@@ -333,14 +348,49 @@ CANDIDATE_CONTRACTS = {
             EVIDENCE_COMBINATION_CONTRACT_VERSION
         ),
         "context_only_evidence_contract_version": (
+            PREDECESSOR_CONTEXT_ONLY_EVIDENCE_CONTRACT_VERSION
+        ),
+        "referent_slot_contract_version": (PREDECESSOR_REFERENT_SLOT_CONTRACT_VERSION),
+        "finding_admission_contract_version": (
+            PREDECESSOR_FINDING_ADMISSION_CONTRACT_VERSION
+        ),
+        "option_display_contract_version": OPTION_DISPLAY_CONTRACT_VERSION,
+    },
+    # Schema 2.8.0 is the chapter 3 contract. The four versions the generation
+    # slice owns track their module constants. Every other entry is a literal
+    # pinned at bd2fb22, because a sibling chapter 3 slice owns it: integration
+    # re-pins each literal to the version that slice lands.
+    "2.8.0": {
+        "prompt_version": GENERATION_PROMPT_VERSION,
+        # Owned by arctic-ch3-routing-r1.
+        "generation_attempt_contract_version": "bounded-failure-routing-v4",
+        "answer_agreement_contract_version": ANSWER_AGREEMENT_CONTRACT_VERSION,
+        # Owned by arctic-ch3-judge-options-r1.
+        "standalone_verification_contract_version": (
+            "source-blind-scientific-referent-v3"
+        ),
+        "question_verification_contract_version": "question-verification-v2",
+        # Owned by arctic-ch3-gates-r1.
+        "numeric_rule_contract_version": "numeric-rule-source-support-v3",
+        "direct_value_contract_version": DIRECT_SOURCE_VALUE_CONTRACT_VERSION,
+        "scope_contract_version": "selected-evidence-literal-scope-v4",
+        "scope_role_semantics_version": "scope-role-semantics-v2",
+        "scope_role_binding_contract_version": (
+            "scope-role-question-context-binding-v1"
+        ),
+        "evidence_combination_contract_version": (
+            EVIDENCE_COMBINATION_CONTRACT_VERSION
+        ),
+        "context_only_evidence_contract_version": (
             CONTEXT_ONLY_EVIDENCE_CONTRACT_VERSION
         ),
         "referent_slot_contract_version": REFERENT_SLOT_CONTRACT_VERSION,
         "finding_admission_contract_version": FINDING_ADMISSION_CONTRACT_VERSION,
-        "option_display_contract_version": OPTION_DISPLAY_CONTRACT_VERSION,
+        # Owned by arctic-ch3-judge-options-r1.
+        "option_display_contract_version": "displayed-option-structure-v1",
     },
 }
-CONTEXT_ONLY_EVIDENCE_SCHEMA_VERSIONS = frozenset({"2.7.0"})
+CONTEXT_ONLY_EVIDENCE_SCHEMA_VERSIONS = frozenset({"2.7.0", "2.8.0"})
 
 
 def expected_standalone_contract(schema_version: object) -> str | None:
@@ -562,15 +612,30 @@ def context_only_span_records(provenance: object) -> list[dict[str, Any]]:
 def context_only_spans_resolve(
     provenance: object, chunks: dict[str, dict[str, Any]]
 ) -> bool:
-    """Re-verify every forwarded context-only span against its source chunk."""
+    """Re-verify every forwarded context-only span against its source chunk.
+
+    Custody binds the raw bytes under both contract versions. Under
+    ``question-context-redacted-evidence-v2`` the recorded ``display_text``
+    must also equal the projection re-derived from those bytes, so a model
+    can only ever have seen a locator-redacted copy of hash-bound text.
+    """
     block = (provenance or {}).get("context_only_source") if provenance else None
     if not isinstance(block, dict):
         return True
-    if block.get("contract_version") != CONTEXT_ONLY_EVIDENCE_CONTRACT_VERSION:
+    contract_version = block.get("contract_version")
+    if contract_version not in {
+        PREDECESSOR_CONTEXT_ONLY_EVIDENCE_CONTRACT_VERSION,
+        CONTEXT_ONLY_EVIDENCE_CONTRACT_VERSION,
+    }:
         return False
     if block.get("selectable_for_answer_evidence") is not False:
         return False
+    redacted = contract_version == CONTEXT_ONLY_EVIDENCE_CONTRACT_VERSION
     for span in context_only_span_records(provenance):
+        if redacted and span.get("display_text") != context_only_display_text(
+            str(span.get("text", ""))
+        ):
+            return False
         chunk = chunks.get(span.get("chunk_id"))
         text = span.get("text")
         if not chunk or not isinstance(text, str) or not text:
@@ -716,7 +781,16 @@ def _eligible_arctic_scope_error(
         eligibility_ids = (candidate.get("answer") or {}).get("eligibility_span_ids")
         if (
             candidate.get("schema_version")
-            not in {"2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0", "2.6.0", "2.7.0"}
+            not in {
+                "2.1.0",
+                "2.2.0",
+                "2.3.0",
+                "2.4.0",
+                "2.5.0",
+                "2.6.0",
+                "2.7.0",
+                "2.8.0",
+            }
             or not isinstance(components, list)
             or not isinstance(eligibility_ids, list)
             or not eligibility_ids
@@ -828,8 +902,14 @@ def validate_candidate(
         return _finish(db, candidate, labels, reasons, [], "rejected")
     interpretation_spans = context_only_span_records(candidate.get("provenance"))
     interpretation_texts = [str(span.get("text", "")) for span in interpretation_spans]
+    # The reader saw the displayed projection, so the leak test runs on it too.
+    leak_records = interpretation_spans + [
+        {"text": span["display_text"]}
+        for span in interpretation_spans
+        if isinstance(span.get("display_text"), str)
+    ]
     if interpretation_spans and interpretation_spans_contain_answer(
-        interpretation_spans, candidate["answer"]
+        leak_records, candidate["answer"]
     ):
         reasons.append("interpretation_span_contains_answer")
         return _finish(db, candidate, labels, reasons, [], "rejected")
@@ -1012,7 +1092,7 @@ def validate_candidate(
         reasons.append("reconstruction_alternative_answer_present")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     agreement = candidate.get("answer_agreement")
-    if schema_version in {"2.4.0", "2.5.0", "2.6.0", "2.7.0"}:
+    if schema_version in {"2.4.0", "2.5.0", "2.6.0", "2.7.0", "2.8.0"}:
         if not answer_agreement_resolves(db, candidate, agreement):
             reasons.append("answer_agreement_unresolved")
             labels["unresolved"] = True
@@ -1329,6 +1409,15 @@ def benchmark_text_requires_context(value: str) -> bool:
     )
 
 
+def unresolved_acronym_tokens(value: str) -> list[str]:
+    """Public name for the acronym screen: the tokens displayed text leaves opaque.
+
+    Generation's definition retrieval reads this list, so the tokenizer fix of
+    the deterministic-gates slice reaches the retrieval scan through one name.
+    """
+    return _unresolved_acronym_tokens(value)
+
+
 def _unresolved_acronym_tokens(value: str) -> list[str]:
     unresolved = []
     for token in _UNFAMILIAR_ACRONYM_PATTERN.findall(value):
@@ -1417,6 +1506,9 @@ def question_qualifier_binding_reason(
     answer: dict[str, Any],
     reconstruction: dict[str, Any] | None,
     verification: dict[str, Any] | None,
+    *,
+    question_context: str = "",
+    context_only_texts: Sequence[str] = (),
 ) -> str | None:
     """Reject a question qualifier that no frozen evidence span carries.
 
@@ -1430,11 +1522,18 @@ def question_qualifier_binding_reason(
     qualifier that sits in a neighbouring hashed span of the same paper is
     source-supported, and rejecting it would be a bookkeeping rejection of the
     kind this contract removes.
+
+    Chapter 2 yield audit 4.1 (d) and DG-5: a qualifier that the
+    QUESTION_CONTEXT states may also rest on a forwarded context-only span,
+    because the writer is told to place such a qualifier there. The stem pool
+    stays the role evidence alone, so a context-only place name in the stem
+    is still rejected.
     """
     records = [record for record in (answer, reconstruction, verification) if record]
     evidence = "\n".join(str(record.get("evidence_quote", "")) for record in records)
     if not evidence.strip():
         return None
+    context_pool = "\n".join([evidence, *(str(text) for text in context_only_texts)])
     for record in records:
         scope = record.get("scope")
         if not isinstance(scope, dict):
@@ -1445,6 +1544,12 @@ def question_qualifier_binding_reason(
                 continue
             if _scope_phrase_in_text(value, question) and not _scope_phrase_in_text(
                 value, evidence
+            ):
+                return "question_qualifier_not_evidence_bound"
+            if (
+                question_context
+                and _scope_phrase_in_text(value, question_context)
+                and not _scope_phrase_in_text(value, context_pool)
             ):
                 return "question_qualifier_not_evidence_bound"
     return None
@@ -2403,6 +2508,7 @@ def answer_agreement_resolves(
         "2.5.0",
         "2.6.0",
         "2.7.0",
+        "2.8.0",
     } or not isinstance(agreement, dict):
         return False
     deterministic_match = reconstruction_matches(
