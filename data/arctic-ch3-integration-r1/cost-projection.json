@@ -1,0 +1,160 @@
+{
+ "schema": "arctic-ch3-integrated-cost-projection-v1",
+ "basis": {
+  "chapter2_spent_usd": 19.995149,
+  "chapter2_calls": 1115,
+  "accepted_items": 6,
+  "usd_per_call_by_stage": {
+   "finding_answer_extraction": 0.03443,
+   "eligibility": 0.02198,
+   "question_generation": 0.00658,
+   "blinded_reconstruction": 0.01309,
+   "standalone_verification": 0.00752,
+   "answer_verification": 0.01643,
+   "option_verification": 0.01637,
+   "answer_agreement": 4e-05,
+   "distractor_generation": 0.00601,
+   "repair": 0.00429
+  },
+  "note": "Steps 1 to 4 and 6 are the cost slice's receipt-measured figures at a fixed yield of 6. Steps 5 and 7 to 9 book the other five slices from the audit's own per-call prices and replay counts. Overlaps are named, not netted, so the total is an upper bound on the saving by about USD 1."
+ },
+ "steps": [
+  {
+   "step": "0",
+   "change": "Chapter 2 as run",
+   "delta_usd": 0.0,
+   "spend_after_usd": 19.9951,
+   "usd_per_accepted_item_at_6": 3.3325,
+   "basis": "1115 calls, 6 accepted items",
+   "rigor_safeguard": "-"
+  },
+  {
+   "step": "1",
+   "change": "Judge call plan: free checks first, standalone kept, no reconstruction or verification after a free-check or standalone failure, no Pro call on an unavailable slot, 5 percent shadow cohort",
+   "delta_usd": -3.3202,
+   "spend_after_usd": 16.6749,
+   "usd_per_accepted_item_at_6": 2.7792,
+   "basis": "{'blinded_reconstruction': 115, 'answer_verification': 115, 'standalone_verification': 17} skipped on the 139 recorded candidates; shadow cohort USD 0.1747",
+   "rigor_safeguard": "Same codes, earlier; routing input preserved; the integration test proves the free checks equal the corrected gates on all 139 candidates."
+  },
+  {
+   "step": "2",
+   "change": "Evidence sent once, static instructions in systemInstruction, real context budget",
+   "delta_usd": -2.6989,
+   "spend_after_usd": 13.976,
+   "usd_per_accepted_item_at_6": 2.3293,
+   "basis": "exact character delta of every recorded request trace, per-stage token ratio",
+   "rigor_safeguard": "Same bytes, same span ids, same hashes."
+  },
+  {
+   "step": "3",
+   "change": "Ranked finding bank serves the alternative-finding rung",
+   "delta_usd": -2.6384,
+   "spend_after_usd": 11.3376,
+   "usd_per_accepted_item_at_6": 1.8896,
+   "basis": "65 extraction calls after a family's first candidate",
+   "rigor_safeguard": "A banked candidate passes the same admission contract as a fresh one."
+  },
+  {
+   "step": "4",
+   "change": "Second admission pass only with an unexcluded span; structural pre-screen in shadow",
+   "delta_usd": -0.0134,
+   "spend_after_usd": 11.3242,
+   "usd_per_accepted_item_at_6": 1.8874,
+   "basis": "3 re-asks in separable-scope families",
+   "rigor_safeguard": "Only rejects, on evidence the freeze-time checks already use."
+  },
+  {
+   "step": "5",
+   "change": "Format re-ask and geography re-screen in the streaming path; two-pass screen in shadow at USD 0",
+   "delta_usd": 0.8131,
+   "spend_after_usd": 12.1373,
+   "usd_per_accepted_item_at_6": 2.0229,
+   "basis": "24 re-screens and 13 bounded re-asks at USD 0.0220 each (replay of the 79 non-eligible papers); the audit booked the re-screens alone (USD 0.53)",
+   "rigor_safeguard": "Statuses frozen on re-ask; a failed geography never returns; no replayed paper becomes eligible without a new judgment."
+  },
+  {
+   "step": "6",
+   "change": "Option stage: admitting_interpretation before the boolean, six proposals, rank-order stop at four verified, one whole-set call, fail-fast prefilter",
+   "delta_usd": -0.252,
+   "spend_after_usd": 11.8853,
+   "usd_per_accepted_item_at_6": 1.9809,
+   "basis": "USD 0.34 of inverted-boolean repair rounds removed (audit 8.2); 11 candidates reach the option stage and buy one whole-set call at about USD 0.008; the rank-order stop saves nothing at four proposals and two Pro calls per clean candidate at six",
+   "rigor_safeguard": "Floor of three, per-option hash binding, Pro verdict on every verified option, the whole-set verdict can only reject."
+  },
+  {
+   "step": "7",
+   "change": "Lineage-wide repeat detector, no-retry guard, weak-judge agreement rule, scope defect block, one slot_lookup per paper",
+   "delta_usd": -0.1093,
+   "spend_after_usd": 11.7761,
+   "usd_per_accepted_item_at_6": 1.9627,
+   "basis": "1 repeat widening stopped (USD 0.0436); 4 barred agreement triggers (USD 0.13); 15 slot lookups at USD 0.0043 replace extractor re-asks already booked in step 3",
+   "rigor_safeguard": "Routing never accepts; every repaired candidate re-runs the whole gate sequence."
+  },
+  {
+   "step": "8",
+   "change": "Standalone contract v4: evidence-bound codes, one re-ask per unevidenced verdict, code-only verdict fingerprint",
+   "delta_usd": -0.4245,
+   "spend_after_usd": 11.3516,
+   "usd_per_accepted_item_at_6": 1.8919,
+   "basis": "upper bound 30 re-asks (chapter 2 verdicts a v4 judge would have to evidence) at USD 0.0075; USD 0.65 of byte-identical repeat attempts ended by the fingerprint (audit 8.2)",
+   "rigor_safeguard": "The re-ask replaces a verdict that carried no evidence; it never passes an item.",
+   "overlap": "the repeat-attempt saving overlaps audit step 7 in part"
+  },
+  {
+   "step": "9",
+   "change": "Corrected deterministic gates, display rules, reconstruction record, Pro agreement judge; scope_evidence at freeze",
+   "delta_usd": -1.9029,
+   "spend_after_usd": 9.4487,
+   "usd_per_accepted_item_at_6": 1.5748,
+   "basis": "Pro fallback judge on about 20 residual agreement cases (USD 0.004); retry waste on defects no rewrite could reach in families 3185c3a7, 46dc1707, efcc5fc4, 7edb49fb and e3d2c979 (USD 1.78); 9 scope values found nowhere die before the writer call (USD 0.127)",
+   "rigor_safeguard": "Every gate correction is replayed on the 139 candidates: 16 freed, 0 regressed, every accepted item still passes.",
+   "overlap": "the retry-waste saving overlaps steps 1 and 7 in part"
+  }
+ ],
+ "total": {
+  "spend_after_all_steps_usd": 9.4487,
+  "usd_per_accepted_item_at_fixed_yield": 1.5748,
+  "audit_expected_after_step_7_usd": 11.89,
+  "cost_slice_after_steps_1_to_4_and_6_usd": 11.3244
+ },
+ "yield_scenarios": [
+  {
+   "accepted_items": 6,
+   "label": "chapter 2 yield, fixed",
+   "spend_usd": 9.4487,
+   "usd_per_accepted_item": 1.5748
+  },
+  {
+   "accepted_items": 12,
+   "label": "audit conservative low",
+   "spend_usd": 9.9255,
+   "usd_per_accepted_item": 0.8271
+  },
+  {
+   "accepted_items": 15,
+   "label": "audit central",
+   "spend_usd": 10.1639,
+   "usd_per_accepted_item": 0.6776
+  },
+  {
+   "accepted_items": 18,
+   "label": "audit conservative high",
+   "spend_usd": 10.4023,
+   "usd_per_accepted_item": 0.5779
+  },
+  {
+   "accepted_items": 16,
+   "label": "chapter 2 plus one item per freed family",
+   "spend_usd": 10.2434,
+   "usd_per_accepted_item": 0.6402
+  },
+  {
+   "accepted_items": 22,
+   "label": "chapter 2 plus every freed candidate",
+   "spend_usd": 10.7202,
+   "usd_per_accepted_item": 0.4873
+  }
+ ],
+ "target": "under USD 1.00 per accepted item at the same rigor (audit section 8.3)"
+}

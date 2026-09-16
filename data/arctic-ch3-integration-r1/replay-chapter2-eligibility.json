@@ -1,0 +1,17 @@
+{
+ "papers": 79,
+ "recorded": {
+  "excluded": 33,
+  "screening_error": 38,
+  "uncertain": 8
+ },
+ "replayed": {
+  "eligible": 0,
+  "uncertain": 26,
+  "excluded": 37,
+  "screening_error": 16
+ },
+ "format_repairable_errors": 13,
+ "geography_rescreen_pool": 24,
+ "recorded_exclusions_kept": true
+}

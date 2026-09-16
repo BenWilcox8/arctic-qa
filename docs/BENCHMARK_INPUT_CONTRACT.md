@@ -41,8 +41,9 @@ A context change creates a different generated item and invalidates old option b
 ## Scope roles
 
 Generation roles use `scope-role-semantics-v2`.
-New candidates use generation prompt `arctic-qa-generation-v22`.
-They use scope contract `selected-evidence-literal-scope-v4` and candidate schema `2.7.0`.
+New candidates use generation prompt `arctic-qa-generation-v23` and candidate schema `2.8.0` (chapter 3).
+They use scope contract `selected-evidence-literal-scope-v4`.
+Chapter 2 candidates keep prompt `arctic-qa-generation-v22` and schema `2.7.0`; the section "Chapter 3 writer context" below lists what changed.
 Before source-aware checks, a source-blind gate reads only the question and question context.
 It rejects missing definitions or answer leakage that make the displayed task ambiguous.
 Schema 2.4 records the answer-agreement method and confidence category.

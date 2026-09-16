@@ -1,6 +1,6 @@
 {
-  "candidate_schema_version": "2.7.0",
-  "generation_prompt_version": "arctic-qa-generation-v22",
+  "candidate_schema_version": "2.8.0",
+  "generation_prompt_version": "arctic-qa-generation-v23",
   "minimum_model_verified_distractors": 3,
   "schema": "arctic-qa-live-dataset-selection-v1",
   "scope_contract_version": "selected-evidence-literal-scope-v4",
