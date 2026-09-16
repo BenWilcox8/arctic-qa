@@ -22,9 +22,9 @@ from .errors import (
 from .model_broker import (
     PAPER_COST_CAP_REASON,
     RESUMABLE_NOT_SUBMITTED_REASONS,
-    TRANSIENT_COUNT_FAILURE,
     SharedGeminiBroker,
     broker_request_key,
+    count_error_is_transient,
 )
 from .providers import ProviderResult
 from .gemini_eligibility import model_config_for_stage
@@ -182,9 +182,18 @@ class BrokerProvider:
         with broker_boundary():
             if receipt_path.is_file():
                 receipt = self.broker.effective_receipt(request_key)
+                # A stored count error that may be counted again is not a
+                # result to replay. The free count charged nothing, so the
+                # request goes back through the broker, which counts it again
+                # under its own retry round. Replaying it ended the chapter 3
+                # producer at 22:27 UTC on 2026-09-16, after the halt of that
+                # same count error was reviewed and lifted.
                 if not (
-                    receipt.get("state") == "not_submitted"
-                    and receipt.get("reason") in RESUMABLE_NOT_SUBMITTED_REASONS
+                    (
+                        receipt.get("state") == "not_submitted"
+                        and receipt.get("reason") in RESUMABLE_NOT_SUBMITTED_REASONS
+                    )
+                    or count_error_is_transient(receipt)
                 ):
                     _, result = self.read_receipt(
                         request_key=request_key,
@@ -394,10 +403,7 @@ def _provider_result(
             # re-trying the capped family.
             raise PaperCostCapError(reason, stage=str(receipt.get("stage") or ""))
         raise BudgetError(reason)
-    if (
-        state == "count_error"
-        and receipt.get("count_failure_class") == TRANSIENT_COUNT_FAILURE
-    ):
+    if count_error_is_transient(receipt):
         # The free preflight stayed unavailable past its bounded retry. No call
         # was made and nothing was charged, so this bounds one paper family:
         # the producer records it, skips it and counts again on a later visit.

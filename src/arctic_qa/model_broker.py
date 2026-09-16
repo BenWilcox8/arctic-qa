@@ -1144,6 +1144,23 @@ def _recorded_count_failure_class(receipt: dict[str, Any], reason: str) -> str:
     return PERMANENT_COUNT_FAILURE
 
 
+def count_error_is_transient(receipt: dict[str, Any]) -> bool:
+    """Say whether a stored count error may be counted again.
+
+    The count made no call and charged nothing, so a transient one is replayed
+    by counting again rather than by returning the old receipt. A receipt
+    written before the bounded retry records no class, so the class is read
+    back from its error string and fails closed to permanent.
+    """
+    if (
+        receipt.get("state") != "count_error"
+        or receipt.get("live_call_made") is not False
+    ):
+        return False
+    reason = str(receipt.get("error") or "")
+    return _recorded_count_failure_class(receipt, reason) == TRANSIENT_COUNT_FAILURE
+
+
 def _count_http_status(error: BaseException) -> int | None:
     """Return the HTTP status of a countTokens failure, when it has one."""
     return error.code if isinstance(error, urllib.error.HTTPError) else None
@@ -6065,7 +6082,16 @@ class SharedGeminiBroker:
             request = ledger["requests"].get(request_key)
             if request is None or request.get("state") != "count_error":
                 return 0
-            if request.get("count_failure_class") != TRANSIENT_COUNT_FAILURE:
+            final_path = self.receipts_dir / (
+                f"{self._request_event_stem(request_key, request)}.json"
+            )
+            final = _read(final_path) if final_path.is_file() else {}
+            recorded = request.get("count_failure_class") or (
+                _recorded_count_failure_class(final, str(request.get("reason") or ""))
+            )
+            if recorded != TRANSIENT_COUNT_FAILURE or not count_error_is_transient(
+                final
+            ):
                 raise ValueError("the paid request key already exists")
             halt = self._phase_halted(ledger, phase)
             if halt is not None:

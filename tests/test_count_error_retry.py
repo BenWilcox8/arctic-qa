@@ -38,6 +38,7 @@ from arctic_qa.errors import (  # noqa: E402
 )
 from arctic_qa.model_broker import (  # noqa: E402
     COUNT_RETRY_ATTEMPTS,
+    count_error_is_transient,
     PERMANENT_COUNT_FAILURE,
     TRANSIENT_COUNT_FAILURE,
 )
@@ -196,6 +197,104 @@ def test_a_free_count_that_charged_nothing_is_never_an_unknown_charge(
     assert [row["status"] for row in rows] == ["failed"]
     assert rows[0]["error_code"] == "COUNT_TOKENS_UNAVAILABLE"
     assert not issubclass(CountUnavailableError, AmbiguousChargeError)
+
+
+class RecoveringCountTransport:
+    """Fail the count of the first request, then answer every count."""
+
+    def __init__(self, failures: int) -> None:
+        self.failures = failures
+        self.methods: list[str] = []
+        self.counts = 0
+
+    def post(self, model: str, method: str, body: dict) -> dict:
+        self.methods.append(method)
+        if method == "countTokens":
+            self.counts += 1
+            if self.counts <= self.failures:
+                raise urllib.error.HTTPError(
+                    "https://example.invalid", 503, "Service Unavailable", {}, None
+                )
+            return {"totalTokens": 100}
+        return {
+            "responseId": "count-retry-response-1",
+            "modelVersion": "gemini-3.8-flash",
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "content": {
+                        "parts": [{"text": json.dumps({"question": "What changed?"})}]
+                    },
+                }
+            ],
+            "usageMetadata": {
+                "promptTokenCount": 100,
+                "candidatesTokenCount": 10,
+                "thoughtsTokenCount": 5,
+                "totalTokenCount": 115,
+            },
+        }
+
+
+def test_a_stored_transient_count_error_is_counted_again_not_replayed(
+    tmp_path: Path,
+) -> None:
+    """The 22:27 UTC exit.
+
+    The stored count-error receipt is not a result. The producer re-asks the
+    same paper under the same request key on its next pass, and the broker
+    counts it again instead of handing the old refusal back.
+    """
+    transport = RecoveringCountTransport(failures=COUNT_RETRY_ATTEMPTS)
+    broker = broker_fixture(tmp_path, transport)
+    provider = _bound_provider(broker)
+
+    with pytest.raises(CountUnavailableError):
+        provider.invoke(
+            "question_writer", "System", "Prompt", _parameters(), timeout=30
+        )
+
+    key = next(
+        path.stem
+        for path in (tmp_path / "receipts").glob("*.json")
+        if path.stem.count(".") == 0
+    )
+    assert transport.methods == ["countTokens"] * COUNT_RETRY_ATTEMPTS
+
+    result = provider.invoke(
+        "question_writer", "System", "Prompt", _parameters(), timeout=30
+    )
+
+    assert result.payload == {"question": "What changed?"}
+    assert transport.methods[-2:] == ["countTokens", "generateContent"]
+    assert (tmp_path / "receipts" / f"{key}.count-retry-1.json").is_file()
+    status = broker.status()
+    assert status["halted"] is False
+    assert status["generation_submissions"] == 1
+
+
+def test_a_count_error_receipt_without_a_class_is_read_back_and_fails_closed() -> None:
+    """A receipt written before the bounded retry records no class."""
+    transient = {
+        "state": "count_error",
+        "live_call_made": False,
+        "error": "HTTPError: HTTP Error 503: Service Unavailable",
+    }
+    permanent = {
+        "state": "count_error",
+        "live_call_made": False,
+        "error": "HTTPError: HTTP Error 404: Not Found",
+    }
+    unreadable = {
+        "state": "count_error",
+        "live_call_made": False,
+        "error": "RuntimeError: something else",
+    }
+    assert count_error_is_transient(transient) is True
+    assert count_error_is_transient(permanent) is False
+    assert count_error_is_transient(unreadable) is False
+    assert count_error_is_transient({**transient, "live_call_made": True}) is False
+    assert count_error_is_transient({**transient, "state": "completed"}) is False
 
 
 # The producer contains it.
