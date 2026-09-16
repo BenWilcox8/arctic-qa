@@ -69,6 +69,7 @@ from .validation import (
     scope_qualifier_not_displayed,
     standalone_deterministic_reason,
     standalone_verdict_fingerprint,
+    standalone_verdict_is_evidence_bound,
     standalone_verdict_is_unevidenced,
     unresolved_acronym_tokens,
 )
@@ -1590,7 +1591,9 @@ def _standalone_gate_reasons(verification: dict[str, Any]) -> list[str]:
     # An unevidenced fail is a contract violation, not a question defect, so
     # it carries one operational code and no referent code (ch2 yield audit
     # section 4.2). Routing then moves to another finding.
-    if standalone_verdict_is_unevidenced(verification):
+    if standalone_verdict_is_evidence_bound(
+        verification
+    ) and standalone_verdict_is_unevidenced(verification):
         return ["standalone_verdict_unevidenced"]
     reasons = [f"standalone_{reason}" for reason in verification.get("reasons", [])]
     if verification.get("answer_leakage_absent") is not True:

@@ -25,10 +25,11 @@ from .validation import (
     DETERMINISTIC_CONTEXT_RULES_VERSION,
     NUMERIC_RULE_CONTRACT_VERSION,
     RECONSTRUCTION_RECORD_CONTRACT_VERSION,
-    benchmark_context_verification_reason,
+    STANDALONE_DETERMINISTIC_REASON_PREFIX,
     context_only_span_records,
     question_answer_leaks_answer,
     reconstruction_matches,
+    standalone_deterministic_reason,
 )
 
 CHAPTER2_REPLAY_CONTRACT_VERSION = "chapter2-gate-replay-v1"
@@ -70,6 +71,12 @@ def _replay_agreement(candidate: dict[str, Any]) -> tuple[dict[str, Any] | None,
     return None, "judge_required"
 
 
+def _collapse_namespace(reason: str) -> str:
+    if reason.startswith(STANDALONE_DETERMINISTIC_REASON_PREFIX):
+        return reason[len(STANDALONE_DETERMINISTIC_REASON_PREFIX) :]
+    return reason
+
+
 def replay_candidate(
     bundle: dict[str, Any], row: dict[str, Any]
 ) -> dict[str, Any]:
@@ -105,15 +112,19 @@ def replay_candidate(
     creation_reason = (
         "question_answer_leakage"
         if question_answer_leaks_answer(question, answer)
-        else benchmark_context_verification_reason(question, question_context)
+        else standalone_deterministic_reason(question, question_context)
     )
     if creation_reason and creation_reason not in reasons:
         reasons.insert(0, creation_reason)
     recorded = [
         reason for reason in (candidate.get("qa_gate_reasons") or []) if isinstance(reason, str)
     ]
-    recorded_set = set(recorded)
-    replayed_set = set(reasons)
+    # Chapter 3 moved the free source-blind screen into its own
+    # ``standalone_det_`` namespace (yield audit 4.2, F7). Chapter 2 recorded
+    # the same verdicts under the bare code, so the comparison collapses the
+    # prefix; the raw replayed list keeps the namespaced code.
+    recorded_set = {_collapse_namespace(reason) for reason in recorded}
+    replayed_set = {_collapse_namespace(reason) for reason in reasons}
     standalone = candidate.get("standalone_verification") or {}
     return {
         "family_id": bundle["family_id"],

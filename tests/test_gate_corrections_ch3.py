@@ -634,6 +634,13 @@ def test_the_chapter_2_replay_frees_exactly_the_recorded_candidates() -> None:
     assert len(report["freed_families"]) == 10
     assert all(row["standalone_pass"] is True for row in report["freed"])
     assert report["regressed"] == []
-    assert report["added_reason_counts"] == {}
+    # Integration: the writer-context binding pool (yield audit 4.1 d, DG-5)
+    # also tests a qualifier that question_context displays. It fires on four
+    # candidates whose scope was already unbound (answer_scope_not_source_bound),
+    # so no candidate changes outcome.
+    assert report["added_reason_counts"] == {"question_qualifier_not_evidence_bound": 4}
+    for row in report["rows"]:
+        if "question_qualifier_not_evidence_bound" in row["added"]:
+            assert "answer_scope_not_source_bound" in row["recorded_reasons"]
     accepted = [row for row in report["rows"] if row["accepted_before"]]
     assert accepted and all(row["replayed_reasons"] == [] for row in accepted)

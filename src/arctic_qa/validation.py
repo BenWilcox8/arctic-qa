@@ -2071,6 +2071,21 @@ def standalone_verdict_is_unevidenced(verification: Any) -> bool:
     return "multiple_interpretations" in reasons and len(readings) < 2
 
 
+def standalone_verdict_is_evidence_bound(verification: Any) -> bool:
+    """Say whether one verdict was produced under the evidence-bound contract.
+
+    Integration of chapter 3: ``standalone_verdict_is_unevidenced`` is a v4
+    rule. Stored chapter 2 verdicts carry contract v3 and were never asked for
+    ``unresolved_phrases`` or ``competing_readings``, so the rule must not
+    re-label them. A verdict that carries no contract version yet is a raw
+    judge response of the current contract.
+    """
+    if not isinstance(verification, dict):
+        return False
+    version = verification.get("contract_version")
+    return version is None or version == STANDALONE_VERIFICATION_CONTRACT_VERSION
+
+
 def standalone_verdict_fingerprint(verification: Any) -> str:
     """Fingerprint one source-blind verdict over its reason codes alone.
 
@@ -3545,7 +3560,11 @@ def _qa_verification_receipts_match(db: Database, candidate: dict[str, Any]) -> 
 
 
 def _standalone_reason_codes(verification: dict[str, Any]) -> list[str]:
-    if standalone_verdict_is_unevidenced(verification):
+    # The evidence rule is part of contract v4: a chapter 2 (v3) verdict was
+    # never asked for phrases or readings, so it keeps its recorded codes.
+    if standalone_verdict_is_evidence_bound(
+        verification
+    ) and standalone_verdict_is_unevidenced(verification):
         return ["standalone_verdict_unevidenced"]
     reasons = [f"standalone_{reason}" for reason in verification.get("reasons", [])]
     if verification.get("answer_leakage_absent") is not True:

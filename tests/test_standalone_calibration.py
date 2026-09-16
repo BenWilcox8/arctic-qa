@@ -60,14 +60,18 @@ def _judge_response(row: dict) -> dict:
             "pass": True,
             "answer_leakage_absent": True,
             "unresolved_phrases": [],
+            "competing_readings": [],
             "missing_detail_types": [],
             "reasons": [],
             "review_rationale": "The task is interpretable without the paper.",
         }
+    # Contract v4 binds every failing code to displayed evidence: a phrase for
+    # an undefined_* code and two readings for multiple_interpretations.
     return {
         "pass": False,
         "answer_leakage_absent": "answer_leakage" not in reasons,
         "unresolved_phrases": ["the unresolved phrase"],
+        "competing_readings": ["the first reading", "the second reading"],
         "missing_detail_types": ["other"],
         "reasons": [reason for reason in reasons if reason != "answer_leakage"],
         "review_rationale": "A necessary detail is missing.",
