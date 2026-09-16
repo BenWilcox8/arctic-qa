@@ -2364,9 +2364,8 @@
         $('process-detail').textContent = error.message;
       }
     }
-    function simpleTable(target, head, rows, nowrapOrEmpty, emptyText) {
-      const nowrap = Array.isArray(nowrapOrEmpty) ? new Set(nowrapOrEmpty) : new Set();
-      const emptyMessage = Array.isArray(nowrapOrEmpty) ? emptyText : nowrapOrEmpty;
+    function simpleTable(target, head, rows, emptyMessage, nowrapColumns = []) {
+      const nowrap = new Set(nowrapColumns);
       target.replaceChildren();
       if (!rows.length) { target.append(text('div', emptyMessage, 'empty')); return; }
       const table = document.createElement('table');
@@ -2534,9 +2533,9 @@
         livePaperElapsed(row),
         row.slot === null || row.slot === undefined ? 'Not exposed' : String(row.slot)
       ]);
-      simpleTable($('live-papers-table'), head, rows, ['Calls', 'Cost'], running
+      simpleTable($('live-papers-table'), head, rows, running
         ? 'No paper has moved a paid call inside the window.'
-        : 'No producer is running, so no paper is in analysis.');
+        : 'No producer is running, so no paper is in analysis.', ['Calls', 'Cost']);
       const finishedHead = ['Paper', 'Outcome', 'Reason', 'Questions', 'Calls', 'Cost', 'Finished'];
       const finishedRows = (data.finished || []).map((row) => [
         livePaperCell(row),
@@ -2547,7 +2546,7 @@
         usd(row.cost_usd),
         dateText(row.finished_at_utc)
       ]);
-      simpleTable($('live-papers-finished'), finishedHead, finishedRows, ['Questions', 'Calls', 'Cost', 'Finished'], 'This run has finished no paper yet.');
+      simpleTable($('live-papers-finished'), finishedHead, finishedRows, 'This run has finished no paper yet.', ['Questions', 'Calls', 'Cost', 'Finished']);
     }
     async function loadLivePapers() {
       try {
