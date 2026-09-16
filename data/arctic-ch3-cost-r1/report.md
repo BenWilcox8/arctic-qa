@@ -214,7 +214,8 @@ Integration should bump the prompt version once for every slice, because the ext
 ## 8. Tests
 
 New: `tests/test_cost_call_plan.py` (16 tests), `tests/test_finding_bank.py` (15 tests), harness `tests/cost_plan_harness.py`.
-Whole suite: see the final commit message for the result of the bounded parts.
+Whole suite: 844 tests collected, all green, run in four bounded foreground parts (the fast files, `test_cli_integration.py`, `test_streaming.py`, `test_model_broker.py`) at commit `5451bb3` plus this report edit.
+Updated expectations: the eleven-call stream transport and the batch chooser read both request parts; the batch revision test expects one reconstruction and one verification, because the leaking first question is short-circuited.
 
 ## 9. Deferred items
 
