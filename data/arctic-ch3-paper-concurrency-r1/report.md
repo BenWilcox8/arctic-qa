@@ -88,6 +88,20 @@ because the ledger binds their absolute paths and this worktree is disposable.
 
 ## Measurement
 
+### Before, one paper at a time
+
+Read from the shared ledger's construction requests, best sustained 20-minute
+window of the r3 run on 2026-09-16 after the lock-wait release:
+
+| Window from | Requests | Requests a minute | Paper families | Families an hour | Calls a family |
+|---|---|---|---|---|---|
+| 19:45:09Z | 64 | 3.20 | 7 | 21.0 | 9.1 |
+
+The captain's brief measured the same shape: about 14 calls and 4.5 minutes a
+paper, about 13 papers an hour, about 3 requests a minute.
+
+### After, four papers at a time
+
 <!-- MEASUREMENT -->
 
 ## Tests
