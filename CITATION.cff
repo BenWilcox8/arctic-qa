@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use this software or the ArcticQA dataset, please cite it as below."
+title: "ArcticQA: a source-supported scientific question pipeline and abstention benchmark"
+abstract: >-
+  ArcticQA builds source-supported multiple-choice and short-answer questions
+  from Arctic research papers, and measures how often a model abstains when no
+  listed option is correct. The pipeline records every paid model call in a
+  shared ledger, so each number in the paper has a receipt.
+type: software
+authors:
+  - family-names: Wilcox
+    given-names: Ben
+repository-code: "https://github.com/BenWilcox8/arctic-qa"
+license: MIT
+version: 0.1.0
+date-released: "2026-09-16"
+keywords:
+  - question answering
+  - benchmark
+  - abstention
+  - Arctic science
+  - large language models
