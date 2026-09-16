@@ -4,7 +4,7 @@ import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -937,6 +937,18 @@ def test_run_plan_mixes_a_live_gemini_broker_with_a_subscription_vendor(
     assert codex_ledger["submissions"] == 18 and codex_ledger["spent_usd"] == "0"
 
 
+def future_resume_utc(days: int = 1) -> str:
+    """A resume time still ahead of the real clock.
+
+    The run path reads ``resume_at_utc`` against the wall clock, so a test
+    that needs a model held must place its resume in the future. The
+    captain's standing pause of 2026-09-16 resumed at 23:00 UTC; five tests
+    that had copied that literal expired with it on the same evening.
+    """
+    when = datetime.now(UTC) + timedelta(days=days)
+    return when.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def fable_pause() -> dict:
     """The captain's standing pause of 2026-09-16, as a record of its own.
 
@@ -954,6 +966,18 @@ def fable_pause() -> dict:
             }
         },
     }
+
+
+def held_fable_pause() -> dict:
+    """The same record with its resume still ahead of the real clock.
+
+    A test of what a held model does needs the hold to be live when the test
+    runs; the record's own resume time passed on the evening it was written.
+    """
+    record = fable_pause()
+    entry = dict(record["paused_models"]["claude-fable-5-1"])
+    entry["resume_at_utc"] = future_resume_utc()
+    return {**record, "paused_models": {"claude-fable-5-1": entry}}
 
 
 def test_the_pause_record_merges_the_file_and_the_command_line(tmp_path: Path) -> None:
@@ -1022,7 +1046,7 @@ def test_a_paused_model_holds_its_trials_and_runs_after_the_resume_time(
         code_commit="test-commit",
         **CONSTRUCTION,
     )
-    held = dry_run_plan(**common, pause=fable_pause())
+    held = dry_run_plan(**common, pause=held_fable_pause())
     # Six of the 48 trials belong to the paused model: 2 conditions x 3 repeats.
     assert held["recorded_trials"] == 42 and held["planned_trials"] == 48
     assert held["complete"] is False
