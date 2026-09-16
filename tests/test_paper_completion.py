@@ -669,3 +669,53 @@ def test_the_eligibility_trust_walk_reads_no_receipt_of_a_labelled_paper(
         )
         == {}
     )
+
+
+# ---------------------------------------------------------------------------
+# The shared state database.
+
+
+def test_the_label_table_joins_the_schema_without_a_version_bump(
+    tmp_path: Path,
+) -> None:
+    """The live state database is shared with the benchmark evaluator.
+
+    The evaluator runs a pinned snapshot whose ``migrate`` raises on any other
+    schema version. A table that only a newer reader queries therefore joins
+    ``SCHEMA`` under the current version, as the chapter 3 finding bank did.
+    Proved against the running snapshot (commit a0b9a82) and the prepared
+    cutover snapshot (commit ea00336) on 2026-09-16: both open, migrate and
+    read a labelled database, and both leave the table in place.
+    """
+    from arctic_qa import db as db_module
+
+    assert db_module.SCHEMA_VERSION == 5
+    assert "CREATE TABLE IF NOT EXISTS paper_completions" in db_module.SCHEMA
+
+    paths, database = _open_database(tmp_path)
+    row = paper_completion.completion_row(
+        run_id=RUN_ID,
+        campaign_id=CAMPAIGN_ID,
+        candidate_key="p",
+        family_id="f",
+        source_id=None,
+        outcome_class="eligibility_excluded",
+        eligibility_decision="excluded",
+        reason_code=None,
+        code_commit=CODE_COMMIT,
+    )
+    paper_completion.record_completion(database, row)
+
+    # An older reader that does not know the table opens the same database and
+    # migrates it: the version matches, so nothing is rebuilt and nothing is
+    # dropped.
+    with database.transaction():
+        database.connection.execute("DROP TABLE paper_completions")
+    database.migrate(paths.namespace / "backups")
+
+    assert paper_completion.load_completions(database, run_id=RUN_ID) == {}
+    assert paper_completion.record_completion(database, row) is True
+    assert (
+        database.one("SELECT version FROM schema_info")["version"]
+        == db_module.SCHEMA_VERSION
+    )

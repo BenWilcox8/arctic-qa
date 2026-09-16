@@ -1534,10 +1534,12 @@ def test_streaming_advances_after_uncertain_brokered_eligibility(
     result = run_stream(**arguments)
 
     assert result["state"] == "completed"
+    # The first run labelled the first paper as finished, so this run skips
+    # it before it reads one receipt of it and advances to the second.
     assert result["counts"] == {
         "accepted_base_questions": 0,
         "candidate_processing_fault": 0,
-        "completion_labelled_skipped": 0,
+        "completion_labelled_skipped": 1,
         "eligibility_rejected": 1,
         "eligibility_unresolved": 1,
         "generation_rejected": 0,
@@ -1545,12 +1547,19 @@ def test_streaming_advances_after_uncertain_brokered_eligibility(
         "paper_cost_cap_reached": 0,
         "processed": 2,
     }
-    assert result["paper_results"][0] == {
+    assert {
+        key: value
+        for key, value in result["paper_results"][0].items()
+        if key != "completion_label"
+    } == {
         "candidate_key": "test-only:streaming-paper",
         "disposition": "eligibility_unresolved",
         "reason_codes": ["evidence_unmatched_or_ambiguous:study_geography"],
         "source_id": None,
     }
+    assert result["paper_results"][0]["completion_label"]["outcome_class"] == (
+        "eligibility_unresolved"
+    )
     assert result["paper_results"][1]["candidate_key"] == second_item["candidate_key"]
     assert result["paper_results"][1]["disposition"] == "eligibility_rejected"
     progress = json.loads(
@@ -1856,7 +1865,11 @@ def test_streaming_uses_one_shared_broker_for_all_eleven_calls(
         **eligibility_inputs,
     )
 
-    assert resumed["resumed_papers"] == 1
+    # The first run labelled the paper as finished, so this run skips it
+    # before it reads one receipt of it: nothing is resumed, the broker is
+    # not asked, and the counts are the counts of the finished paper.
+    assert resumed["resumed_papers"] == 0
+    assert resumed["counts"]["completion_labelled_skipped"] == 1
     assert resumed["counts"]["accepted_base_questions"] == 1
     assert broker.status()["generation_submissions"] == 12
     assert transport.methods.count("generateContent") == 12
@@ -3242,7 +3255,14 @@ def test_streaming_cli_resumes_without_a_duplicate_model_call(tmp_path: Path) ->
 
     assert first["counts"]["accepted_base_questions"] == 1
     assert second["counts"]["accepted_base_questions"] == 1
-    assert second["resumed_papers"] == 1
+    # The first run labelled the paper as finished, so the second run skips
+    # it before it reads one call record of it: nothing is resumed, and
+    # nothing is called.
+    assert second["resumed_papers"] == 0
+    assert second["counts"]["completion_labelled_skipped"] == 1
+    assert second["paper_results"][0]["completion_label"]["outcome_class"] == (
+        "generation_accepted"
+    )
     status = run_cli(tmp_path, "status", "--run-id", "stream-resume")
     assert status["calls"] == [{"count": 11, "status": "completed"}]
 

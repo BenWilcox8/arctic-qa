@@ -107,6 +107,22 @@ The 208 complete papers agree with the live progress record of 22:27 UTC, which 
 
 The dry run walked all 4,420 papers in 43 seconds.
 
+## 5a. The apply, rehearsed, and the shared database
+
+The apply was rehearsed on a second copy of the same backup: it wrote 208 labels, and a second run of it wrote none and reported 208 already labelled.
+
+The live state database is shared with the benchmark evaluator, which must keep running.
+The evaluator opens the database through `Database.migrate`, and that method raises on any schema version other than its own.
+So the label table joins `SCHEMA` under the current version, and `SCHEMA_VERSION` stays 5.
+Both evaluator snapshots were run against the labelled copy on 2026-09-16:
+
+| Snapshot | Result |
+| --- | --- |
+| `app-a0b9a82-arctic-abstention-streaming-eval-r1` (running) | `SCHEMA_VERSION` 5; migrate ok; 50 accepted items readable; the label table still holds its 208 rows |
+| `app-ea00336-arctic-abstention-stream-r4` (prepared cutover) | `SCHEMA_VERSION` 5; migrate ok; 50 accepted items readable |
+
+An older reader that does not know the table leaves it alone, because its `SCHEMA` never drops a table and the version already matches.
+
 ## 6. The activation
 
 `build-completion.py` in this directory prepares and cuts over the activation set, in the shape of `build-concurrency.py` of `arctic-ch3-paper-concurrency-r1`.
