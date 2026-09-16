@@ -4074,7 +4074,6 @@ def resume_candidate_distractors(
         retries=0,
         rate_limit_seconds=0,
         attempt_id=attempt_id,
-        chunks={row["chunk_id"]: row for row in chunks},
     )
     candidate = json.loads(canonical_json(base))
     candidate["item_id"] = stable_id("aqa-targeted", item_id, PROMPT_VERSION)
