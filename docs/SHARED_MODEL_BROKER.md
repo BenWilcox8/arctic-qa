@@ -89,6 +89,8 @@ Later starts can use the immutable event without the original transition file.
 
 Before the first transitioned request, each restart validates the embedded ledger snapshot, gate, and review record again.
 
+Evaluation requests made after the application are the one change the ledger may carry at that point; a construction request made under the previous configuration still stops the start.
+
 Each transitioned request binds its ledger record and immutable receipts to the exact transition event hash.
 
 Later restarts require this binding before they accept a historical transition.

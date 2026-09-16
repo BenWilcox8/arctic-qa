@@ -1515,12 +1515,43 @@ class SharedGeminiBroker:
         ] != sha256_file(review_path):
             raise ValueError("the configuration transition review is invalid")
 
+    @staticmethod
+    def _only_evaluation_activity_since(
+        ledger: dict[str, Any], applied_at_utc: str
+    ) -> bool:
+        """Return whether every request touched after ``applied_at_utc`` is evaluation.
+
+        An applied transition waits for its first construction request. The
+        evaluation phase runs on the same ledger under its own ceiling, so its
+        requests may land in between; a construction request may not.
+        """
+        applied = datetime.fromisoformat(str(applied_at_utc).replace("Z", "+00:00"))
+        for request in ledger["requests"].values():
+            times = [
+                datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                for value in (
+                    request.get("submitted_at_utc"),
+                    request.get("completed_at_utc"),
+                )
+                if value
+            ]
+            # A record without a timestamp predates the timestamps (one legacy
+            # count-stage record carries none); the snapshot hash covered it.
+            # Timestamps carry seconds; a request from the second of the
+            # application counts as later, which errs toward a refused start.
+            if not times or max(times) < applied:
+                continue
+            if request.get("phase") != EVALUATION_PHASE:
+                return False
+        return True
+
     def _validate_transition_authorization(
         self,
         authorization: dict[str, Any],
         *,
         identity: dict[str, Any],
         ledger: dict[str, Any],
+        applied_at_utc: str | None = None,
     ) -> None:
         expected_fields = (
             self._transition_fields(authorization)
@@ -1677,7 +1708,16 @@ class SharedGeminiBroker:
                     if len(matching_predecessors) != 1:
                         raise ValueError("the policy transition predecessor changed")
         if authorization["expected_ledger_sha256"] != sha256_file(self.ledger_file):
-            raise ValueError("the configuration transition ledger hash changed")
+            # Before its first construction request, an applied transition is
+            # validated again on every start. Evaluation requests made since
+            # the application are the one change the ledger may carry: the
+            # evaluation phase never stops construction (2026-09-16 11:29 UTC,
+            # twelve evaluation calls between the chapter 3 expansion event
+            # and the relaunch of the producer).
+            if applied_at_utc is None or not self._only_evaluation_activity_since(
+                ledger, applied_at_utc
+            ):
+                raise ValueError("the configuration transition ledger hash changed")
         if ledger["halted"] or ledger["inflight"] != 0:
             raise ValueError("a configuration transition requires a settled ledger")
         reserved = _money(ledger["reserved_usd"], "reserved")
@@ -1826,7 +1866,10 @@ class SharedGeminiBroker:
                 self._validate_transition_durable_bindings(authorization)
             else:
                 self._validate_transition_authorization(
-                    authorization, identity=identity, ledger=ledger
+                    authorization,
+                    identity=identity,
+                    ledger=ledger,
+                    applied_at_utc=str(event["applied_at_utc"]),
                 )
             event_hash = sha256_file(event_path)
             self._config_transition_sha256 = event_hash
@@ -2069,7 +2112,10 @@ class SharedGeminiBroker:
             self._validate_transition_durable_bindings(authorization)
         else:
             self._validate_transition_authorization(
-                authorization, identity=identity, ledger=ledger
+                authorization,
+                identity=identity,
+                ledger=ledger,
+                applied_at_utc=str(event["applied_at_utc"]),
             )
         if (
             authorization["ledger_file"] != str(self.ledger_file)

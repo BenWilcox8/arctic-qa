@@ -4,11 +4,11 @@ On 2026-09-16 at 10:00 UTC two abstention evaluation requests were in flight
 while the chapter 3 producer asked for a slot. The shared in-flight counter
 refused the producer's request as "the paid-call concurrency limit is
 complete", the refusal became an immutable not-submitted receipt, and every
-relaunch returned that receipt as final. These tests pin the three parts of
-the repair: each phase counts its own slots and its own per-minute window,
-``execute`` waits a bounded time for room before it records a refusal, and a
-request that a transient refusal stopped resumes under the next reviewed
-transition.
+relaunch returned that receipt as final. These tests pin the repair: each
+phase counts its own slots, ``execute`` waits a bounded time for room before
+it records a refusal, a request that a transient refusal stopped resumes under
+the next reviewed transition, and evaluation requests made after an applied
+transition and before its first construction request do not stop a start.
 """
 
 from __future__ import annotations
@@ -34,6 +34,8 @@ from arctic_qa.model_broker import (  # noqa: E402
     RESUMABLE_NOT_SUBMITTED_REASONS,
     SharedGeminiBroker,
 )
+from test_abstention_broker import LetterTransport, bind, evaluation_fixture  # noqa: E402
+from test_abstention_broker import execute as evaluation_execute  # noqa: E402
 from test_model_broker import (  # noqa: E402
     ROOT as BROKER_ROOT,
     Transport,
@@ -41,6 +43,7 @@ from test_model_broker import (  # noqa: E402
     fixture,
     policy_with_limits,
     reviewed_policy_transition,
+    write_json,
 )
 
 
@@ -295,3 +298,75 @@ def test_the_provider_reissues_a_transiently_refused_request(
     )
     assert receipt["state"] == "completed"
     assert values["resumed_transport"].methods == ["generateContent"]
+
+
+def _construction_broker(values: dict, tmp_path: Path, policy: Path, transition: Path):
+    return SharedGeminiBroker(
+        policy_file=policy,
+        price_config_file=BROKER_ROOT / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=values["construction_gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=Transport(),
+        config_transition_file=transition,
+    )
+
+
+def _applied_construction_transition(tmp_path: Path) -> dict:
+    """An evaluation-capable ledger with one applied construction transition."""
+    values = evaluation_fixture(tmp_path, transport=LetterTransport("B"))
+    bind(values)
+    write_json(
+        values["construction_gate"],
+        {
+            "schema": "streaming-live-execution-gate-v1",
+            "live_generation_enabled": True,
+            "allowed_phase": "live_test",
+            "integrated_code_commit": "fixture-commit",
+            "independent_review_verdict": "pass",
+            "review_record": "fixture-review",
+        },
+    )
+    construction = {"gate": values["construction_gate"], "ledger": values["ledger"]}
+    policy = policy_with_limits(tmp_path, paper_limit=40)
+    transition = reviewed_policy_transition(tmp_path, construction, policy)
+    applied = _construction_broker(values, tmp_path, policy, transition)
+    assert applied.status()["limits"]["live_test_maximum_papers"] == 40
+    return {**values, "policy": policy, "transition": transition}
+
+
+def test_an_applied_transition_survives_evaluation_activity_before_its_first_request(
+    tmp_path: Path,
+) -> None:
+    values = _applied_construction_transition(tmp_path)
+    # The evaluator, still on the initial construction policy, keeps working.
+    assert evaluation_execute(values, trial_id="t1")["state"] == "completed"
+    assert evaluation_execute(values, trial_id="t2", repeat=2)["state"] == "completed"
+
+    restarted = _construction_broker(
+        values, tmp_path, values["policy"], values["transition"]
+    )
+    status = restarted.status()
+    assert status["integrity_valid"] is True
+    assert status["limits"]["live_test_maximum_papers"] == 40
+    assert status["evaluation"]["submissions"] == 2
+    # The first construction request binds the event; a later start needs no
+    # snapshot comparison at all.
+    assert execute(restarted, paper="p1")["state"] == "completed"
+    again = _construction_broker(
+        values, tmp_path, values["policy"], values["transition"]
+    )
+    assert again.status()["integrity_valid"] is True
+
+
+def test_construction_activity_before_the_first_transitioned_request_still_stops(
+    tmp_path: Path,
+) -> None:
+    values = _applied_construction_transition(tmp_path)
+    # A construction request under the initial policy after the application is
+    # the change the snapshot check exists for.
+    assert execute(values["broker"], paper="p1")["state"] == "completed"
+    with pytest.raises(ValueError, match="ledger hash changed"):
+        _construction_broker(values, tmp_path, values["policy"], values["transition"])
