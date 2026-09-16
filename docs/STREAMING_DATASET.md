@@ -261,6 +261,10 @@ An invalid evidence result stays uncertain and nonaccepted.
 The result remains resumable without another request and does not block the next frozen paper.
 Completed receipts are reused only after the broker validates that each immutable event remains present in its ledger.
 Ambiguous receipts stop the scheduler.
+A refusal that names the per-paper cost cap does not stop the run.
+The producer records the family at stage `paper_cost_cap` with the reason code `paper_cost_cap_reached` and continues with the next paper.
+The refused receipt is immutable and is not resumable, so a relaunch replays it at no cost and never re-tries the capped family.
+See [the shared model broker guide](SHARED_MODEL_BROKER.md), section "The per-paper cost cap".
 Do not replay an ambiguous request.
 The `reconcile-usage` command can settle one saved omitted-zero usage response after an independent review and supervisor release.
 It preserves all original receipts and writes a new immutable reconciliation receipt.

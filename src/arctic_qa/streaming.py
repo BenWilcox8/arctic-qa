@@ -12,7 +12,12 @@ from . import generation as generation_contract
 from . import validation as validation_contract
 from .db import Database, now
 from .discovery import manual_record
-from .errors import BudgetError, CandidateRejectedError, ProviderResponseError
+from .errors import (
+    BudgetError,
+    CandidateRejectedError,
+    PaperCostCapError,
+    ProviderResponseError,
+)
 from .exporting import export_run
 from .extraction import extract_source
 from .generation import generate_candidate
@@ -248,6 +253,9 @@ UNROUTABLE_OUTCOME_REASONS = frozenset(
 MINIMUM_AGREEMENT_TRIGGER_STRENGTH = 4
 # One slot_lookup call per paper, behind the answer-leak filter.
 MAX_SLOT_LOOKUPS_PER_PAPER = 1
+# One paper family reached ``maximum_paper_cost_usd``. The family is recorded
+# and skipped; the run continues with the next paper.
+PAPER_COST_CAP_REASON_CODE = "paper_cost_cap_reached"
 # Candidate rows that record a generation call rather than a benchmark item.
 # They keep the 26 dead chapter 2 calls visible without entering path
 # reconstruction, acceptance, or the run counts (audit 4.6 e and 4.9 C8).
@@ -490,6 +498,7 @@ def run_stream(
                 for item in eligibility_jobs.values()
             ),
             "generation_rejected": 0,
+            "paper_cost_cap_reached": 0,
             "accepted_qa": _accepted_count(db, campaign_id),
         },
     )
@@ -502,6 +511,7 @@ def run_stream(
         "eligibility_unresolved": 0,
         "generation_rejected": 0,
         "incomplete_non_mcq": 0,
+        "paper_cost_cap_reached": 0,
         "processed": 0,
     }
     paper_results: list[dict[str, Any]] = []
@@ -606,6 +616,39 @@ def run_stream(
                     policy_file=eligibility_policy_file,
                     rescreen_prompt_file=eligibility_rescreen_prompt_file,
                 )
+            except PaperCostCapError as error:
+                # The family reached the per-paper cost cap before it was
+                # screened. Nothing is charged past the cap, so the family is
+                # recorded and the run continues with the next paper.
+                _record_paper_cost_cap(
+                    db,
+                    campaign_id=campaign_id,
+                    candidate_key=str(candidate_key),
+                    source_id=None,
+                    family_id=family_id,
+                    selected=selected,
+                    error=error,
+                    cost_state=_family_cost_state(paper_verifier, family_id),
+                )
+                counts["paper_cost_cap_reached"] += 1
+                counts["processed"] += 1
+                progress.increment("paper_cost_cap_reached")
+                paper_results.append(
+                    {
+                        "candidate_key": candidate_key,
+                        "disposition": "paper_cost_cap_reached",
+                        "reason_codes": [PAPER_COST_CAP_REASON_CODE],
+                        "source_id": None,
+                    }
+                )
+                progress.paper(
+                    paper_id=candidate_key,
+                    title=access.get("title"),
+                    current_stage="completed",
+                    final_state="paper_cost_cap_reached",
+                    final_reason=PAPER_COST_CAP_REASON_CODE,
+                )
+                continue
             except Exception as error:
                 progress.error(candidate_key, access.get("title"), "eligibility", error)
                 raise
@@ -794,11 +837,14 @@ def run_stream(
                 "generation_rejected": "generation_rejected",
                 "accepted": "accepted_base_questions",
                 "incomplete_non_mcq": "incomplete_non_mcq",
+                "paper_cost_cap_reached": "paper_cost_cap_reached",
             }[disposition]
         ] += 1
         counts["processed"] += 1
         if disposition == "generation_rejected":
             progress.increment("generation_rejected")
+        elif disposition == "paper_cost_cap_reached":
+            progress.increment("paper_cost_cap_reached")
         elif disposition == "accepted":
             progress.set_count("accepted_qa", _accepted_count(db, campaign_id))
         paper_results.append(
@@ -1122,6 +1168,32 @@ def _progress_generation(
                 "legacy": not generation_attempt_supported,
             }
             continue
+        except PaperCostCapError as error:
+            # The per-paper cost cap bounds one family, never the run. Nothing is
+            # charged past the cap; the family is recorded and the producer moves
+            # to the next paper. Only a whole-run stop ends the producer.
+            _settle_generation_call_record(
+                db,
+                call_record_id,
+                state="generation_incomplete",
+                reason_code=PAPER_COST_CAP_REASON_CODE,
+            )
+            _record_paper_cost_cap(
+                db,
+                campaign_id=campaign_id,
+                candidate_key=candidate_key,
+                source_id=source_id,
+                family_id=family_id,
+                selected=selected,
+                error=error,
+                cost_state=_family_cost_state(author, family_id),
+                attempt=next_attempt,
+            )
+            return {
+                "disposition": "paper_cost_cap_reached",
+                "reason_codes": [PAPER_COST_CAP_REASON_CODE],
+                "resumed": resumed,
+            }
         except BudgetError as error:
             if str(error) != PER_REQUEST_CAP_REASON:
                 progress.error(source_id, title, "generation", error)
@@ -2939,6 +3011,72 @@ def _record_budget_stop(
                 ),
                 source_id,
                 "request_cost_bound_exceeded",
+                canonical_json(detail),
+                now(),
+            ),
+        )
+
+
+def _family_cost_state(provider: Provider, family_id: str) -> dict[str, str] | None:
+    """Return the family's committed spend, or None without a shared broker."""
+    broker = getattr(provider, "broker", None)
+    if broker is None:
+        return None
+    try:
+        return broker.family_cost_state(family_id)
+    except Exception:
+        # The skip is an accounting note, never a second failure path: a family
+        # the cap stopped is recorded even when its cost row cannot be read.
+        return None
+
+
+def _record_paper_cost_cap(
+    db: Database,
+    *,
+    campaign_id: str,
+    candidate_key: str,
+    source_id: str | None,
+    family_id: str,
+    selected: dict[str, Any],
+    error: PaperCostCapError,
+    cost_state: dict[str, str] | None,
+    attempt: dict[str, Any] | None = None,
+) -> None:
+    """Record one paper family the per-paper cost cap stopped.
+
+    The cap bounds one family. The row keeps the reason code, the money the
+    family already holds and the stage the refusal landed on, so the skipped
+    family is answerable later without the ledger.
+    """
+    detail = {
+        "campaign_id": campaign_id,
+        "candidate_key": candidate_key,
+        "family_id": family_id,
+        "error": str(error),
+        "selection": selected,
+        "paper_cost_cap_reached": True,
+        "broker_stage": error.stage or None,
+        "family_cost_state": cost_state,
+    }
+    if attempt is not None:
+        detail["generation_attempt"] = attempt
+    with db.transaction():
+        db.connection.execute(
+            """INSERT OR IGNORE INTO rejection_ledger
+            (rejection_id,item_id,source_id,stage,reason_code,detail_json,created_at)
+            VALUES (?,NULL,?,'paper_cost_cap',?,?,?)""",
+            (
+                stable_id(
+                    "rejection",
+                    campaign_id,
+                    candidate_key,
+                    "paper_cost_cap",
+                    family_id,
+                    error.stage or "",
+                    PAPER_COST_CAP_REASON_CODE,
+                ),
+                source_id,
+                PAPER_COST_CAP_REASON_CODE,
                 canonical_json(detail),
                 now(),
             ),
