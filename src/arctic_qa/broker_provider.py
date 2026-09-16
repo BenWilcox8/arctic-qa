@@ -10,6 +10,7 @@ from typing import Any
 
 from .errors import (
     AmbiguousChargeError,
+    BrokerOperationBusyError,
     BudgetError,
     CandidateRejectedError,
     PaperCostCapError,
@@ -50,7 +51,13 @@ ROLE_STAGES = {
 # The refusals the broker raises about one candidate or one paper family, not
 # about the run. Everything else it raises is a whole-run stop: the execution
 # gate, the ledger, a ceiling, a halt, an unsettled charge.
+#
+# ``BrokerOperationBusyError`` belongs here because it reserves nothing, submits
+# nothing and describes no fault of the run: a reviewed operation of another
+# worker held the exclusive operation lock past the bounded wait. The family is
+# recorded and skipped, and the next paper takes the lock as usual.
 _PAPER_LEVEL_BROKER_ERRORS = (
+    BrokerOperationBusyError,
     CandidateRejectedError,
     PaperCostCapError,
     ProviderResponseError,

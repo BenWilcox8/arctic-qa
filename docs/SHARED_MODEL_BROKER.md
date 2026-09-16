@@ -248,6 +248,30 @@ The note is an observation, never an accounting event: the money of the request 
 
 A settlement that ended the run this way stopped the chapter 3 producer at 13:53 UTC on 2026-09-16.
 
+### The exclusive operation lock
+
+One shared ledger has one exclusive operation lock.
+
+`model_broker.hold_operation_lock` is the only way to take it.
+
+A reviewed operation takes the lock with no wait.
+Such an operation is an authorization, a settlement, a reconciliation or an exclusive batch activation.
+It refuses a held lock at once with `another paid broker operation is active`.
+Two reviewed operations of one ledger must never overlap, and the second one has an operator to tell.
+
+The ordinary request path, `execute`, waits for the lock instead.
+The bound is `OPERATION_LOCK_WAIT_SECONDS`, and the wait polls each `OPERATION_LOCK_WAIT_INTERVAL_SECONDS`.
+A reviewed operation is short, and a request that meets one describes no fault of its own.
+
+At the bound the request raises `errors.BrokerOperationBusyError`.
+That error keeps the message of the immediate refusal and is a `ValueError`.
+It reserves nothing and submits nothing.
+The broker seam does not mark it a run stop, so the producer records it against one family, skips that family and continues.
+
+Do not give a new reviewed operation the wait.
+Do not make the bound-exceeded case a run stop.
+The immediate refusal ended the chapter 3 producer on 2026-09-16 at 18:26 UTC while another task released the evaluation phase.
+
 ### Phase slots and windows
 
 Each phase counts its own in-flight requests against its own concurrency limit.

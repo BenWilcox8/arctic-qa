@@ -42,6 +42,22 @@ class PaperCostCapError(BudgetError):
         self.stage = stage
 
 
+class BrokerOperationBusyError(ArcticQAError, ValueError):
+    """The exclusive broker operation lock stayed held past the bounded wait.
+
+    An ordinary request of the shared broker waits for the lock that a reviewed
+    operation holds, because such an operation is short and the request is not
+    about it. The wait has a bound, and this error is what the bound raises. It
+    is not a money stop and not an authorization refusal: nothing was reserved
+    and nothing was submitted, so the producer records it against one family,
+    skips that family and continues. It subclasses ``ValueError`` and keeps the
+    message the immediate refusal used, so every caller that matches on either
+    is unaffected.
+    """
+
+    code = "BROKER_OPERATION_BUSY"
+
+
 class ProviderError(ArcticQAError):
     code = "PROVIDER_ERROR"
 

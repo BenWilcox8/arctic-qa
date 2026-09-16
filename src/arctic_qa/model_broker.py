@@ -13,6 +13,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from .errors import BrokerOperationBusyError
 from .gemini_eligibility import (
     DEFAULT_CALL_TIMEOUT_SECONDS,
     MAXIMUM_CALL_TIMEOUT_SECONDS,
@@ -247,6 +248,15 @@ RESUMABLE_NOT_SUBMITTED_REASONS = (
 )
 TRANSIENT_RESERVATION_RETRY_SECONDS = 90.0
 TRANSIENT_RESERVATION_RETRY_INTERVAL_SECONDS = 3.0
+# An ordinary request waits this long for the exclusive operation lock that a
+# reviewed operation holds. A reviewed authorization, a batch activation or a
+# reconciliation takes the lock for a moment; a request that meets one is not
+# about that operation and has nothing to report, so it waits instead of ending
+# the run. The chapter 3 producer exited on that immediate refusal at 18:26 UTC
+# on 2026-09-16 while a release of another task held the lock.
+OPERATION_LOCK_WAIT_SECONDS = 120.0
+OPERATION_LOCK_WAIT_INTERVAL_SECONDS = 1.0
+OPERATION_LOCK_BUSY_REASON = "another paid broker operation is active"
 ALLOWED_LIVE_TEST_LIMITS = {(20, 100), (40, 100), (41, 101), (None, None)}
 STREAM_INPUT_BINDING_VERSION = "stream-input-binding-v1"
 TRANSITION_GATE_SUCCESSOR_FIELDS = {
@@ -562,6 +572,41 @@ def exclusive_batch_marker_path(ledger_file: Path) -> Path:
     return ledger_file.resolve().with_name(f".{ledger_file.name}.exclusive-batch.json")
 
 
+def hold_operation_lock(
+    path: Path,
+    *,
+    wait_seconds: float = 0.0,
+    busy_error: type[ValueError] = ValueError,
+) -> Any:
+    """Open the exclusive operation lock file and hold it, or refuse.
+
+    ``wait_seconds`` is the bound of the wait for a lock another operation
+    holds, and ``busy_error`` is what the bound raises. The two travel
+    together, so the meaning of a refusal never depends on the value of a
+    tunable constant.
+
+    A reviewed operation takes the default of both: no wait, and a plain
+    ``ValueError`` that the broker seam marks a whole-run stop. Two reviewed
+    operations of one ledger must never overlap, and the second one has an
+    operator to tell. The one ordinary request path passes
+    ``OPERATION_LOCK_WAIT_SECONDS`` and :class:`BrokerOperationBusyError`
+    instead, because a reviewed operation is short and the request describes no
+    fault of its own.
+    """
+    handle = path.open("a+")
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return handle
+        except BlockingIOError as error:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                handle.close()
+                raise busy_error(OPERATION_LOCK_BUSY_REASON) from error
+            time.sleep(min(OPERATION_LOCK_WAIT_INTERVAL_SECONDS, remaining))
+
+
 def activate_exclusive_batch_mode(
     ledger_file: Path,
     *,
@@ -578,11 +623,7 @@ def activate_exclusive_batch_mode(
     operation_path = ledger_file.with_name(f".{ledger_file.name}.operation.lock")
     ledger_lock_path = ledger_file.with_name(f".{ledger_file.name}.lock")
     marker_path = exclusive_batch_marker_path(ledger_file)
-    with operation_path.open("a+") as operation:
-        try:
-            fcntl.flock(operation, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise ValueError("another paid broker operation is active") from error
+    with hold_operation_lock(operation_path):
         with ledger_lock_path.open("a+") as ledger_lock:
             fcntl.flock(ledger_lock, fcntl.LOCK_EX)
             if sha256_file(ledger_file) != expected_ledger_sha256:
@@ -4561,12 +4602,7 @@ class SharedGeminiBroker:
         """
         if not re.fullmatch(r"[a-f0-9]{64}", request_key):
             raise ValueError("the reconciled request key is invalid")
-        operation = self._operation_lock_file.open("a+")
-        try:
-            fcntl.flock(operation, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            operation.close()
-            raise ValueError("another paid broker operation is active") from error
+        operation = hold_operation_lock(self._operation_lock_file)
         try:
             with self._lock_file.open("a+") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
@@ -4765,12 +4801,7 @@ class SharedGeminiBroker:
             raise ValueError("the ambiguous continuation request key is invalid")
         if not authorized_run_id.strip() or not operator_id.strip():
             raise ValueError("the ambiguous continuation operator identity is missing")
-        operation = self._operation_lock_file.open("a+")
-        try:
-            fcntl.flock(operation, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            operation.close()
-            raise ValueError("another paid broker operation is active") from error
+        operation = hold_operation_lock(self._operation_lock_file)
         try:
             with self._lock_file.open("a+") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
@@ -5022,12 +5053,7 @@ class SharedGeminiBroker:
             raise ValueError("the orphaned continuation request key is invalid")
         if not authorized_run_id.strip() or not operator_id.strip():
             raise ValueError("the orphaned continuation operator identity is missing")
-        operation = self._operation_lock_file.open("a+")
-        try:
-            fcntl.flock(operation, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            operation.close()
-            raise ValueError("another paid broker operation is active") from error
+        operation = hold_operation_lock(self._operation_lock_file)
         try:
             with self._lock_file.open("a+") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
@@ -5170,12 +5196,7 @@ class SharedGeminiBroker:
             raise ValueError("the http rejection request key is invalid")
         if not authorized_run_id.strip() or not operator_id.strip():
             raise ValueError("the http rejection operator identity is missing")
-        operation = self._operation_lock_file.open("a+")
-        try:
-            fcntl.flock(operation, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            operation.close()
-            raise ValueError("another paid broker operation is active") from error
+        operation = hold_operation_lock(self._operation_lock_file)
         try:
             with self._lock_file.open("a+") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
@@ -5462,12 +5483,7 @@ class SharedGeminiBroker:
         """Settle one reviewed reservation that stopped before provider transport."""
         if request_key != PRETRANSPORT_SETTLEMENT_REQUEST["request_key"]:
             raise ValueError("the request is not approved for pretransport settlement")
-        operation = self._operation_lock_file.open("a+")
-        try:
-            fcntl.flock(operation, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            operation.close()
-            raise ValueError("another paid broker operation is active") from error
+        operation = hold_operation_lock(self._operation_lock_file)
         try:
             with self._lock_file.open("a+") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
@@ -5607,12 +5623,7 @@ class SharedGeminiBroker:
         evidence_file: Path,
     ) -> dict[str, Any]:
         """Clear one reviewed pretransport count error without replaying it."""
-        operation = self._operation_lock_file.open("a+")
-        try:
-            fcntl.flock(operation, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            operation.close()
-            raise ValueError("another paid broker operation is active") from error
+        operation = hold_operation_lock(self._operation_lock_file)
         try:
             with self._lock_file.open("a+") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
@@ -6636,12 +6647,15 @@ class SharedGeminiBroker:
             self._evaluation_admission_lock.acquire()
             admitted = True
         else:
-            operation = self._operation_lock_file.open("a+")
-            try:
-                fcntl.flock(operation, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as error:
-                operation.close()
-                raise ValueError("another paid broker operation is active") from error
+            # This is the broker's one ordinary request path, so it waits for
+            # a reviewed operation of this ledger rather than ending the run on
+            # it. The bound raises ``BrokerOperationBusyError``, which the
+            # producer contains against one family like any other fault.
+            operation = hold_operation_lock(
+                self._operation_lock_file,
+                wait_seconds=OPERATION_LOCK_WAIT_SECONDS,
+                busy_error=BrokerOperationBusyError,
+            )
         try:
             if exclusive_batch_marker_path(self.ledger_file).exists():
                 raise ValueError("exclusive Gemini batch mode is active")

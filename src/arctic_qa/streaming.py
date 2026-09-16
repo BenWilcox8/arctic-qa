@@ -14,6 +14,7 @@ from .db import Database, now
 from .discovery import manual_record
 from .errors import (
     AmbiguousChargeError,
+    BrokerOperationBusyError,
     BudgetError,
     CandidateRejectedError,
     PaperCostCapError,
@@ -3121,9 +3122,11 @@ def _ends_the_run(error: BaseException) -> bool:
     included, carries the marker that ``broker_provider.broker_boundary`` puts
     on it at the seam. A direct read of the shared ledger, which does not cross
     that seam, is matched by its own message. The per-paper cost cap bounds one
-    family, so it is never a run stop.
+    family, so it is never a run stop, and neither is a bounded wait for the
+    exclusive operation lock that a reviewed operation of another worker held:
+    it reserved nothing and submitted nothing.
     """
-    if isinstance(error, PaperCostCapError):
+    if isinstance(error, (PaperCostCapError, BrokerOperationBusyError)):
         return False
     if isinstance(error, (BudgetError, AmbiguousChargeError)) or is_run_stop(error):
         return True
