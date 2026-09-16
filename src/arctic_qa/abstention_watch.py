@@ -40,6 +40,12 @@ the call, and the watcher then pauses the Gemini vendor, journals the pause,
 and keeps the subscription vendors running. It exits non-zero only on a real
 error.
 
+A bound is not an error, so the exit code alone never says that the benchmark
+stopped. That silence cost a day: the unit met its item bound at
+2026-09-16T19:31:44Z, exited 0, and no operator saw it until the next
+morning. So ``status_file`` takes the supervisor's status file, and the
+watcher appends one ``blocked:`` line to it when a bound ends the run.
+
 Paused vendors. A vendor that stops on an item is paused for the rest of the
 invocation, because the policy forbids a retry, and a start clears that pause.
 One pause lifts on its own: an ambiguous charge. The broker keeps the
@@ -605,6 +611,7 @@ def watch(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     deadline_seconds: float | None = None,
+    status_file: Path | None = None,
 ) -> dict[str, Any]:
     """Evaluate every accepted item as it appears, then wait for the next.
 
@@ -614,6 +621,11 @@ def watch(
     is off by default. ``vendors`` restricts the plan to a subset, for
     example the subscription vendors while the Gemini arm waits for its own
     reviewed gate; the journal then lists the rest as paused.
+
+    ``status_file`` is the supervisor's status file. A bound that ends the run
+    is not an error, so it appends one ``blocked:`` line there. Without that
+    line a bound is a silent stop: the exit code is 0 and the journal simply
+    stops growing.
 
     ``pause_files`` are the paused-model files, re-read before every item, so
     an operator or a cost guard can pause or resume a model while the watcher
@@ -688,6 +700,22 @@ def watch(
     def emit(event: dict[str, Any]) -> None:
         if log is not None:
             log({**event, "at": _utc_now()})
+
+    def report_blocked(line: str) -> None:
+        """Append one ``blocked:`` line for the supervisor of this unit.
+
+        A bound ends the run with exit code 0, which no supervisor reads as a
+        stop. The line is the one signal that says the benchmark needs an
+        operator. A status file that cannot be written must not end the run,
+        because the run is over already.
+        """
+        if status_file is None:
+            return
+        try:
+            with Path(status_file).open("a", encoding="utf-8") as handle:
+                handle.write(f"blocked: {line}\n")
+        except OSError as error:  # pragma: no cover - environment
+            emit({"event": "status_file_unwritable", "error": str(error)})
 
     def write_state() -> None:
         """Publish the watcher state: the poll count and the items so far."""
@@ -784,6 +812,10 @@ def watch(
         remaining_bound = bound - len(journal.latest_item_rows())
         if remaining_bound <= 0:
             emit({"event": "item_bound_reached", "bound": bound})
+            report_blocked(
+                f"the streaming evaluator met its item bound of {bound} items "
+                "and stopped; a larger run needs a new reviewed authorization"
+            )
             break
         pending = pending[:remaining_bound]
         if not pending:
@@ -834,6 +866,14 @@ def watch(
                             "vendor": PROVIDER_GOOGLE_GEMINI,
                             **ceiling_pause,
                         }
+                    )
+                    # The Gemini arm is the arm the USD allocation pays for.
+                    # A budget bound turns it off while the subscription
+                    # vendors keep the run looking healthy, so the supervisor
+                    # must hear about it here and not at the exit.
+                    report_blocked(
+                        "the streaming evaluator paused the Gemini vendor on a "
+                        f"budget bound: {ceiling_pause['reason']}"
                     )
             emit(
                 {"event": "item_started", "item_id": item_id, "vendors": list(vendors)}
@@ -920,6 +960,14 @@ def watch(
                 )
             if not vendors:
                 emit({"event": "every_vendor_paused"})
+                report_blocked(
+                    "the streaming evaluator stopped because every vendor is "
+                    "paused: "
+                    + ", ".join(
+                        f"{name} ({(record or {}).get('reason')})"
+                        for name, record in sorted(state["paused_vendors"].items())
+                    )
+                )
                 break
             if result["error"]:
                 # run_plan raised: an error outside the recorded responses.

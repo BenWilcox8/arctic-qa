@@ -18,6 +18,13 @@ through the evaluator's documented switch: the file
 `benchmark-evaluation-model-pause-v1`, which the evaluator reads before it
 dispatches a trial. A paused model's trials stay pending and run later.
 
+The guard also watches the evaluator itself. An evaluator that stopped scores
+nothing, and a bound that ends it is not an error, so the exit code says
+nothing: the unit met its item bound at 2026-09-16T19:31:44Z and no operator
+saw it until the next morning. So a watch state that is absent or stale is an
+error of `guard-state.json`, and the guard appends one `blocked:` line to its
+status file when the evaluator stops and one `working:` line when it returns.
+
 Nothing here makes a paid model call. Every input is a file on disk or the
 read-only `quota-axi` report.
 
@@ -1231,6 +1238,7 @@ def empty_memory() -> dict[str, Any]:
         "codex_samples": [],
         "rule_clear_cycles": {},
         "guard_resumes": {},
+        "evaluator_reported": None,
     }
 
 
@@ -1256,6 +1264,9 @@ def read_memory(path: Path) -> dict[str, Any]:
         block = value.get(name)
         if isinstance(block, dict):
             memory[name] = dict(block)
+    reported = value.get("evaluator_reported")
+    if isinstance(reported, bool):
+        memory["evaluator_reported"] = reported
     return memory
 
 

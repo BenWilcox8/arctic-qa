@@ -334,6 +334,15 @@ def add_parser(commands: argparse._SubParsersAction) -> None:
         help="watch: return after this many seconds of waiting (for a bounded test).",
     )
     parser.add_argument(
+        "--status-file",
+        type=Path,
+        help=(
+            "watch: the supervisor status file. The watcher appends one "
+            "'blocked:' line to it when a bound ends the run, because a bound "
+            "is not an error and the exit code alone says nothing."
+        ),
+    )
+    parser.add_argument(
         "--backfill",
         action="store_true",
         help="watch: also evaluate the items of --backfill-contract-file (off by default).",
@@ -662,6 +671,7 @@ def _watch(args: argparse.Namespace) -> dict[str, Any]:
         progress=_progress,
         log=_watch_log,
         deadline_seconds=args.deadline_seconds,
+        status_file=args.status_file,
     )
 
 
