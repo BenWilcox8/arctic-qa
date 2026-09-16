@@ -450,7 +450,14 @@ def test_every_new_eligibility_code_has_one_routing_entry() -> None:
         "eligible_arctic_scope_phrase_not_specific",
     }
     assert new_codes <= streaming.ELIGIBILITY_CONTRACT_REASONS
-    assert new_codes <= eligibility.FORMAT_ERROR_CODES
+    # A wrong dimension label is no longer an error at all. It filters one span
+    # and is recorded as that span's reason, so it can never be re-asked
+    # (chapter 3 production run, the rule 5 correction of 2026-09-16).
+    assert (
+        "eligible_arctic_scope_dimension_unsupported"
+        not in eligibility.FORMAT_ERROR_CODES
+    )
+    assert "eligible_arctic_scope_phrase_not_specific" in eligibility.FORMAT_ERROR_CODES
     # These codes end a screening attempt, so no candidate-level rung may claim
     # them. Routing must never spend a revision on a paper that has no candidate.
     for reasons in (

@@ -5,8 +5,10 @@ Do not use tools or outside knowledge.
 Apply only the supplied frozen policy.
 Return JSON that matches the supplied schema.
 Set schema_version to the exact string eligibility-response-v4.
-Every other criterion keeps the status of the first screening. Do not restate it
-and do not revise it. The frozen statuses are in frozen_criterion_statuses.
+Every other criterion keeps the status of the first screening. The frozen
+statuses are in frozen_criterion_statuses. The schema needs all five criteria,
+so write each other criterion with its frozen status, an empty evidence list and
+an empty missing_context list. Do not revise any of them.
 
 A first screening left study_geography unresolved. Read the supplied spans again
 and decide that one criterion.

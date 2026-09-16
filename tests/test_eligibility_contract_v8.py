@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import itertools
 import json
+from collections.abc import Callable
 from hashlib import sha256
 from pathlib import Path
 
@@ -169,8 +170,11 @@ def _case(
     phrases: list[str] | None = None,
     component: str = "separable_arctic_component",
     version: str = eligibility.ELIGIBILITY_RESPONSE_V4,
+    extra_lines: tuple[str, ...] = (),
+    criteria_factory: Callable[[list[str]], list[dict]] | None = None,
+    frozen: dict[str, str] | None = None,
 ) -> dict[str, object]:
-    text = "".join(SOURCE_LINES)
+    text = "".join((*SOURCE_LINES, *extra_lines))
     extraction = sha256(text.encode()).hexdigest()
     blocks = eligibility._span_blocks_v2(text, extraction)
     spans = [span["span_id"] for block in blocks for span in block["spans"]]
@@ -219,6 +223,8 @@ def _case(
         }
         for criterion in eligibility.CRITERIA
     ]
+    if criteria_factory is not None:
+        criteria = criteria_factory(spans)
     if activity_spans is None:
         activity_spans = [
             {"span_id": spans[GEOGRAPHY], "dimension": "geography"},
@@ -278,6 +284,7 @@ def _case(
             "known_context_gaps": ["correction_retraction_coverage:unknown"],
         },
         response_schema=schema,
+        frozen_criterion_statuses=frozen,
     )
     return {"result": result, "spans": spans, "response": response}
 
@@ -435,20 +442,34 @@ def test_no_geography_bearing_activity_span_still_breaks_the_custody_chain() -> 
     assert "eligible_arctic_scope_activity_unbound" in result["errors"]
 
 
-def test_a_dimension_label_the_span_text_cannot_support_is_refused() -> None:
-    """Audit 4.7 phase B: the label is a claim, so it is checked against the text."""
+def test_a_dimension_label_the_span_text_cannot_support_drops_that_span() -> None:
+    """The label is a claim about one span, so it filters that span only.
+
+    Audit 4.7 phase B made a wrong label an error. The chapter 3 production run
+    showed the test refusing correct science and ending whole papers, so the
+    captain made it a span filter (2026-09-16).
+    """
     spans = _case()["spans"]
-    result = _case(
+    case = _case(
         activity_spans=[
             {"span_id": spans[GEOGRAPHY], "dimension": "geography"},
             {"span_id": spans[METHOD], "dimension": "period"},
         ]
-    )["result"]
-    assert "eligible_arctic_scope_dimension_unsupported" in result["errors"]
-    assert result["format_repair_detail"]["mislabelled_dimensions"] == [
-        {"span_id": spans[METHOD], "dimension": "period"}
+    )
+    result = case["result"]
+    assert result["errors"] == []
+    assert result["valid"] is True
+    assert result["decision"] == "eligible"
+    assert result["dimension_span_filter"]["dropped"] == [
+        {
+            "span_id": spans[METHOD],
+            "dimension": "period",
+            "reason": "eligible_arctic_scope_dimension_unsupported",
+        }
     ]
-    assert eligibility.format_repairable(result["errors"])
+    assert f"scope_span_dropped:{spans[METHOD]}" in result["contract_notes"]
+    forwarded = result["resolved_eligible_arctic_scope"]["activity_spans"]
+    assert [span["span_id"] for span in forwarded] == [spans[GEOGRAPHY]]
 
 
 def test_each_dimension_marker_reads_its_own_span_text() -> None:

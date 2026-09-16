@@ -3573,6 +3573,7 @@ def _eligibility_attempt(
             "known_context_gaps": _known_context_gaps(access),
         },
         response_schema=schema,
+        frozen_criterion_statuses=_frozen_rescreen_statuses(attempt_note),
     )
     identity = provider.request_identity()
     request_key = broker_request_key(
@@ -3664,6 +3665,22 @@ def _criterion_statuses(job: dict[str, Any]) -> dict[str, Any]:
         for row in (job.get("parsed_response") or {}).get("criteria", [])
         if isinstance(row, dict)
     }
+
+
+def _frozen_rescreen_statuses(
+    attempt_note: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return the statuses a geography re-screen must keep, or None.
+
+    A re-screen decides one criterion, but the response schema needs all five
+    rows. The four frozen rows are read from this note, never from the answer.
+    """
+    if not isinstance(attempt_note, dict):
+        return None
+    if attempt_note.get("kind") != "geography_rescreen":
+        return None
+    frozen = attempt_note.get("frozen_criterion_statuses")
+    return frozen if isinstance(frozen, dict) else None
 
 
 def _rescreen_note(job: dict[str, Any]) -> dict[str, Any]:
@@ -3964,6 +3981,7 @@ def _validate_brokered_eligibility(
             "known_context_gaps": _known_context_gaps(access),
         },
         response_schema=schema,
+        frozen_criterion_statuses=_frozen_rescreen_statuses(attempt_note),
     )
     return validation
 

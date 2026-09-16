@@ -86,14 +86,20 @@ SCOPE_DIMENSIONS = ("geography", "period", "sample", "method", "definition")
 # checked against that text (audit 4.7, phase B). The test only refuses a label
 # the span cannot support; it never admits a span the geography rules refused.
 _DIMENSION_MARKERS = {
+    # The text extractor writes the degree sign as a bare letter "o", or drops
+    # it, so "69.4273 o N" and "70 -78 N" must still read as a latitude
+    # (chapter 3 production run, papers 1 and 20).
     "geography": re.compile(
-        r"\d+(?:[.,]\d+)?\s*(?:°|º|∘|deg(?:rees)?\.?)\s*[NSEW]\b"
+        r"\d+(?:[.,]\d+)?\s*(?:°|º|∘|\bo\b|deg(?:rees)?\.?)\s*[NSEW]\b"
+        r"|\d+[.,]\d+\s*[NSEW]\b"
+        r"|\d+\s*[-\u2010\u2013\u2014]\s*\d+\s*[NSEW]\b"
         r"|\d+(?:[.,]\d+)?\s*(?:°|º|∘|deg(?:rees)?\.?)?\s*"
         r"(?:north|south)\b"
         r"|\b(?:latitude|longitude|station|stations|site|sites|region|regions|"
         r"sea|seas|ocean|island|islands|glacier|glaciers|fjord|fjords|bay|"
         r"basin|transect|domain|grid|coast|coastal|peninsula|archipelago|"
         r"tundra|permafrost|ice\s+cap|ice\s+sheet|shelf|catchment|watershed|"
+        r"river|rivers|parallel|parallels|"
         r"arctic|antarctic|boreal|subarctic)\b",
         re.IGNORECASE,
     ),
@@ -106,7 +112,8 @@ _DIMENSION_MARKERS = {
     "sample": re.compile(
         r"\b(?:sampl\w*|collect\w*|measur\w*|specimen\w*|participant\w*|"
         r"individual\w*|subject\w*|core|cores|replicate\w*|aliquot\w*|"
-        r"profile\w*|cohort\w*|observation\w*|record\w*)\b|\bn\s*=",
+        r"profile\w*|cohort\w*|observation\w*|record\w*|survey\w*|unit|"
+        r"units|species)\b|\bn\s*=",
         re.IGNORECASE,
     ),
     "method": re.compile(
@@ -115,12 +122,14 @@ _DIMENSION_MARKERS = {
         r"simulat\w*|reanalys\w*|algorithm\w*|retrieval\w*|vessel|icebreaker|"
         r"ship|aircraft|buoy|buoys|mooring\w*|station|platform|analyz\w*|"
         r"analys\w*|assay\w*|sequenc\w*|method\w*|resolution|protocol\w*|"
-        r"campaign|cruise|expedition)\b|R/V",
+        r"campaign|cruise|expedition|techniqu\w*|medium|media|device\w*)\b"
+        r"|R/V",
         re.IGNORECASE,
     ),
     # An acronym is defined either as "expansion (ABBR)" or as "ABBR (expansion)".
     "definition": re.compile(
-        r"\(\s*[A-Z][A-Za-z0-9‐-]{1,15}\s*\)|\b[A-Z][A-Z0-9]{1,15}\b\s*\("
+        r"\(\s*[A-Z][A-Za-z0-9‐-]{1,15}\s*[);,]"
+        r"|\b[A-Z][A-Z0-9]{1,15}\b\s*\("
     ),
 }
 
@@ -144,7 +153,6 @@ _NON_SPECIFIC_PHRASE = re.compile(
 FORMAT_ERROR_CODES = frozenset(
     {
         "eligible_arctic_scope_activity_unbound",
-        "eligible_arctic_scope_dimension_unsupported",
         "eligible_arctic_scope_missing",
         "eligible_arctic_scope_phrase_missing",
         "eligible_arctic_scope_phrase_not_specific",
@@ -901,19 +909,13 @@ def _repair_note(prior: dict[str, Any] | None) -> dict[str, Any] | None:
             if detail.get("finding_span_text")
             else {}
         ),
-        **(
-            {"mislabelled_dimensions": list(detail["mislabelled_dimensions"])}
-            if detail.get("mislabelled_dimensions")
-            else {}
-        ),
         "instruction": (
             "Your last answer had a formatting mistake, listed in format_errors. "
             "unbound_phrases lists each question_scope_phrases value that is not "
             "in finding_span_text. Replace each one with a phrase you copy from "
             "finding_span_text, or add the finding span that states it. Each "
             "phrase must still name a station, region, stratum, population, or "
-            "modeled domain. mislabelled_dimensions lists each activity span "
-            "whose text does not state the dimension you gave it. Answer again "
+            "modeled domain. Answer again "
             "with the same criterion statuses, listed in "
             "frozen_criterion_statuses, and correct only the span and phrase "
             "fields. Do not change any criterion status."
@@ -1962,6 +1964,20 @@ def _span_catalog_v2(
     return catalog, sorted(set(errors))
 
 
+def _dimension_verifiable(text: str) -> bool:
+    """Say whether the marker patterns can judge this span's text at all.
+
+    Every marker word is English, so a span in another script fails each
+    pattern whatever it states. Such a span is forwarded unverified, never
+    dropped (chapter 3 production run, papers 6 and 18).
+    """
+    letters = [character for character in text if character.isalpha()]
+    if not letters:
+        return True
+    latin = sum(1 for character in letters if character.isascii())
+    return latin * 2 >= len(letters)
+
+
 def _dimension_supported(text: str, dimension: str) -> bool:
     """Say whether a span's own text states the dimension it is labelled with.
 
@@ -1987,7 +2003,10 @@ def phrase_is_specific(phrase: str) -> bool:
 
 
 def _resolved_scope_span(
-    span: dict[str, Any], *, dimension: str | None = None
+    span: dict[str, Any],
+    *,
+    dimension: str | None = None,
+    dimension_verified: bool = True,
 ) -> dict[str, Any]:
     return {
         "span_id": span["span_id"],
@@ -2001,6 +2020,13 @@ def _resolved_scope_span(
         "quote": span["text"],
         "source_bytes_sha256": span["span_sha256"],
         **({"dimension": dimension} if dimension else {}),
+        # Only the exception is recorded. A span without this key carries a
+        # label the marker patterns could judge and did support.
+        **(
+            {"dimension_verified": False}
+            if dimension and not dimension_verified
+            else {}
+        ),
     }
 
 
@@ -2026,6 +2052,17 @@ def _measurement_relaxed_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return relaxed
 
 
+def _frozen_criterion_row(criterion: str, status: Any) -> dict[str, Any]:
+    """Build the row a re-screen keeps from the first screening."""
+    return {
+        "criterion_id": criterion,
+        "status": status,
+        "reason_codes": [],
+        "evidence": [],
+        "missing_context": [],
+    }
+
+
 def _validate_response_span_contract(
     value: Any,
     blocks: list[dict[str, Any]],
@@ -2033,6 +2070,7 @@ def _validate_response_span_contract(
     expected: dict[str, Any],
     response_schema: dict[str, Any],
     response_schema_version: str,
+    frozen_criterion_statuses: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     applied_schema = (
         _measurement_relaxed_schema(response_schema)
@@ -2104,6 +2142,15 @@ def _validate_response_span_contract(
             continue
         if criterion in by_id:
             errors.append("criterion_repeated")
+            continue
+        if frozen_criterion_statuses is not None and criterion != "study_geography":
+            # A geography re-screen decides one criterion, but the schema needs
+            # all five rows, so the model must restate the other four. The
+            # restated row is read for nothing: the status comes from the first
+            # screening (chapter 3 production run, family B).
+            by_id[criterion] = _frozen_criterion_row(
+                criterion, frozen_criterion_statuses.get(criterion)
+            )
             continue
         by_id[criterion] = row
         if (
@@ -2189,6 +2236,8 @@ def _validate_response_span_contract(
         errors.append("criterion_set_invalid")
     resolved_scope: dict[str, Any] | None = None
     repair_detail: dict[str, Any] = {}
+    dropped_spans: list[dict[str, Any]] = []
+    unverified_spans: list[dict[str, Any]] = []
     if response_schema_version in SCOPE_CONTRACT_VERSIONS:
         scope = value.get("eligible_arctic_scope")
         geography = by_id.get("study_geography", {})
@@ -2268,19 +2317,34 @@ def _validate_response_span_contract(
                     # span, not every span, so the test becomes an intersection.
                     if not set(activity_ids) & geography_ids:
                         errors.append("eligible_arctic_scope_activity_unbound")
-                    mislabelled = [
-                        record
-                        for record in activity_records
-                        if record["span_id"] in catalog
-                        and not _dimension_supported(
-                            catalog[record["span_id"]]["text"], record["dimension"]
-                        )
-                    ]
-                    if mislabelled:
-                        errors.append("eligible_arctic_scope_dimension_unsupported")
-                        repair_detail["mislabelled_dimensions"] = [
-                            dict(record) for record in mislabelled
-                        ]
+                    # The dimension label is a claim about one auxiliary span.
+                    # A wrong label is a reason to drop that span from the
+                    # forwarded context, never a reason to end a paper whose
+                    # criteria are satisfied (chapter 3 production run, the
+                    # rule 5 interrupt). No re-ask is spent on it.
+                    for record in activity_records:
+                        span = catalog.get(record["span_id"])
+                        if span is None:
+                            continue
+                        if not _dimension_verifiable(span["text"]):
+                            unverified_spans.append(
+                                dict(record, reason="dimension_marker_not_latin_script")
+                            )
+                            notes.append(
+                                f"scope_span_dimension_unverified:{record['span_id']}"
+                            )
+                        elif not _dimension_supported(
+                            span["text"], record["dimension"]
+                        ):
+                            dropped_spans.append(
+                                dict(
+                                    record,
+                                    reason=(
+                                        "eligible_arctic_scope_dimension_unsupported"
+                                    ),
+                                )
+                            )
+                            notes.append(f"scope_span_dropped:{record['span_id']}")
                 elif not set(activity_ids) <= geography_ids:
                     errors.append("eligible_arctic_scope_activity_unbound")
                 if component == "separable_arctic_component" and not phrases:
@@ -2318,14 +2382,25 @@ def _validate_response_span_contract(
                     if response_schema_version == ELIGIBILITY_RESPONSE_V4
                     else {}
                 )
+                dropped_ids = {record["span_id"] for record in dropped_spans}
+                unverified_ids = {record["span_id"] for record in unverified_spans}
+                forwarded_ids = [
+                    span_id for span_id in activity_ids if span_id not in dropped_ids
+                ]
+                # The custody link is the activity span that also proves the
+                # latitude. Losing it to the filter is recorded, never silent.
+                if dropped_ids and not set(forwarded_ids) & geography_ids:
+                    notes.append("scope_activity_custody_dropped")
                 if not unknown and trusted_catalog:
                     resolved_scope = {
                         "component": component,
                         "activity_spans": [
                             _resolved_scope_span(
-                                catalog[span_id], dimension=dimensions.get(span_id)
+                                catalog[span_id],
+                                dimension=dimensions.get(span_id),
+                                dimension_verified=span_id not in unverified_ids,
                             )
-                            for span_id in activity_ids
+                            for span_id in forwarded_ids
                         ],
                         "finding_spans": [
                             _resolved_scope_span(catalog[span_id])
@@ -2351,6 +2426,16 @@ def _validate_response_span_contract(
             else {}
         ),
         **({"format_repair_detail": repair_detail} if repair_detail else {}),
+        **(
+            {
+                "dimension_span_filter": {
+                    "dropped": dropped_spans,
+                    "unverified": unverified_spans,
+                }
+            }
+            if dropped_spans or unverified_spans
+            else {}
+        ),
         "decision": mapped if not unique_errors else "uncertain",
         "overall_reason_codes": reason_codes,
         "mapping_version": ELIGIBILITY_STATUS_MAPPING_VERSION,
@@ -2363,6 +2448,7 @@ def validate_response(
     *,
     expected: dict[str, Any],
     response_schema: dict[str, Any],
+    frozen_criterion_statuses: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     response_version = _response_contract_version(response_schema)
     if response_version in SPAN_CONTRACT_VERSIONS:
@@ -2372,6 +2458,7 @@ def validate_response(
             expected=expected,
             response_schema=response_schema,
             response_schema_version=response_version,
+            frozen_criterion_statuses=frozen_criterion_statuses,
         )
     return _validate_response_v1(
         value,

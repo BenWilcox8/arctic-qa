@@ -1,0 +1,213 @@
+{
+  "note": "Every recorded geography re-screen of the run. Each one failed on criterion_evidence_missing, because the schema needs five criteria rows and the prompt told the model not to restate four of them.",
+  "responses": [
+    {
+      "candidate_key": "10.22328/2413-5747-2024-10-1-119-122",
+      "criteria": [
+        {
+          "criterion_id": "published_primary_findings",
+          "evidence": [],
+          "missing_context": [],
+          "reason_codes": [
+            "primary_research_reported"
+          ],
+          "status": "satisfied"
+        },
+        {
+          "criterion_id": "stable_identity_version",
+          "evidence": [],
+          "missing_context": [],
+          "reason_codes": [
+            "identifier_present"
+          ],
+          "status": "satisfied"
+        },
+        {
+          "criterion_id": "study_geography",
+          "evidence": [],
+          "missing_context": [
+            "Specific geographic coordinates or boundaries verifying that the study locations in the coastal territories of the Arkhangelsk region (\u0410\u0440\u0445\u0430\u043d\u0433\u0435\u043b\u044c\u0441\u043a\u0430\u044f \u043e\u0431\u043b\u0430\u0441\u0442\u044c) are at or north of 66.56\u00b0 N"
+          ],
+          "reason_codes": [
+            "boundary_crossing_unresolved"
+          ],
+          "status": "uncertain"
+        },
+        {
+          "criterion_id": "access_rights_evidence",
+          "evidence": [],
+          "missing_context": [],
+          "reason_codes": [
+            "access_open"
+          ],
+          "status": "satisfied"
+        },
+        {
+          "criterion_id": "correction_retraction_coverage",
+          "evidence": [],
+          "missing_context": [],
+          "reason_codes": [
+            "coverage_unknown"
+          ],
+          "status": "uncertain"
+        }
+      ],
+      "errors": [
+        "criterion_evidence_missing:access_rights_evidence",
+        "criterion_evidence_missing:published_primary_findings",
+        "criterion_evidence_missing:stable_identity_version"
+      ],
+      "frozen_criterion_statuses": {
+        "access_rights_evidence": "satisfied",
+        "correction_retraction_coverage": "uncertain",
+        "published_primary_findings": "satisfied",
+        "stable_identity_version": "satisfied"
+      },
+      "job_key": "8ba4baf15b045d425f7f931eb3e3e8e17fbc51851a8fc4b101ca1e5e78ca56d2",
+      "state": "screening_error"
+    },
+    {
+      "candidate_key": "10.17073/2500-0632-2023-12-188",
+      "criteria": [
+        {
+          "criterion_id": "published_primary_findings",
+          "evidence": [],
+          "missing_context": [],
+          "reason_codes": [
+            "primary_research_reported"
+          ],
+          "status": "satisfied"
+        },
+        {
+          "criterion_id": "stable_identity_version",
+          "evidence": [],
+          "missing_context": [],
+          "reason_codes": [
+            "identifier_present"
+          ],
+          "status": "satisfied"
+        },
+        {
+          "criterion_id": "study_geography",
+          "evidence": [],
+          "missing_context": [
+            "coordinates or specific latitude for the study sites in the Nakyn kimberlite field / Nyurba District / Western Yakutia"
+          ],
+          "reason_codes": [
+            "activity_not_located"
+          ],
+          "status": "uncertain"
+        },
+        {
+          "criterion_id": "access_rights_evidence",
+          "evidence": [],
+          "missing_context": [],
+          "reason_codes": [
+            "access_open"
+          ],
+          "status": "satisfied"
+        },
+        {
+          "criterion_id": "correction_retraction_coverage",
+          "evidence": [],
+          "missing_context": [
+            "correction_retraction_coverage:unknown"
+          ],
+          "reason_codes": [
+            "coverage_unknown"
+          ],
+          "status": "uncertain"
+        }
+      ],
+      "errors": [
+        "criterion_evidence_missing:access_rights_evidence",
+        "criterion_evidence_missing:published_primary_findings",
+        "criterion_evidence_missing:stable_identity_version"
+      ],
+      "frozen_criterion_statuses": {
+        "access_rights_evidence": "satisfied",
+        "correction_retraction_coverage": "uncertain",
+        "published_primary_findings": "satisfied",
+        "stable_identity_version": "satisfied"
+      },
+      "job_key": "aaa9d1b96ee7311c0ccf0389fd1cf201a381d9c242df093e722c6815799cdce7",
+      "state": "screening_error"
+    },
+    {
+      "candidate_key": "10.47148/1609-364x-2024-4-29-38",
+      "criteria": [
+        {
+          "criterion_id": "published_primary_findings",
+          "evidence": [],
+          "missing_context": [],
+          "reason_codes": [
+            "primary_research_reported"
+          ],
+          "status": "satisfied"
+        },
+        {
+          "criterion_id": "stable_identity_version",
+          "evidence": [],
+          "missing_context": [],
+          "reason_codes": [
+            "identifier_present"
+          ],
+          "status": "satisfied"
+        },
+        {
+          "criterion_id": "study_geography",
+          "evidence": [
+            {
+              "span_ids": [
+                "s000165",
+                "s000166",
+                "s000167"
+              ]
+            }
+          ],
+          "missing_context": [],
+          "reason_codes": [
+            "other"
+          ],
+          "status": "satisfied"
+        },
+        {
+          "criterion_id": "access_rights_evidence",
+          "evidence": [],
+          "missing_context": [],
+          "reason_codes": [
+            "access_open"
+          ],
+          "status": "satisfied"
+        },
+        {
+          "criterion_id": "correction_retraction_coverage",
+          "evidence": [],
+          "missing_context": [
+            "correction_retraction_coverage:unknown"
+          ],
+          "reason_codes": [
+            "coverage_unknown"
+          ],
+          "status": "uncertain"
+        }
+      ],
+      "errors": [
+        "criterion_evidence_missing:access_rights_evidence",
+        "criterion_evidence_missing:published_primary_findings",
+        "criterion_evidence_missing:stable_identity_version",
+        "eligible_arctic_scope_dimension_unsupported"
+      ],
+      "frozen_criterion_statuses": {
+        "access_rights_evidence": "satisfied",
+        "correction_retraction_coverage": "uncertain",
+        "published_primary_findings": "satisfied",
+        "stable_identity_version": "satisfied"
+      },
+      "job_key": "c0483732da942d8e4cf876ff4ac112e592c6d221ec74e10bba3dcb497297bf48",
+      "state": "screening_error"
+    }
+  ],
+  "schema": "arctic-eligibility-recorded-rescreen-v1",
+  "source": "run chapter3-7dc6485-r2, campaign arctic-qa-production-campaign-003, 2026-09-16"
+}

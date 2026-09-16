@@ -325,6 +325,63 @@ The validator then reads a `satisfied` criterion with no evidence and writes `cr
 That code is not in `FORMAT_ERROR_CODES`, so the paper ends at once with no re-ask.
 The three papers each produced the same three codes: `access_rights_evidence`, `published_primary_findings` and `stable_identity_version`.
 
+### 7c. The correction
+
+Captain decision of 2026-09-16 08:49 UTC: option (c) with the targeted part of (a), plus the re-screen fix.
+Options (b) and (d) were rejected.
+
+**Family A becomes a span filter.**
+`_dimension_supported` no longer raises an error.
+For each activity span the validator now decides one of three outcomes:
+
+1. The span's own text states its label. The span is forwarded as before.
+2. The text is Latin script and states no marker of that label. The span is dropped from the forwarded context and recorded in `dimension_span_filter.dropped` with its span id, its label and the reason.
+3. The text is not Latin script. The marker words are English, so the test cannot judge it. The span is forwarded and recorded in `dimension_span_filter.unverified`, and its forwarded record carries `dimension_verified: false`.
+
+The paper keeps its screening decision in every case, and no bounded re-ask is spent on a label.
+`eligible_arctic_scope_dimension_unsupported` leaves `FORMAT_ERROR_CODES` and stays only as the recorded reason of a dropped span.
+
+The markers were widened only for the refusals that reading the span text proved correct:
+
+| Pattern | Added | The span it refused |
+|---|---|---|
+| geography | the degree sign as the extractor writes it (`69.4273 o N`), a decimal coordinate with no sign, a latitude range (`70 -78 N`) | papers 1, 20 |
+| geography | `river`, `parallel` | "the Itkillik River", "Bounded from the north by the parallels of the Vilkitsky" |
+| sample | `survey`, `unit`, `species` | "airborne surveys show the mean ice thickness", "7 units", "dwarf shrub species" |
+| method | `technique`, `medium`, `device` | "the eddy-covariance technique", "growth medium", "The ECS device" |
+| definition | an acronym followed by more text inside the same parentheses | "moist acidic tundra (MAT; soil pH <5.5)" |
+
+**The rigor safeguard.**
+A dropped span never reaches the writer as verified context, and an unverified span reaches it with its flag.
+The custody test is unchanged: at least one activity span must also be study_geography evidence, and that test still reads the model's full list, so the filter cannot end a paper.
+When the filter removes the span that carried that custody, the row records `scope_activity_custody_dropped` in `contract_notes`, so the condition is measurable and never silent.
+Every downstream gate still binds `question_context` to evidence.
+
+**Family B: the prompt, the schema and the validator now agree.**
+The root cause is a contradiction the run exposed.
+Schema v4 sets `minItems` and `maxItems` of `criteria` to 5, so a re-screen answer must carry all five rows.
+The re-screen prompt said "Do not restate it and do not revise it" about the other four.
+The model therefore restated them with the frozen status and an empty evidence list, which is the one shape the validator rejects.
+
+The prompt now says what the schema needs: write each other criterion with its frozen status, an empty evidence list and an empty missing_context list.
+`validate_response` takes `frozen_criterion_statuses` on a re-screen and reads only `study_geography` from the answer.
+The four frozen rows come from the re-screen note, which both the live attempt and the later receipt-bound revalidation already hold, so a replay reads the same result.
+`_rescreen_moved_a_frozen_status` is unchanged and still refuses an answer that contradicts a frozen status.
+
+**What the correction does to the answers the run already paid for.**
+Every recorded r2 answer was replayed through the corrected validator, with no model call.
+
+| | r2 as recorded | the same answers, corrected |
+|---|---|---|
+| eligible | 8 | 12 |
+| excluded | 3 | 3 |
+| uncertain | 0 | 2 |
+| screening_error | 11 | 5 |
+
+Of the first 20 papers, 3 would be flagged, against the rule 5 limit of 5.
+The five remaining errors are other format defects, each of which still has its bounded re-ask in a live run: `criterion_evidence_missing` on a first screening (paper 5), `eligible_arctic_scope_invalid` (papers 12, 22, 23) and `eligible_arctic_scope_activity_unbound` (paper 18).
+This is a projection from recorded answers, not a promise about new calls.
+
 ## 8. The first phase E readout
 
 `phase_e_measures.py` ran once on the r2 artifacts.
