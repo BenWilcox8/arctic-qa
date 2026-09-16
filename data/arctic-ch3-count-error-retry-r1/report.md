@@ -80,3 +80,40 @@ No paid call was replayed, retried or settled, and none exists to replay.
 The ledger halt is lifted and the row carries `count_failure_class` `transient`, so the next visit of that family counts the request again.
 
 The release ran from the task worktree under the gate the request records, and took the exclusive operation lock for one moment only.
+
+## 4. The tests
+
+`tests/test_count_error_retry.py` is the slice.
+It pins the broker seam, the exhausted transient count at the provider, the halt a permanent count failure keeps, the call journal that records a free count as failed and never as an unknown charge, and the producer that contains the fault over two papers.
+
+`tests/test_model_broker.py` adds the broker half: 503 then success with one retry, five 503s then a transient exhaustion that halts nothing and counts again under round 1, a 404 that halts as before, and the reviewed continuation with its exact evidence.
+
+The three exact-dict assertions of `tests/test_streaming.py` name the new `count_tokens_unavailable` disposition.
+
+Suite on the deployed commit `ae91e40`, four bounded parts in parallel:
+
+- `tests/` without the three slow files: 1178 passed in 369 s.
+- `tests/test_cli_integration.py`: 98 passed in 115 s.
+- `tests/test_streaming.py`: 61 passed in 508 s.
+- `tests/test_model_broker.py`: 91 passed in 156 s.
+- Total 1428 passed. `ruff check` and `ruff format --check` clean.
+
+`suite-result.json` and `suite-ae91e40.log` are in the activation directory.
+
+## 5. The activation
+
+No new money and no new ledger transition.
+The applied USD 200 expansion transition stands, and the successor gate names the gate that authorized it.
+Only the code moves.
+
+- Commit `ae91e401aa0ea990ff31553fdfd9c736b62d0d9f`, branch `fm/arctic-ch3-count-error-retry-r1`.
+- Predecessor commit `f53e3e213fe270fc5149b4063e5b8a242091c421` (`arctic-broker-operation-lock-wait-r1`).
+- Gate `live-execution-gate-ae91e40-countretry.json`, sha256 `686f332e67c9ec77211f9f89e30b8db5032dafc583105d90aa5a2370f1b2a7ee`.
+- Runtime snapshot `runtime/app-ae91e40-arctic-ch3-count-error-retry-r1`, sha256 `84826b0b4367fff209bb8b380c0484a97521f10fcc7646a08e2b8c217a5b38d0`.
+- Source archive sha256 `44b2df25840d715b714951d6f8f924888c0462042b475c1618ded4022120422e`.
+- Ledger validation after the re-snapshot: `integrity_valid` true, `halted` false, `status_state` `valid`.
+
+The predecessor producer of the f53e3e2 snapshot was relaunched at 21:41Z on firstmate's order and interrupted at 21:53:40Z with `SIGINT`, at zero construction requests in flight.
+It could not have finished: the f53e3e2 broker refuses a request key that holds a terminal `count_error` row with `the paid request key already exists`, so it would have exited again on the same paper.
+The count-retry round of this commit is what lets that key be counted again.
+Nothing moved while it ran: `spent_usd` 76.302066 before and after.

@@ -309,6 +309,11 @@ The ledger row records `count_retry_round` and `count_retry_from_sha256`, which 
 The chain proves the retry replaced no paid call and settled no money.
 
 `_open_count_retry` opens a round.
+
+A stored count error is never replayed as a result while it may be counted again.
+`broker_provider.invoke` reads the effective receipt of a request it already holds, and `model_broker.count_error_is_transient` decides it: a transient one goes back through `execute`, which opens the next round, and a permanent one is read back as before.
+A receipt written before the bounded retry records no class, so the class is read from the error string and fails closed to permanent.
+Replaying the reviewed count error of 2026-09-16 as a result ended the chapter 3 producer at 22:27 UTC, after its halt had been lifted.
 It refuses a permanent count error with `the paid request key already exists`, as before.
 
 ### Reviewed count-error continuation
