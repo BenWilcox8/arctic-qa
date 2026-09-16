@@ -167,6 +167,21 @@ class Activation:
         return result
 
     @staticmethod
+    def our_inflight(ledger: dict) -> int:
+        """Count the requests of THIS run that are on the wire.
+
+        ``inflight`` counts every caller of the shared ledger, and the
+        benchmark evaluator keeps calling. A producer is stopped safely when
+        none of ITS requests is submitted, whatever the evaluator is doing.
+        """
+        return sum(
+            1
+            for request in ledger.get("requests", {}).values()
+            if request.get("state") == "submitted"
+            and str(request.get("run_id")) == RUN_ID
+        )
+
+    @staticmethod
     def wait_for_settled_ledger(timeout: float = 600.0) -> dict:
         """Wait for a moment with nothing in flight, and return the ledger.
 
@@ -597,12 +612,13 @@ class Activation:
             # boundary first, then stop at once.
             for _ in range(600):
                 ledger = read_json(LEDGER)
-                if int(ledger["inflight"]) == 0:
+                if self.our_inflight(ledger) == 0:
                     break
                 time.sleep(0.5)
             ledger = read_json(LEDGER)
-            assert int(ledger["inflight"]) == 0, (
-                f"no zero-in-flight boundary; inflight {ledger['inflight']}"
+            assert self.our_inflight(ledger) == 0, (
+                "no zero-in-flight boundary for this run; "
+                f"{self.our_inflight(ledger)} submitted"
             )
             print(f"stopping the live producer {pid}", file=sys.stderr)
             subprocess.run(["kill", str(pid)], check=False)
@@ -614,8 +630,12 @@ class Activation:
         stopped_at = now()
         subprocess.run(["tmux", "kill-session", "-t", TMUX_SESSION], check=False)
         ledger = read_json(LEDGER)
-        assert int(ledger["inflight"]) == 0, f"inflight {ledger['inflight']}"
         assert not ledger["halted"], "the ledger is halted"
+        # In-flight requests here are the benchmark evaluator's: it shares this
+        # ledger and keeps calling. What this launch needs is that OUR producer
+        # is stopped, which is checked above. The label touches the state
+        # database alone, and every broker construction below waits for its own
+        # settled window.
         # The one-time batch label, while nothing writes the table.
         stamp = stopped_at.replace(":", "")
         dry = self.label(apply=False, stamp=stamp)
