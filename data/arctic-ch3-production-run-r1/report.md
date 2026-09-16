@@ -9,12 +9,12 @@ Nothing under `chapter2/` or `streaming-dataset-r1/` changed except the shared l
 
 ## 1. Result in six lines
 
-1. The producer was launched at 07:24:36 UTC on the v6 judge and stopped 17 seconds later: the first eligibility call (paper 1, `gemini-3.8-flash`, prompt v8, schema v4) returned HTTP 400, the broker booked an ambiguous charge and halted the ledger. No paper was screened. Section 6 has the evidence. The task is blocked on that halt.
-2. The shared ledger carries two new chained transitions: price config v8, then the construction ceiling of USD 73.990121. Section 3 gives every number.
-3. Three calibration cassettes were recorded through the same gate and ledger: v4 failed (three held-out controls passed), v5 failed (three must-pass rows failed, one control passed), v6 met the release rule (no control passed, 19 of 20 must-pass). Section 5 names every misjudged row. Spend: USD 0.238626, 0.244198 and 0.262088, USD 0.744912 in total, inside the USD 20.
-4. Two code changes were necessary before the activation could be built, and two prompt revisions followed the decisions. Section 2 explains them. The deployed commit is `e2a8cba`: `7dc6485` plus seven commits of this task.
-5. The gate (a reviewed successor of the `9f4cb18` gate), the launcher, the runtime snapshot, the chapter 3 root and the streaming input are built and bound.
-6. The phase E script is beside the run and was proven on the chapter 2 artifacts. It has no chapter 3 run to read yet. Section 8.
+1. The producer runs as `chapter3-7dc6485-r2` on campaign `arctic-qa-production-campaign-003`, in tmux session `arctic-ch3-production-r1`, PID 2229516, since 08:09:09 UTC, on the `c545cf8` runtime. Sections 6, 6b and 6c give every launch, stop and relaunch.
+2. The shared ledger carries two chained transitions: price config v8, then the construction ceiling of USD 73.990121 (USD 53.990121 of construction spend at the chapter 2 pause plus USD 20.00). Section 3.
+3. Three calibration cassettes were recorded through the gate: v4 and v5 failed the release rule, v6 met it (21 of 21 controls failed, 19 of 20 must-pass rows passed). USD 0.744912 in total. Section 5.
+4. The first launch died on HTTP 400 (an `enum` inside array items in eligibility schema v4, never sent live before); the rejection was diagnosed, fixed, settled at zero cost and the halt lifted. The second launch died on a missing `finding_bank` table (the migration skipped a table added under an unchanged schema version); fixed and migrated. Sections 6, 6b, 6c.
+5. Five code changes were necessary on top of `7dc6485` (section 2). The branch tip is `ea3568a` merged with local `main` at `76eba30`; the deployed runtime is `c545cf8`, which differs from the tip only by the migration fix that the migrated database no longer needs.
+6. The eligibility watch of the first 20 papers and the first phase E readout are in sections 7 and 8.
 
 ## 2. Deviations from the fixed decisions, and why
 
@@ -32,6 +32,8 @@ That commit is `7dc6485` plus nine commits of this task, and no other change:
 | `089a016` | The report and the v5 cassette. | Evidence for the second decision. |
 | `e2a8cba` | `STANDALONE_SYSTEM` revised to contract v6: the unit clause excludes a unit implied by a named metric, the sample clause covers only an absent sample type, a comparison-basis clause is added; the two held-out rows v6 was written on moved to `seen`. | Captain decision of 2026-09-16 06:56 UTC. |
 | `0badc1f` | The report, the v6 cassette, the halt. | Evidence for the third decision. |
+| `ea3568a` | `Database.migrate` runs the `CREATE TABLE IF NOT EXISTS` script on a database whose schema version already matches; `tests/test_db_migrate_idempotent.py`. | The second r2 stop (section 6c). Applied to the production database once; the deployed `c545cf8` runtime does not need it any more. |
+| `5f41f2d` (merge) | Local `main` at `76eba30` (the abstention subscription providers) merged into the branch with a merge commit; the one conflict, `abstention_cli.py`, took `main`'s content and a `ruff format` pass. | Inbox message 002. The abstention tests pass on the merge: 36 passed. |
 | `c545cf8` | Eligibility schema v4: the reason-code vocabulary moves from an `enum` inside the array items to the item description; prompt v8 names it there; `tests/test_eligibility_request_constraints.py`. Broker: the provider error body and status of every non-2xx answer go into the ambiguous receipt; `settle-http-rejection` settles a rejection before generation at zero cost; `tests/test_http_rejection_settlement.py`. | Firstmate decision of 2026-09-16 07:30 UTC, steps 2 and 3. |
 
 **The ceiling.** The broker accepts only registered policy transitions.
@@ -225,6 +227,18 @@ The receipt `activation-receipt-c545cf8-ch3.json` recorded a fresh progress obse
 At 08:06:02 UTC paper 1 had two completed eligibility calls under the corrected schema and no halt.
 The receipt lists every calibration recording (v4, v5, v6) with its misses, and the settlement of the r1 rejection.
 
+### 6c. The second stop and the migration fix
+
+At 08:06:25 UTC, after paper 1 (unresolved after its re-ask) and paper 2 (eligible), the producer stopped in the generation stage on `sqlite3.OperationalError: no such table: finding_bank`.
+No paid call failed: three eligibility calls completed for USD 0.0627 and the ledger stayed clean, not halted, with the request states and receipts consistent.
+Cause: `Database.migrate` returned before the idempotent table script whenever `schema_info.version` already matched.
+The chapter 3 integration added the `finding_bank` and `finding_prescreen_shadow` tables to the schema under the same version, so a fresh database (the dry run, the tests) had them and the production database, already at version 5, never got them.
+Fix (`ea3568a`): `migrate` runs the `CREATE TABLE IF NOT EXISTS` script on every open; `tests/test_db_migrate_idempotent.py` drops the two tables from a current database and checks that a re-open restores them.
+The production database was migrated once with the fixed code at 08:19 UTC (the two tables and their index were created; schema version 5, no other change, no backup because the version did not change).
+The `c545cf8` runtime then runs correctly on it, so the producer was relaunched on the same runtime, the same gate and the same run id r2; the relaunch resumes the three completed eligibility receipts by request key and replays nothing.
+The first r2 receipt is kept as `activation-receipt-c545cf8-ch3.first-launch.json`.
+The relaunch at 08:09:09 UTC runs as PID 2229516 in tmux session `arctic-ch3-production-r1`; the receipt `activation-receipt-c545cf8-ch3.json` records it with a fresh progress observation at 08:09:20 UTC.
+
 ## 7. The eligibility watch
 
 Not reached: no paper was screened.
@@ -250,16 +264,17 @@ PYTHONPATH=src python data/arctic-ch3-production-run-r1/phase_e_measures.py \
 
 ## 9. Test results
 
-Command: `nix develop -c bash -c 'PYTHONPATH=src pytest <files> -p no:cacheprovider -o addopts=""'`, four bounded foreground parts, run on `9f4cb18` and again on `61d2ea6` with the same result.
+Command: `nix develop -c bash -c 'PYTHONPATH=src pytest <files> -p no:cacheprovider -o addopts=""'`, four bounded foreground parts, run on every deployed commit.
 
-| Part | Result |
-|---|---|
-| `tests/` without the three slow files | 984 passed |
-| `tests/test_cli_integration.py` | 98 passed |
-| `tests/test_streaming.py` | 56 passed |
-| `tests/test_model_broker.py` | 86 passed |
-| `ruff check src tests` | clean |
-| `ruff format --check src tests` | clean |
+| Part | `9f4cb18`, `61d2ea6`, `e2a8cba` | `c545cf8` | `ea3568a` |
+|---|---|---|---|
+| `tests/` without the three slow files | 984 passed | 994 passed | see below |
+| `tests/test_cli_integration.py` | 98 passed | 98 passed | see below |
+| `tests/test_streaming.py` | 56 passed | 56 passed | see below |
+| `tests/test_model_broker.py` | 86 passed | 86 passed | see below |
+| `ruff check`, `ruff format --check` | clean | clean | clean |
+
+On the merge commit `5f41f2d` the four abstention test files pass: 36 passed.
 
 The five new tests in `tests/test_chapter3_production_run.py` are in the first part.
 They pin the ceiling constant, replay the chain (chapter 2 price, chapter 2 ceiling, chapter 3 price, chapter 3 ceiling) on a fixture ledger, refuse a wrong tranche, record a cassette through a bound broker with a fake transport, and refuse a recording without the gate's streaming input.
