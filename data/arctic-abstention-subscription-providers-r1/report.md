@@ -93,3 +93,75 @@ Print mode, property by property:
   A change there touches the production money ledger.
   The subscription ledger applies the same evaluation policy file (per-item-condition-model-arm cap, per-minute pace, one concurrent request, no retries, stop on the first error), binds the same gate schema, and writes one immutable receipt per request key with USD 0.
 - The response record gains one `harness` field with the vendor, the exact model id, the preset, the invocation and the raw final text.
+
+## 2. Implementation
+
+Commit `8bd21e9` on branch `fm/arctic-abstention-subscription-providers-r1` adds:
+
+- `src/arctic_qa/abstention_subscription.py`: the two providers, the subprocess transport, the scripted transport, the subscription ledger, the decoding record, the gate record, the dry run and the model enumeration.
+- `config/benchmark-evaluation-subscription-models-v1.json`: the registry of both vendors (binary path, checked version, models, presets, timeout, output constraint).
+- `src/arctic_qa/abstention_cli.py`: the `--provider` switch of `run`, `dry-run`, `gate-template` and `list-models`, plus `--subscription-models-file`, `--subscription-ledger-dir`, `--binary-path`, `--scratch-dir` and `--catalog-bundled`.
+- `src/arctic_qa/abstention_providers.py`: one new optional field `harness` on the response record. The Gemini provider leaves it `None`.
+- `tests/test_abstention_subscription.py`: 13 unit tests with the scripted transport.
+
+The Gemini provider, the prompt contract and the shared paid-call ledger are unchanged.
+
+What one subscription call records:
+
+- The response row carries `harness` with the vendor, the exact model id, the preset, the argv, the environment names, the raw final text, the side-call models (Claude), the schema flag (Codex) and the harness error lines.
+- The receipt (`<ledger>/receipts/<request_key>.json`) adds the stdout, the stderr tail, the stdin hash, the timing, the usage, `billing: subscription` and `cost_usd: "0"`.
+- The request key binds the vendor, the model, the run id, the trial id, the item identity, the prompt bytes and the output constraint.
+- The ledger (`<ledger>/subscription-ledger.json`) counts submissions per item, condition, model and arm, and paces them per minute under the evaluation policy.
+
+## 3. Tests
+
+Unit tests (`nix develop -c bash -c 'PYTHONPATH=src pytest tests/test_abstention_subscription.py tests/test_abstention_run.py tests/test_abstention_render.py tests/test_abstention_broker.py -o addopts="" -q'`): 36 passed.
+The new tests cover: the isolation flags of both invocations, the prompt bytes against the Gemini payload, the private Codex home and its strict config, the N0 filing of a sentence, a wrong letter, a `max_tokens` stop and a non-JSON Codex message, USD 0 accounting with the token counts, the harness failure and timeout states, the resume from receipts, the per-item cap and the per-minute pace, the gate binding refusals, the request key, the parsers on the real probe outputs, and the dry run through the CLI.
+`ruff check src tests` and `ruff format --check` on every touched file pass.
+The whole suite result is in section 5.
+
+### 3.1 Live test: runs/subscription-test-r1
+
+The same 5 items as the Gemini canary (`abstention-eval-set-4d3202cf27b30859`), both conditions, one repeat, medium preset, through `--action run` with a reviewed gate per provider.
+Gates, review record and launcher: `/mnt/crdata/research-abstention/arctic-qa/abstention-eval/private/subscription-test-r1-*`.
+Runs: `/mnt/crdata/research-abstention/arctic-qa/abstention-eval/runs/subscription-test-r1/{claude,codex}`.
+Ledgers: `/mnt/crdata/research-abstention/arctic-qa/abstention-eval/subscription/{anthropic_claude_code,openai_codex}`.
+
+| | Gemini canary (gemini-3.1-pro-preview) | Claude (claude-opus-5) | ChatGPT (gpt-5.6-terra) |
+|---|---|---|---|
+| Calls made | 10 | 10 | 10 |
+| Invalid (N0) | 0 | 0 | 0 |
+| Mean latency (s) | 14.5 | 3.3 | 8.5 |
+| Median latency (s) | 14.2 | 3.5 | 7.2 |
+| Prompt tokens per call (harness overhead included) | 216 | 762 | 2369 |
+| Thinking tokens per call | 469 | 113 | 168 |
+| Answer tokens per call | 1 | 3 | 20 (the JSON object) |
+| Cost | USD 0.061 | USD 0 (subscription) | USD 0 (subscription) |
+| N1 gold present, gold chosen | 3 | 3 | 4 |
+| N2 gold present, distractor chosen | 1 | 1 | 1 |
+| N3 gold present, abstained | 1 | 1 | 0 |
+| N4 gold absent, distractor chosen | 0 | 3 | 5 |
+| N5 gold absent, abstained | 5 | 2 | 0 |
+
+Observations:
+
+- Both harness paths worked end to end through the gate, the ledger, the receipts and the scorer.
+- No Claude call made a side call (`side_call_models: []` on all 10), so `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` removed the session-title call.
+- Every Codex call honoured the schema (`schema_honoured: true`) and ran no tool item. Every Codex call also logged the harness line "Exceeded skills context budget", which is the intended effect of `skills.max_context_tokens = 1`.
+- The first Codex call cost 4492 prompt tokens, the other nine about 2100 to 2190. The first call of a fresh `CODEX_HOME` carries more harness context.
+- Five of the ten Claude calls reported 0 thinking tokens: adaptive thinking at the medium preset skipped the thinking block for those items.
+- gpt-5.6-terra at medium never abstained (N5 = 0). This is a data point about the model, not about the harness: the abstention option was in the prompt and the schema allowed its letter.
+
+## 4. Documentation
+
+`docs/ABSTENTION_EVALUATION.md` gained the section "Subscription providers" with the chosen methods, the setup, the fairness caveats and the exact commands.
+
+## 5. Whole test suite
+
+`nix develop -c bash -c 'PYTHONPATH=src pytest tests -o addopts="" -q'`: 1233 passed in 12 minutes 31 seconds, at commit `8bd21e9` plus the documentation changes.
+
+## 6. Open points for the captain
+
+- Model choice for the control arms. The live test used `claude-opus-5` and `gpt-5.6-terra`. The registry also holds `claude-fable-5-1` and `gpt-6-astra` as the flagship tier of each vendor. Every registered model is one `--models` value away.
+- The evaluation policy paces at 10 requests per minute and caps 8 calls per item, condition, model and arm, the same as the Gemini canary policy. A large subscription run can use a policy file with a faster pace, bound into a new gate.
+- The Claude and Codex quotas are shared with every agent session on this machine. A large run should go in a quiet window.
