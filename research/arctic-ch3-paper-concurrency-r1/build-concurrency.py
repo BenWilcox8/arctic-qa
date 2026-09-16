@@ -376,7 +376,7 @@ class Activation:
                     *[f"- {name}: {result}" for name, result in suite["parts"].items()],
                     f"- ruff check and ruff format --check: {suite['ruff']}",
                     "",
-                    f"Task report: `data/{TASK}/report.md` on the branch.",
+                    f"Task report: `research/{TASK}/report.md` on the branch.",
                     "",
                 ]
             ),
