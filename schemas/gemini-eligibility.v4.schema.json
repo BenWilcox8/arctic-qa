@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "status_mapping_version", "request_id", "criteria", "eligible_arctic_scope", "known_missing_context", "correction_metadata_used", "input_echo"],
+  "properties": {
+    "schema_version": {"const": "eligibility-response-v4"},
+    "status_mapping_version": {"const": "eligibility-criterion-status-map-v1"},
+    "request_id": {"type": "string"},
+    "criteria": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": {"$ref": "#/$defs/criterion"}
+    },
+    "eligible_arctic_scope": {"$ref": "#/$defs/arctic_scope"},
+    "known_missing_context": {"type": "array", "items": {"type": "string"}},
+    "correction_metadata_used": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provided", "source", "as_of", "known_status"],
+      "properties": {
+        "provided": {"type": "boolean"},
+        "source": {"type": ["string", "null"]},
+        "as_of": {"type": ["string", "null"]},
+        "known_status": {"enum": ["clear", "correction", "retraction", "unknown"]}
+      }
+    },
+    "input_echo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy_sha256", "source_version_sha256", "extracted_text_sha256", "metadata_sha256", "span_manifest_sha256"],
+      "properties": {
+        "policy_sha256": {"type": "string"},
+        "source_version_sha256": {"type": "string"},
+        "extracted_text_sha256": {"type": "string"},
+        "metadata_sha256": {"type": "string"},
+        "span_manifest_sha256": {"type": "string"}
+      }
+    }
+  },
+  "$defs": {
+    "criterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["criterion_id", "status", "reason_codes", "evidence", "missing_context"],
+      "properties": {
+        "criterion_id": {"enum": ["published_primary_findings", "stable_identity_version", "study_geography", "access_rights_evidence", "correction_retraction_coverage"]},
+        "status": {"enum": ["satisfied", "failed", "uncertain"]},
+        "reason_codes": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Use only these codes. Use other when no listed code states your reason. The codes are recorded for measurement and take no part in the eligibility decision.",
+          "items": {
+            "enum": [
+              "lat_ge_66_56",
+              "wholly_north_region",
+              "crossing_region_with_northern_evidence",
+              "modeled_arctic_domain",
+              "all_activity_outside_boundary",
+              "incidental_arctic_reference",
+              "activity_not_located",
+              "boundary_crossing_unresolved",
+              "primary_research_reported",
+              "not_primary_research",
+              "retracted_or_corrected",
+              "no_correction_or_retraction_found",
+              "access_open",
+              "access_restricted",
+              "identifier_present",
+              "identifier_absent",
+              "coverage_unknown",
+              "other"
+            ]
+          }
+        },
+        "missing_context": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Required when status is uncertain. At least one value that names the material you could not read."
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["span_ids"],
+            "properties": {
+              "span_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "maxItems": 12
+              }
+            }
+          }
+        }
+      }
+    },
+    "arctic_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["component", "activity_spans", "finding_span_ids", "question_scope_phrases"],
+      "properties": {
+        "component": {"enum": ["whole_study", "separable_arctic_component", "none"]},
+        "activity_spans": {
+          "type": "array",
+          "maxItems": 12,
+          "description": "The Arctic activity spans and the study-setting spans, each labelled with the dimension its own text states.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["span_id", "dimension"],
+            "properties": {
+              "span_id": {"type": "string", "minLength": 1},
+              "dimension": {
+                "enum": ["geography", "period", "sample", "method", "definition"],
+                "description": "geography for a latitude, coordinate, named region, station or modeled domain; period for a date, year, season with its year or campaign window; sample for what was sampled or measured and how many; method for the instrument, platform, vessel, sensor, model or reanalysis; definition for the first expansion of an acronym."
+              }
+            }
+          }
+        },
+        "finding_span_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 24},
+        "question_scope_phrases": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 12}
+      }
+    }
+  }
+}

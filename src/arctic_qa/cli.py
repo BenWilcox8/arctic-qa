@@ -432,6 +432,11 @@ def parser() -> argparse.ArgumentParser:
         default=Path("schemas/gemini-eligibility.v1.schema.json"),
     )
     stream.add_argument("--eligibility-policy-file", type=Path)
+    stream.add_argument(
+        "--eligibility-rescreen-prompt-file",
+        type=Path,
+        default=Path("config/gemini-eligibility-geography-rescreen-v2.txt"),
+    )
     stream.add_argument("--roles-file", type=Path)
     stream.add_argument("--role-profile")
     stream.add_argument("--author-script", type=Path)
@@ -1379,6 +1384,12 @@ def _stream(args, paths: DataPaths, db: Database) -> dict[str, Any]:
         eligibility_policy_file=(
             args.eligibility_policy_file.resolve()
             if args.eligibility_policy_file
+            else None
+        ),
+        eligibility_rescreen_prompt_file=(
+            args.eligibility_rescreen_prompt_file.resolve()
+            if args.eligibility_rescreen_prompt_file
+            and args.eligibility_rescreen_prompt_file.is_file()
             else None
         ),
         roles_file=args.roles_file.resolve() if args.roles_file else None,

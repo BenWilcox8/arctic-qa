@@ -11,6 +11,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Read `docs/CHAPTER2_CORPUS.md` before you extract, freeze, or read the chapter 2 corpus.
 - `config/gemini-eligibility-v1.json` is bound into every paid receipt through `price_config_sha256`. Any edit to it needs a chained ledger price transition before a live run can resume, and a new `config_id` revision rather than a changed meaning for an old one.
 - No change to `STANDALONE_SYSTEM` ships without a live calibration run on the judge model (paid, captain-approved). The fixture rows live in `fixtures/standalone-calibration-*.jsonl`; the header of each file states its slice and release rule.
+- One paper can hold three eligibility job rows in a run directory: the first screening, one bounded format re-ask, and one bounded geography re-screen. Each row binds its own broker receipt. `streaming.py::_load_eligibility_jobs` takes the last attempt, and `_attempt_order` defines that order.
 
 ## Maintaining this file
 
