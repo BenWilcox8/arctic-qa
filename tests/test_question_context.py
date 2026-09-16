@@ -81,6 +81,7 @@ def test_standalone_contract_version_is_controller_owned() -> None:
         "pass": False,
         "answer_leakage_absent": True,
         "unresolved_phrases": ["Figure 6"],
+        "competing_readings": [],
         "missing_detail_types": ["study_local_referent"],
         "reasons": ["source_dependent_locator"],
         "review_rationale": "Figure 6 is not available to the reader.",
@@ -132,7 +133,7 @@ def test_study_local_station_and_species_need_grounded_context() -> None:
         question_context_verification_reason(
             "", answer, _verification(required=False), question=question
         )
-        == "question_context_missing"
+        == "standalone_det_question_context_missing"
     )
 
 
@@ -147,7 +148,7 @@ def test_a_coordinate_alone_does_not_resolve_a_study_local_station() -> None:
             verification,
             question=question,
         )
-        == "question_context_referent_unresolved"
+        == "standalone_det_question_context_referent_unresolved"
     )
 
 
@@ -363,7 +364,11 @@ def test_standalone_contract_requires_referent_not_study_identity() -> None:
     assert "NECESSITY TEST" in system
     assert "These tasks pass." in system
     assert "These tasks fail." in system
-    assert "choose the correct option from the displayed text alone" in system
+    # ch2 yield audit 4.2: the guessability step is gone. The judge never sees
+    # the options and never judges whether the reader could pick one.
+    assert "choose the correct option from the displayed text alone" not in system
+    assert "arbitrary study-specific quantity" not in system
+    assert "never judge whether the reader could pick the right one" in system
     assert (
         "A named campaign, cruise, core, or project code does not resolve a referent"
         in system
@@ -372,7 +377,7 @@ def test_standalone_contract_requires_referent_not_study_identity() -> None:
     assert "DOI, paper title" in system
     assert "Do not treat an empirical observation as a universal claim" in system
     assert generation.STANDALONE_VERIFICATION_CONTRACT_VERSION == (
-        "source-blind-scientific-referent-v3"
+        "source-blind-scientific-referent-v4"
     )
     assert "study_local_referent" not in str(
         generation.ROLE_SCHEMAS["standalone_verifier"]

@@ -183,6 +183,7 @@ def _plain_reason(
             "answer_verifier": "answer_verification",
             "distractor_writer": "distractor_generation",
             "option_verifier": "option_verification",
+            "option_set_verifier": "option_verification",
         }.get(reason.removesuffix("_response_invalid"), current_stage)
         return {
             "category": "invalid_model_response",

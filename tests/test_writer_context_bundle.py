@@ -806,6 +806,8 @@ def test_eligibility_prompt_v7_states_the_component_rule() -> None:
 
 def test_phase_one_contract_versions_are_recorded() -> None:
     """The chapter 2 contract row keeps its historical literals under chapter 3."""
+    assert generation.CANDIDATE_SCHEMA_VERSION == "2.8.0"
+    assert generation.PROMPT_VERSION == "arctic-qa-generation-v23"
     assert (
         generation.SCOPE_ROLE_FINDING_POLICY_VERSION
         == "one-finding-per-paper-ranked-context-v8"
@@ -824,7 +826,11 @@ def test_phase_one_contract_versions_are_recorded() -> None:
     assert contract["scope_contract_version"] == "selected-evidence-literal-scope-v4"
     assert (
         contract["standalone_verification_contract_version"]
-        == validation.STANDALONE_VERIFICATION_CONTRACT_VERSION
+        == "source-blind-scientific-referent-v3"
+    )
+    assert contract["numeric_rule_contract_version"] == "numeric-rule-source-support-v3"
+    assert contract["generation_attempt_contract_version"] == (
+        "bounded-failure-routing-v4"
     )
 
 

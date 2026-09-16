@@ -28,11 +28,18 @@ AUTHOR_ROLES = (
 JUDGE_ROLES = (
     "standalone_verifier",
     "option_verifier",
+    "option_set_verifier",
     "reconstructor",
     "answer_verifier",
     "answer_judge",
 )
-STRONGEST_JUDGE_ROLES = ("standalone_verifier", "option_verifier")
+# The whole-set option verdict (ch2 yield audit section 4.8) is a source-blind
+# judge call like the two beside it, so it takes the strongest judge model.
+STRONGEST_JUDGE_ROLES = (
+    "standalone_verifier",
+    "option_verifier",
+    "option_set_verifier",
+)
 REQUIRED_ROLES = AUTHOR_ROLES + JUDGE_ROLES
 
 

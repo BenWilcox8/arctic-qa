@@ -98,6 +98,16 @@ REPAIRABLE_QUESTION_REASONS = frozenset(
         "standalone_answer_leakage",
         "standalone_multiple_interpretations",
         "standalone_malformed_text",
+        # ch2 yield audit 4.2 (F7 part 2): the free deterministic screen now
+        # speaks in its own namespace. Same repair as the unprefixed codes.
+        "standalone_det_question_context_missing",
+        "standalone_det_question_context_referent_unresolved",
+        "standalone_det_benchmark_text_malformed",
+        "standalone_det_source_dependent_locator",
+        "standalone_det_publication_relative_period",
+        # ch2 yield audit 4.8: the whole-set verdict codes earn an option repair.
+        "option_set_not_mutually_exclusive",
+        "option_set_answer_not_choosable",
     }
 )
 ALTERNATIVE_FINDING_REASONS = frozenset(
@@ -105,6 +115,13 @@ ALTERNATIVE_FINDING_REASONS = frozenset(
         "finding_answer_phrase_in_required_question_phrases",
         "finding_evidence_quote_excludes_finding",
         "insufficient_verified_distractors",
+        # ch2 yield audit 4.2: an unevidenced judge verdict is a contract
+        # violation, so routing moves to another finding, never a revision.
+        "standalone_verdict_unevidenced",
+        # ch2 yield audit 4.8: the option stage had no legal move on this
+        # finding; no rewrite of the question changes that.
+        "option_pool_empty_after_prefilter",
+        "closed_set_closure_not_source_established",
         "reconstruction_disagreement",
         "eligible_arctic_scope_missing_from_finding",
         "eligible_arctic_finding_out_of_scope",
@@ -123,6 +140,10 @@ IMMEDIATE_ALTERNATIVE_FINDING_REASONS = frozenset(
     {
         "finding_answer_phrase_in_required_question_phrases",
         "finding_evidence_quote_excludes_finding",
+        # ch2 yield audit 4.2 and 4.8: see ALTERNATIVE_FINDING_REASONS.
+        "standalone_verdict_unevidenced",
+        "option_pool_empty_after_prefilter",
+        "closed_set_closure_not_source_established",
         "eligible_arctic_scope_missing_from_finding",
         "eligible_arctic_finding_out_of_scope",
         "finding_evidence_components_not_contiguous",
@@ -136,7 +157,15 @@ IMMEDIATE_ALTERNATIVE_FINDING_REASONS = frozenset(
         "finding_scope_value_unsourced",
     }
 )
-OPTION_REPAIR_REASONS = frozenset({"insufficient_verified_distractors"})
+OPTION_REPAIR_REASONS = frozenset(
+    {
+        "insufficient_verified_distractors",
+        # ch2 yield audit 4.8: a failed whole-set verdict regenerates the
+        # option set on the verified question.
+        "option_set_not_mutually_exclusive",
+        "option_set_answer_not_choosable",
+    }
+)
 ANSWER_RULE_REPAIR_REASONS = frozenset({"source_bound_numeric_rule_missing"})
 SURGICAL_CORRECTION_REASONS = frozenset(
     {
@@ -145,6 +174,10 @@ SURGICAL_CORRECTION_REASONS = frozenset(
         "question_context_required",
         "question_context_referent_unresolved",
         "question_context_invalid",
+        # ch2 yield audit 4.2 (F7 part 2): the namespaced deterministic codes
+        # keep the surgical rung of their unprefixed forms.
+        "standalone_det_question_context_missing",
+        "standalone_det_question_context_referent_unresolved",
         "standalone_undefined_acronym",
         "standalone_undefined_unit_meaning",
         "standalone_undefined_percentage_basis",
@@ -181,6 +214,14 @@ _DEPENDENT_ROUTING_REASONS = {
         {"relation_scope_mismatch", "answer_verifier_scope_not_source_bound"}
     ),
     "question_context_missing": frozenset(
+        {"relation_scope_mismatch", "answer_verifier_scope_not_source_bound"}
+    ),
+    # ch2 yield audit 4.2 (F7 part 2): the namespaced deterministic codes carry
+    # the same downstream symptoms as their unprefixed forms.
+    "standalone_det_question_context_referent_unresolved": frozenset(
+        {"relation_scope_mismatch", "answer_verifier_scope_not_source_bound"}
+    ),
+    "standalone_det_question_context_missing": frozenset(
         {"relation_scope_mismatch", "answer_verifier_scope_not_source_bound"}
     ),
     "finding_answer_phrase_in_required_question_phrases": frozenset(
@@ -840,6 +881,7 @@ def _progress_generation(
                 failed_path=failed_path,
                 reason_codes=failure["reason_codes"],
                 slot_evidence=_source_slot_evidence(db, source_id),
+                forwarded_slot_evidence=_forwarded_slot_evidence(failed_path),
             )
             if next_attempt is None:
                 incomplete = next(
@@ -1596,6 +1638,54 @@ def _repeat_depth(
     )
 
 
+def _failed_candidate(path: dict[str, Any]) -> dict[str, Any] | None:
+    candidate = path.get("candidate")
+    if not isinstance(candidate, dict):
+        return None
+    payload = candidate.get("candidate_json")
+    if isinstance(payload, str):
+        try:
+            loaded = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+        return loaded if isinstance(loaded, dict) else None
+    return candidate
+
+
+def _failed_answer_scope(path: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the frozen answer scope of the failed candidate, or None."""
+    candidate = _failed_candidate(path)
+    if candidate is None:
+        return None
+    scope = (candidate.get("answer") or {}).get("scope")
+    return scope if isinstance(scope, dict) else None
+
+
+def _forwarded_slot_evidence(path: dict[str, Any]) -> frozenset[str] | None:
+    """Return the slot kinds of the text the writer saw, or None when unknown.
+
+    ch2 yield audit 4.2 (F3) and 4.6 (c): the guard reads the forwarded
+    context-only spans and the frozen finding's own evidence quote, not the
+    raw eligibility spans. None disables the guard rather than guessing.
+    """
+    candidate = _failed_candidate(path)
+    if candidate is None:
+        return None
+    texts = [
+        str(span.get("text", ""))
+        for span in generation_contract.context_only_span_records(
+            candidate.get("provenance")
+        )
+        if isinstance(span.get("text"), str)
+    ]
+    evidence = (candidate.get("answer") or {}).get("evidence_quote")
+    if isinstance(evidence, str) and evidence:
+        texts.append(evidence)
+    if not texts:
+        return None
+    return _slot_evidence_types(texts)
+
+
 def _slot_demand_unmet(
     reason_codes: list[str], slot_evidence: frozenset[str] | None
 ) -> bool:
@@ -1646,6 +1736,7 @@ def _next_generation_attempt(
     failed_path: dict[str, Any],
     reason_codes: list[str],
     slot_evidence: frozenset[str] | None = None,
+    forwarded_slot_evidence: frozenset[str] | None = None,
 ) -> dict[str, Any] | None:
     """Choose the one repair this failure earns, inside the six-path bound.
 
@@ -1685,7 +1776,15 @@ def _next_generation_attempt(
     # A demand is only spent when the source can meet it. When the paper states
     # no place, period, sample size, or acronym expansion of the demanded kind,
     # a rewrite can only invent filler, so the family moves to another finding.
-    if _slot_demand_unmet(reason_codes, slot_evidence):
+    # ch2 yield audit 4.2 (F3 as amended): the satisfiability guard is a pure
+    # function in generation.py. It reads the frozen answer scope and the slot
+    # kinds of the text the writer saw, never the raw eligibility spans.
+    unsatisfiable = generation_contract.unsatisfiable_standalone_demands(
+        reason_codes,
+        answer_scope=_failed_answer_scope(failed_path),
+        supplied_slots=forwarded_slot_evidence,
+    )
+    if unsatisfiable or _slot_demand_unmet(reason_codes, slot_evidence):
         if finding_index != 1:
             return None
         return _alternative_finding_attempt(
