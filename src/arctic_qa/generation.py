@@ -310,8 +310,9 @@ These tasks fail. They are not interpretable without the paper.
 - A definite description with no antecedent in the task, such as 'the southern station' with no other property, 'the identified OTUs', 'the combined expeditions', or 'this experiment'.
 - A period fixed only by the publication date, such as 'the past 20 years', 'recent years', or 'at this time'.
 - A pointer to source material, such as 'Table 2', 'the fourth column', 'Figure 6', or 'according to the study'.
-- A measured variable whose unit, metric, or basis the displayed text never names, such as 'what concentration value' with no unit, when the answer is a value of that variable. Code undefined_measured_variable.
-- A quantity reported for samples whose sample type the displayed text never states, such as 'in samples from Resolute Bay' with no word for what was sampled. Code undefined_population_or_sample.
+- A measured variable whose unit the displayed text neither names nor implies through a named metric, such as 'what concentration value' with no unit, when the answer is a value of that variable. A named metric with a unit convention, such as 'RMS error' or 'net N2O flux', implies its unit and passes. Code undefined_measured_variable.
+- A quantity reported for samples whose sample type is absent from the displayed text, such as 'in samples from Resolute Bay' with no word for what was sampled. A sample set that the task only counts, such as 'how many groups were the 12 samples clustered into', does not need its sample type. Code undefined_population_or_sample.
+- A relative comparison such as 'higher', 'lower', 'more', or 'percentage higher' with no stated baseline of the comparison. Code undefined_comparison_basis.
 - A word such as 'listed', 'reported', 'identified', or 'associated' that points at a table, list, or record the reader cannot see, such as 'which ports are listed in association with'. An empty question_context does not excuse it. Code source_dependent_locator.
 - Text that is broken, garbled, or cut in the middle of a word.
 - A task that states its own answer.

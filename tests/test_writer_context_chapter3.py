@@ -884,7 +884,7 @@ def test_chapter_three_contract_versions_are_recorded() -> None:
     # Sibling-owned versions, re-pinned at integration to what each slice landed.
     assert row["generation_attempt_contract_version"] == "bounded-failure-routing-v5"
     assert row["standalone_verification_contract_version"] == (
-        "source-blind-scientific-referent-v5"
+        "source-blind-scientific-referent-v6"
     )
     assert row["question_verification_contract_version"] == "question-verification-v2"
     assert row["numeric_rule_contract_version"] == "numeric-rule-source-support-v4"

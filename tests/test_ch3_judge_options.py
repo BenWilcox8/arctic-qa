@@ -36,12 +36,19 @@ FAIL_LIST = (
     "'recent years', or 'at this time'.",
     "- A pointer to source material, such as 'Table 2', 'the fourth column', "
     "'Figure 6', or 'according to the study'.",
-    "- A measured variable whose unit, metric, or basis the displayed text never "
-    "names, such as 'what concentration value' with no unit, when the answer is a "
-    "value of that variable. Code undefined_measured_variable.",
-    "- A quantity reported for samples whose sample type the displayed text never "
-    "states, such as 'in samples from Resolute Bay' with no word for what was "
-    "sampled. Code undefined_population_or_sample.",
+    "- A measured variable whose unit the displayed text neither names nor implies "
+    "through a named metric, such as 'what concentration value' with no unit, when "
+    "the answer is a value of that variable. A named metric with a unit "
+    "convention, such as 'RMS error' or 'net N2O flux', implies its unit and "
+    "passes. Code undefined_measured_variable.",
+    "- A quantity reported for samples whose sample type is absent from the "
+    "displayed text, such as 'in samples from Resolute Bay' with no word for what "
+    "was sampled. A sample set that the task only counts, such as 'how many groups "
+    "were the 12 samples clustered into', does not need its sample type. Code "
+    "undefined_population_or_sample.",
+    "- A relative comparison such as 'higher', 'lower', 'more', or 'percentage "
+    "higher' with no stated baseline of the comparison. Code "
+    "undefined_comparison_basis.",
     "- A word such as 'listed', 'reported', 'identified', or 'associated' that "
     "points at a table, list, or record the reader cannot see, such as 'which "
     "ports are listed in association with'. An empty question_context does not "
@@ -259,7 +266,7 @@ def _bound_verdict(**overrides: object) -> dict:
 
 def test_bound_verdict_carries_version_and_fingerprint() -> None:
     bound = _bound_verdict()
-    assert bound["contract_version"] == "source-blind-scientific-referent-v5"
+    assert bound["contract_version"] == "source-blind-scientific-referent-v6"
     assert bound["verdict_fingerprint"] == validation.standalone_verdict_fingerprint(
         bound
     )
@@ -296,7 +303,7 @@ def test_contract_table_pins_chapter2_to_v3_and_chapter3_to_v4() -> None:
         "source-blind-scientific-referent-v3"
     )
     assert contracts["2.8.0"]["standalone_verification_contract_version"] == (
-        "source-blind-scientific-referent-v5"
+        "source-blind-scientific-referent-v6"
     )
     assert "option_verification_contract_version" not in contracts["2.7.0"]
     assert contracts["2.8.0"]["option_verification_contract_version"] == (

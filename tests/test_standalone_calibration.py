@@ -198,12 +198,15 @@ def test_the_two_predecessor_false_passes_are_closed_deterministically() -> None
     )
 
 
-def test_the_v5_prompt_states_every_rule_the_calibration_set_exercises() -> None:
+def test_the_v6_prompt_states_every_rule_the_calibration_set_exercises() -> None:
     system = generation.STANDALONE_SYSTEM
     for clause in (
         "NECESSITY TEST",
-        "whose unit, metric, or basis the displayed text never names",
-        "samples whose sample type the displayed text never states",
+        "whose unit the displayed text neither names nor implies through a named metric",
+        "implies its unit and passes",
+        "samples whose sample type is absent from the displayed text",
+        "does not need its sample type",
+        "with no stated baseline of the comparison",
         "points at a table, list, or record the reader cannot see",
         "An empty question_context does not excuse it",
         "two readers who both understand the task can defend answers about "

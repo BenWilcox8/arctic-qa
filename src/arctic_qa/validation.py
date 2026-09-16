@@ -45,7 +45,10 @@ CHAPTER2_STANDALONE_VERIFICATION_CONTRACT_VERSION = (
 # the classes the held-out controls exposed, an unnamed unit or metric, an
 # unstated sample type, and a locator word that points at an unseen table.
 # No pass rule changed. The verdict shape and the evidence rule are v4's.
-STANDALONE_VERIFICATION_CONTRACT_VERSION = "source-blind-scientific-referent-v5"
+# v6 (captain decision 2026-09-16 06:56 UTC): the unit clause excludes a unit
+# implied by a named metric, the sample clause covers only an absent sample
+# type, and a comparison-basis clause is added. Nothing else changed.
+STANDALONE_VERIFICATION_CONTRACT_VERSION = "source-blind-scientific-referent-v6"
 PREDECESSOR_STANDALONE_CALIBRATION_SET_VERSION = "standalone-calibration-v1"
 STANDALONE_CALIBRATION_SET_VERSION = "standalone-calibration-v2"
 STANDALONE_CALIBRATION_MUST_PASS_RATE = Decimal("0.8")

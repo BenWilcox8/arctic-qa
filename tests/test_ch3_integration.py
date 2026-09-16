@@ -172,7 +172,7 @@ def test_the_reconciled_contract_versions() -> None:
     row = validation.CANDIDATE_CONTRACTS["2.8.0"]
     assert row["prompt_version"] == "arctic-qa-generation-v23"
     assert row["standalone_verification_contract_version"] == (
-        "source-blind-scientific-referent-v5"
+        "source-blind-scientific-referent-v6"
     )
     assert row["generation_attempt_contract_version"] == "bounded-failure-routing-v5"
     assert row["numeric_rule_contract_version"] == "numeric-rule-source-support-v4"
@@ -202,7 +202,7 @@ def test_a_stored_chapter_two_verdict_keeps_its_recorded_codes() -> None:
     assert validation._standalone_reason_codes(stored) == [
         "standalone_undefined_location"
     ]
-    live = {**stored, "contract_version": "source-blind-scientific-referent-v5"}
+    live = {**stored, "contract_version": "source-blind-scientific-referent-v6"}
     assert validation._standalone_reason_codes(live) == [
         "standalone_verdict_unevidenced"
     ]
