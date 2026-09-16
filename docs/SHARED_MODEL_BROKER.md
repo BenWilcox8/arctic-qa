@@ -219,9 +219,13 @@ receipt = broker.execute(
 )
 ```
 
-Valid phases are `live_test` and `away_production`.
+Valid construction phases are `live_test` and `away_production`.
 
-Valid stages are defined in `arctic_qa.model_broker.STAGES`.
+Valid construction stages are defined in `arctic_qa.model_broker.STAGES`.
+
+The abstention evaluation uses the phase `benchmark_evaluation` and the stage family `evaluation_answer:<model>`.
+That phase has its own policy, price config, and gate, and never counts toward construction totals.
+Read `docs/ABSTENTION_EVALUATION.md` before you meter an evaluation call.
 
 The broker checks the offline-review execution gate before it reads a credential.
 

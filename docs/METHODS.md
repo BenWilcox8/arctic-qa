@@ -78,3 +78,10 @@ A run-specific candidate ID prevents identical content in another run from losin
 External candidate-file validation cannot change stored state.
 Stored validation events and exports bind to the exact candidate payload hash.
 A future authorized audit can add a stronger review label without blocking this production workflow.
+
+## Abstention evaluation
+
+The abstention evaluation reuses the response taxonomy and the metrics of the previous abstention paper (N1 to N5, ACC, Precision_abs, Recall_abs, F1_abs, Abstention Rate, R-Acc, SSR).
+It adds an abstention option to every item instead of a separate abstention dataset.
+The gold-present condition drops the last distractor of a fixed random order, so both conditions show the same option count.
+The [abstention evaluation document](ABSTENTION_EVALUATION.md) records the design, the run procedure, and the captain's decisions.

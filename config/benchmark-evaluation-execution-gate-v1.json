@@ -1,0 +1,22 @@
+{
+  "schema": "benchmark-evaluation-execution-gate-v1",
+  "evaluation_enabled": false,
+  "allowed_phase": null,
+  "eval_set_id": null,
+  "eval_set_manifest_sha256": null,
+  "prompt_version": null,
+  "prompt_sha256": null,
+  "abstention_option_text": null,
+  "models": [],
+  "arms": [],
+  "decoding": {},
+  "repeats_maximum": null,
+  "authorized_run_id": null,
+  "evaluation_policy_sha256": null,
+  "evaluation_price_config_sha256": null,
+  "integrated_code_commit": null,
+  "independent_review_verdict": "pending",
+  "review_record": null,
+  "review_record_sha256": null,
+  "message": "Benchmark evaluation stays disabled until a reviewed private gate binds one evaluation set, prompt, model list, decoding record and run id. See docs/ABSTENTION_EVALUATION.md."
+}

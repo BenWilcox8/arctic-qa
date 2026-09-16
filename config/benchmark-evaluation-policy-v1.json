@@ -1,0 +1,18 @@
+{
+  "schema": "benchmark-evaluation-policy-v1",
+  "policy_id": "arctic-abstention-evaluation-policy-v1-canary",
+  "purpose": "First benchmark evaluation budget policy: the bounded paid canary that gauges the price per call (captain order 2026-09-16). A later policy raises the ceiling for the large run after the dataset is complete.",
+  "evaluation_ceiling_usd": "5.00",
+  "ceiling_scope": "cumulative benchmark_evaluation spend, reservations and ambiguous charges in the shared ledger; halt at exhaustion, no reset",
+  "maximum_request_reserved_cost_usd": "0.25",
+  "maximum_calls_per_item_condition_model_arm": 8,
+  "maximum_concurrent_requests": 1,
+  "maximum_requests_per_minute": 10,
+  "maximum_output_tokens_including_thinking": 8192,
+  "automatic_transport_retries": 0,
+  "automatic_model_fallback": false,
+  "re_ask_on_invalid_response": false,
+  "automatic_budget_rearm": false,
+  "stop_on_first_infrastructure_error_or_ambiguous_charge": true,
+  "scope": "Google Gemini models only until another credential is enabled; evaluation spend counts toward the project lifetime ceiling and never toward dataset construction totals"
+}

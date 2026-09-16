@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .db import Database
+from .distractor_order import apply_order, resolve_order
 from .util import atomic_json, atomic_write, jsonl_bytes, sha256_bytes, stable_id
 
 
@@ -60,6 +61,11 @@ def export_run(
             item for item in validation_details["distractors"] if item["accepted"]
         ]
         if validation_details["labels"].get("mcq_eligible") and len(accepted) >= 3:
+            # A candidate that records its fixed random distractor order
+            # exports in that order, so the answer-present MCQ drops the last
+            # ordered distractor. An older candidate keeps validation order.
+            if candidate.get("distractor_order") is not None:
+                accepted = apply_order(resolve_order(candidate), accepted)
             mcqs.append(_present_mcq(candidate, accepted[:3], seed))
             if len(accepted) >= 4:
                 mcqs.append(_absent_mcq(candidate, accepted[:4], seed))
@@ -185,6 +191,7 @@ def _present_mcq(
         "question": candidate["question"],
         "question_context": candidate.get("question_context", ""),
         "options": options,
+        "distractor_order": candidate.get("distractor_order"),
         "release_label": "machine_accepted_unverified",
         "source": candidate["source"],
         "answer_evidence": _answer_evidence(candidate["answer"]),
@@ -232,6 +239,7 @@ def _absent_mcq(
         "question": candidate["question"],
         "question_context": candidate.get("question_context", ""),
         "options": options,
+        "distractor_order": candidate.get("distractor_order"),
         "release_label": "machine_accepted_unverified",
         "source": candidate["source"],
     }

@@ -13,6 +13,7 @@ from .context_projection import (
     context_only_display_text,
 )
 from .db import Database, now
+from .distractor_order import distractor_order_record
 from .errors import CandidateRejectedError, ProviderResponseError
 from .extraction import load_chunks
 from .providers import (
@@ -3063,6 +3064,10 @@ def generate_candidate(
             }
         ),
         "distractors": distractors,
+        # Abstention evaluation (captain decision 2026-09-16): every item
+        # carries one fixed random distractor order with its seed, so the
+        # gold-present condition can drop the last one at test time.
+        "distractor_order": distractor_order_record(item_id, distractors),
         "option_verdicts": option_verdicts,
         "option_set_verdict": option_stage["set_verdict"],
         "correction_history": [],
@@ -4079,6 +4084,9 @@ def resume_candidate_distractors(
     candidate["item_id"] = stable_id("aqa-targeted", item_id, PROMPT_VERSION)
     candidate["status"] = "candidate"
     candidate["distractors"] = distractors
+    candidate["distractor_order"] = distractor_order_record(
+        candidate["item_id"], distractors
+    )
     candidate["option_verdicts"] = verdicts
     candidate["option_set_verdict"] = option_stage["set_verdict"]
     candidate["correction_history"] = [

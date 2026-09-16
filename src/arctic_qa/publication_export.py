@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .distractor_order import apply_order, resolve_order
 from .util import atomic_json, atomic_write, canonical_json, jsonl_bytes, stable_id
 
 
@@ -188,6 +189,11 @@ def _live_reviewer_row(
     ]
     if len(distractors) < 3:
         raise ValueError("a live dataset row requires three accepted distractors")
+    # A candidate with a recorded distractor order shows its accepted
+    # distractors in that order; the preview then drops the last ordered one.
+    distractor_order = candidate.get("distractor_order")
+    if distractor_order is not None:
+        distractors = apply_order(resolve_order(candidate), distractors)
     verdicts = {
         item.get("option_text"): item
         for item in candidate.get("option_verdicts", [])
@@ -260,6 +266,7 @@ def _live_reviewer_row(
             if evidence is not None
         ],
         "options": options,
+        "distractor_order": _live_safe(distractor_order),
         "rationales": {
             name: value
             for name, value in (

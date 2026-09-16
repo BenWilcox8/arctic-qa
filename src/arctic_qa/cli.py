@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from . import abstention_cli
 from .access_readiness import run_access_readiness, supervise_access_readiness
 from .broker_provider import BrokerProvider
 from .corpus_viewer import serve_corpus_viewer
@@ -466,6 +467,8 @@ def parser() -> argparse.ArgumentParser:
     stream.add_argument("--credential-file", type=Path)
     stream.add_argument("--prior-construction-spend-usd", type=Decimal)
 
+    abstention_cli.add_parser(commands)
+
     reconcile = commands.add_parser(
         "reconcile-usage",
         help="Settle one saved response that proves an omitted thought count is zero.",
@@ -714,6 +717,8 @@ def main(argv: list[str] | None = None) -> int:
                     decision_at_utc=args.decision_at_utc,
                 ),
             )
+        if args.command == "abstention-eval":
+            return _emit(args, abstention_cli.handle(args))
         if args.command == "reconcile-usage":
             return _emit(args, _reconcile_usage(args))
         if args.command == "authorize-ambiguous-continuation":

@@ -37,7 +37,33 @@ STAGES = {
     "option_verification",
     "repair",
 }
-PHASES = {"live_test", "away_production"}
+CONSTRUCTION_PHASES = {"live_test", "away_production"}
+# Abstention benchmark evaluation (captain order 2026-09-16). Evaluation calls
+# share this one ledger and the lifetime ceiling, but they run under their own
+# phase, stage family, budget policy, price config and execution gate, so
+# evaluation spend never mixes with construction accounting.
+EVALUATION_PHASE = "benchmark_evaluation"
+PHASES = CONSTRUCTION_PHASES | {EVALUATION_PHASE}
+EVALUATION_STAGE_PREFIX = "evaluation_answer:"
+EVALUATION_STAGE_PATTERN = re.compile(r"^evaluation_answer:[a-z0-9.-]+$")
+EVALUATION_POLICY_SCHEMA = "benchmark-evaluation-policy-v1"
+EVALUATION_PRICE_CONFIG_SCHEMA = "benchmark-evaluation-price-config-v1"
+EVALUATION_GATE_SCHEMA = "benchmark-evaluation-execution-gate-v1"
+EVALUATION_CEILING_REASON = "the paid request exceeds the evaluation ceiling"
+EVALUATION_GATE_BINDING_FIELDS = {
+    "eval_set_id",
+    "eval_set_manifest_sha256",
+    "prompt_version",
+    "prompt_sha256",
+    "abstention_option_text",
+    "models",
+    "arms",
+    "decoding",
+    "repeats_maximum",
+    "authorized_run_id",
+    "evaluation_policy_sha256",
+    "evaluation_price_config_sha256",
+}
 CONFIG_TRANSITION_V1_FIELDS = {
     "schema",
     "ledger_file",
@@ -456,6 +482,175 @@ def _money(value: Any, name: str, *, positive: bool = False) -> Decimal:
     return _decimal(value, name, positive=positive)
 
 
+def is_evaluation_stage(stage: Any) -> bool:
+    """Return whether a stage belongs to the evaluation stage family."""
+    return isinstance(stage, str) and EVALUATION_STAGE_PATTERN.fullmatch(stage) is not None
+
+
+def stage_supported(stage: Any) -> bool:
+    return stage in STAGES or is_evaluation_stage(stage)
+
+
+def evaluation_stage(model: str) -> str:
+    """Return the ledger stage of one evaluated model."""
+    stage = f"{EVALUATION_STAGE_PREFIX}{model}"
+    if not is_evaluation_stage(stage):
+        raise ValueError(f"the evaluated model name cannot form a stage: {model}")
+    return stage
+
+
+def _validate_evaluation_policy(
+    path: Path, construction_policy: dict[str, Any]
+) -> dict[str, Any]:
+    value = _read(path)
+    if value.get("schema") != EVALUATION_POLICY_SCHEMA:
+        raise ValueError("unsupported benchmark evaluation policy schema")
+    if not str(value.get("policy_id") or "").strip():
+        raise ValueError("the benchmark evaluation policy lacks a policy id")
+    ceiling = _money(
+        value.get("evaluation_ceiling_usd"), "evaluation_ceiling_usd", positive=True
+    )
+    reserve = _money(
+        construction_policy["reserved_for_benchmark_evaluation_usd"],
+        "evaluation reserve",
+    )
+    if ceiling > reserve:
+        raise ValueError("the evaluation ceiling exceeds the evaluation reserve")
+    request_cap = _money(
+        value.get("maximum_request_reserved_cost_usd"),
+        "maximum_request_reserved_cost_usd",
+        positive=True,
+    )
+    if request_cap > _money(
+        construction_policy["maximum_request_reserved_cost_usd"], "request cap"
+    ):
+        raise ValueError("the evaluation request cap exceeds the construction cap")
+    for field in (
+        "maximum_calls_per_item_condition_model_arm",
+        "maximum_concurrent_requests",
+        "maximum_requests_per_minute",
+        "maximum_output_tokens_including_thinking",
+    ):
+        item = value.get(field)
+        if isinstance(item, bool) or not isinstance(item, int) or item < 1:
+            raise ValueError(f"the benchmark evaluation policy {field} is invalid")
+    if value["maximum_output_tokens_including_thinking"] > int(
+        construction_policy["maximum_output_tokens_including_thinking"]
+    ):
+        raise ValueError("the evaluation output limit exceeds the construction limit")
+    if value.get("automatic_transport_retries") != 0:
+        raise ValueError("the benchmark evaluation policy permits retries")
+    for field, expected in {
+        "automatic_model_fallback": False,
+        "re_ask_on_invalid_response": False,
+        "automatic_budget_rearm": False,
+        "stop_on_first_infrastructure_error_or_ambiguous_charge": True,
+    }.items():
+        if value.get(field) is not expected:
+            raise ValueError(f"benchmark evaluation control changed: {field}")
+    return value
+
+
+def _validate_evaluation_price_config(
+    path: Path, construction_config: dict[str, Any]
+) -> dict[str, Any]:
+    from datetime import date
+
+    value = _read(path)
+    if value.get("schema") != EVALUATION_PRICE_CONFIG_SCHEMA:
+        raise ValueError("unsupported benchmark evaluation price config schema")
+    if not str(value.get("config_id") or "").strip():
+        raise ValueError("the benchmark evaluation price config lacks a config id")
+    if value.get("api_base") != construction_config["api_base"]:
+        raise ValueError("the benchmark evaluation API base differs from the broker")
+    if value.get("provider") != "google_gemini":
+        raise ValueError("the benchmark evaluation price config provider is unsupported")
+    models = value.get("models")
+    if not isinstance(models, dict) or not models:
+        raise ValueError("the benchmark evaluation price config lists no model")
+    for model, entry in models.items():
+        if not is_evaluation_stage(f"{EVALUATION_STAGE_PREFIX}{model}"):
+            raise ValueError(f"the evaluated model name is invalid: {model}")
+        if not isinstance(entry, dict):
+            raise ValueError(f"the price entry of {model} is not an object")
+        for field in ("maximum_input_tokens", "maximum_output_tokens"):
+            if (
+                isinstance(entry.get(field), bool)
+                or not isinstance(entry.get(field), int)
+                or entry[field] < 1
+            ):
+                raise ValueError(f"the price entry of {model} has an invalid {field}")
+        if entry["maximum_output_tokens"] > int(
+            construction_config["maximum_output_tokens"]
+        ):
+            raise ValueError(f"the output limit of {model} exceeds the broker limit")
+        for field in (
+            "input_usd_per_million_tokens",
+            "output_usd_per_million_tokens_including_thinking",
+        ):
+            _money(entry.get(field), field, positive=True)
+        _money(entry.get("temperature"), "temperature")
+        levels = entry.get("thinking_levels")
+        if (
+            not isinstance(levels, list)
+            or not levels
+            or any(not isinstance(level, str) or not level for level in levels)
+        ):
+            raise ValueError(f"the price entry of {model} lists no thinking level")
+        if not isinstance(entry.get("is_pro"), bool):
+            raise ValueError(f"the price entry of {model} lacks the Pro flag")
+        if "call_timeout_seconds" in entry:
+            from .gemini_eligibility import _validate_call_timeout
+
+            _validate_call_timeout(entry["call_timeout_seconds"])
+        start = date.fromisoformat(str(entry.get("price_valid_from")))
+        end = date.fromisoformat(str(entry.get("price_valid_through")))
+        if not start <= date.today() <= end:
+            raise ValueError(f"the price of {model} is not active; update the record")
+        if not str(entry.get("price_source", "")).startswith("https://ai.google.dev/"):
+            raise ValueError(f"the price source of {model} is not an official URL")
+    return value
+
+
+def evaluation_model_config(config: dict[str, Any], stage: str) -> dict[str, Any]:
+    """Return the price and decoding record of one evaluation stage."""
+    if not is_evaluation_stage(stage):
+        raise ValueError("the stage is not an evaluation stage")
+    model = stage[len(EVALUATION_STAGE_PREFIX) :]
+    entry = (config.get("models") or {}).get(model)
+    if not isinstance(entry, dict):
+        raise ValueError(f"the evaluated model has no price entry: {model}")
+    return {"api_base": config["api_base"], **entry, "model": model}
+
+
+def _validate_evaluation_gate(path: Path) -> dict[str, Any]:
+    value = _read(path)
+    if value.get("schema") != EVALUATION_GATE_SCHEMA:
+        raise ValueError("unsupported benchmark evaluation gate schema")
+    if value.get("evaluation_enabled") is not True:
+        raise ValueError("benchmark evaluation is disabled")
+    if value.get("allowed_phase") != EVALUATION_PHASE:
+        raise ValueError("the benchmark evaluation gate does not allow this phase")
+    if value.get("independent_review_verdict") != "pass":
+        raise ValueError("the benchmark evaluation review did not pass")
+    for field in ("integrated_code_commit", "review_record"):
+        if not str(value.get(field) or "").strip():
+            raise ValueError(f"the benchmark evaluation gate lacks {field}")
+    missing = sorted(EVALUATION_GATE_BINDING_FIELDS - set(value))
+    if missing:
+        raise ValueError(f"the benchmark evaluation gate lacks {missing[0]}")
+    if not isinstance(value["models"], list) or not value["models"]:
+        raise ValueError("the benchmark evaluation gate lists no model")
+    if not isinstance(value["arms"], list) or not value["arms"]:
+        raise ValueError("the benchmark evaluation gate lists no thinking arm")
+    repeats = value["repeats_maximum"]
+    if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1:
+        raise ValueError("the benchmark evaluation gate repeat limit is invalid")
+    if not isinstance(value["decoding"], dict):
+        raise ValueError("the benchmark evaluation gate decoding record is invalid")
+    return value
+
+
 def _validate_policy(path: Path) -> dict[str, Any]:
     value = _read(path)
     if value.get("schema") != "streaming-dataset-budget-policy-v1":
@@ -622,6 +817,20 @@ def _validate_payload(payload: dict[str, Any], config: dict[str, Any]) -> None:
         "thinkingLevel": config["thinking_level"]
     }:
         raise ValueError("the broker thinking control changed")
+    if "thinking_levels" in config:
+        # An evaluation model entry: the arm must be an official preset of the
+        # model and the temperature must be the pinned API maximum.
+        levels = config["thinking_levels"]
+        if (
+            not isinstance(thinking, dict)
+            or set(thinking) != {"thinkingLevel"}
+            or thinking["thinkingLevel"] not in levels
+        ):
+            raise ValueError("the evaluation thinking arm is not an official preset")
+        if "temperature" not in generation or _money(
+            generation["temperature"], "temperature"
+        ) != _money(config["temperature"], "pinned temperature"):
+            raise ValueError("the evaluation temperature is not the pinned maximum")
     for instruction in (payload.get("systemInstruction"), *payload.get("contents", [])):
         if not isinstance(instruction, dict):
             raise ValueError("the broker request content is invalid")
@@ -642,8 +851,13 @@ def broker_request_key(
     family_id: str,
     source_version_id: str,
     payload: dict[str, Any],
+    trial_id: str | None = None,
 ) -> str:
-    """Bind one request key to its model, pipeline identity, and exact payload."""
+    """Bind one request key to its model, pipeline identity, and exact payload.
+
+    An evaluation request also binds its run id and trial id, so two repeats
+    of one identical stimulus never collide and are never treated as replays.
+    """
     identity = {
         "model": model,
         "stage": stage,
@@ -654,6 +868,10 @@ def broker_request_key(
     }
     if phase == "away_production":
         identity.update({"phase": phase, "run_id": run_id})
+    if phase == EVALUATION_PHASE:
+        if not trial_id:
+            raise ValueError("an evaluation request key requires a trial id")
+        identity.update({"phase": phase, "run_id": run_id, "trial_id": trial_id})
     return sha256_bytes(canonical_json(identity).encode())
 
 
@@ -672,6 +890,9 @@ class SharedGeminiBroker:
         prior_construction_spend_usd: Decimal,
         transport: Any | None = None,
         config_transition_file: Path | None = None,
+        evaluation_policy_file: Path | None = None,
+        evaluation_price_config_file: Path | None = None,
+        evaluation_gate_file: Path | None = None,
     ) -> None:
         self.policy_file = policy_file.resolve()
         self.price_config_file = price_config_file.resolve()
@@ -692,11 +913,163 @@ class SharedGeminiBroker:
         self._authorized_live_test_ceiling_usd: Decimal | None = None
         self._status_observer: Callable[[Path], None] | None = None
         self._stream_input_binding: dict[str, Any] | None = None
+        evaluation_files = (
+            evaluation_policy_file,
+            evaluation_price_config_file,
+            evaluation_gate_file,
+        )
+        if any(evaluation_files) and not all(evaluation_files):
+            raise ValueError(
+                "benchmark evaluation needs its policy, price config and gate together"
+            )
+        self.evaluation_policy_file = (
+            evaluation_policy_file.resolve() if evaluation_policy_file else None
+        )
+        self.evaluation_price_config_file = (
+            evaluation_price_config_file.resolve()
+            if evaluation_price_config_file
+            else None
+        )
+        self.evaluation_gate_file = (
+            evaluation_gate_file.resolve() if evaluation_gate_file else None
+        )
+        self.evaluation_policy: dict[str, Any] | None = None
+        self.evaluation_config: dict[str, Any] | None = None
+        self.active_evaluation_price_config_sha256: str | None = None
+        self._evaluation_binding: dict[str, Any] | None = None
+        if self.evaluation_policy_file is not None:
+            self.evaluation_policy = _validate_evaluation_policy(
+                self.evaluation_policy_file, self.policy
+            )
+            self.evaluation_config = _validate_evaluation_price_config(
+                self.evaluation_price_config_file, self.config  # type: ignore[arg-type]
+            )
+            self.active_evaluation_price_config_sha256 = sha256_file(
+                self.evaluation_price_config_file  # type: ignore[arg-type]
+            )
+            gate = _validate_evaluation_gate(self.evaluation_gate_file)  # type: ignore[arg-type]
+            self._validate_evaluation_gate_hashes(gate)
         self._initialize()
+
+    def _validate_evaluation_gate_hashes(self, gate: dict[str, Any]) -> None:
+        if gate["evaluation_policy_sha256"] != sha256_file(
+            self.evaluation_policy_file  # type: ignore[arg-type]
+        ):
+            raise ValueError("the benchmark evaluation gate binds another policy")
+        if gate["evaluation_price_config_sha256"] != (
+            self.active_evaluation_price_config_sha256
+        ):
+            raise ValueError("the benchmark evaluation gate binds another price config")
+        for model in gate["models"]:
+            entry = (self.evaluation_config or {}).get("models", {}).get(model)
+            if not isinstance(entry, dict):
+                raise ValueError(f"the gate model has no price entry: {model}")
+            for arm in gate["arms"]:
+                if arm not in entry["thinking_levels"]:
+                    raise ValueError(
+                        f"the gate arm {arm} is not an official preset of {model}"
+                    )
+
+    def evaluation_enabled(self) -> bool:
+        return self.evaluation_policy is not None
+
+    def _require_evaluation(self) -> None:
+        if not self.evaluation_enabled():
+            raise ValueError(
+                "the broker has no benchmark evaluation policy, price config and gate"
+            )
+
+    def bind_evaluation(
+        self,
+        *,
+        eval_set_manifest_file: Path,
+        eval_set_id: str,
+        run_id: str,
+        models: list[str],
+        arms: list[str],
+        repeats: int,
+        prompt_version: str,
+        prompt_sha256: str,
+        abstention_option_text: str,
+        decoding: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bind one reviewed evaluation run to the gate before any paid call."""
+        self._require_evaluation()
+        gate = _validate_evaluation_gate(self.evaluation_gate_file)  # type: ignore[arg-type]
+        self._validate_evaluation_gate_hashes(gate)
+        binding = {
+            "eval_set_manifest_file": eval_set_manifest_file.resolve(),
+            "eval_set_id": eval_set_id,
+            "run_id": run_id,
+            "models": list(models),
+            "arms": list(arms),
+            "repeats": repeats,
+            "prompt_version": prompt_version,
+            "prompt_sha256": prompt_sha256,
+            "abstention_option_text": abstention_option_text,
+            "decoding": decoding,
+        }
+        self._validate_evaluation_binding(gate, binding, request_run_id=run_id)
+        self._evaluation_binding = binding
+        return binding
+
+    @staticmethod
+    def _validate_evaluation_binding(
+        gate: dict[str, Any],
+        binding: dict[str, Any] | None,
+        *,
+        request_run_id: str | None = None,
+    ) -> None:
+        if binding is None:
+            raise ValueError("the benchmark evaluation run is not bound")
+        manifest = binding["eval_set_manifest_file"]
+        if not manifest.is_file() or sha256_file(manifest) != (
+            gate["eval_set_manifest_sha256"]
+        ):
+            raise ValueError("the reviewed evaluation set manifest changed")
+        if binding["eval_set_id"] != gate["eval_set_id"]:
+            raise ValueError("the reviewed evaluation set identity changed")
+        if binding["run_id"] != gate["authorized_run_id"] or (
+            request_run_id is not None and request_run_id != gate["authorized_run_id"]
+        ):
+            raise ValueError("the reviewed evaluation run identity changed")
+        if (
+            binding["prompt_version"] != gate["prompt_version"]
+            or binding["prompt_sha256"] != gate["prompt_sha256"]
+            or binding["abstention_option_text"] != gate["abstention_option_text"]
+        ):
+            raise ValueError("the reviewed evaluation prompt changed")
+        if not set(binding["models"]) <= set(gate["models"]) or not binding["models"]:
+            raise ValueError("the reviewed evaluation model list changed")
+        if not set(binding["arms"]) <= set(gate["arms"]) or not binding["arms"]:
+            raise ValueError("the reviewed evaluation thinking arms changed")
+        repeats = binding["repeats"]
+        if (
+            isinstance(repeats, bool)
+            or not isinstance(repeats, int)
+            or not 1 <= repeats <= int(gate["repeats_maximum"])
+        ):
+            raise ValueError("the reviewed evaluation repeat count changed")
+        if binding["decoding"] != gate["decoding"]:
+            raise ValueError("the reviewed evaluation decoding settings changed")
 
     def config_for_stage(self, stage: str) -> dict[str, Any]:
         """Return the registered model and price values for one stage."""
+        if is_evaluation_stage(stage):
+            if self.evaluation_config is None:
+                raise ValueError(
+                    "an evaluation stage needs the benchmark evaluation price config"
+                )
+            return evaluation_model_config(self.evaluation_config, stage)
         return model_config_for_stage(self.config, stage)
+
+    def _timeout_for_stage(self, stage: str) -> int:
+        if is_evaluation_stage(stage):
+            entry = self.config_for_stage(stage)
+            if "call_timeout_seconds" not in entry:
+                return DEFAULT_CALL_TIMEOUT_SECONDS
+            return int(entry["call_timeout_seconds"])
+        return call_timeout_seconds(self.config, stage)
 
     @property
     def _lock_file(self) -> Path:
@@ -881,7 +1254,7 @@ class SharedGeminiBroker:
         self, authorization: dict[str, Any]
     ) -> None:
         gate_phase = _read(self.execution_gate_file).get("allowed_phase")
-        if gate_phase not in PHASES:
+        if gate_phase not in CONSTRUCTION_PHASES:
             raise ValueError("the configuration transition gate phase is invalid")
         gate = _validate_gate(self.execution_gate_file, gate_phase)
         if authorization.get("changed_policy_fields") in (
@@ -2598,7 +2971,7 @@ class SharedGeminiBroker:
                 transition_hash is None or transition_hash == resume_transition_sha256
             ):
                 raise ValueError("a paid-call resume transition did not advance")
-            if request["stage"] not in STAGES:
+            if not stage_supported(request["stage"]):
                 raise ValueError("a paid-call request has an unsupported stage")
             binding = ledger["family_bindings"].get(request["family_id"])
             if binding != {
@@ -2782,10 +3155,72 @@ class SharedGeminiBroker:
         for value in ledger["recent_submission_times_utc"]:
             datetime.fromisoformat(str(value).replace("Z", "+00:00"))
 
+    @staticmethod
+    def _evaluation_totals(ledger: dict[str, Any]) -> dict[str, Any]:
+        """Sum the evaluation-phase liabilities recorded in the ledger requests."""
+        totals: dict[str, Any] = {
+            "reserved_usd": Decimal("0"),
+            "spent_usd": Decimal("0"),
+            "ambiguous_usd": Decimal("0"),
+            "submissions": 0,
+            "inflight": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "thinking_tokens": 0,
+            "calls_by_trial_key": {},
+        }
+        for request in ledger["requests"].values():
+            if request.get("phase") != EVALUATION_PHASE:
+                continue
+            state = request.get("state")
+            if state not in {
+                "submitted",
+                "orphaned_no_replay",
+                "completed",
+                "ambiguous_charge",
+            }:
+                continue
+            reserved = _money(request.get("reserved_usd"), "evaluation reservation")
+            totals["submissions"] += 1
+            trial = request.get("evaluation_trial") or {}
+            trial_key = canonical_json(
+                {
+                    "family_id": request.get("family_id"),
+                    "stage": request.get("stage"),
+                    "condition": trial.get("condition"),
+                    "arm": trial.get("arm"),
+                }
+            )
+            totals["calls_by_trial_key"][trial_key] = (
+                totals["calls_by_trial_key"].get(trial_key, 0) + 1
+            )
+            if state in {"submitted", "orphaned_no_replay"}:
+                totals["reserved_usd"] += reserved
+                if state == "submitted":
+                    totals["inflight"] += 1
+            elif state == "ambiguous_charge":
+                totals["ambiguous_usd"] += reserved
+            else:
+                totals["spent_usd"] += _money(
+                    request.get("actual_cost_usd"), "evaluation actual cost"
+                )
+                usage = request.get("usage") or {}
+                totals["input_tokens"] += int(usage.get("promptTokenCount", 0))
+                totals["output_tokens"] += int(usage.get("candidatesTokenCount", 0))
+                totals["thinking_tokens"] += int(usage.get("thoughtsTokenCount", 0))
+        totals["used_usd"] = (
+            totals["reserved_usd"] + totals["spent_usd"] + totals["ambiguous_usd"]
+        )
+        return totals
+
     def _status_payload(self, ledger: dict[str, Any]) -> dict[str, Any]:
-        away_used = sum(
-            _money(ledger[name], name)
-            for name in ("reserved_usd", "spent_usd", "ambiguous_reserved_usd")
+        evaluation = self._evaluation_totals(ledger)
+        away_used = (
+            sum(
+                _money(ledger[name], name)
+                for name in ("reserved_usd", "spent_usd", "ambiguous_reserved_usd")
+            )
+            - evaluation["used_usd"]
         )
         live_used = sum(
             _money(row.get("reserved_usd", 0), "live reserved")
@@ -2797,6 +3232,10 @@ class SharedGeminiBroker:
         if self._authorized_live_test_ceiling_usd is not None:
             live_test_cap = min(live_test_cap, self._authorized_live_test_ceiling_usd)
         construction_used = self.prior + away_used
+        lifetime_used = construction_used + evaluation["used_usd"]
+        construction_submissions = (
+            int(ledger["generation_submissions"]) - evaluation["submissions"]
+        )
         accepted = int(ledger["accepted_question_count"])
         cutoff = datetime.now(UTC) - timedelta(minutes=1)
         recent_count = sum(
@@ -2842,8 +3281,8 @@ class SharedGeminiBroker:
             else None
         )
         usage = {
-            "project_lifetime_usd": str(construction_used),
-            "benchmark_evaluation_usd": "0",
+            "project_lifetime_usd": str(lifetime_used),
+            "benchmark_evaluation_usd": str(evaluation["used_usd"]),
             "dataset_construction_usd": str(construction_used),
             "construction_checkpoint_usd": str(construction_used),
             "away_session_usd": str(away_used),
@@ -2851,20 +3290,21 @@ class SharedGeminiBroker:
             "accepted_questions": accepted,
             "live_test_papers": len(ledger["live_test_papers"]),
             "live_test_generation_submissions": live_submissions,
-            "away_generation_submissions": int(ledger["generation_submissions"]),
+            "away_generation_submissions": construction_submissions,
             "concurrent_generation_requests": int(ledger["inflight"]),
             "generation_requests_in_current_minute": recent_count,
         }
         remaining = {
             "project_lifetime_usd": str(
                 _money(self.policy["project_lifetime_ceiling_usd"], "lifetime")
-                - construction_used
+                - lifetime_used
             ),
             "benchmark_evaluation_usd": str(
                 _money(
                     self.policy["reserved_for_benchmark_evaluation_usd"],
                     "evaluation reserve",
                 )
+                - evaluation["used_usd"]
             ),
             "dataset_construction_usd": str(
                 _money(
@@ -2899,7 +3339,7 @@ class SharedGeminiBroker:
             "away_generation_submissions": int(
                 self.policy["away_maximum_generation_submissions"]
             )
-            - int(ledger["generation_submissions"]),
+            - construction_submissions,
             "concurrent_generation_requests": int(
                 self.policy["maximum_concurrent_generation_requests"]
             )
@@ -2943,8 +3383,46 @@ class SharedGeminiBroker:
             "limits": limits,
             "usage": usage,
             "remaining": remaining,
+            "evaluation": self._evaluation_status(evaluation),
             "stages": ledger["stages"],
             "papers": papers,
+        }
+
+    def _evaluation_status(self, evaluation: dict[str, Any]) -> dict[str, Any]:
+        """Report the evaluation phase beside, never inside, construction totals."""
+        policy = self.evaluation_policy
+        ceiling = (
+            _money(policy["evaluation_ceiling_usd"], "evaluation ceiling")
+            if policy
+            else None
+        )
+        return {
+            "phase": EVALUATION_PHASE,
+            "policy_id": policy["policy_id"] if policy else None,
+            "policy_sha256": (
+                sha256_file(self.evaluation_policy_file)
+                if self.evaluation_policy_file
+                else None
+            ),
+            "price_config_sha256": self.active_evaluation_price_config_sha256,
+            "gate_sha256": (
+                sha256_file(self.evaluation_gate_file)
+                if self.evaluation_gate_file
+                else None
+            ),
+            "ceiling_usd": str(ceiling) if ceiling is not None else None,
+            "reserved_usd": str(evaluation["reserved_usd"]),
+            "spent_usd": str(evaluation["spent_usd"]),
+            "ambiguous_usd": str(evaluation["ambiguous_usd"]),
+            "used_usd": str(evaluation["used_usd"]),
+            "remaining_usd": (
+                str(ceiling - evaluation["used_usd"]) if ceiling is not None else None
+            ),
+            "submissions": evaluation["submissions"],
+            "inflight": evaluation["inflight"],
+            "input_tokens": evaluation["input_tokens"],
+            "output_tokens": evaluation["output_tokens"],
+            "thinking_tokens": evaluation["thinking_tokens"],
         }
 
     def _publish_status(self, ledger: dict[str, Any]) -> None:
@@ -3166,7 +3644,7 @@ class SharedGeminiBroker:
             old = ledger["accepted_families"].get(family_id)
             if old and old != item_id:
                 gate_phase = _read(self.execution_gate_file).get("allowed_phase")
-                if gate_phase not in PHASES:
+                if gate_phase not in CONSTRUCTION_PHASES:
                     raise ValueError("the accepted-item supersession phase is invalid")
                 gate = _validate_gate(self.execution_gate_file, gate_phase)
                 binding = self._stream_input_binding
@@ -4235,7 +4713,12 @@ class SharedGeminiBroker:
             return exact_input
 
     def _pace(self) -> None:
-        """Wait until the frozen per-minute submission window has room."""
+        """Wait until the frozen per-minute submission window has room.
+
+        The active phase is read from ``_pacing_phase``, which ``execute`` sets
+        before the wait, so the method keeps its historical one-argument shape.
+        """
+        phase = getattr(self, "_pacing_phase", "live_test")
         while True:
             with self._lock_file.open("a+") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
@@ -4246,7 +4729,7 @@ class SharedGeminiBroker:
                 for value in ledger["recent_submission_times_utc"]
                 if datetime.fromisoformat(value.replace("Z", "+00:00")) > cutoff
             )
-            limit = int(self.policy["maximum_generation_requests_per_minute"])
+            limit = self._minute_limit(phase)
             if len(recent) < limit:
                 return
             wait_seconds = max(
@@ -4255,6 +4738,57 @@ class SharedGeminiBroker:
             )
             if wait_seconds:
                 time.sleep(min(wait_seconds + 0.01, 60.0))
+
+    def _minute_limit(self, phase: str) -> int:
+        if phase == EVALUATION_PHASE:
+            self._require_evaluation()
+            return int(self.evaluation_policy["maximum_requests_per_minute"])  # type: ignore[index]
+        return int(self.policy["maximum_generation_requests_per_minute"])
+
+    def _concurrency_limit(self, phase: str) -> int:
+        if phase == EVALUATION_PHASE:
+            self._require_evaluation()
+            return int(self.evaluation_policy["maximum_concurrent_requests"])  # type: ignore[index]
+        return int(self.policy["maximum_concurrent_generation_requests"])
+
+    def _check_evaluation_reservation(
+        self, ledger: dict[str, Any], request: dict[str, Any], reserved: Decimal
+    ) -> None:
+        """Apply the evaluation ceiling, the reserve and the lifetime ceiling."""
+        self._require_evaluation()
+        policy = self.evaluation_policy or {}
+        if reserved > _money(policy["maximum_request_reserved_cost_usd"], "request"):
+            raise ValueError(PER_REQUEST_CAP_REASON)
+        evaluation = self._evaluation_totals(ledger)
+        if evaluation["used_usd"] + reserved > _money(
+            policy["evaluation_ceiling_usd"], "evaluation ceiling"
+        ):
+            raise ValueError(EVALUATION_CEILING_REASON)
+        if evaluation["used_usd"] + reserved > _money(
+            self.policy["reserved_for_benchmark_evaluation_usd"], "evaluation reserve"
+        ):
+            raise ValueError("the paid request exceeds the evaluation reserve")
+        all_used = sum(
+            _money(ledger[name], name)
+            for name in ("reserved_usd", "spent_usd", "ambiguous_reserved_usd")
+        )
+        if self.prior + all_used + reserved > _money(
+            self.policy["project_lifetime_ceiling_usd"], "lifetime"
+        ):
+            raise ValueError("the paid request exceeds the project lifetime ceiling")
+        trial = request.get("evaluation_trial") or {}
+        trial_key = canonical_json(
+            {
+                "family_id": request.get("family_id"),
+                "stage": request.get("stage"),
+                "condition": trial.get("condition"),
+                "arm": trial.get("arm"),
+            }
+        )
+        if evaluation["calls_by_trial_key"].get(trial_key, 0) >= int(
+            policy["maximum_calls_per_item_condition_model_arm"]
+        ):
+            raise ValueError("the evaluation repeat limit for this item is complete")
 
     def _reserve(
         self,
@@ -4280,31 +4814,17 @@ class SharedGeminiBroker:
             }
             if ledger["halted"] or ambiguous_requests - continuation_events.keys():
                 raise ValueError("the paid-call broker is halted")
-            if reserved > _money(
-                self.policy["maximum_request_reserved_cost_usd"], "request"
-            ):
-                raise ValueError(PER_REQUEST_CAP_REASON)
-            used = sum(
-                _money(ledger[name], name)
-                for name in ("reserved_usd", "spent_usd", "ambiguous_reserved_usd")
-            )
-            if used + reserved > _money(
-                self.policy["away_session_total_ceiling_usd"], "away"
-            ):
-                raise ValueError("the paid request exceeds the authorized away cap")
-            construction_used = self.prior + used
-            if construction_used + reserved > _money(
-                self.policy["construction_review_checkpoint_usd"], "checkpoint"
-            ):
-                raise ValueError("the paid request exceeds the construction checkpoint")
-            if ledger["generation_submissions"] >= int(
-                self.policy["away_maximum_generation_submissions"]
-            ):
-                raise ValueError("the away-session submission limit is complete")
-            if ledger["accepted_question_count"] >= int(
-                self.policy["accepted_question_target"]
-            ):
-                raise ValueError("the accepted-question target is complete")
+            evaluation_used = self._evaluation_totals(ledger)["used_usd"]
+            evaluation_submissions = self._evaluation_totals(ledger)["submissions"]
+            if phase == EVALUATION_PHASE:
+                self._check_evaluation_reservation(ledger, request, reserved)
+            else:
+                self._check_construction_reservation(
+                    ledger,
+                    reserved,
+                    evaluation_used=evaluation_used,
+                    evaluation_submissions=evaluation_submissions,
+                )
             paper = ledger["papers"].setdefault(
                 family_id,
                 {
@@ -4322,7 +4842,9 @@ class SharedGeminiBroker:
                 _money(paper[name], name)
                 for name in ("reserved_usd", "spent_usd", "ambiguous_usd")
             )
-            if paper_used + reserved > _money(
+            # An evaluation item is its own paper family; its repeat limit
+            # replaces the per-paper construction cap.
+            if phase != EVALUATION_PHASE and paper_used + reserved > _money(
                 self.policy["maximum_paper_cost_usd"], "paper"
             ):
                 raise ValueError("the paid request exceeds the paper cost limit")
@@ -4362,9 +4884,7 @@ class SharedGeminiBroker:
                     submission_limit
                 ):
                     raise ValueError("the live-test submission limit is complete")
-            if ledger["inflight"] >= int(
-                self.policy["maximum_concurrent_generation_requests"]
-            ):
+            if ledger["inflight"] >= self._concurrency_limit(phase):
                 raise ValueError("the paid-call concurrency limit is complete")
             cutoff = datetime.now(UTC) - timedelta(minutes=1)
             recent = [
@@ -4372,9 +4892,7 @@ class SharedGeminiBroker:
                 for value in ledger["recent_submission_times_utc"]
                 if datetime.fromisoformat(value.replace("Z", "+00:00")) > cutoff
             ]
-            if len(recent) >= int(
-                self.policy["maximum_generation_requests_per_minute"]
-            ):
+            if len(recent) >= self._minute_limit(phase):
                 raise ValueError("the paid-call minute limit is complete")
             ledger["recent_submission_times_utc"] = recent + [_now()]
             ledger["reserved_usd"] = str(
@@ -4425,6 +4943,48 @@ class SharedGeminiBroker:
             )
             ledger["updated_at_utc"] = _now()
             self._commit_ledger(ledger)
+
+    def _check_construction_reservation(
+        self,
+        ledger: dict[str, Any],
+        reserved: Decimal,
+        *,
+        evaluation_used: Decimal,
+        evaluation_submissions: int,
+    ) -> None:
+        """Apply the construction caps; evaluation liabilities never count here."""
+        if reserved > _money(
+            self.policy["maximum_request_reserved_cost_usd"], "request"
+        ):
+            raise ValueError(PER_REQUEST_CAP_REASON)
+        used = (
+            sum(
+                _money(ledger[name], name)
+                for name in ("reserved_usd", "spent_usd", "ambiguous_reserved_usd")
+            )
+            - evaluation_used
+        )
+        if used + reserved > _money(
+            self.policy["away_session_total_ceiling_usd"], "away"
+        ):
+            raise ValueError("the paid request exceeds the authorized away cap")
+        construction_used = self.prior + used
+        if construction_used + reserved > _money(
+            self.policy["construction_review_checkpoint_usd"], "checkpoint"
+        ):
+            raise ValueError("the paid request exceeds the construction checkpoint")
+        if construction_used + evaluation_used + reserved > _money(
+            self.policy["project_lifetime_ceiling_usd"], "lifetime"
+        ):
+            raise ValueError("the paid request exceeds the project lifetime ceiling")
+        if ledger["generation_submissions"] - evaluation_submissions >= int(
+            self.policy["away_maximum_generation_submissions"]
+        ):
+            raise ValueError("the away-session submission limit is complete")
+        if ledger["accepted_question_count"] >= int(
+            self.policy["accepted_question_target"]
+        ):
+            raise ValueError("the accepted-question target is complete")
 
     def _settle(
         self,
@@ -4511,6 +5071,16 @@ class SharedGeminiBroker:
     def _completed_receipt(
         self, submitted: dict[str, Any], response: Any
     ) -> tuple[dict[str, Any], Decimal | None, dict[str, int] | None]:
+        if (
+            is_evaluation_stage(submitted.get("stage"))
+            and self.evaluation_config is None
+        ):
+            # Fail closed: a broker without the evaluation price config cannot
+            # settle an evaluation response, and must not record it as an
+            # ambiguous charge either.
+            raise ValueError(
+                "an evaluation response needs the benchmark evaluation price config"
+            )
         try:
             usage = _normalized_usage(response)
             values = [
@@ -4635,17 +5205,32 @@ class SharedGeminiBroker:
         source_version_id: str,
         request_key: str,
         payload: dict[str, Any],
+        trial: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if sha256_file(self.price_config_file) != self.active_price_config_sha256:
             raise ValueError("the active price configuration changed after startup")
-        if phase not in PHASES or stage not in STAGES:
+        if phase not in PHASES or not stage_supported(stage):
             raise ValueError("the paid request phase or stage is unsupported")
+        if (phase == EVALUATION_PHASE) != is_evaluation_stage(stage):
+            raise ValueError("the paid request phase does not match its stage family")
+        if phase == EVALUATION_PHASE:
+            self._require_evaluation()
+            if sha256_file(self.evaluation_price_config_file) != (  # type: ignore[arg-type]
+                self.active_evaluation_price_config_sha256
+            ):
+                raise ValueError(
+                    "the evaluation price configuration changed after startup"
+                )
+            if not isinstance(trial, dict) or not str(trial.get("trial_id") or ""):
+                raise ValueError("an evaluation request needs its trial record")
+        elif trial is not None:
+            raise ValueError("a construction request cannot carry a trial record")
         if not all((run_id, paper_id, family_id, source_version_id, request_key)):
             raise ValueError("the paid request identity is incomplete")
         if not re.fullmatch(r"[a-f0-9]{64}", request_key):
             raise ValueError("the paid request key must be a lowercase SHA-256 value")
         request_config = self.config_for_stage(stage)
-        timeout_seconds = call_timeout_seconds(self.config, stage)
+        timeout_seconds = self._timeout_for_stage(stage)
         _validate_payload(payload, request_config)
         expected_key = broker_request_key(
             model=request_config["model"],
@@ -4656,6 +5241,7 @@ class SharedGeminiBroker:
             family_id=family_id,
             source_version_id=source_version_id,
             payload=payload,
+            trial_id=str(trial["trial_id"]) if trial else None,
         )
         if request_key != expected_key:
             raise ValueError("the paid request key does not bind the exact request")
@@ -4669,12 +5255,39 @@ class SharedGeminiBroker:
             "family_id": family_id,
             "source_version_id": source_version_id,
             "model": request_config["model"],
-            "gate_sha256": sha256_file(self.execution_gate_file),
+            "gate_sha256": sha256_file(
+                self.evaluation_gate_file  # type: ignore[arg-type]
+                if phase == EVALUATION_PHASE
+                else self.execution_gate_file
+            ),
             "price_config_sha256": self.active_price_config_sha256,
             "policy_sha256": sha256_file(self.policy_file),
             "config_transition_sha256": self._config_transition_sha256,
             "timeout_seconds": timeout_seconds,
         }
+        if phase == EVALUATION_PHASE:
+            base.update(
+                {
+                    "evaluation_trial": {
+                        name: trial.get(name)  # type: ignore[union-attr]
+                        for name in (
+                            "trial_id",
+                            "eval_set_id",
+                            "item_id",
+                            "condition",
+                            "arm",
+                            "repeat",
+                        )
+                    },
+                    "evaluation_policy_sha256": sha256_file(
+                        self.evaluation_policy_file  # type: ignore[arg-type]
+                    ),
+                    "evaluation_price_config_sha256": (
+                        self.active_evaluation_price_config_sha256
+                    ),
+                    "evaluation_gate_sha256": base["gate_sha256"],
+                }
+            )
         operation = self._operation_lock_file.open("a+")
         try:
             fcntl.flock(operation, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -4685,10 +5298,18 @@ class SharedGeminiBroker:
             if exclusive_batch_marker_path(self.ledger_file).exists():
                 raise ValueError("exclusive Gemini batch mode is active")
             self._recover_orphans(active_run_id=run_id)
-            gate = _validate_gate(self.execution_gate_file, phase)
-            self._validate_stream_input_binding(
-                gate, self._stream_input_binding, request_run_id=run_id
-            )
+            if phase == EVALUATION_PHASE:
+                gate = _validate_evaluation_gate(self.evaluation_gate_file)  # type: ignore[arg-type]
+                self._validate_evaluation_gate_hashes(gate)
+                self._validate_evaluation_binding(
+                    gate, self._evaluation_binding, request_run_id=run_id
+                )
+            else:
+                gate = _validate_gate(self.execution_gate_file, phase)
+                self._validate_stream_input_binding(
+                    gate, self._stream_input_binding, request_run_id=run_id
+                )
+            self._pacing_phase = phase
             self._pace()
             client = self.transport or GeminiTransport(
                 self.config["api_base"],
