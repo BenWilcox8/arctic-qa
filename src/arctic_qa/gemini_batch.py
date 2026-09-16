@@ -1303,6 +1303,7 @@ def prepare_pipeline(
         "rejected": 0,
         "incomplete": 0,
         "unavailable": 0,
+        "paper_cost_cap_reached": 0,
     }
     for selected in selection[:limit]:
         candidate_key = selected.get("candidate_key")
@@ -1406,6 +1407,8 @@ def prepare_pipeline(
                 "accepted": "accepted",
                 "incomplete_non_mcq": "incomplete",
                 "generation_rejected": "rejected",
+                # The per-paper cost cap ends one family, not the batch.
+                "paper_cost_cap_reached": "paper_cost_cap_reached",
             }[generation["disposition"]]
             counts[state] += 1
             papers.append(

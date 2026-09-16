@@ -28,6 +28,20 @@ class BudgetOverageError(BudgetError):
     code = "BUDGET_OVERAGE"
 
 
+class PaperCostCapError(BudgetError):
+    """One paper family reached its maximum paper cost.
+
+    The cap bounds one family, never the run. The producer records the family,
+    skips it and continues; only a whole-run stop ends the producer.
+    """
+
+    code = "PAPER_COST_CAP_REACHED"
+
+    def __init__(self, message: str, *, stage: str | None = None) -> None:
+        super().__init__(message)
+        self.stage = stage
+
+
 class ProviderError(ArcticQAError):
     code = "PROVIDER_ERROR"
 

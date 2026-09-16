@@ -224,6 +224,11 @@ CEILING_CHANGES = (
 CEILING_EXTENSION_CHANGE: dict[str, Any] = {}
 AUTHORIZED_CAP_REASON = "the paid request exceeds the authorized live-test cap"
 PER_REQUEST_CAP_REASON = "the paid request exceeds USD 0.25"
+# One paper family reached ``maximum_paper_cost_usd``. The refusal describes the
+# family, not the moment and not the run: the cap holds, nothing is charged past
+# it, and every other family keeps its own budget. The producer records the
+# family and moves to the next paper instead of ending the run.
+PAPER_COST_CAP_REASON = "the paid request exceeds the paper cost limit"
 # Two scheduling refusals describe the moment, not the request: another request
 # of the same phase holds a slot or the window. ``execute`` waits a bounded time
 # for room before it records one. A request that one of them stopped resumes
@@ -5384,6 +5389,35 @@ class SharedGeminiBroker:
         finally:
             operation.close()
 
+    def family_cost_state(self, family_id: str) -> dict[str, str]:
+        """Return one paper family's committed spend against the paper cap.
+
+        A family the cap stopped is recorded with the money it already holds, so
+        the skip is legible without a second read of the ledger.
+        """
+        with self._lock_file.open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            ledger = self._validated_ledger()
+            row = ledger["papers"].get(family_id, {})
+            used = sum(
+                _money(row.get(name, 0), f"paper {name}")
+                for name in ("reserved_usd", "spent_usd", "ambiguous_usd")
+            )
+            cap = _money(self.policy["maximum_paper_cost_usd"], "paper cap")
+            return {
+                "family_id": family_id,
+                "reserved_usd": str(
+                    _money(row.get("reserved_usd", 0), "paper reserved")
+                ),
+                "spent_usd": str(_money(row.get("spent_usd", 0), "paper spent")),
+                "ambiguous_usd": str(
+                    _money(row.get("ambiguous_usd", 0), "paper ambiguous")
+                ),
+                "committed_usd": str(used),
+                "maximum_paper_cost_usd": str(cap),
+                "remaining_usd": str(cap - used),
+            }
+
     def operational_unresolved_families(self) -> dict[str, dict[str, str]]:
         """Return reviewed no-replay families with their exact skip reasons."""
         with self._lock_file.open("a+") as lock:
@@ -5969,7 +6003,7 @@ class SharedGeminiBroker:
             if phase != EVALUATION_PHASE and paper_used + reserved > _money(
                 self.policy["maximum_paper_cost_usd"], "paper"
             ):
-                raise ValueError("the paid request exceeds the paper cost limit")
+                raise ValueError(PAPER_COST_CAP_REASON)
             if phase == "live_test":
                 live_used = sum(
                     _money(row.get("reserved_usd", 0), "live reserved")

@@ -204,6 +204,26 @@ The chapter 3 expansion change set (`CHAPTER3_EXPANSION_CHANGE`) moves four fiel
 
 The broker refuses each of these four fields alone, and it accepts the expanded counts only under the expansion ceiling.
 
+### The per-paper cost cap
+
+`maximum_paper_cost_usd` bounds one paper family, never the run.
+
+The broker refuses a request that would take the family past the cap with `PAPER_COST_CAP_REASON`.
+
+It records the refusal as a `not_submitted` receipt and charges nothing past the cap.
+
+The receipt is immutable, and the reason is not resumable.
+
+Thus, a relaunch replays the same refusal at no cost and never re-tries the capped family.
+
+The streaming producer reads that refusal as `errors.PaperCostCapError`.
+
+It settles the in-flight call record as `generation_incomplete`, writes a `rejection_ledger` row at stage `paper_cost_cap` with the reason code `paper_cost_cap_reached`, the family's committed spend and the stage that stopped, and continues with the next paper.
+
+Only a whole-run stop ends the producer: the allocation ceiling, the session ceiling or a halt.
+
+To raise the cap for a family, move `maximum_paper_cost_usd` through a registered budget transition. Do not change the skip.
+
 ### Phase slots and windows
 
 Each phase counts its own in-flight requests against its own concurrency limit.

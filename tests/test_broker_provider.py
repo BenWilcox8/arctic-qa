@@ -8,8 +8,12 @@ import pytest
 
 from arctic_qa.broker_provider import BrokerProvider, _request_payload
 from arctic_qa.db import Database
-from arctic_qa.errors import ProviderError
-from arctic_qa.model_broker import SharedGeminiBroker, broker_request_key
+from arctic_qa.errors import PaperCostCapError, ProviderError
+from arctic_qa.model_broker import (
+    PAPER_COST_CAP_REASON,
+    SharedGeminiBroker,
+    broker_request_key,
+)
 from arctic_qa.providers import call_provider, provider_prompt_hash
 from arctic_qa.util import canonical_json, stable_id
 
@@ -554,3 +558,159 @@ def test_adapter_rejects_receipt_that_is_absent_from_broker_ledger(
         provider.invoke("question_writer", "System", "Prompt", parameters, 30)
 
     assert transport.methods == []
+
+
+class ExpensivePaperTransport(Transport):
+    """Report one costly call, so a family reaches the per-paper cost cap.
+
+    The reservation stays under ``maximum_request_reserved_cost_usd``, so the
+    refusal that follows is the per-paper cap and nothing else.
+    """
+
+    INPUT_TOKENS = 280_000
+    OUTPUT_TOKENS = 900
+    THINKING_TOKENS = 100
+
+    def post(self, model: str, method: str, body: dict) -> dict:
+        self.methods.append(method)
+        if method == "countTokens":
+            return {"totalTokens": self.INPUT_TOKENS}
+        return {
+            "responseId": "expensive-response",
+            "modelVersion": "gemini-3.8-flash",
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "content": {
+                        "parts": [{"text": json.dumps({"question": "What changed?"})}]
+                    },
+                }
+            ],
+            "usageMetadata": {
+                "promptTokenCount": self.INPUT_TOKENS,
+                "candidatesTokenCount": self.OUTPUT_TOKENS,
+                "thoughtsTokenCount": self.THINKING_TOKENS,
+                "totalTokenCount": (
+                    self.INPUT_TOKENS + self.OUTPUT_TOKENS + self.THINKING_TOKENS
+                ),
+            },
+        }
+
+
+def test_paper_cost_cap_refusal_names_the_family_and_charges_nothing_past_it(
+    tmp_path: Path,
+) -> None:
+    transport = ExpensivePaperTransport()
+    broker = broker_fixture(tmp_path, transport)
+    provider = BrokerProvider(
+        broker=broker,
+        phase="live_test",
+        invocation_run_id="paper-cap-r1",
+    ).bind(
+        paper_id="paper-1",
+        family_id="family-1",
+        source_version_id=SOURCE_VERSION,
+    )
+    parameters = {
+        "temperature": 0,
+        "max_tokens": 1000,
+        "json_schema": {
+            "type": "object",
+            "required": ["question"],
+            "properties": {"question": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    }
+
+    accepted = 0
+    error: PaperCostCapError | None = None
+    for index in range(8):
+        try:
+            provider.invoke(
+                "question_writer", "System", f"Prompt {index}", parameters, timeout=30
+            )
+        except PaperCostCapError as raised:
+            error = raised
+            break
+        accepted += 1
+
+    assert error is not None
+    assert str(error) == PAPER_COST_CAP_REASON
+    assert error.stage == "question_generation"
+    assert error.code == "PAPER_COST_CAP_REACHED"
+    # The cap bounds the family, not the run: the broker is not halted and no
+    # money moved past the cap.
+    status = broker.status()
+    assert not status["halted"]
+    cost_state = broker.family_cost_state("family-1")
+    assert Decimal(cost_state["committed_usd"]) <= Decimal(
+        cost_state["maximum_paper_cost_usd"]
+    )
+    assert Decimal(cost_state["committed_usd"]) == Decimal("0.21375") * accepted
+    assert status["generation_submissions"] == accepted
+
+    # The refusal is on the record as a receipt that no call was made under.
+    refused = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted((tmp_path / "receipts").glob("*.json"))
+    ]
+    refusals = [row for row in refused if row.get("state") == "not_submitted"]
+    assert len(refusals) == 1
+    assert refusals[0]["reason"] == PAPER_COST_CAP_REASON
+    assert refusals[0]["family_id"] == "family-1"
+    assert refusals[0]["stage"] == "question_generation"
+    assert refusals[0]["live_call_made"] is False
+
+
+def test_a_capped_family_is_not_retried_on_relaunch(tmp_path: Path) -> None:
+    transport = ExpensivePaperTransport()
+    broker = broker_fixture(tmp_path, transport)
+    parameters = {
+        "temperature": 0,
+        "max_tokens": 1000,
+        "json_schema": {
+            "type": "object",
+            "required": ["question"],
+            "properties": {"question": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    }
+
+    def run_until_capped(invocation_run_id: str) -> tuple[int, PaperCostCapError]:
+        provider = BrokerProvider(
+            broker=broker,
+            phase="live_test",
+            invocation_run_id=invocation_run_id,
+        ).bind(
+            paper_id="paper-1",
+            family_id="family-1",
+            source_version_id=SOURCE_VERSION,
+        )
+        calls = 0
+        for index in range(8):
+            try:
+                provider.invoke(
+                    "question_writer",
+                    "System",
+                    f"Prompt {index}",
+                    parameters,
+                    timeout=30,
+                )
+            except PaperCostCapError as raised:
+                return calls, raised
+            calls += 1
+        raise AssertionError("the per-paper cost cap never stopped the family")
+
+    first_calls, first_error = run_until_capped("paper-cap-r1")
+    methods_after_first = list(transport.methods)
+    spend_after_first = broker.family_cost_state("family-1")["committed_usd"]
+
+    second_calls, second_error = run_until_capped("paper-cap-r2")
+
+    # The relaunch replays the completed receipts and the stored refusal. No new
+    # provider call is made, and the family's spend does not move.
+    assert second_calls == first_calls
+    assert str(second_error) == str(first_error) == PAPER_COST_CAP_REASON
+    assert second_error.stage == first_error.stage == "question_generation"
+    assert transport.methods == methods_after_first
+    assert broker.family_cost_state("family-1")["committed_usd"] == spend_after_first

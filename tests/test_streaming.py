@@ -15,13 +15,14 @@ import pytest
 from arctic_qa import cli as cli_module
 from arctic_qa import generation as generation_module
 from arctic_qa import streaming as streaming_module
-from arctic_qa.broker_provider import BrokerProvider
+from arctic_qa.broker_provider import ROLE_STAGES, BrokerProvider
 from arctic_qa.db import Database
-from arctic_qa.errors import AmbiguousChargeError, BudgetError
+from arctic_qa.errors import AmbiguousChargeError, BudgetError, PaperCostCapError
 from arctic_qa.exporting import export_run
 from arctic_qa.generation import ROLE_SCHEMAS, resume_candidate_distractors
 from arctic_qa.model_broker import (
     AUTHORIZED_CAP_REASON,
+    PAPER_COST_CAP_REASON,
     PER_REQUEST_CAP_REASON,
     SharedGeminiBroker,
 )
@@ -1046,6 +1047,7 @@ def test_streaming_cli_moves_one_eligible_paper_to_validated_export(
         "eligibility_unresolved": 0,
         "generation_rejected": 0,
         "incomplete_non_mcq": 0,
+        "paper_cost_cap_reached": 0,
         "processed": 1,
     }
 
@@ -1122,6 +1124,7 @@ def test_finding_prompt_requires_one_exact_source_span(
         "excluded": 0,
         "unresolved": 0,
         "generation_rejected": 0,
+        "paper_cost_cap_reached": 0,
         "accepted_qa": 1,
     }
     assert progress["recent_papers"] == [
@@ -1514,6 +1517,7 @@ def test_streaming_advances_after_uncertain_brokered_eligibility(
         "eligibility_unresolved": 1,
         "generation_rejected": 0,
         "incomplete_non_mcq": 0,
+        "paper_cost_cap_reached": 0,
         "processed": 2,
     }
     assert result["paper_results"][0] == {
@@ -1534,6 +1538,7 @@ def test_streaming_advances_after_uncertain_brokered_eligibility(
         "excluded": 1,
         "unresolved": 1,
         "generation_rejected": 0,
+        "paper_cost_cap_reached": 0,
         "accepted_qa": 0,
     }
     assert observed_progress_counts
@@ -2701,6 +2706,7 @@ def test_streaming_cli_stops_after_eligibility_rejection(tmp_path: Path) -> None
         "eligibility_unresolved": 0,
         "generation_rejected": 0,
         "incomplete_non_mcq": 0,
+        "paper_cost_cap_reached": 0,
         "processed": 1,
     }
     assert result["export"]["short_answer_count"] == 0
@@ -3387,3 +3393,326 @@ def test_streaming_export_discloses_same_model_correlated_error(
         "separate_blinded_calls": True,
         "independent_error_evidence": False,
     }
+
+
+def second_streaming_paper(access: Path) -> dict[str, Any]:
+    """Add one more ready paper to the ordered selection of the fixture."""
+    first = json.loads(
+        (access / "items" / "item-000001.json").read_text(encoding="utf-8")
+    )
+    source = access / "originals" / "source-cap-2.html"
+    source.write_bytes(
+        Path(first["source_path"]).read_bytes() + b"\n<!-- second cap source -->\n"
+    )
+    extraction = access / "extracted" / "text-cap-2.txt"
+    extraction.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    second = {
+        **first,
+        "position": 2,
+        "candidate_key": "test-only:streaming-paper-2",
+        "title": "Second synthetic Arctic extraction fixture",
+        "source_path": str(source),
+        "source_content_hash": sha256(source.read_bytes()).hexdigest(),
+        "extraction_path": str(extraction),
+        "extraction_sha256": sha256(extraction.read_bytes()).hexdigest(),
+        "final_url": "https://example.invalid/public-source-2.html",
+    }
+    write_json(access / "items" / "item-000002.json", second)
+    manifest_path = access / "run-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["target_total"] = 2
+    manifest["selection"].append(
+        {
+            "position": 2,
+            "candidate_key": second["candidate_key"],
+            "subgroup": "test_only",
+            "authors": ["Arctic QA test suite"],
+            "year": 2026,
+        }
+    )
+    write_json(manifest_path, manifest)
+    return second
+
+
+def test_streaming_records_a_capped_family_and_keeps_going(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The per-paper cost cap skips one family; it never ends the run.
+
+    The chapter 3 production run of 2026-09-16 exited on the first family that
+    reached ``maximum_paper_cost_usd``, and every relaunch stopped on the same
+    paper. The cap bounds one family, so the producer records it and moves on.
+    """
+    access, eligibility = streaming_fixture(tmp_path)
+    second = second_streaming_paper(access)
+    # The second paper needs its own screening job; the fixture holds only one.
+    first_job = json.loads(
+        (eligibility / "jobs" / "fixture-job.json").read_text(encoding="utf-8")
+    )
+    parsed = json.loads(json.dumps(first_job["parsed_response"]))
+    parsed["request_id"] = "fixture-job-2"
+    parsed["input_echo"] = {
+        **parsed["input_echo"],
+        "source_version_sha256": second["source_content_hash"],
+        "extracted_text_sha256": second["extraction_sha256"],
+    }
+    write_json(
+        eligibility / "jobs" / "fixture-job-2.json",
+        {
+            **first_job,
+            "job_key": "fixture-job-2",
+            "candidate_key": second["candidate_key"],
+            "source_content_hash": second["source_content_hash"],
+            "extraction_sha256": second["extraction_sha256"],
+            "parsed_response": parsed,
+        },
+    )
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+
+    real_generate_candidate = streaming_module.generate_candidate
+    capped_sources: list[str] = []
+
+    def cap_the_first_family(db: Any, namespace: Any, **kwargs: Any):
+        source_id = kwargs["source_id"]
+        if not capped_sources:
+            capped_sources.append(source_id)
+        if source_id == capped_sources[0]:
+            raise PaperCostCapError(
+                PAPER_COST_CAP_REASON, stage="finding_answer_extraction"
+            )
+        return real_generate_candidate(db, namespace, **kwargs)
+
+    monkeypatch.setattr(streaming_module, "generate_candidate", cap_the_first_family)
+
+    result = run_stream(
+        db=database,
+        namespace=paths.namespace,
+        run_id="paper-cap-skip",
+        campaign_id="paper-cap-skip",
+        access_run_dir=access,
+        eligibility_run_dir=eligibility,
+        author=FakeProvider("fake-gemini", FIXTURES / "fake-author.jsonl"),
+        verifier=FakeProvider("fake-gemini", FIXTURES / "fake-verifier.jsonl"),
+        max_papers=2,
+    )
+
+    assert result["state"] == "completed"
+    assert result["counts"]["paper_cost_cap_reached"] == 1
+    assert result["counts"]["processed"] == 2
+    assert result["counts"]["accepted_base_questions"] == 1
+    assert result["paper_results"][0]["disposition"] == "paper_cost_cap_reached"
+    assert result["paper_results"][0]["reason_codes"] == ["paper_cost_cap_reached"]
+    # The run did not stop: the next paper was generated and accepted.
+    assert result["paper_results"][1]["disposition"] == "accepted"
+
+    row = database.one(
+        """SELECT reason_code,detail_json FROM rejection_ledger
+        WHERE stage='paper_cost_cap'""",
+        (),
+    )
+    assert row is not None
+    assert row["reason_code"] == "paper_cost_cap_reached"
+    detail = json.loads(row["detail_json"])
+    assert detail["paper_cost_cap_reached"] is True
+    assert detail["error"] == PAPER_COST_CAP_REASON
+    assert detail["broker_stage"] == "finding_answer_extraction"
+    assert detail["candidate_key"] == "test-only:streaming-paper"
+    assert detail["generation_attempt"]["attempt_kind"] == "primary"
+
+    # The in-flight call record of the capped family is settled, not left open.
+    capped_records = database.rows(
+        """SELECT status,candidate_json FROM candidates
+        WHERE run_id=? AND source_id=?""",
+        ("paper-cap-skip", capped_sources[0]),
+    )
+    assert [row["status"] for row in capped_records] == ["generation_incomplete"]
+    assert json.loads(capped_records[0]["candidate_json"])["reason_code"] == (
+        "paper_cost_cap_reached"
+    )
+
+    progress = json.loads(
+        (paths.namespace / "streaming-dataset-r1" / "progress.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert progress["state"] == "completed"
+    assert progress["counts"]["paper_cost_cap_reached"] == 1
+    assert progress["recent_papers"][0]["final_state"] == "paper_cost_cap_reached"
+    assert progress["recent_papers"][0]["final_reason"] == "paper_cost_cap_reached"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "the paid request exceeds the remaining dataset construction allocation",
+        "the paid request exceeds the away session ceiling",
+        "the paid-call broker is halted",
+    ],
+)
+def test_streaming_still_exits_on_a_whole_run_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    message: str,
+) -> None:
+    """Only a whole-run stop ends the producer, and it still ends it."""
+    access, eligibility = streaming_fixture(tmp_path)
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+
+    def whole_run_stop(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise BudgetError(message)
+
+    monkeypatch.setattr(streaming_module, "generate_candidate", whole_run_stop)
+
+    with pytest.raises(BudgetError, match=re.escape(message)):
+        run_stream(
+            db=database,
+            namespace=paths.namespace,
+            run_id="whole-run-stop",
+            campaign_id="whole-run-stop",
+            access_run_dir=access,
+            eligibility_run_dir=eligibility,
+            author=FakeProvider("fake-gemini", FIXTURES / "fake-author.jsonl"),
+            verifier=FakeProvider("fake-gemini", FIXTURES / "fake-verifier.jsonl"),
+            max_papers=1,
+        )
+
+    progress = json.loads(
+        (paths.namespace / "streaming-dataset-r1" / "progress.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert progress["state"] == "error"
+    assert (
+        database.one(
+            "SELECT COUNT(*) AS count FROM rejection_ledger WHERE stage='paper_cost_cap'",
+            (),
+        )["count"]
+        == 0
+    )
+
+
+def model_prices() -> dict[str, tuple[Decimal, Decimal]]:
+    """Return each priced model's input and output price for each million tokens."""
+    config = json.loads(
+        (REPO / "config" / "gemini-eligibility-v1.json").read_text(encoding="utf-8")
+    )
+    prices: dict[str, tuple[Decimal, Decimal]] = {}
+    for row in (config, *config["stage_models"].values()):
+        model = row.get("model") or config["model"]
+        if "input_usd_per_million_tokens" in row:
+            prices[model] = (
+                Decimal(row["input_usd_per_million_tokens"]),
+                Decimal(row["output_usd_per_million_tokens_including_thinking"]),
+            )
+    return prices
+
+
+class ExpensiveGenerationTransport(ScriptedBrokerTransport):
+    """Make every generation call costly, so the family reaches the paper cap.
+
+    Each reservation stays just under ``maximum_request_reserved_cost_usd``
+    (USD 0.25), and the screening call stays cheap, so the only refusal the run
+    can meet is the per-paper cost cap of USD 1.00, after four calls.
+    """
+
+    TARGET_RESERVATION = Decimal("0.249")
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.prices = model_prices()
+        self.input_tokens = 100
+        self.output_tokens = 10
+
+    def post(self, model: str, method: str, body: dict) -> dict:
+        if method == "countTokens":
+            config = body["generateContentRequest"]["generationConfig"]
+            screening = "criteria" in config["responseJsonSchema"].get("properties", {})
+            output_limit = int(config["maxOutputTokens"])
+            input_price, output_price = self.prices[model]
+            output_cost = Decimal(output_limit) * output_price / 1_000_000
+            self.input_tokens = (
+                100
+                if screening
+                else int(
+                    (self.TARGET_RESERVATION - output_cost) * 1_000_000 / input_price
+                )
+            )
+            self.output_tokens = min(output_limit, 100)
+            self.methods.append(method)
+            return {"totalTokens": self.input_tokens}
+        return super().post(model, method, body)
+
+    def _response(self, model: str, payload: dict, request_id: str | None) -> dict:
+        response = super()._response(model, payload, request_id)
+        response["usageMetadata"] = {
+            "promptTokenCount": self.input_tokens,
+            "candidatesTokenCount": self.output_tokens,
+            "thoughtsTokenCount": 0,
+            "totalTokenCount": self.input_tokens + self.output_tokens,
+        }
+        return response
+
+
+def test_streaming_completes_when_the_broker_refuses_a_capped_family(
+    tmp_path: Path,
+) -> None:
+    """The whole path: a real broker refusal ends one family, not the run."""
+    access, eligibility = streaming_fixture(tmp_path)
+    paths = DataPaths.open(tmp_path, test_mode=True)
+    database = Database(paths.database)
+    database.migrate(paths.namespace / "backups")
+    transport = ExpensiveGenerationTransport()
+    broker = shared_broker(tmp_path, transport)
+    provider = BrokerProvider(
+        broker=broker,
+        phase="live_test",
+        invocation_run_id="paper-cap-live",
+    )
+
+    result = run_stream(
+        db=database,
+        namespace=paths.namespace,
+        run_id="paper-cap-live",
+        campaign_id="paper-cap-live-campaign",
+        access_run_dir=access,
+        eligibility_run_dir=eligibility,
+        author=provider,
+        verifier=provider,
+        max_papers=1,
+        **broker_eligibility_inputs(tmp_path),
+    )
+
+    assert result["state"] == "completed"
+    assert result["counts"]["paper_cost_cap_reached"] == 1
+    assert result["paper_results"][0]["disposition"] == "paper_cost_cap_reached"
+
+    row = database.one(
+        """SELECT detail_json FROM rejection_ledger WHERE stage='paper_cost_cap'""",
+        (),
+    )
+    assert row is not None
+    detail = json.loads(row["detail_json"])
+    assert detail["error"] == PAPER_COST_CAP_REASON
+    assert detail["broker_stage"] in ROLE_STAGES.values()
+    cost_state = detail["family_cost_state"]
+    assert cost_state["family_id"] == detail["family_id"]
+    assert Decimal(cost_state["maximum_paper_cost_usd"]) == Decimal("1.00")
+    # Nothing was charged past the cap, and the family holds most of it.
+    assert Decimal("0.75") < Decimal(cost_state["committed_usd"]) <= Decimal("1.00")
+    assert Decimal(cost_state["remaining_usd"]) >= 0
+
+    ledger = json.loads((tmp_path / "shared-ledger.json").read_text(encoding="utf-8"))
+    assert not ledger["halted"]
+    refused = [
+        request
+        for request in ledger["requests"].values()
+        if request.get("state") == "not_submitted"
+    ]
+    assert [request["reason"] for request in refused] == [PAPER_COST_CAP_REASON]
+    assert refused[0]["family_id"] == detail["family_id"]
+    assert refused[0]["stage"] == detail["broker_stage"]

@@ -9,10 +9,12 @@ from typing import Any
 from .errors import (
     AmbiguousChargeError,
     BudgetError,
+    PaperCostCapError,
     ProviderError,
     ProviderResponseError,
 )
 from .model_broker import (
+    PAPER_COST_CAP_REASON,
     RESUMABLE_NOT_SUBMITTED_REASONS,
     SharedGeminiBroker,
     broker_request_key,
@@ -336,9 +338,13 @@ def _provider_result(
     if state == "ambiguous_charge":
         raise AmbiguousChargeError("the broker recorded an ambiguous model charge")
     if state == "not_submitted":
-        raise BudgetError(
-            str(receipt.get("reason") or "the broker stopped the request")
-        )
+        reason = str(receipt.get("reason") or "the broker stopped the request")
+        if reason == PAPER_COST_CAP_REASON:
+            # The refused request is never charged, and the receipt is immutable,
+            # so a relaunch replays this same refusal for free instead of
+            # re-trying the capped family.
+            raise PaperCostCapError(reason, stage=str(receipt.get("stage") or ""))
+        raise BudgetError(reason)
     if state != "completed":
         raise ProviderError(f"the broker stopped with state {state}")
     response = receipt.get("response")
