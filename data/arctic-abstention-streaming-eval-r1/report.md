@@ -377,6 +377,22 @@ test that fails on the old code.
    whose every missing trial belongs to a model that is still paused now
    waits, and the next pass after the resume takes it up.
 
+The service was restarted a fourth time for the fix of point 3, and it runs at commit `a0b9a82` now.
+
+Its state after the first pass and the poll that followed:
+
+```
+polls 1, items 6, vendors [google_gemini, anthropic_claude_code, openai_codex], paused []
+polls 2, items 7, vendors [google_gemini, anthropic_claude_code, openai_codex], paused []
+```
+
+So the unit polls, publishes its progress, keeps all three vendors and pauses none of them.
+
+Two vendor conditions of the environment appeared during these starts, neither of them a defect of this code:
+
+- The Claude Code binary was absent for about two minutes while its npm package upgraded. The symlink `/home/ben/.npm-global/bin/claude` was rewritten at 09:31 local time.
+- The Codex CLI refused a turn with "Exceeded skills context budget", which its own harness raises when too many skill descriptions are loaded. The evaluator paused that vendor and kept the others running, which is the designed behaviour for a harness error.
+
 The starts also showed two operational rules that the report had not stated.
 A per-item plan manifest binds the run id and the code commit and is
 immutable, so a restart from a new commit needs a new run id prefix and a new
@@ -615,12 +631,12 @@ The snapshot pattern is the one the producer activations use.
 | Part | Value |
 | --- | --- |
 | Unit | `arctic-abstention-stream-r3` |
-| Snapshot | `/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-abstention-streaming-eval-r1/runtime/app-1b6fffa-arctic-abstention-streaming-eval-r1` |
+| Snapshot | `/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-abstention-streaming-eval-r1/runtime/app-a0b9a82-arctic-abstention-streaming-eval-r1` |
 | Review record | `private/streaming-eval-r6-review.md` |
 | Authorization | `private/streaming-eval-r6-authorization.json` |
 | Launcher | `private/streaming-eval-r6-launcher.sh` |
-| Run id prefix | `abstention-stream-r8` |
-| Work directory | `abstention-eval/streaming-r8` |
+| Run id prefix | `abstention-stream-r10` |
+| Work directory | `abstention-eval/streaming-r10` |
 | Bounds | 12 items, USD 3.00 of Gemini spend |
 
 ```sh
@@ -630,7 +646,7 @@ systemd-run --user --unit=arctic-abstention-stream-r3 --working-directory=$APP \
   /mnt/crdata/research-abstention/arctic-qa/abstention-eval/private/streaming-eval-r6-launcher.sh
 ```
 
-The snapshot is of commit `1b6fffa`. The branch tip adds this report section and nothing else, so the running code is the code of the tip: `git diff 1b6fffa HEAD -- src config` is empty.
+The snapshot is of commit `a0b9a82`. The branch tip adds this report section and nothing else, so the running code is the code of the tip: `git diff a0b9a82 HEAD -- src config` is empty.
 
 The launcher uses `nix develop "path:$APP"`, with the `path:` prefix, because the snapshot lives inside a git repository that does not track it.
 It carries no `--concurrency` override, so each vendor runs at the concurrency of the plan file: Gemini 4 calls in flight, Claude Code 3, Codex 3.
@@ -641,8 +657,11 @@ It also needs a new authorization, because the authorization binds the code comm
 Write it with `--action watch-authorization` at the bounds the captain sets, and have it reviewed.
 
 The earlier authorization sets `streaming-eval-r2-*` through `r5` are superseded evidence.
-The work directories `streaming-r2`, `r3`, `r5`, `r6` and `r7` hold the evidence of the bounded passes.
-The cost guard of task `arctic-benchmark-guard-site-r1` reads `streaming-r2` today; repoint its `--journal-dir` at `streaming-r8` to read the running service.
+The work directories `streaming-r2`, `r3` and `r5` hold the evidence of the bounded passes.
+The cost guard of task `arctic-benchmark-guard-site-r1` reads `streaming-r2` today; repoint its `--journal-dir` at `streaming-r10` to read the running service.
+
+The work directories `streaming-r6` through `streaming-r9` hold the evidence of the four starts of section 5.7.
+Each start needed its own directory, for the reason in the caution above.
 
 Start it as a systemd user unit, the pattern the live publication snapshot service already uses:
 
@@ -812,6 +831,7 @@ The new tests cover:
 | Commit `f64d289`, the branch on main `3f7de6e` | 1355 passed in 17 minutes 47 seconds |
 | Commit `353ae0c`, the branch tip | 1355 passed in 17 minutes 43 seconds |
 | Commit `ed174cf`, after the merge of main `9bda270` | the abstention, broker, phase-slot and continuation suites: 187 passed in 3 minutes 18 seconds |
+| Commit `a0b9a82`, after the service brought up the four defects of section 5.7 | 1366 passed in 18 minutes 35 seconds |
 
 The one failure of the second run was the reviewed chapter 2 MAX_TOKENS continuation, whose case matches its receipt by the exact usage message.
 The widened usage rule of `183779b` changed that message for a record that omits both token counts.
