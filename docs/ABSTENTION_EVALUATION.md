@@ -467,6 +467,16 @@ If one more item passes a bound, the evaluator pauses the Gemini vendor, writes 
 A vendor that stops on an item is paused the same way, whatever the reason: a budget stop, a harness error, a timeout or an ambiguous charge.
 The policy forbids a retry, so the next item repeats that stop.
 
+One pause lifts on its own: an ambiguous charge.
+The broker keeps the reservation of a paid call whose charge it cannot prove, and it halts the evaluation phase of the shared ledger.
+A supervisor releases that charge with a reviewed continuation, which is the `authorize-ambiguous-continuation` command of `docs/SHARED_MODEL_BROKER.md`.
+The release is a ledger fact, so the evaluator reads the shared ledger on every poll.
+On the first poll after the release, it resumes the Gemini vendor, logs a `vendor_resumed` event, and appends a `vendor_resume` row to the journal.
+No restart is needed.
+The evaluator resumes only the Gemini vendor this way, because the shared ledger is the record that proves the release.
+A vendor paused for any other reason stays paused until a start clears it.
+The 503 of 2026-09-16 at 17:53 UTC showed why: the Gemini arm, which the USD 200 allocation pays for, was off for every later question until an operator restarted the unit.
+
 One stop is item-scoped and never pauses a vendor: the per-item repeat limit of the evaluation policy.
 That limit counts the calls of one item, condition, model and arm, so it says nothing about the next item.
 The evaluator records the stop on that item and takes the next one with every vendor still active.

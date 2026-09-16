@@ -537,6 +537,12 @@ def parser() -> argparse.ArgumentParser:
     continuation.add_argument(
         "--prior-construction-spend-usd", type=Decimal, required=True
     )
+    # An ambiguous `benchmark_evaluation` charge is released under the
+    # evaluation gate of its own item, not the construction gate.
+    continuation.add_argument("--evaluation-policy-file", type=Path)
+    continuation.add_argument("--evaluation-price-config-file", type=Path)
+    continuation.add_argument("--evaluation-gate-file", type=Path)
+    continuation.add_argument("--evaluation-policy-transition-file", type=Path)
 
     rejection = commands.add_parser(
         "settle-http-rejection",
@@ -956,6 +962,12 @@ def _reconcile_usage(args) -> dict[str, Any]:
     return broker.reconcile_omitted_thought_usage(args.request_key)
 
 
+def _optional_path(args, name: str) -> Path | None:
+    """Resolve one optional path option, or None when it is absent."""
+    value = getattr(args, name, None)
+    return value.resolve() if value else None
+
+
 def _authorize_ambiguous_continuation(args) -> dict[str, Any]:
     broker = SharedGeminiBroker(
         policy_file=args.streaming_budget_policy_file.resolve(),
@@ -969,6 +981,14 @@ def _authorize_ambiguous_continuation(args) -> dict[str, Any]:
             args.ledger_config_transition_file.resolve()
             if args.ledger_config_transition_file
             else None
+        ),
+        evaluation_policy_file=_optional_path(args, "evaluation_policy_file"),
+        evaluation_price_config_file=_optional_path(
+            args, "evaluation_price_config_file"
+        ),
+        evaluation_gate_file=_optional_path(args, "evaluation_gate_file"),
+        evaluation_policy_transition_file=_optional_path(
+            args, "evaluation_policy_transition_file"
         ),
     )
     return broker.authorize_ambiguous_continuation(

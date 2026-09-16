@@ -1053,6 +1053,21 @@ def _provider_error_status(body: str | None) -> str | None:
     return status if isinstance(status, str) and status else None
 
 
+def phase_halt_reason(ledger: dict[str, Any], phase: str) -> str | None:
+    """Return the halt reason that blocks one phase of a ledger, or None.
+
+    The ledger halt blocks every phase. The evaluation halt blocks the
+    evaluation phase only, so an ambiguous evaluation charge never stops the
+    construction pipeline. A reader of the ledger, such as the streaming
+    evaluator, asks this function whether its own phase can call again.
+    """
+    if ledger.get("halted"):
+        return str(ledger.get("halt_reason") or "halted")
+    if phase == EVALUATION_PHASE and ledger.get("evaluation_halted"):
+        return str(ledger.get("evaluation_halt_reason") or "halted")
+    return None
+
+
 def _validate_gate(path: Path, phase: str) -> dict[str, Any]:
     value = _read(path)
     if value.get("schema") != "streaming-live-execution-gate-v1":
@@ -3944,17 +3959,8 @@ class SharedGeminiBroker:
 
     @staticmethod
     def _phase_halted(ledger: dict[str, Any], phase: str) -> str | None:
-        """Return the halt reason that blocks one phase, or None.
-
-        The ledger halt blocks every phase. The evaluation halt blocks the
-        evaluation phase only, so an ambiguous evaluation charge never stops
-        the construction pipeline.
-        """
-        if ledger.get("halted"):
-            return str(ledger.get("halt_reason") or "halted")
-        if phase == EVALUATION_PHASE and ledger.get("evaluation_halted"):
-            return str(ledger.get("evaluation_halt_reason") or "halted")
-        return None
+        """Return the halt reason that blocks one phase, or None."""
+        return phase_halt_reason(ledger, phase)
 
     def _lift_settled_halts(self, ledger: dict[str, Any]) -> None:
         """Lift each halt whose ambiguous requests are all settled.
@@ -4828,20 +4834,36 @@ class SharedGeminiBroker:
                     raise ValueError("the ambiguous continuation ledger changed")
                 if request.get("state") != "ambiguous_charge":
                     raise ValueError("the request does not have an ambiguous charge")
-                if (
-                    ledger.get("halted") is not True
-                    or ledger.get("halt_reason") != "ambiguous_generation_charge"
-                ):
+                # The halt this release lifts is the one that covers the
+                # request's own phase. An ambiguous construction charge halts
+                # the whole ledger; an ambiguous ``benchmark_evaluation``
+                # charge halts the evaluation phase alone, through
+                # ``evaluation_halted``, so the construction pipeline keeps
+                # running.
+                halt = self._phase_halted(ledger, request["phase"])
+                if halt != AMBIGUOUS_HALT_REASON:
                     raise ValueError("the ambiguous-charge halt state changed")
                 if request.get("run_id") != authorized_run_id:
                     raise ValueError(
                         "the request is outside the authorized continuation run"
                     )
-                gate = _validate_gate(self.execution_gate_file, request["phase"])
-                gate_sha256 = sha256_file(self.execution_gate_file)
+                # An evaluation request is reviewed by its own evaluation gate;
+                # the construction gate never allows that phase. The two gates
+                # name the authorized run in their own field.
+                if request["phase"] == EVALUATION_PHASE:
+                    self._require_evaluation()
+                    gate_file = self.evaluation_gate_file
+                    gate = _validate_evaluation_gate(gate_file)  # type: ignore[arg-type]
+                    self._validate_evaluation_gate_hashes(gate)
+                    gate_run_id = gate.get("authorized_run_id")
+                else:
+                    gate_file = self.execution_gate_file
+                    gate = _validate_gate(gate_file, request["phase"])
+                    gate_run_id = gate.get("authorized_new_run_id")
+                gate_sha256 = sha256_file(gate_file)  # type: ignore[arg-type]
                 if (
                     request.get("gate_sha256") != gate_sha256
-                    or gate.get("authorized_new_run_id") != authorized_run_id
+                    or gate_run_id != authorized_run_id
                 ):
                     raise ValueError("the ambiguous continuation gate changed")
                 final_path = self.receipts_dir / f"{request_key}.json"
@@ -5020,8 +5042,15 @@ class SharedGeminiBroker:
                         }
                     )
                 atomic_json(continuation_path, event, immutable=True)
-                ledger["halted"] = False
-                ledger["halt_reason"] = None
+                # Lift exactly the halt the ambiguous charge set, and only for
+                # the request's own phase. A released evaluation ambiguity
+                # never lifts a construction halt, and the reverse.
+                if request["phase"] == EVALUATION_PHASE:
+                    ledger["evaluation_halted"] = False
+                    ledger["evaluation_halt_reason"] = None
+                else:
+                    ledger["halted"] = False
+                    ledger["halt_reason"] = None
                 ledger["updated_at_utc"] = _now()
                 self._commit_ledger(ledger)
                 continuation_sha256 = sha256_file(continuation_path)

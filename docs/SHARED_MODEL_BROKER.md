@@ -417,6 +417,70 @@ PYTHONPATH=src python -m arctic_qa --json settle-http-rejection \
   --prior-construction-spend-usd KNOWN_VALUE
 ```
 
+## Ambiguous continuation
+
+An ambiguous charge keeps its full reservation, because the provider can have billed the call.
+
+The reviewed `authorize-ambiguous-continuation` command does not settle, retry, or replay that request.
+
+It records the reviewed skip, so unrelated families continue, and it lifts the halt the charge set.
+
+The command accepts three bounded cases: any 5xx answer with no received receipt, a `MAX_TOKENS` answer with unprovable usage, and a provider timeout.
+
+It needs a review record, an evidence file, the authorized run ID, and the gate the request ran under.
+
+The reservation stays in `ambiguous_reserved_usd` and counts against every cap.
+
+The event file is `ambiguous-continuation-<request-key>.json` and it is immutable.
+
+Every other outstanding ambiguous request needs its own event first.
+
+### The phase of the release
+
+The release lifts only the halt that covers the phase of the request.
+
+An ambiguous construction charge halts the whole ledger, so the release clears `halted`.
+
+An ambiguous `benchmark_evaluation` charge halts the evaluation phase alone, so the release clears `evaluation_halted`.
+
+The construction phase keeps its own ceiling, slots, and window through an evaluation release.
+
+An evaluation request is reviewed by its own evaluation gate, because the construction gate never allows that phase.
+
+So the command takes `--evaluation-policy-file`, `--evaluation-price-config-file`, and `--evaluation-gate-file` for an evaluation request.
+
+The evaluation gate names its run in `authorized_run_id`; the construction gate names it in `authorized_new_run_id`.
+
+The derived per-item gate of the streaming evaluator is the gate of an evaluation request.
+
+CAUTION: Release an evaluation ambiguity before the evaluator visits that item again.
+A visit rewrites the derived gate file with a new `written_at_utc`, which changes its digest.
+The release needs the exact gate digest the receipt recorded.
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json authorize-ambiguous-continuation \
+  --request-key REQUEST_SHA256 \
+  --expected-ledger-sha256 LEDGER_SHA256 \
+  --review-file /PRIVATE/DIRECTORY/review.md \
+  --evidence-file /PRIVATE/DIRECTORY/evidence.json \
+  --authorized-run-id RUN_ID --operator-id OPERATOR \
+  --streaming-budget-policy-file POLICY --price-config-file PRICE_CONFIG \
+  --execution-gate-file /PRIVATE/DIRECTORY/gate.json \
+  --evaluation-policy-file EVALUATION_POLICY \
+  --evaluation-price-config-file EVALUATION_PRICES \
+  --evaluation-gate-file WORK_DIR/gates/ITEM_ID/google_gemini.json \
+  --shared-ledger-file LEDGER --model-receipts-dir RECEIPTS \
+  --ledger-config-transition-file TRANSITION \
+  --credential-file /PRIVATE/DIRECTORY/gemini.key \
+  --prior-construction-spend-usd KNOWN_VALUE
+```
+
+The command takes the exclusive broker operation lock without a wait.
+
+A live producer holds that lock for the whole of each paid call.
+
+So the release can need many attempts before it wins the lock.
+
 ## Usage reconciliation
 
 Use reconciliation only for a saved response with an omitted-zero pattern: an absent `thoughtsTokenCount` or an absent `candidatesTokenCount`.

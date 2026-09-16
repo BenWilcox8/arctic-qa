@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
@@ -35,6 +37,7 @@ from arctic_qa.abstention_watch import (
     WATCH_STATE_FILENAME,
     authorization_record,
     estimated_gemini_item_usd,
+    is_ambiguous_charge_reason,
     is_ceiling_reason,
     is_item_scoped_reason,
     pending_item_ids,
@@ -1541,3 +1544,251 @@ def test_a_start_clears_the_vendor_pause_of_the_last_invocation(
     row = CostJournal(work).item_rows()[0]
     assert row["evaluation"]["vendors_paused"] == []
     assert row["evaluation"]["recorded_trials"] == 48
+
+
+class StoppingGeminiProvider(ScriptedEvaluationProvider):
+    """A Gemini provider that stops on its first calls, then answers.
+
+    ``budget`` is a shared one-element list, so the count survives the fresh
+    provider the watcher builds for every item. ``state`` and ``error`` are
+    the response fields the run summary turns into the vendor stop reason:
+    an ambiguous charge carries the state alone, which is the shape the
+    running service recorded on 2026-09-16 at 17:53 UTC.
+    """
+
+    def __init__(
+        self,
+        *,
+        budget: list[int],
+        state: str = "ambiguous_charge",
+        error: str | None = None,
+        **changes,
+    ) -> None:
+        super().__init__(**changes)
+        self.budget = budget
+        self.stop_state = state
+        self.stop_error = error
+
+    def answer(self, request):  # type: ignore[no-untyped-def]
+        response = super().answer(request)
+        if self.budget[0] <= 0:
+            return response
+        self.budget[0] -= 1
+        return replace(response, state=self.stop_state, error=self.stop_error)
+
+
+def _halt_the_evaluation_phase(ledger_file: Path, *, halted: bool) -> None:
+    """Set or clear the evaluation-phase halt of a shared ledger."""
+    ledger = json.loads(ledger_file.read_text(encoding="utf-8"))
+    ledger["evaluation_halted"] = halted
+    ledger["evaluation_halt_reason"] = "ambiguous_generation_charge" if halted else None
+    atomic_json(ledger_file, ledger)
+
+
+def _watch_two_polls(
+    *,
+    db: Path,
+    work: Path,
+    ledger_file: Path,
+    auth: Path,
+    events: list[dict],
+    between_polls: Callable[[], None],
+    budget: list[int],
+    stop_state: str = "ambiguous_charge",
+    stop_error: str | None = None,
+) -> dict:
+    """Run two polls, with ``between_polls`` in the wait between them.
+
+    The Gemini vendor stops on the first poll, so the second poll is the one
+    that decides whether the vendor resumes.
+    """
+    import arctic_qa.abstention_watch as module
+
+    def fake_build(*, plan, set_dir, run_id, gate_dir, vendors, **_: object):
+        runs = {}
+        for vendor in vendors:
+            provider = (
+                StoppingGeminiProvider(
+                    budget=budget,
+                    state=stop_state,
+                    error=stop_error,
+                    policy="gold",
+                )
+                if vendor == PROVIDER_GOOGLE_GEMINI
+                else ScriptedEvaluationProvider(policy="gold")
+            )
+            runs[vendor] = VendorRun(
+                vendor=vendor,
+                provider=provider,
+                decoding={"scripted": True, "vendor": vendor},
+                models=plan["vendors"][vendor]["models"],
+                concurrency=1,
+            )
+        return runs
+
+    ticks = iter([0.0, 1.0, 100.0, 100.0])
+    original = module.build_vendor_runs
+    module.build_vendor_runs = fake_build  # type: ignore[assignment]
+    try:
+        return watch(
+            authorization_file=auth,
+            plan_file=PLAN_FILE,
+            contract_file=CH3_CONTRACT,
+            evaluation_policy_file=POLICY_V2,
+            evaluation_price_config_file=PRICES,
+            subscription_models_file=MODELS_FILE,
+            state_db=db,
+            work_dir=work,
+            shared_ledger_file=ledger_file,
+            broker_factory=None,
+            subscription_ledger_root=work / "subscription",
+            list_price_file=LIST_PRICES,
+            poll_seconds=5,
+            code_commit="test-commit",
+            ledger_run_prefixes=("chapter3-",),
+            log=events.append,
+            clock=lambda: next(ticks, 100.0),
+            sleep=lambda _seconds: between_polls(),
+            deadline_seconds=10.0,
+        )
+    finally:
+        module.build_vendor_runs = original  # type: ignore[assignment]
+
+
+def test_a_released_ambiguous_charge_resumes_gemini_on_the_next_poll(
+    tmp_path: Path,
+) -> None:
+    """A supervisor release unpauses the vendor without a restart.
+
+    The broker keeps the reservation of a paid call whose charge it cannot
+    prove and halts the evaluation phase. The evaluator paused the Gemini
+    vendor for the rest of the invocation, and only a start cleared it, so the
+    captain's Gemini arm stayed off after the 503 of 2026-09-16 at 17:53 UTC
+    until an operator restarted the unit. The release is a ledger fact, so the
+    evaluator reads it on every poll and resumes the vendor itself.
+    """
+    db = state_db(tmp_path / "now", chapter3=["aqa-a"])
+    later = state_db(tmp_path / "later", chapter3=["aqa-a", "aqa-b"])
+    ledger_file = construction_ledger(
+        tmp_path, {"family-aqa-a": ["0.01"], "family-aqa-b": ["0.01"]}
+    )
+    _halt_the_evaluation_phase(ledger_file, halted=True)
+    auth = authorization(tmp_path, db, maximum_items=4)
+    work = tmp_path / "released"
+    events: list[dict] = []
+
+    def between_polls() -> None:
+        # The supervisor releases the ambiguous charge, and the producer
+        # accepts one more question, while the evaluator waits.
+        _halt_the_evaluation_phase(ledger_file, halted=False)
+        db.write_bytes(later.read_bytes())
+
+    result = _watch_two_polls(
+        db=db,
+        work=work,
+        ledger_file=ledger_file,
+        auth=auth,
+        events=events,
+        between_polls=between_polls,
+        budget=[1],
+    )
+    assert result["errors"] == []
+    paused = [row for row in events if row["event"] == "vendor_paused"]
+    assert len(paused) == 1
+    assert paused[0]["vendor"] == PROVIDER_GOOGLE_GEMINI
+    assert paused[0]["reason"] == "ambiguous_charge"
+    resumed = [row for row in events if row["event"] == "vendor_resumed"]
+    assert len(resumed) == 1
+    assert resumed[0]["vendor"] == PROVIDER_GOOGLE_GEMINI
+    assert resumed[0]["paused_reason"] == "ambiguous_charge"
+    # The vendor runs again on the next question, with no restart between.
+    started = [row for row in events if row["event"] == "item_started"]
+    assert [row["item_id"] for row in started] == ["aqa-a", "aqa-b"]
+    assert PROVIDER_GOOGLE_GEMINI in started[1]["vendors"]
+    assert result["paused_vendors"] == {}
+    assert PROVIDER_GOOGLE_GEMINI in result["active_vendors"]
+    rows = {row["item_id"]: row for row in CostJournal(work).item_rows()}
+    assert rows["aqa-a"]["evaluation"]["vendors_paused"] == []
+    assert rows["aqa-b"]["evaluation"]["vendors_paused"] == []
+    assert rows["aqa-b"]["evaluation"]["recorded_trials"] == 48
+    resumes = [
+        row for row in CostJournal(work).rows() if row.get("kind") == "vendor_resume"
+    ]
+    assert len(resumes) == 1
+    assert resumes[0]["vendor"] == PROVIDER_GOOGLE_GEMINI
+    assert resumes[0]["paused_reason"] == "ambiguous_charge"
+
+
+def test_an_unreleased_ambiguous_charge_keeps_gemini_paused(tmp_path: Path) -> None:
+    """The evaluation halt is the release, so a standing halt keeps the pause."""
+    db = state_db(tmp_path / "now", chapter3=["aqa-a"])
+    later = state_db(tmp_path / "later", chapter3=["aqa-a", "aqa-b"])
+    ledger_file = construction_ledger(
+        tmp_path, {"family-aqa-a": ["0.01"], "family-aqa-b": ["0.01"]}
+    )
+    _halt_the_evaluation_phase(ledger_file, halted=True)
+    auth = authorization(tmp_path, db, maximum_items=4)
+    work = tmp_path / "held"
+    events: list[dict] = []
+    result = _watch_two_polls(
+        db=db,
+        work=work,
+        ledger_file=ledger_file,
+        auth=auth,
+        events=events,
+        between_polls=lambda: db.write_bytes(later.read_bytes()),
+        budget=[1],
+    )
+    assert result["errors"] == []
+    assert [row for row in events if row["event"] == "vendor_resumed"] == []
+    assert PROVIDER_GOOGLE_GEMINI in result["paused_vendors"]
+    assert result["active_vendors"] == [
+        PROVIDER_ANTHROPIC_CLAUDE_CODE,
+        PROVIDER_OPENAI_CODEX,
+    ]
+    rows = {row["item_id"]: row for row in CostJournal(work).item_rows()}
+    assert rows["aqa-b"]["evaluation"]["vendors_paused"] == [PROVIDER_GOOGLE_GEMINI]
+    assert [
+        row for row in CostJournal(work).rows() if row.get("kind") == "vendor_resume"
+    ] == []
+
+
+def test_a_clean_ledger_does_not_resume_a_vendor_paused_for_another_reason(
+    tmp_path: Path,
+) -> None:
+    """Only an ambiguous charge waits on the ledger; every other stop stands."""
+    db = state_db(tmp_path / "now", chapter3=["aqa-a"])
+    later = state_db(tmp_path / "later", chapter3=["aqa-a", "aqa-b"])
+    ledger_file = construction_ledger(
+        tmp_path, {"family-aqa-a": ["0.01"], "family-aqa-b": ["0.01"]}
+    )
+    auth = authorization(tmp_path, db, maximum_items=4)
+    work = tmp_path / "other"
+    events: list[dict] = []
+    result = _watch_two_polls(
+        db=db,
+        work=work,
+        ledger_file=ledger_file,
+        auth=auth,
+        events=events,
+        between_polls=lambda: db.write_bytes(later.read_bytes()),
+        budget=[1],
+        stop_state="failed",
+        stop_error="the provider refused the request",
+    )
+    assert result["errors"] == []
+    paused = [row for row in events if row["event"] == "vendor_paused"]
+    assert len(paused) == 1
+    assert paused[0]["reason"] == "failed: the provider refused the request"
+    assert [row for row in events if row["event"] == "vendor_resumed"] == []
+    assert PROVIDER_GOOGLE_GEMINI in result["paused_vendors"]
+
+
+def test_the_ambiguous_charge_reason_is_read_from_the_request_state() -> None:
+    """The journalled reason is the request state, with any detail after it."""
+    assert is_ambiguous_charge_reason("ambiguous_charge")
+    assert is_ambiguous_charge_reason("ambiguous_charge: HTTP 503 UNAVAILABLE")
+    assert not is_ambiguous_charge_reason("failed: the harness exited")
+    assert not is_ambiguous_charge_reason(EVALUATION_CEILING_REASON)
+    assert not is_ambiguous_charge_reason(None)
+    assert not is_ambiguous_charge_reason("")

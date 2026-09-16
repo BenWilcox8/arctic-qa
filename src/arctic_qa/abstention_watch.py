@@ -39,6 +39,15 @@ never lets one Gemini call pass the evaluation ceiling: the broker refuses
 the call, and the watcher then pauses the Gemini vendor, journals the pause,
 and keeps the subscription vendors running. It exits non-zero only on a real
 error.
+
+Paused vendors. A vendor that stops on an item is paused for the rest of the
+invocation, because the policy forbids a retry, and a start clears that pause.
+One pause lifts on its own: an ambiguous charge. The broker keeps the
+reservation of a paid call whose charge it cannot prove and halts the
+evaluation phase until a supervisor releases it with a reviewed continuation.
+That release is a ledger fact, so the watcher reads the shared ledger on every
+poll, and resumes the Gemini vendor on the first poll after the release with a
+``vendor_resumed`` event and a journal row. No restart is needed.
 """
 
 from __future__ import annotations
@@ -60,6 +69,7 @@ from .abstention_cost import (
     load_list_prices,
     pause_row,
     read_ledger,
+    resume_row,
     summarize_journal,
 )
 from .abstention_plan import (
@@ -86,7 +96,9 @@ from .abstention_set import (
 from .model_broker import (
     EVALUATION_CEILING_REASON,
     EVALUATION_ITEM_REPEAT_REASON,
+    EVALUATION_PHASE,
     SharedGeminiBroker,
+    phase_halt_reason,
 )
 from .util import atomic_json, sha256_file
 
@@ -95,6 +107,9 @@ AUTHORIZATION_SCHEMA = "abstention-streaming-authorization-v1"
 WATCH_STATE_SCHEMA = "abstention-streaming-watch-state-v1"
 WATCH_STATE_FILENAME = "watch-state.json"
 SKIP_KIND = "skipped_item"
+# The request state the broker records for a paid call whose charge it
+# cannot prove. Such a pause waits on a supervisor release, not a restart.
+AMBIGUOUS_CHARGE_STATE = "ambiguous_charge"
 DEFAULT_POLL_SECONDS = 30
 MINIMUM_POLL_SECONDS = 5
 MAXIMUM_POLL_SECONDS = 600
@@ -532,6 +547,19 @@ def is_item_scoped_reason(reason: str | None) -> bool:
     return bool(reason) and EVALUATION_ITEM_REPEAT_REASON in str(reason)
 
 
+def is_ambiguous_charge_reason(reason: str | None) -> bool:
+    """Say whether one stop reason is an ambiguous shared-ledger charge.
+
+    The broker books a paid call whose charge it cannot prove as an ambiguous
+    charge and halts the evaluation phase. The reason the evaluator journals is
+    the request state, with the provider detail after a colon when there is
+    one, so the state is the first field.
+    """
+    if not reason:
+        return False
+    return str(reason).split(":", 1)[0].strip() == AMBIGUOUS_CHARGE_STATE
+
+
 def is_ceiling_reason(reason: str | None) -> bool:
     """Return whether one stop reason is the evaluation budget wall."""
     if not reason:
@@ -634,6 +662,9 @@ def watch(
     ]
     if not active:
         raise ValueError("every vendor of the plan is excluded")
+    # The vendors this invocation may run. A pause narrows `vendors`; a resume
+    # restores one of them, and never a vendor `--vendors` excluded.
+    authorized_vendors = list(active)
     vendors = active
     stop = {"now": False}
 
@@ -683,6 +714,47 @@ def watch(
 
     while True:
         polls += 1
+        # A vendor paused for an ambiguous charge waits on a supervisor
+        # release, not on a restart: the broker keeps the reservation and
+        # halts the evaluation phase until a reviewed continuation releases
+        # it. So the evaluator asks the shared ledger on every poll whether
+        # the evaluation phase can call again, and resumes the vendor itself.
+        # Only the shared-ledger vendor is covered, because that ledger is the
+        # record that proves the release.
+        if (
+            PROVIDER_GOOGLE_GEMINI in authorized_vendors
+            and PROVIDER_GOOGLE_GEMINI not in vendors
+            and is_ambiguous_charge_reason(
+                (state["paused_vendors"].get(PROVIDER_GOOGLE_GEMINI) or {}).get(
+                    "reason"
+                )
+            )
+            and phase_halt_reason(read_ledger(shared_ledger_file), EVALUATION_PHASE)
+            is None
+        ):
+            paused_reason = str(
+                state["paused_vendors"][PROVIDER_GOOGLE_GEMINI]["reason"]
+            )
+            del state["paused_vendors"][PROVIDER_GOOGLE_GEMINI]
+            running = set(vendors) | {PROVIDER_GOOGLE_GEMINI}
+            vendors = [name for name in authorized_vendors if name in running]
+            atomic_json(state_path, {**state, "updated_at_utc": _utc_now()})
+            journal.append(
+                resume_row(
+                    run_id=str(authorization["run_id_prefix"]),
+                    vendor=PROVIDER_GOOGLE_GEMINI,
+                    paused_reason=paused_reason,
+                )
+            )
+            emit(
+                {
+                    "event": "vendor_resumed",
+                    "vendor": PROVIDER_GOOGLE_GEMINI,
+                    "paused_reason": paused_reason,
+                    "reason": "the released ambiguous charge no longer halts "
+                    "the evaluation phase",
+                }
+            )
         # An item whose only missing trials belong to a model that is still
         # paused cannot advance: a revisit records nothing, calls nothing and
         # appends one more journal row. So it waits here until the pause
@@ -958,6 +1030,7 @@ __all__ = [
     "SKIP_KIND",
     "WATCH_STATE_FILENAME",
     "authorization_record",
+    "is_ambiguous_charge_reason",
     "is_ceiling_reason",
     "estimated_gemini_item_usd",
     "evaluate_item",
