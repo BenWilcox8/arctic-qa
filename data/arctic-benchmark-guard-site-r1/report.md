@@ -251,7 +251,7 @@ Two things are needed before a guard pause can reach a live run:
 
 Until then the guard still measures, still extrapolates, still logs and still shows everything on the page.
 Only the pause action is inert.
-This is a coordination item for firstmate, not a change this task should make to the evaluator.
+This is a coordination item for firstmate. This task does not change the evaluator.
 
 A second item is smaller.
 The guard reads `config/benchmark-evaluation-policy-v1.json`, which carries the USD 5.00 canary ceiling.

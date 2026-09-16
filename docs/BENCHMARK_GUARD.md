@@ -172,10 +172,18 @@ Give the evaluator launcher the same path that the guard writes.
 Run the guard as a systemd user unit, like the live publication snapshot service.
 Operate it from a read-only runtime snapshot of a landed commit, not from a worktree.
 
+First build a read-only snapshot of the landed commit:
+
 ```sh
-systemd-run --user --unit=arctic-benchmark-guard-r1 \
-  --working-directory=<runtime-snapshot> \
-  <runtime-snapshot>/... nix develop -c env PYTHONPATH=<runtime-snapshot>/src \
+APP=<runtime root>/app-<short sha>-<task>
+mkdir -p $APP && git archive <short sha> | tar -x -C $APP && chmod -R a-w $APP
+```
+
+Then start the unit:
+
+```sh
+systemd-run --user --unit=arctic-benchmark-guard-r1 --working-directory=$APP \
+  /run/current-system/sw/bin/nix develop path:$APP -c env PYTHONPATH=$APP/src \
   python -m arctic_qa.benchmark_guard \
     --journal-dir <evaluator work dir> \
     --guard-dir <guard dir> \
@@ -230,4 +238,5 @@ A model that only the ledger knows, such as an earlier canary model, is marked "
 - The guard reads the ledger without a write lock, under the shared lock of the ledger file. A number can be one cycle old.
 - The guard pauses one model of each affected vendor per cycle. A vendor whose whole quota collapses needs as many cycles as it has models.
 - A pause is inert until the evaluator reads the same pause file. Confirm the path of the evaluator launcher before you rely on the guard.
+- When the shared ledger cannot be read, the Gemini readings are zero and no Gemini rule fires. The guard records the error, and the evaluator's own ceiling precheck still bounds the run.
 - When `quota-axi` cannot run, no quota rule fires. The guard records the error in `guard-state.json`, and the viewer shows it. A missing quota reading never causes a pause.
