@@ -30,6 +30,7 @@ ROLE_STAGES = {
     "distractor_writer": "distractor_generation",
     "option_verifier": "option_verification",
     "correction": "repair",
+    "slot_lookup": "repair",
 }
 
 

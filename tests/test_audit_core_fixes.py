@@ -471,7 +471,7 @@ def test_the_context_only_block_marks_its_spans_as_unselectable() -> None:
 
 def test_stable_identifiers_stay_bound_to_the_new_routing_contract() -> None:
     assert generation.GENERATION_ATTEMPT_CONTRACT_VERSION == (
-        "bounded-failure-routing-v4"
+        "bounded-failure-routing-v5"
     )
     assert stable_id("probe", generation.GENERATION_ATTEMPT_CONTRACT_VERSION)
 

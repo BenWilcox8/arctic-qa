@@ -5,9 +5,11 @@ import inspect
 import re
 from decimal import Decimal
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any, Callable
 
 from . import generation as generation_contract
+from . import validation as validation_contract
 from .db import Database, now
 from .discovery import manual_record
 from .errors import BudgetError, CandidateRejectedError, ProviderResponseError
@@ -70,6 +72,10 @@ REPAIRABLE_QUESTION_REASONS = frozenset(
         "publication_relative_period",
         "question_qualifier_not_evidence_bound",
         "scope_value_not_source_supported",
+        # audit 4.6 d: the three frozen-record scope codes reach the rebind rung
+        "answer_scope_not_source_bound",
+        "answer_verifier_scope_not_source_bound",
+        "reconstruction_scope_not_source_bound",
         "revision_unchanged_payload",
         "question_claim_type_disagreement",
         "reconstruction_disagreement",
@@ -133,6 +139,51 @@ IMMEDIATE_ALTERNATIVE_FINDING_REASONS = frozenset(
 )
 OPTION_REPAIR_REASONS = frozenset({"insufficient_verified_distractors"})
 ANSWER_RULE_REPAIR_REASONS = frozenset({"source_bound_numeric_rule_missing"})
+# One scope family, one failure layer, one pair of rungs (chapter 2 yield audit
+# 4.6 d, finding R3). _reason_family already collapsed these six codes to one
+# demand while _failure_layer left three of them in the contract catch-all and
+# no rung set held them, so family-3480407b ended after one attempt with a
+# mechanical scope trim still unspent.
+SCOPE_FAMILY_REASONS = frozenset(
+    {
+        "relation_scope_mismatch",
+        "scope_qualifier_missing",
+        "scope_qualifier_not_source_bound",
+        "scope_qualifier_not_displayed",
+        "scope_value_not_source_supported",
+        "answer_scope_not_source_bound",
+        "answer_verifier_scope_not_source_bound",
+        "reconstruction_scope_not_source_bound",
+    }
+)
+# Routing's own terminal outcomes. Each one records that a rewrite has nothing
+# to act on, so no rung set may hold them and no repair may carry them.
+UNROUTABLE_OUTCOME_REASONS = frozenset(
+    {
+        # every judge record present reports clean and no diagnostic names a
+        # phrase, a detail type or a scope field: the gates contradict each other
+        "gate_contradiction_unroutable",
+        # a judge names a defect but the rejection carries no displayed words,
+        # so the writer would be rewriting blind
+        "empty_diagnostic_unroutable",
+    }
+)
+# A weak judge may not buy a repair cycle (chapter 2 yield audit 4.6 f, R6). The
+# roster's own rank decides: rank 4 is the Pro judge, rank 1 the flash-lite one
+# that answered "no" to "24 species" against "24".
+MINIMUM_AGREEMENT_TRIGGER_STRENGTH = 4
+# One slot_lookup call per paper, behind the answer-leak filter.
+MAX_SLOT_LOOKUPS_PER_PAPER = 1
+# Candidate rows that record a generation call rather than a benchmark item.
+# They keep the 26 dead chapter 2 calls visible without entering path
+# reconstruction, acceptance, or the run counts (audit 4.6 e and 4.9 C8).
+INCOMPLETE_CANDIDATE_STATUSES = frozenset(
+    {"incomplete_infra", "generation_incomplete", "generation_settled"}
+)
+# The one SQL predicate that keeps call records out of a benchmark-item query.
+BENCHMARK_CANDIDATE_PREDICATE = "status NOT IN ({})".format(
+    ",".join(f"'{status}'" for status in sorted(INCOMPLETE_CANDIDATE_STATUSES))
+)
 SURGICAL_CORRECTION_REASONS = frozenset(
     {
         "question_context_missing",
@@ -389,6 +440,13 @@ def run_stream(
                 request_key=request_key,
                 reason_code=reason_code,
             )
+            # audit 4.9 C8: the family keeps its in-flight call records, so the
+            # completed calls of an ambiguous charge stay visible for diagnosis
+            # instead of vanishing with the attempt.
+            counts.setdefault("incomplete_infra", 0)
+            counts["incomplete_infra"] += len(
+                _incomplete_infra_records(db, campaign_id, family_id)
+            )
             counts.setdefault("operational_unresolved", 0)
             counts["operational_unresolved"] += 1
             counts["processed"] += 1
@@ -622,6 +680,7 @@ def run_stream(
             source_id=source_id,
             family_id=family_id,
             selected=selected,
+            source_version_id=source_version_id,
             title=access.get("title"),
             author=paper_author,
             verifier=paper_verifier,
@@ -721,6 +780,7 @@ def _progress_generation(
     title: str | None,
     author: Provider,
     verifier: Provider,
+    source_version_id: str = "",
     pending_handler: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     try:
@@ -735,6 +795,7 @@ def _progress_generation(
         raise
     resumed = bool(paths)
     generation_attempt_supported = _supports_generation_attempt()
+    slot_lookups_used = 0
 
     while True:
         for path in sorted(paths.values(), key=_path_sort_key):
@@ -825,14 +886,47 @@ def _progress_generation(
                     "reason_codes": failure["reason_codes"],
                     "resumed": resumed,
                 }
+            evidence = _routing_evidence(failed_path)
+            slot_evidence = _slot_evidence_pool(db, source_id, evidence)
+            unmet = _unmet_slot_demands(failure["reason_codes"], slot_evidence)
+            if unmet and slot_lookups_used < MAX_SLOT_LOOKUPS_PER_PAPER:
+                slot_lookups_used += 1
+                found = _run_slot_lookup(
+                    db,
+                    author,
+                    run_id=campaign_id,
+                    failed_path=failed_path,
+                    evidence=evidence,
+                    source_id=source_id,
+                    slot=sorted(unmet)[0],
+                )
+                if found is not None:
+                    evidence["slot_lookup"] = found
+                    slot_evidence = frozenset(
+                        {*(slot_evidence or frozenset()), found["slot"]}
+                    )
+            unroutable: list[str] = []
             next_attempt = _next_generation_attempt(
                 campaign_id=campaign_id,
                 family_id=family_id,
                 paths=paths,
                 failed_path=failed_path,
                 reason_codes=failure["reason_codes"],
-                slot_evidence=_source_slot_evidence(db, source_id),
+                slot_evidence=slot_evidence,
+                evidence=evidence,
+                unroutable=unroutable,
             )
+            if next_attempt is None and unroutable:
+                _record_gate_review_flag(
+                    db,
+                    campaign_id=campaign_id,
+                    candidate_key=candidate_key,
+                    source_id=source_id,
+                    selected=selected,
+                    attempt=failed_path["attempt"],
+                    reason_code=unroutable[0],
+                    rejection_reason_codes=failure["reason_codes"],
+                )
             if next_attempt is None:
                 incomplete = next(
                     (
@@ -843,6 +937,9 @@ def _progress_generation(
                     None,
                 )
                 if incomplete is not None:
+                    # An accepted question whose distractors failed is a product
+                    # output, so it keeps its own disposition even when routing
+                    # stopped the last path for gate review.
                     return {
                         "disposition": "incomplete_non_mcq",
                         "reason_codes": _path_failure(db, incomplete)["reason_codes"],
@@ -850,7 +947,7 @@ def _progress_generation(
                     }
                 return {
                     "disposition": "generation_rejected",
-                    "reason_codes": failure["reason_codes"],
+                    "reason_codes": [*failure["reason_codes"], *unroutable],
                     "resumed": resumed,
                 }
         else:
@@ -871,6 +968,17 @@ def _progress_generation(
             title=title,
             current_stage="generation",
         )
+        # audit 4.9 C8 and audit 4.6 e: the call is on the record before the
+        # provider can charge for it, so an ambiguous charge, a crash or a dead
+        # call leaves a row instead of nothing.
+        call_record_id = _open_generation_call_record(
+            db,
+            run_id=campaign_id,
+            source_id=source_id,
+            family_id=family_id,
+            source_version_id=source_version_id,
+            attempt=next_attempt,
+        )
         try:
             candidate = _generate_candidate_attempt(
                 db,
@@ -883,6 +991,12 @@ def _progress_generation(
             )
         except (CandidateRejectedError, ProviderResponseError) as error:
             reason_code = error.reason_code
+            _settle_generation_call_record(
+                db,
+                call_record_id,
+                state="generation_incomplete",
+                reason_code=reason_code,
+            )
             _record_generation_rejection(
                 db,
                 campaign_id=campaign_id,
@@ -905,6 +1019,12 @@ def _progress_generation(
             if str(error) != PER_REQUEST_CAP_REASON:
                 progress.error(source_id, title, "generation", error)
                 raise
+            _settle_generation_call_record(
+                db,
+                call_record_id,
+                state="generation_incomplete",
+                reason_code="request_cost_bound_exceeded",
+            )
             _record_budget_stop(
                 db,
                 campaign_id=campaign_id,
@@ -925,6 +1045,12 @@ def _progress_generation(
                 and str(error) == "alternative finding state is invalid"
             ):
                 reason_code = "alternative_finding_state_invalid"
+                _settle_generation_call_record(
+                    db,
+                    call_record_id,
+                    state="generation_incomplete",
+                    reason_code=reason_code,
+                )
                 _record_generation_rejection(
                     db,
                     campaign_id=campaign_id,
@@ -961,6 +1087,12 @@ def _progress_generation(
         candidate_row = _candidate_row(db, candidate["item_id"])
         if candidate_row is None:
             raise ValueError("generation returned a candidate that was not persisted")
+        _settle_generation_call_record(
+            db,
+            call_record_id,
+            state="generation_settled",
+            candidate_item_id=candidate["item_id"],
+        )
         candidate_provenance = candidate.get("provenance") or {}
         if (
             generation_attempt_supported
@@ -1075,6 +1207,8 @@ def _generation_attempt(
     parent_item_id: str | None,
     trigger_reason_code: str | None,
     excluded_finding_span_ids: list[str],
+    repair_numeric_rule: bool = False,
+    slot_lookup: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     attempt_id = stable_id(
         "generation-attempt",
@@ -1098,6 +1232,14 @@ def _generation_attempt(
             f"{finding_attempt_index}"
         ),
         "excluded_finding_span_ids": sorted(set(excluded_finding_span_ids)),
+        # audit 4.6 d: the numeric rule repair is orthogonal to the layer a
+        # rewrite answers, so it rides along with whatever repair the remaining
+        # codes earn instead of competing with them for the one rung.
+        "repair_numeric_rule": bool(repair_numeric_rule),
+        # audit 4.6 c: the verbatim sentence one slot_lookup call found in the
+        # text the writer sees, after the answer-leak filter. None when no
+        # lookup ran or when the source states no such sentence.
+        "slot_lookup": slot_lookup,
     }
 
 
@@ -1113,6 +1255,20 @@ def _path_sort_key(path: dict[str, Any]) -> tuple[int, int, str]:
     return (*_path_key(attempt), str(attempt["attempt_id"]))
 
 
+def _validate_slot_lookup(value: Any) -> None:
+    """Check the one verbatim slot sentence a repair may carry to the writer."""
+    if value is None:
+        return
+    if not isinstance(value, dict) or set(value) != {"slot", "quote", "span_id"}:
+        raise ValueError("the generation attempt slot lookup record is malformed")
+    if value["slot"] not in set(_SLOT_REASON_TYPES.values()):
+        raise ValueError("the generation attempt slot lookup names no known slot")
+    if not isinstance(value["quote"], str) or not value["quote"].strip():
+        raise ValueError("the generation attempt slot lookup quote is empty")
+    if not isinstance(value["span_id"], str) or not value["span_id"]:
+        raise ValueError("the generation attempt slot lookup span is missing")
+
+
 def _validate_generation_attempt(attempt: Any) -> dict[str, Any]:
     fields = {
         "contract_version",
@@ -1125,9 +1281,14 @@ def _validate_generation_attempt(attempt: Any) -> dict[str, Any]:
         "trigger_reason_code",
         "finding_policy_version",
         "excluded_finding_span_ids",
+        "repair_numeric_rule",
+        "slot_lookup",
     }
     if not isinstance(attempt, dict) or set(attempt) != fields:
         raise ValueError("the generation attempt object is malformed")
+    if type(attempt["repair_numeric_rule"]) is not bool:
+        raise ValueError("the generation attempt numeric repair flag is invalid")
+    _validate_slot_lookup(attempt["slot_lookup"])
     if attempt["contract_version"] != GENERATION_ATTEMPT_CONTRACT_VERSION:
         raise ValueError("the generation attempt contract version is unsupported")
     finding_index = attempt["finding_attempt_index"]
@@ -1149,7 +1310,9 @@ def _validate_generation_attempt(attempt: Any) -> dict[str, Any]:
     elif revision_index in {1, 2} and trigger in ANSWER_RULE_REPAIR_REASONS:
         allowed_kinds = {"answer_rule_repair"}
     elif revision_index in {1, 2}:
-        allowed_kinds = set(generation_contract.QUESTION_REPAIR_KINDS)
+        allowed_kinds = set(generation_contract.QUESTION_REPAIR_KINDS) | {
+            "frozen_scope_rebind"
+        }
     else:
         allowed_kinds = set()
     if attempt["attempt_kind"] not in allowed_kinds:
@@ -1254,9 +1417,12 @@ def _generation_paths(
 ) -> dict[tuple[int, int], dict[str, Any]]:
     paths: dict[tuple[int, int], dict[str, Any]] = {}
     predecessor_rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    # A call record is a receipt for one generation call, not a benchmark item,
+    # so it never enters path reconstruction, acceptance, or the run counts.
     rows = db.rows(
-        """SELECT item_id,status,candidate_json FROM candidates
+        f"""SELECT item_id,status,candidate_json FROM candidates
         WHERE run_id=? AND source_id=? AND paper_family_id=?
+        AND {BENCHMARK_CANDIDATE_PREDICATE}
         ORDER BY updated_at,item_id""",
         (campaign_id, source_id, family_id),
     )
@@ -1480,14 +1646,31 @@ def _path_failure(db: Database, path: dict[str, Any]) -> dict[str, list[str]]:
     return {"reason_codes": [str(reason) for reason in reasons]}
 
 
+# Words that end in "s" and are not the plural noun of a counted sample.
+_NOT_A_COUNTED_NOUN = frozenset(
+    {"was", "is", "has", "its", "this", "thus", "less", "plus", "versus", "across"}
+)
+# The closed noun list scored false on all 7 families whose repair demanded a
+# sample, and the demand became structurally unmeetable (chapter 2 yield audit
+# 4.6 c, finding R1). These patterns fail open on purpose: a false "the source
+# states it" only spends a rewrite the pipeline would have spent anyway, and a
+# false "it is unavailable" abandons a finding the source can still support.
 _SLOT_EVIDENCE_PATTERNS = {
     "period": re.compile(
         r"\b(?:1[89]\d{2}|20\d{2})\b|\b(?:January|February|March|April|May|June|"
-        r"July|August|September|October|November|December)\b"
+        r"July|August|September|October|November|December)\b|"
+        r"\b(?:spring|summer|autumn|winter|melt season|freeze[ -]?up|"
+        r"open[ -]water season|ice[ -]free season|growing season|field season|"
+        r"cruise|expedition|campaign|deployment|overwintering)\b",
+        re.IGNORECASE,
     ),
     "sample": re.compile(
-        r"\bn\s*=\s*\d+|\b\d+\s+(?:samples|individuals|stations|cores|sites|"
-        r"replicates|animals|birds|participants)\b"
+        r"\bn\s*=\s*\d+|"
+        r"\b(?:cohort|transect|census|survey|study population|sampling campaign)\b|"
+        r"\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+        r"thirteen|fourteen|fifteen|twenty|thirty|forty|fifty)\s+"
+        r"(?!(?:%s)\b)[A-Za-z][A-Za-z-]{2,}s\b" % "|".join(sorted(_NOT_A_COUNTED_NOUN)),
+        re.IGNORECASE,
     ),
     "acronym": re.compile(r"\([A-Z][A-Za-z0-9-]{1,}\)|\b[A-Z]{2,}\b"),
 }
@@ -1533,15 +1716,215 @@ def _slot_evidence_types(texts: list[str]) -> frozenset[str]:
     return frozenset(slots)
 
 
-def _source_slot_evidence(db: Database, source_id: str) -> frozenset[str] | None:
-    """Return the slot kinds this paper states, or None when it is unknown."""
+def _failed_candidate(failed_path: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the stored candidate document of one failed path, if it has one."""
+    row = failed_path.get("candidate")
+    if row is None:
+        return None
+    try:
+        candidate = json.loads(row["candidate_json"])
+    except (TypeError, KeyError, IndexError, json.JSONDecodeError):
+        return None
+    return candidate if isinstance(candidate, dict) else None
+
+
+def _writer_visible_texts(candidate: dict[str, Any]) -> list[str]:
+    """Return the hash-bound text the writer itself received for this attempt.
+
+    The chapter 2 slot guard read ``eligible_activity_spans`` only, which the
+    eligibility screen picked for another purpose, so the router judged a demand
+    met or unmeetable from text the writer never saw (audit 4.6 c, finding R1).
+    """
+    answer = candidate.get("answer")
+    answer = answer if isinstance(answer, dict) else {}
+    texts = [str(answer.get("evidence_quote") or "")]
+    for component in answer.get("evidence_components") or []:
+        if isinstance(component, dict):
+            texts.append(str(component.get("text") or ""))
+        elif isinstance(component, str):
+            texts.append(component)
+    for span in validation_contract.context_only_span_records(
+        candidate.get("provenance")
+    ):
+        texts.append(str(span.get("text") or ""))
+    return [text for text in texts if text.strip()]
+
+
+def _text_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if isinstance(item, str) and item.strip()]
+
+
+def _routing_evidence(failed_path: dict[str, Any]) -> dict[str, Any]:
+    """Collect the structured records routing may read from a failed candidate.
+
+    Routing reads typed diagnostics, the writer's own payload and the
+    deterministic scope check only. It never reads a judge's free text, which is
+    the same rule ``ATTEMPT_HISTORY`` keeps.
+    """
+    candidate = _failed_candidate(failed_path)
+    if candidate is None:
+        return {"has_candidate": False}
+    standalone = candidate.get("standalone_verification")
+    standalone = standalone if isinstance(standalone, dict) else {}
+    verification = candidate.get("answer_verification")
+    verification = verification if isinstance(verification, dict) else {}
+    agreement = candidate.get("answer_agreement")
+    return {
+        "has_candidate": True,
+        "unresolved_phrases": _text_list(standalone.get("unresolved_phrases")),
+        "missing_detail_types": _text_list(standalone.get("missing_detail_types")),
+        "scope_defect": validation_contract.scope_defect_records(candidate),
+        "standalone_pass": standalone.get("pass"),
+        "referent_resolved": verification.get("question_context_referent_resolved"),
+        "missing_detail": str(
+            verification.get("question_context_missing_detail") or ""
+        ).strip(),
+        "residual_error": str(verification.get("residual_error") or "").strip(),
+        "relation_scope_match": verification.get("relation_scope_match"),
+        "scope_contradicted": verification.get("scope_value_contradicted_by_source"),
+        "agreement": agreement if isinstance(agreement, dict) else {},
+        "writer_texts": _writer_visible_texts(candidate),
+    }
+
+
+def _slot_evidence_pool(
+    db: Database, source_id: str, evidence: dict[str, Any] | None
+) -> frozenset[str] | None:
+    """Return the slot kinds the text the writer will see can supply.
+
+    The pool is SOURCE_DATA plus CONTEXT_ONLY_SOURCE plus the eligibility
+    activity spans, never the activity spans alone.
+    """
     source = db.one("SELECT * FROM sources WHERE source_id=?", (source_id,))
-    if not source:
+    quotes = list(generation_contract.eligible_activity_spans(source)) if source else []
+    texts = [*((evidence or {}).get("writer_texts") or []), *quotes]
+    if not texts:
         return None
-    quotes = generation_contract.eligible_activity_spans(source)
-    if not quotes:
+    return _slot_evidence_types(texts)
+
+
+def _agreement_verdict_is_authoritative(agreement: dict[str, Any]) -> bool:
+    """Say whether a reconstruction disagreement may buy a repair cycle.
+
+    A disagreement counts from the deterministic comparator or from a judge the
+    role contract ranks at the Pro tier. The flash-lite judge answered "no" to
+    "24 species" against "24" and bought a whole repair cycle for family
+    2fa3406e (audit 4.6 f, finding R6). The bar is on a judge the roster ranks
+    below that tier, and only on one: a record the roster cannot rank is left
+    alone, because the rule removes a known-weak verdict and invents no new
+    reason to stop.
+    """
+    if not isinstance(agreement, dict) or agreement.get("method") != "llm_judge":
+        return True
+    judge = agreement.get("judge")
+    if not isinstance(judge, dict):
+        return True
+    model = judge.get("requested_model") or judge.get("returned_model")
+    try:
+        strength = load_role_contract()["model_strength_rank"]
+    except (ValueError, OSError):
+        return True
+    rank = strength.get(str(model))
+    if not isinstance(rank, int):
+        return True
+    return rank >= MINIMUM_AGREEMENT_TRIGGER_STRENGTH
+
+
+def _authoritative_reason_codes(
+    reason_codes: list[str], evidence: dict[str, Any] | None
+) -> list[str]:
+    """Drop a trigger whose only evidence is a judge too weak to spend on."""
+    if "reconstruction_disagreement" not in reason_codes:
+        return reason_codes
+    if evidence is None or not evidence.get("has_candidate"):
+        return reason_codes
+    if _agreement_verdict_is_authoritative(evidence.get("agreement") or {}):
+        return reason_codes
+    return [code for code in reason_codes if code != "reconstruction_disagreement"]
+
+
+# A rewrite that is handed no phrase, no detail type and no scope field has
+# nothing to act on. The guard applies only where the repair would be a
+# question-level rewrite: an option repair reuses the verified question, a
+# finding-layer code leaves the finding, and a leakage code names its own fix.
+_DIAGNOSTIC_REQUIRED_LAYERS = frozenset({"context", "evidence", "contract"})
+# Codes whose own contract promises the displayed words they object to, and
+# whose diagnostic this router can read. A self-describing code such as
+# question_context_missing names its own fix and is never suppressed. So is a
+# code whose diagnostic lives on a record the router does not compute: the
+# replay over the 139 chapter 2 candidates showed that
+# reconstruction_scope_not_source_bound and question_qualifier_not_evidence_bound
+# reach a context widening that accepted an item (family e02e286a), and the
+# guard must never take that path away. Widen this set only with a code whose
+# diagnostic _routing_evidence actually carries.
+DIAGNOSTIC_BEARING_REASONS = frozenset(
+    {
+        # the answer record's own scope, which scope_defect_records computes
+        "relation_scope_mismatch",
+        "scope_qualifier_missing",
+        "scope_qualifier_not_displayed",
+        "scope_qualifier_not_source_bound",
+        "scope_value_not_source_supported",
+        "answer_scope_not_source_bound",
+        "answer_verifier_scope_not_source_bound",
+        # the source-blind judge carries unresolved_phrases and
+        # missing_detail_types for every one of these
+        "standalone_undefined_subject_or_system",
+        "standalone_undefined_measured_variable",
+        "standalone_undefined_unit_meaning",
+        "standalone_undefined_percentage_basis",
+        "standalone_undefined_acronym",
+        "standalone_undefined_location",
+        "standalone_undefined_period_or_event",
+        "standalone_undefined_population_or_sample",
+        "standalone_undefined_treatment_or_condition",
+        "standalone_undefined_comparison_basis",
+        "standalone_unresolved_study_local_referent",
+        "standalone_source_dependent_locator",
+    }
+)
+
+
+def _unroutable_outcome(
+    reason_codes: list[str], evidence: dict[str, Any] | None
+) -> str | None:
+    """Return the terminal outcome when a rewrite has nothing to act on.
+
+    45 of 139 chapter 2 candidates were rejected with an empty
+    ``unresolved_phrases`` and an empty ``missing_detail_types``; 29 of them were
+    repairs, which cost USD 1.26 and returned no accepted item (audit 4.6 b,
+    finding R2). The condition reads whatever judge records exist at rejection
+    time: an absent record is not evidence of a contradiction.
+    """
+    if evidence is None or not evidence.get("has_candidate"):
         return None
-    return _slot_evidence_types(quotes)
+    if not reason_codes:
+        return None
+    if _primary_failure_layer(reason_codes) not in _DIAGNOSTIC_REQUIRED_LAYERS:
+        return None
+    if not all(reason in DIAGNOSTIC_BEARING_REASONS for reason in reason_codes):
+        return None
+    if (
+        evidence.get("unresolved_phrases")
+        or evidence.get("missing_detail_types")
+        or evidence.get("scope_defect")
+        or evidence.get("missing_detail")
+        or evidence.get("residual_error")
+    ):
+        return None
+    judges_clean = (
+        evidence.get("standalone_pass") is not False
+        and evidence.get("referent_resolved") is not False
+        and evidence.get("relation_scope_match") is not False
+        and evidence.get("scope_contradicted") is not True
+    )
+    return (
+        "gate_contradiction_unroutable"
+        if judges_clean
+        else "empty_diagnostic_unroutable"
+    )
 
 
 def _primary_failure_layer(reason_codes: list[str]) -> str:
@@ -1561,28 +1944,31 @@ def _reason_family(reason: str) -> str:
         return "standalone"
     if reason.startswith("question_context_"):
         return "question_context"
-    if reason in {
-        "relation_scope_mismatch",
-        "scope_qualifier_missing",
-        "scope_qualifier_not_source_bound",
-        "answer_scope_not_source_bound",
-        "answer_verifier_scope_not_source_bound",
-        "reconstruction_scope_not_source_bound",
-    }:
+    if reason in SCOPE_FAMILY_REASONS:
         return "scope"
     return reason
 
 
-def _repeat_depth(
-    paths: dict[tuple[int, int], dict[str, Any]], finding_index: int, family: str
-) -> int:
-    """Count earlier attempts on this finding that answered the same demand."""
+# Rungs the lineage-wide counter never suppresses. ``option_repair`` reuses the
+# parent's already verified question and went 5 for 6 in chapter 2, so a repeat
+# on the option demand is the cheapest item in the pipeline, not a waste.
+REPEAT_EXEMPT_REPAIR_KINDS = frozenset({"option_repair"})
+
+
+def _repeat_depth(paths: dict[tuple[int, int], dict[str, Any]], family: str) -> int:
+    """Count earlier attempts in the whole lineage that answered this demand.
+
+    The chapter 2 counter reset on a finding switch, so 72 of 139 candidates
+    re-failed on a defect their own family had already seen (audit 4.6 e). The
+    counter now spans the family lineage. An exempt rung is not counted, so a
+    repeat on the option demand still earns its rung.
+    """
     return sum(
         1
         for path in paths.values()
-        if int(path["attempt"]["finding_attempt_index"]) == finding_index
-        and isinstance(path["attempt"].get("trigger_reason_code"), str)
+        if isinstance(path["attempt"].get("trigger_reason_code"), str)
         and _reason_family(str(path["attempt"]["trigger_reason_code"])) == family
+        and path["attempt"].get("attempt_kind") not in REPEAT_EXEMPT_REPAIR_KINDS
     )
 
 
@@ -1598,6 +1984,83 @@ def _slot_demand_unmet(
         if reason in _SLOT_REASON_TYPES
     }
     return bool(demanded) and not (demanded & slot_evidence)
+
+
+def _unmet_slot_demands(
+    reason_codes: list[str], slot_evidence: frozenset[str] | None
+) -> frozenset[str]:
+    """Return the referent slots the writer-visible text cannot supply."""
+    if slot_evidence is None:
+        return frozenset()
+    demanded = {
+        _SLOT_REASON_TYPES[reason]
+        for reason in _routing_reason_codes(reason_codes)
+        if reason in _SLOT_REASON_TYPES
+    }
+    if not demanded or demanded & slot_evidence:
+        return frozenset()
+    return frozenset(demanded)
+
+
+def _run_slot_lookup(
+    db: Database,
+    author: Provider,
+    *,
+    run_id: str,
+    failed_path: dict[str, Any],
+    evidence: dict[str, Any],
+    source_id: str,
+    slot: str,
+) -> dict[str, Any] | None:
+    """Ask once for the sentence that states a slot the patterns could not find.
+
+    A pattern miss is a reason to ask once, not a reason to abandon a finding.
+    The chapter 2 guard abandoned family 7ad42191 over a year that sat inside
+    the admitted finding span, skipped a USD 0.0066 correction and paid USD 0.20
+    for two extractions that froze nothing (audit 4.6 c, finding R1).
+    """
+    source = db.one("SELECT * FROM sources WHERE source_id=?", (source_id,))
+    quotes = list(generation_contract.eligible_activity_spans(source)) if source else []
+    texts = [*(evidence.get("writer_texts") or []), *quotes]
+    if not texts:
+        return None
+    candidate = _failed_candidate(failed_path) or {}
+    answer = candidate.get("answer")
+    broker = getattr(author, "broker", None)
+    timeout = (
+        maximum_call_timeout_seconds(broker.config)
+        if broker is not None
+        else DEFAULT_CALL_TIMEOUT_SECONDS
+    )
+    try:
+        return generation_contract.slot_lookup_quote(
+            db,
+            author,
+            run_id=run_id,
+            entity_id=stable_id(
+                "slot-lookup",
+                run_id,
+                failed_path["attempt"]["attempt_id"],
+                slot,
+            ),
+            slot=slot,
+            texts=texts,
+            answer=answer if isinstance(answer, dict) else None,
+            parameters={
+                "temperature": 0,
+                "max_tokens": 512,
+                "reasoning_token_cap": 0,
+                "billable_token_overhead": 0,
+            },
+            reservation=Decimal("1"),
+            timeout=timeout,
+            retries=0,
+            rate_limit_seconds=0,
+        )
+    except (CandidateRejectedError, ProviderResponseError):
+        # The lookup is an optional cheap retrieval. A failure routes the slot
+        # as unavailable, exactly as a pattern miss did before it existed.
+        return None
 
 
 def _alternative_finding_attempt(
@@ -1636,6 +2099,8 @@ def _next_generation_attempt(
     failed_path: dict[str, Any],
     reason_codes: list[str],
     slot_evidence: frozenset[str] | None = None,
+    evidence: dict[str, Any] | None = None,
+    unroutable: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Choose the one repair this failure earns, inside the six-path bound.
 
@@ -1645,17 +2110,42 @@ def _next_generation_attempt(
     highest-priority layer only. It decides which repair runs, never whether an
     item is accepted: every repaired candidate re-runs the whole gate sequence
     and consumes a path.
+
+    ``evidence`` carries the structured records of the failed candidate, from
+    ``_routing_evidence``. ``unroutable`` collects the terminal outcome code when
+    routing stops because a rewrite has nothing to act on, so the caller can
+    record it and flag the family for gate review.
     """
     reason_codes = _routing_reason_codes(reason_codes)
+    reason_codes = _authoritative_reason_codes(reason_codes, evidence)
     if not reason_codes:
+        return None
+    # audit 4.6 d: the numeric rule repair is a cost swap, not a competitor for
+    # the one rung. It is stripped before layer selection and runs inside the
+    # same attempt as whatever repair the remaining codes earn.
+    repair_numeric_rule = "source_bound_numeric_rule_missing" in reason_codes
+    if repair_numeric_rule:
+        remaining = [
+            reason
+            for reason in reason_codes
+            if reason != "source_bound_numeric_rule_missing"
+        ]
+        if remaining:
+            reason_codes = remaining
+    outcome = _unroutable_outcome(reason_codes, evidence)
+    if outcome is not None:
+        if unroutable is not None:
+            unroutable.append(outcome)
         return None
     layer = _primary_failure_layer(reason_codes)
     primary = [reason for reason in reason_codes if _failure_layer(reason) == layer]
     reason_codes = primary or reason_codes
+    scope_defects = list((evidence or {}).get("scope_defect") or [])
     failed_attempt = failed_path["attempt"]
     finding_index = int(failed_attempt["finding_attempt_index"])
     revision_index = int(failed_attempt["question_revision_index"])
     trigger = reason_codes[0]
+    slot_lookup = (evidence or {}).get("slot_lookup")
 
     if finding_index == 1 and (
         (len(reason_codes) == 1 and trigger in IMMEDIATE_ALTERNATIVE_FINDING_REASONS)
@@ -1698,8 +2188,13 @@ def _next_generation_attempt(
     if repairable and next_revision <= MAX_QUESTION_REVISIONS:
         key = (finding_index, next_revision)
         if key not in paths:
-            depth = _repeat_depth(paths, finding_index, _reason_family(trigger))
-            kind = _repair_kind(reason_codes, depth)
+            depth = _repeat_depth(paths, _reason_family(trigger))
+            kind = _repair_kind(
+                reason_codes,
+                depth,
+                scope_defects=scope_defects,
+                finding_has_widened=_finding_has_widened(paths, finding_index),
+            )
             rung_declined = kind is None
             if kind is not None:
                 return _generation_attempt(
@@ -1712,6 +2207,12 @@ def _next_generation_attempt(
                     parent_item_id=(failed_path.get("candidate") or {}).get("item_id"),
                     trigger_reason_code=trigger,
                     excluded_finding_span_ids=[],
+                    repair_numeric_rule=repair_numeric_rule,
+                    slot_lookup=(
+                        slot_lookup
+                        if kind in generation_contract.QUESTION_REPAIR_KINDS
+                        else None
+                    ),
                 )
     if finding_index != 1:
         return None
@@ -1738,8 +2239,32 @@ def _next_generation_attempt(
     )
 
 
-def _repair_kind(reason_codes: list[str], repeat_depth: int) -> str | None:
-    """Pick the repair rung for one primary layer at this repeat depth."""
+def _finding_has_widened(
+    paths: dict[tuple[int, int], dict[str, Any]], finding_index: int
+) -> bool:
+    """Say whether this finding already spent its one context widening."""
+    return any(
+        int(path["attempt"]["finding_attempt_index"]) == finding_index
+        and path["attempt"].get("attempt_kind") == "context_widened_revision"
+        for path in paths.values()
+    )
+
+
+def _repair_kind(
+    reason_codes: list[str],
+    repeat_depth: int,
+    *,
+    scope_defects: Sequence[dict[str, Any]] = (),
+    finding_has_widened: bool = True,
+) -> str | None:
+    """Pick the repair rung for one primary layer at this repeat depth.
+
+    A scope trigger is routed by the demand the deterministic check computed,
+    never by the code alone. ``display_verbatim`` means the frozen value is in
+    the evidence and reaches no reader, which a question rewrite can place.
+    ``not_in_evidence`` means the evidence does not state it, which only a
+    rebind of the frozen answer record can settle (audit 4.6 a and 4.6 d).
+    """
     trigger = reason_codes[0]
     if trigger in OPTION_REPAIR_REASONS:
         return "option_repair"
@@ -1747,8 +2272,23 @@ def _repair_kind(reason_codes: list[str], repeat_depth: int) -> str | None:
         # A question rewrite cannot repair a numeric rule, and the rung is
         # allowed one attempt only.
         return "answer_rule_repair" if repeat_depth < 1 else None
+    if trigger in SCOPE_FAMILY_REASONS:
+        demands = {str(defect.get("demand")) for defect in scope_defects}
+        if "display_verbatim" in demands:
+            if repeat_depth < 1:
+                return "scope_display_repair"
+        elif demands == {"not_in_evidence"}:
+            # A rewrite may not touch the frozen scope, so the ordinary ladder
+            # would spend a path it cannot win.
+            return "frozen_scope_rebind" if repeat_depth < 1 else None
     if repeat_depth >= 2:
-        return None
+        # The lineage-wide counter stops a demand the family has already
+        # answered twice. The one exemption is the widening rung, which the
+        # replay over the 139 chapter 2 candidates showed the counter would
+        # otherwise suppress (audit 4.6 e). It runs once per finding, because
+        # CONTEXT_ONLY_SOURCE is new text for a finding the family has not yet
+        # widened, and never twice on the same one.
+        return None if finding_has_widened else "context_widened_revision"
     if repeat_depth == 1:
         return "context_widened_revision"
     if len(reason_codes) == 1 and trigger in SURGICAL_CORRECTION_REASONS:
@@ -1800,16 +2340,17 @@ def _failure_layer(reason: str) -> str:
         return "options"
     if reason.startswith("standalone_") or reason.startswith("question_context_"):
         return "context"
-    if reason in {
-        "relation_scope_mismatch",
-        "scope_qualifier_missing",
-        "scope_qualifier_not_source_bound",
+    if reason in SCOPE_FAMILY_REASONS or reason in {
         "benchmark_text_malformed",
         "publication_relative_period",
         "question_qualifier_not_evidence_bound",
-        "scope_value_not_source_supported",
     }:
+        # audit 4.6 d: the whole scope family sits in one layer, so the numeric
+        # and contract catch-alls stop winning the repair from it.
         return "context"
+    if reason in UNROUTABLE_OUTCOME_REASONS:
+        # Terminal routing outcomes. They are recorded, never repaired.
+        return "contract"
     if reason == "slot_evidence_unavailable":
         return "finding"
     if reason in {
@@ -1819,6 +2360,14 @@ def _failure_layer(reason: str) -> str:
         "alternative_answer_unresolved",
     }:
         return "evidence"
+    if reason in {
+        # Registered for the eligibility slice (chapter 3). Both end a screening
+        # attempt before any candidate exists, so the family layer records them
+        # and no candidate-level rung may claim them.
+        "eligible_arctic_scope_dimension_unsupported",
+        "eligible_arctic_scope_phrase_not_specific",
+    }:
+        return "finding"
     if reason.startswith("eligible_arctic_") or reason.startswith("finding_"):
         return "finding"
     return "contract"
@@ -1921,6 +2470,184 @@ def _require_validation_event(
             "a terminal streaming candidate lacks a validation event for its payload"
         )
     return event
+
+
+GENERATION_CALL_RECORD_CONTRACT_VERSION = "generation-call-record-v1"
+
+
+def _generation_call_record_id(
+    run_id: str, family_id: str, source_version_id: str, attempt_id: str
+) -> str:
+    """Return the idempotent key of one generation call.
+
+    The same attempt on the same frozen source text always resolves to the same
+    row, so a resumed run settles the record it already opened instead of
+    opening a second one and paying twice (audit 4.9 C8).
+    """
+    return stable_id(
+        "generation-call",
+        GENERATION_CALL_RECORD_CONTRACT_VERSION,
+        run_id,
+        family_id,
+        source_version_id,
+        attempt_id,
+    )
+
+
+def _open_generation_call_record(
+    db: Database,
+    *,
+    run_id: str,
+    source_id: str,
+    family_id: str,
+    source_version_id: str,
+    attempt: dict[str, Any],
+) -> str:
+    """Persist the in-flight candidate before any charge-uncertain call.
+
+    Two chapter 2 families lost every completed call to an ambiguous charge and
+    one family's attempt vanished with no terminal record at all (audit 4.9 C8),
+    and 26 generation calls produced no row of any kind (audit 4.6 e). The row
+    opens as ``incomplete_infra``: a call was started and its outcome is not yet
+    known. It is a receipt for the call, never a benchmark item, so it takes no
+    part in path reconstruction, acceptance or the run counts.
+    """
+    item_id = _generation_call_record_id(
+        run_id, family_id, source_version_id, attempt["attempt_id"]
+    )
+    record = {
+        "schema_version": generation_contract.CANDIDATE_SCHEMA_VERSION,
+        "item_id": item_id,
+        "generation_call_record": GENERATION_CALL_RECORD_CONTRACT_VERSION,
+        "state": "incomplete_infra",
+        "source": {"source_id": source_id, "paper_family_id": family_id},
+        "provenance": {
+            "run_id": run_id,
+            "generation_attempt": attempt,
+            "source_version_id": source_version_id,
+            "request_identity": {
+                "run_id": run_id,
+                "paper_id": source_id,
+                "family_id": family_id,
+                "source_version_id": source_version_id,
+                "attempt_id": attempt["attempt_id"],
+            },
+        },
+    }
+    with db.transaction():
+        db.connection.execute(
+            """INSERT INTO candidates
+            (item_id,run_id,source_id,paper_family_id,generation_arm,candidate_json,
+             status,created_at,updated_at)
+            VALUES (?,?,?,?,?,?,'incomplete_infra',?,?)
+            ON CONFLICT(item_id) DO UPDATE SET
+              candidate_json=excluded.candidate_json,
+              status='incomplete_infra',
+              updated_at=excluded.updated_at""",
+            (
+                item_id,
+                run_id,
+                source_id,
+                family_id,
+                "answer_first",
+                canonical_json(record),
+                now(),
+                now(),
+            ),
+        )
+    return item_id
+
+
+def _settle_generation_call_record(
+    db: Database,
+    item_id: str,
+    *,
+    state: str,
+    reason_code: str | None = None,
+    candidate_item_id: str | None = None,
+) -> None:
+    """Close one in-flight call record with the outcome the call reached."""
+    row = _candidate_row(db, item_id)
+    if row is None:
+        return
+    try:
+        record = json.loads(row["candidate_json"])
+    except (TypeError, json.JSONDecodeError):
+        return
+    record["state"] = state
+    record["reason_code"] = reason_code
+    record["candidate_item_id"] = candidate_item_id
+    with db.transaction():
+        db.connection.execute(
+            "UPDATE candidates SET candidate_json=?,status=?,updated_at=? WHERE item_id=?",
+            (canonical_json(record), state, now(), item_id),
+        )
+
+
+def _incomplete_infra_records(
+    db: Database, run_id: str, family_id: str
+) -> list[dict[str, Any]]:
+    """Return the call records of one family whose outcome is still unknown."""
+    return [
+        dict(row)
+        for row in db.rows(
+            """SELECT item_id,status,candidate_json FROM candidates
+            WHERE run_id=? AND paper_family_id=? AND status='incomplete_infra'
+            ORDER BY item_id""",
+            (run_id, family_id),
+        )
+    ]
+
+
+def _record_gate_review_flag(
+    db: Database,
+    *,
+    campaign_id: str,
+    candidate_key: str,
+    source_id: str,
+    selected: dict[str, Any],
+    attempt: dict[str, Any],
+    reason_code: str,
+    rejection_reason_codes: list[str],
+) -> None:
+    """Record why routing stopped and flag the family for gate review.
+
+    ``gate_contradiction_unroutable`` means every judge record present reports
+    clean while a deterministic code killed the candidate, so the gates
+    contradict each other. ``empty_diagnostic_unroutable`` means a judge named a
+    defect and no diagnostic named the words it objects to. Neither can accept
+    anything: they only stop the pipeline paying for a rewrite that is handed
+    nothing to act on.
+    """
+    detail = {
+        "campaign_id": campaign_id,
+        "candidate_key": candidate_key,
+        "selection": selected,
+        "generation_attempt": attempt,
+        "rejection_reason_codes": rejection_reason_codes,
+        "gate_review_required": True,
+        "routing_outcome": reason_code,
+    }
+    with db.transaction():
+        db.connection.execute(
+            """INSERT OR IGNORE INTO rejection_ledger
+            (rejection_id,item_id,source_id,stage,reason_code,detail_json,created_at)
+            VALUES (?,NULL,?,'generation_routing',?,?,?)""",
+            (
+                stable_id(
+                    "rejection",
+                    campaign_id,
+                    candidate_key,
+                    "generation_routing",
+                    attempt["attempt_id"],
+                    reason_code,
+                ),
+                source_id,
+                reason_code,
+                canonical_json(detail),
+                now(),
+            ),
+        )
 
 
 def _record_generation_rejection(
@@ -2050,7 +2777,9 @@ def _generation_counts(db: Database, run_id: str) -> dict[str, int]:
     revision_attempt_ids: set[str] = set()
     candidate_count = 0
     for row in db.rows(
-        "SELECT candidate_json FROM candidates WHERE run_id=?", (run_id,)
+        f"""SELECT candidate_json FROM candidates WHERE run_id=?
+        AND {BENCHMARK_CANDIDATE_PREDICATE}""",
+        (run_id,),
     ):
         candidate = json.loads(row["candidate_json"])
         if not _is_current_contract_candidate(candidate):
@@ -2160,8 +2889,9 @@ def _candidate_for_current_contract(
 ) -> dict[str, Any] | None:
     """Return only a candidate made with every current generation contract."""
     rows = db.rows(
-        """SELECT item_id,status,candidate_json FROM candidates
+        f"""SELECT item_id,status,candidate_json FROM candidates
         WHERE run_id=? AND source_id=?
+        AND {BENCHMARK_CANDIDATE_PREDICATE}
         ORDER BY updated_at DESC,item_id DESC""",
         (run_id, source_id),
     )

@@ -109,10 +109,10 @@ def test_the_launch_profile_matches_the_broker_stage_models() -> None:
 # Run blocker 1: judge stage models with verified pricing.
 
 
-def test_price_config_v7_pins_the_judge_model_and_its_price() -> None:
+def test_price_config_v8_pins_the_judge_model_and_its_price() -> None:
     config = _config(PRICE_CONFIG)
 
-    assert config["config_id"] == "arctic-gemini-eligibility-r1-config-v7"
+    assert config["config_id"] == "arctic-gemini-eligibility-r1-config-v8"
     assert config["model"] == "gemini-3.8-flash"
     for stage in PRO_JUDGE_STAGES:
         row = config["stage_models"][stage]

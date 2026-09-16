@@ -9,6 +9,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - A whole-suite run takes several minutes. `tests/test_model_broker.py` and `tests/test_streaming.py` hold real rate-limit sleeps.
 - Read `docs/CHAPTER2_CORPUS.md` before you extract, freeze, or read the chapter 2 corpus.
 - `config/gemini-eligibility-v1.json` is bound into every paid receipt through `price_config_sha256`. Any edit to it needs a chained ledger price transition before a live run can resume, and a new `config_id` revision rather than a changed meaning for an old one.
+- Not every row in the `candidates` table is a benchmark item. A row whose status is in `streaming.INCOMPLETE_CANDIDATE_STATUSES` records one generation call. Query benchmark items with `streaming.BENCHMARK_CANDIDATE_PREDICATE`.
 
 ## Maintaining this file
 

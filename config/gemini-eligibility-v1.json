@@ -1,6 +1,6 @@
 {
   "schema": "gemini-eligibility-config-v1",
-  "config_id": "arctic-gemini-eligibility-r1-config-v7",
+  "config_id": "arctic-gemini-eligibility-r1-config-v8",
   "model": "gemini-3.8-flash",
   "fallback_model": null,
   "api_base": "https://generativelanguage.googleapis.com/v1beta",
@@ -14,6 +14,9 @@
   "input_usd_per_million_tokens": "0.75",
   "output_usd_per_million_tokens_including_thinking": "3.75",
   "stage_models": {
+    "question_generation": {
+      "call_timeout_seconds": 300
+    },
     "answer_agreement": {
       "model": "gemini-3.1-flash-lite",
       "maximum_input_tokens": 1048576,

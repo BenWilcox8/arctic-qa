@@ -696,20 +696,23 @@ class AlwaysSucceeds:
 
 
 def test_stage_call_timeout_comes_from_the_price_config(tmp_path: Path) -> None:
-    """The Pro judge gets 300 seconds; every other stage keeps the 120 default."""
+    """The Pro judge and the writer get 300 seconds; the rest keep 120."""
     values = fixture(tmp_path, AlwaysSucceeds())
     broker = values["broker"]
     assert call_timeout_seconds(broker.config, "answer_verification") == 300
     assert call_timeout_seconds(broker.config, "standalone_verification") == 300
     assert call_timeout_seconds(broker.config, "option_verification") == 300
     assert call_timeout_seconds(broker.config, "blinded_reconstruction") == 300
-    assert call_timeout_seconds(broker.config, "question_generation") == 120
+    # Chapter 2 yield audit 4.9 C8: the writer was the last stage still cut off
+    # at 120 seconds, which left the charge of a completed call unknown.
+    assert call_timeout_seconds(broker.config, "question_generation") == 300
     assert call_timeout_seconds(broker.config, "answer_agreement") == 120
+    assert call_timeout_seconds(broker.config, "finding_answer_extraction") == 120
     assert maximum_call_timeout_seconds(broker.config) == 300
 
     writer = execute(broker, paper="writer", run_id="run-current")
     assert writer["state"] == "completed"
-    assert writer["timeout_seconds"] == 120
+    assert writer["timeout_seconds"] == 300
     judge = execute_answer_verifier(broker, paper="judge", run_id="run-current")
     assert judge["state"] == "completed"
     assert judge["timeout_seconds"] == 300

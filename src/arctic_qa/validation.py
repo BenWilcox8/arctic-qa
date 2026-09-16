@@ -34,7 +34,12 @@ STANDALONE_CALIBRATION_SET_VERSION = "standalone-calibration-v1"
 STANDALONE_CALIBRATION_MUST_PASS_RATE = Decimal("0.8")
 ANSWER_AGREEMENT_CONTRACT_VERSION = "deterministic-first-answer-agreement-v1"
 ANSWER_AGREEMENT_PROMPT_VERSION = "answer-agreement-judge-v1"
-ROUTING_CONTRACT_VERSION = "bounded-failure-routing-v4"
+ROUTING_CONTRACT_VERSION = "bounded-failure-routing-v5"
+# The structured scope defect a rejection hands the repair. Chapter 2 sent a
+# bare code with an empty unresolved_phrases list, so 29 repairs were fired
+# into the dark (chapter 2 yield audit 4.6, finding R2).
+SCOPE_DEFECT_CONTRACT_VERSION = "scope-defect-v1"
+SCOPE_DEFECT_DEMANDS = ("display_verbatim", "not_in_evidence")
 ANSWER_AGREEMENT_SYSTEM = """Decide whether two texts give the same answer to one question.
 Accept equivalent units, paraphrases, and harmless extra explanation.
 Reject contradictions, changed quantities, missing requested parts, incompatible scope, and negation changes.
@@ -530,6 +535,85 @@ def scope_qualifier_not_displayed(
         if not scope_phrase_is_displayed(value, question, question_context):
             return True
     return False
+
+
+def _scope_defect_evidence_texts(candidate: dict[str, Any]) -> list[str]:
+    """Return the hash-bound text a frozen scope value is checked against."""
+    answer = candidate.get("answer")
+    answer = answer if isinstance(answer, dict) else {}
+    texts = [str(answer.get("evidence_quote") or "")]
+    for component in answer.get("evidence_components") or []:
+        if isinstance(component, dict):
+            texts.append(str(component.get("text") or ""))
+        elif isinstance(component, str):
+            texts.append(component)
+    for span in context_only_span_records(candidate.get("provenance")):
+        texts.append(str(span.get("text") or ""))
+    return [text for text in texts if text.strip()]
+
+
+def scope_defect_records(candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return one structured defect per scope field the gate could not bind.
+
+    Chapter 2 rejected 45 of 139 candidates with an empty ``unresolved_phrases``
+    and an empty ``missing_detail_types`` while the scope codes carried the whole
+    rejection mass, so a rewrite was ordered to change something and told nothing
+    about what (chapter 2 yield audit 4.6, finding R2). This block is computed by
+    the same containment rule that emits those codes. It echoes only the frozen
+    finding's own scope strings, the hash-bound text they were checked against,
+    and the text the reader already sees. It states no new claim.
+
+    ``demand`` is ``display_verbatim`` when the frozen value is present in the
+    evidence but reaches no reader, and ``not_in_evidence`` when the evidence
+    does not state the frozen value at all. Only the first demand can go to the
+    writer: scope lives on the frozen answer record, which a question revision
+    may not change.
+    """
+    answer = candidate.get("answer")
+    answer = answer if isinstance(answer, dict) else {}
+    scope = answer.get("scope")
+    if not isinstance(scope, dict):
+        return []
+    question = str(candidate.get("question") or "")
+    question_context = str(candidate.get("question_context") or "")
+    evidence_texts = _scope_defect_evidence_texts(candidate)
+    verification = candidate.get("answer_verification")
+    verification = verification if isinstance(verification, dict) else {}
+    contradicted_field = (
+        str(verification.get("contradicted_scope_field") or "").strip()
+        if verification.get("scope_value_contradicted_by_source") is True
+        else ""
+    )
+    verifier_note = str(verification.get("scope_representation_note") or "")
+    defects: list[dict[str, Any]] = []
+    for field in sorted(scope):
+        value = scope.get(field)
+        if not isinstance(value, str) or not normalize_text(value):
+            continue
+        binding = next(
+            (text for text in evidence_texts if _scope_phrase_in_text(value, text)),
+            None,
+        )
+        displayed = scope_phrase_is_displayed(value, question, question_context)
+        if binding is None or field == contradicted_field:
+            demand = "not_in_evidence"
+        elif field in DISPLAYED_SCOPE_DIMENSIONS and not displayed:
+            demand = "display_verbatim"
+        else:
+            continue
+        defects.append(
+            {
+                "contract_version": SCOPE_DEFECT_CONTRACT_VERSION,
+                "field": field,
+                "frozen_value": value,
+                "demand": demand,
+                "evidence_quote_span": binding
+                or (evidence_texts[0] if evidence_texts else ""),
+                "displayed_text": question_context or question,
+                "verifier_note": verifier_note if field == contradicted_field else "",
+            }
+        )
+    return defects
 
 
 def benchmark_text_raw_source_artifact(*values: str) -> bool:

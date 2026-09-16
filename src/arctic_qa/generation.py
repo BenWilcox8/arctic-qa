@@ -31,6 +31,7 @@ from .validation import (
     QUESTION_VERIFICATION_CONTRACT_VERSION,
     ROUTING_CONTRACT_VERSION,
     REFERENT_SLOT_CONTRACT_VERSION,
+    SCOPE_DEFECT_CONTRACT_VERSION,
     SCOPE_CONTRACT_VERSION,
     STANDALONE_VERIFICATION_CONTRACT_VERSION,
     answer_verifier_scope_reasons,
@@ -47,6 +48,7 @@ from .validation import (
     reconstruction_has_competing_alternatives,
     reconstruction_matches,
     required_question_phrases_contain_answer,
+    scope_defect_records,
     scope_is_evidence_bound,
     scope_phrase_in_text,
     scope_phrase_is_displayed,
@@ -69,7 +71,14 @@ FINDING_ADMISSION_REASK_REASONS = frozenset(
     }
 )
 QUESTION_REPAIR_KINDS = frozenset(
-    {"question_revision", "context_widened_revision", "surgical_correction"}
+    {
+        "question_revision",
+        "context_widened_revision",
+        "surgical_correction",
+        # chapter 2 yield audit 4.6 a: the writer places a frozen scope value
+        # the evidence states but no reader sees. It changes nothing else.
+        "scope_display_repair",
+    }
 )
 ATTEMPT_KINDS = frozenset(
     {
@@ -77,6 +86,10 @@ ATTEMPT_KINDS = frozenset(
         "option_repair",
         "alternative_finding",
         "answer_rule_repair",
+        # chapter 2 yield audit 4.6 a: the fourth correction component. Scope
+        # lives on the frozen answer record, which no question revision may
+        # change, so an unsupported qualifier is re-grounded or removed here.
+        "frozen_scope_rebind",
         *QUESTION_REPAIR_KINDS,
     }
 )
@@ -315,6 +328,20 @@ REVISION_INSTRUCTIONS = (
     "question unchanged. Do not add answer-bearing information. Do not repeat the "
     "parent question and question_context unchanged. Do not change the frozen "
     "finding. "
+)
+SCOPE_DEFECT_INSTRUCTIONS = (
+    "SCOPE_DEFECT lists every scope field the gate could not bind, with the "
+    "frozen value and the evidence span it was checked against. When demand is "
+    "display_verbatim, place frozen_value in the question or in question_context "
+    "exactly as written, character for character, and change nothing else. Never "
+    "invent a scope value to satisfy SCOPE_DEFECT. If the value cannot be placed "
+    "from SOURCE_DATA or CONTEXT_ONLY_SOURCE, set context_gap to the field name "
+    "and leave the question unchanged. "
+)
+SLOT_EVIDENCE_INSTRUCTIONS = (
+    "SLOT_EVIDENCE carries one verbatim sentence from this paper that states the "
+    "named slot. Take the slot value from that sentence in plain words. Do not "
+    "quote the sentence, and do not use it for anything else. "
 )
 CONTEXT_WIDENED_REVISION_INSTRUCTIONS = (
     "This attempt repeats an earlier rejection on this finding. "
@@ -1029,8 +1056,17 @@ ROLE_SCHEMAS: dict[str, dict[str, Any]] = {
         "type": "object",
         "required": ["component", "replacement"],
         "properties": {
-            "component": {"enum": ["question", "distractors", "numeric_rule"]},
+            "component": {"enum": ["question", "distractors", "numeric_rule", "scope"]},
             "replacement": {},
+        },
+        "additionalProperties": False,
+    },
+    "slot_lookup": {
+        "type": "object",
+        "required": ["found", "quote"],
+        "properties": {
+            "found": {"type": "boolean"},
+            "quote": {"type": "string"},
         },
         "additionalProperties": False,
     },
@@ -1096,9 +1132,20 @@ def _validated_generation_attempt(
         "trigger_reason_code",
         "finding_policy_version",
         "excluded_finding_span_ids",
+        "repair_numeric_rule",
+        "slot_lookup",
     }
     if set(value) != required:
         raise ValueError("generation attempt fields do not match the contract")
+    if type(value["repair_numeric_rule"]) is not bool:
+        raise ValueError("generation attempt numeric repair flag is invalid")
+    slot_lookup = value["slot_lookup"]
+    if slot_lookup is not None and (
+        not isinstance(slot_lookup, dict)
+        or set(slot_lookup) != {"slot", "quote", "span_id"}
+        or not str(slot_lookup.get("quote") or "").strip()
+    ):
+        raise ValueError("generation attempt slot lookup record is invalid")
     if value["contract_version"] != GENERATION_ATTEMPT_CONTRACT_VERSION:
         raise ValueError("generation attempt contract version is not current")
     if value["attempt_kind"] not in ATTEMPT_KINDS:
@@ -1162,6 +1209,15 @@ def _validated_generation_attempt(
             raise ValueError("answer rule repair parent state is invalid")
         if exclusions:
             raise ValueError("answer rule repair cannot exclude a finding")
+    if value["attempt_kind"] == "frozen_scope_rebind":
+        if revision_index not in {1, 2} or not isinstance(value["parent_item_id"], str):
+            raise ValueError("frozen scope rebind parent state is invalid")
+        if exclusions:
+            raise ValueError("frozen scope rebind cannot exclude a finding")
+    if value["attempt_kind"] == "scope_display_repair" and not isinstance(
+        value["parent_item_id"], str
+    ):
+        raise ValueError("scope display repair requires a parent candidate")
     if value["attempt_kind"] == "option_repair":
         if revision_index not in {1, 2} or not isinstance(value["parent_item_id"], str):
             raise ValueError("option repair parent state is invalid")
@@ -1561,6 +1617,15 @@ def generate_candidate(
     answer_rule_repair = bool(
         attempt is not None and attempt["attempt_kind"] == "answer_rule_repair"
     )
+    frozen_scope_rebind = bool(
+        attempt is not None and attempt["attempt_kind"] == "frozen_scope_rebind"
+    )
+    # audit 4.6 d: the numeric metadata repair is orthogonal to the question
+    # repair. It runs inside the same attempt, so it costs one extra USD 0.0043
+    # flash call and no longer competes for the one repair rung.
+    repair_numeric_rule = answer_rule_repair or bool(
+        attempt is not None and attempt.get("repair_numeric_rule")
+    )
     revision_payload: dict[str, Any] = {
         "trigger_reason_code": attempt["trigger_reason_code"]
         if attempt is not None
@@ -1574,6 +1639,15 @@ def generate_candidate(
         ),
     }
     if revision_parent is not None:
+        # audit 4.6 a: the rejection now carries the structured scope defect the
+        # same deterministic check computed, so a scope rewrite is told which
+        # field, which frozen string and which hash-bound span it failed on. The
+        # display_verbatim branch is the only one the writer may act on.
+        parent_scope_defects = [
+            defect
+            for defect in scope_defect_records(revision_parent)
+            if defect["demand"] == "display_verbatim"
+        ]
         revision_payload.update(
             {
                 "parent_question": revision_parent["question"],
@@ -1588,8 +1662,12 @@ def generate_candidate(
                     )
                     or []
                 ),
+                "scope_defect": parent_scope_defects,
             }
         )
+    attempt_slot_lookup = (attempt or {}).get("slot_lookup")
+    if attempt_slot_lookup is not None:
+        revision_payload["slot_evidence"] = attempt_slot_lookup
     attempt_history = (
         _attempt_history(db, run_id, source["paper_family_id"], finding_id)
         if attempt is not None and attempt["attempt_kind"] in QUESTION_REPAIR_KINDS
@@ -1621,11 +1699,13 @@ def generate_candidate(
             if attempt_kind == "surgical_correction"
             else ""
         )
+        + (SCOPE_DEFECT_INSTRUCTIONS if revision_payload.get("scope_defect") else "")
+        + (SLOT_EVIDENCE_INSTRUCTIONS if revision_payload.get("slot_evidence") else "")
         if attempt_kind in QUESTION_REPAIR_KINDS
         else ""
     )
     referent_slots: list[dict[str, Any]] = []
-    if distractor_only_retry or answer_rule_repair:
+    if distractor_only_retry or answer_rule_repair or frozen_scope_rebind:
         if revision_parent is None:
             raise ValueError("a bounded repair requires its parent candidate")
         question = revision_parent["question"]
@@ -1724,7 +1804,38 @@ def generate_candidate(
         arm_answer_proposal = joint["answer"]
     else:
         raise ValueError(f"unknown generation arm: {arm}")
-    if answer_rule_repair:
+    rebound_finding_id: str | None = None
+    if frozen_scope_rebind:
+        answer = _rebound_scope_answer(
+            db,
+            author,
+            run_id=run_id,
+            entity_id=entity_id,
+            answer=answer,
+            parent=revision_parent,
+            chunk=chunk,
+            interpretation_texts=[
+                str(span.get("text") or "")
+                for span in forwarded_interpretation_spans or []
+            ],
+            arctic_scope=arctic_scope,
+            context=context,
+            parameters=parameters,
+            reservation=reservation,
+            timeout=timeout,
+            retries=retries,
+            rate_limit_seconds=rate_limit_seconds,
+        )
+        rebound_finding_id = stable_id(
+            "finding",
+            run_id,
+            source_id,
+            finding_policy_version,
+            chunk["chunk_id"],
+            canonical_json(answer),
+        )
+        arm_answer_proposal = answer
+    if repair_numeric_rule:
         answer = _repaired_numeric_rule_answer(
             db,
             author,
@@ -1749,6 +1860,7 @@ def generate_candidate(
         revision_parent is not None
         and not distractor_only_retry
         and not answer_rule_repair
+        and not frozen_scope_rebind
         and (
             question == revision_parent.get("question")
             and question_context == revision_parent.get("question_context", "")
@@ -2155,6 +2267,24 @@ def generate_candidate(
         "answer_agreement": answer_agreement,
         "decision_evidence": decision_evidence,
         "qa_gate_reasons": qa_gate_reasons,
+        # audit 4.6 a: every rejection carries the scope fields it objects to,
+        # with the frozen value and the hash-bound span it was checked against.
+        "scope_defect": scope_defect_records(
+            {
+                "question": question,
+                "question_context": question_context,
+                "answer": answer,
+                "answer_verification": answer_verification,
+                "provenance": {
+                    "context_only_source": {
+                        "spans": [
+                            _context_only_span(span)
+                            for span in forwarded_interpretation_spans
+                        ]
+                    }
+                },
+            }
+        ),
         "distractors": distractors,
         "option_verdicts": option_verdicts,
         "correction_history": [],
@@ -2189,6 +2319,11 @@ def generate_candidate(
                 CONTEXT_ONLY_EVIDENCE_CONTRACT_VERSION
             ),
             "referent_slot_contract_version": REFERENT_SLOT_CONTRACT_VERSION,
+            "scope_defect_contract_version": SCOPE_DEFECT_CONTRACT_VERSION,
+            # A frozen-scope rebind changes the answer record, so the rebound
+            # record carries its own derived finding id beside the family's
+            # frozen one and re-ran freeze-time admission before it got here.
+            "rebound_finding_id": rebound_finding_id,
             "finding_admission_contract_version": FINDING_ADMISSION_CONTRACT_VERSION,
             "context_only_source": {
                 "contract_version": CONTEXT_ONLY_EVIDENCE_CONTRACT_VERSION,
@@ -2315,6 +2450,200 @@ def activity_context_block(source: dict[str, Any], answer: dict[str, Any]) -> st
     if not quotes:
         return ""
     return ACTIVITY_CONTEXT_HEADER + "\n".join(quotes) + "\n"
+
+
+SLOT_LOOKUP_CONTRACT_VERSION = "routing-slot-lookup-v1"
+SLOT_LOOKUP_INSTRUCTIONS = (
+    "Return the one verbatim sentence in SOURCE_TEXT that states the named "
+    "referent slot for this study. Copy it character for character. Set found "
+    "to false and quote to an empty string when no sentence states it. Do not "
+    "summarize, do not combine sentences, and do not write a sentence that is "
+    "not in SOURCE_TEXT."
+)
+
+
+def slot_lookup_quote(
+    db: Database,
+    provider: Provider,
+    *,
+    run_id: str,
+    entity_id: str,
+    slot: str,
+    texts: list[str],
+    answer: dict[str, Any] | None,
+    parameters: dict[str, Any],
+    reservation: Decimal,
+    timeout: float,
+    retries: int,
+    rate_limit_seconds: float,
+) -> dict[str, Any] | None:
+    """Ask once for the verbatim sentence that states one referent slot.
+
+    A regex miss is a reason to ask once, not a reason to abandon a finding
+    (chapter 2 yield audit 4.6 c, finding R1). The answer is bound before this
+    runs, so every returned sentence passes the same answer-leak filter that
+    strips a study-setting span carrying the answer, and a sentence that is not
+    verbatim in the hash-bound pool is refused.
+    """
+    pool = [text for text in texts if str(text).strip()]
+    if not pool:
+        return None
+    payload = _call(
+        db,
+        provider,
+        run_id,
+        entity_id,
+        "slot_lookup",
+        "SLOT\n"
+        + canonical_json({"slot": slot})
+        + "\nSOURCE_TEXT\n"
+        + canonical_json(pool)
+        + "\n"
+        + SLOT_LOOKUP_INSTRUCTIONS,
+        parameters,
+        reservation,
+        timeout,
+        retries,
+        rate_limit_seconds,
+    )
+    if payload.get("found") is not True:
+        return None
+    quote = str(payload.get("quote") or "").strip()
+    if not quote:
+        return None
+    span_index = next(
+        (index for index, text in enumerate(pool) if quote in text),
+        None,
+    )
+    if span_index is None:
+        # The sentence is not verbatim in the hash-bound pool the writer sees.
+        return None
+    if answer is not None and interpretation_spans_contain_answer(
+        [{"text": quote}], answer
+    ):
+        return None
+    return {
+        "slot": slot,
+        "quote": quote,
+        "span_id": stable_id("slot-lookup", entity_id, slot, span_index),
+    }
+
+
+def _rebound_scope_answer(
+    db: Database,
+    provider: Provider,
+    *,
+    run_id: str,
+    entity_id: str,
+    answer: dict[str, Any],
+    parent: dict[str, Any] | None,
+    chunk: dict[str, Any],
+    interpretation_texts: list[str],
+    arctic_scope: dict[str, Any] | None,
+    context: str,
+    parameters: dict[str, Any],
+    reservation: Decimal,
+    timeout: float,
+    retries: int,
+    rate_limit_seconds: float,
+) -> dict[str, Any]:
+    """Re-ground or remove a frozen scope value the evidence does not state.
+
+    Scope lives on the frozen answer record and ``REVISION_INSTRUCTIONS`` forbid
+    a change to the frozen finding, so six attempts in family a2bb181f never
+    dropped "northern Sweden" and family a5bcbcf9 kept a hallucinated period
+    (chapter 2 yield audit 4.6 a). This is the fourth correction component. It
+    deletes an unsupported qualifier or replaces it with one the frozen span
+    states verbatim, and it never adds a dimension the parent did not carry, so
+    it strictly raises how well the answer record is supported.
+    """
+    defects = [
+        defect
+        for defect in scope_defect_records(parent or {})
+        if defect["demand"] == "not_in_evidence"
+    ]
+    if not defects:
+        raise CandidateRejectedError(
+            "frozen_scope_rebind_not_applicable",
+            "no frozen scope value is unsupported by the evidence",
+        )
+    scope = answer.get("scope")
+    if not isinstance(scope, dict):
+        raise CandidateRejectedError(
+            "frozen_scope_rebind_not_applicable",
+            "the frozen answer carries no scope record to rebind",
+        )
+    replacement = correct_one_component(
+        db,
+        provider,
+        run_id=run_id,
+        entity_id=entity_id,
+        component="scope",
+        candidate_record={
+            "answer_text": answer.get("text"),
+            "evidence_quote": answer.get("evidence_quote"),
+            "scope": scope,
+        },
+        context=context,
+        reason_codes=sorted(
+            {str(reason) for reason in (parent or {}).get("qa_gate_reasons") or []}
+        ),
+        defect={"scope_defect": defects},
+        parameters=parameters,
+        reservation=reservation,
+        timeout=timeout,
+        retries=retries,
+        rate_limit_seconds=rate_limit_seconds,
+    )
+    if not isinstance(replacement, dict):
+        raise CandidateRejectedError(
+            "frozen_scope_rebind_invalid",
+            "the scope rebind did not return a scope object",
+        )
+    if set(replacement) - set(scope):
+        raise CandidateRejectedError(
+            "frozen_scope_rebind_invalid",
+            "the scope rebind added a dimension the frozen record did not carry",
+        )
+    supporting = [str(answer.get("evidence_quote", "")), *interpretation_texts]
+    rebound: dict[str, Any] = {}
+    for field in scope:
+        value = replacement.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        if not isinstance(value, str):
+            raise CandidateRejectedError(
+                "frozen_scope_rebind_invalid",
+                "the scope rebind returned a value that is not text",
+            )
+        if not any(scope_phrase_in_text(value, text) for text in supporting):
+            raise CandidateRejectedError(
+                "frozen_scope_rebind_invalid",
+                f"the rebound scope value is not stated by the evidence: {field}",
+            )
+        rebound[field] = value
+    if all(
+        rebound.get(defect["field"]) == scope.get(defect["field"]) for defect in defects
+    ):
+        raise CandidateRejectedError(
+            "frozen_scope_rebind_unchanged",
+            "the scope rebind returned the same unsupported values",
+        )
+    repaired = {**answer, "scope": rebound}
+    if not scope_is_evidence_bound(
+        rebound, repaired, interpretation_texts, allow_empty=True
+    ):
+        raise CandidateRejectedError(
+            "answer_scope_not_source_bound",
+            "the rebound scope is not bound to the frozen span",
+        )
+    # A change to the frozen answer record re-runs freeze-time admission, so the
+    # trim is auditable and no weaker finding enters through this rung.
+    admission = finding_admission_reason(repaired, chunk)
+    if admission:
+        raise CandidateRejectedError(admission[0], admission[1])
+    _require_arctic_scope_custody(repaired, arctic_scope)
+    return repaired
 
 
 def _repaired_numeric_rule_answer(
@@ -2861,7 +3190,7 @@ def correct_one_component(
     section 4.6 fix 4). This version returns the replacement only. The caller
     rebuilds the candidate and runs the whole gate sequence on it.
     """
-    if component not in {"question", "distractors", "numeric_rule"}:
+    if component not in {"question", "distractors", "numeric_rule", "scope"}:
         raise ValueError(f"component is not eligible for correction: {component}")
     response = _call(
         db,

@@ -464,6 +464,8 @@ def test_generation_attempt_contract_rejects_unbounded_paths() -> None:
             generation.SCOPE_ROLE_FINDING_POLICY_VERSION + ":finding-1"
         ),
         "excluded_finding_span_ids": [],
+        "repair_numeric_rule": False,
+        "slot_lookup": None,
     }
 
     assert generation._validated_generation_attempt(primary) == primary
