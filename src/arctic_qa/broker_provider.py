@@ -13,6 +13,7 @@ from .errors import (
     BrokerOperationBusyError,
     BudgetError,
     CandidateRejectedError,
+    CountUnavailableError,
     PaperCostCapError,
     ProviderError,
     ProviderResponseError,
@@ -23,6 +24,7 @@ from .model_broker import (
     RESUMABLE_NOT_SUBMITTED_REASONS,
     SharedGeminiBroker,
     broker_request_key,
+    count_error_is_transient,
 )
 from .providers import ProviderResult
 from .gemini_eligibility import model_config_for_stage
@@ -56,9 +58,15 @@ ROLE_STAGES = {
 # nothing and describes no fault of the run: a reviewed operation of another
 # worker held the exclusive operation lock past the bounded wait. The family is
 # recorded and skipped, and the next paper takes the lock as usual.
+#
+# ``CountUnavailableError`` belongs here for the same reason: the free
+# countTokens preflight stayed unavailable past its bounded retry. It reserved
+# nothing, submitted nothing and charged nothing, so it says nothing about the
+# money or the authorization of the run.
 _PAPER_LEVEL_BROKER_ERRORS = (
     BrokerOperationBusyError,
     CandidateRejectedError,
+    CountUnavailableError,
     PaperCostCapError,
     ProviderResponseError,
 )
@@ -174,9 +182,18 @@ class BrokerProvider:
         with broker_boundary():
             if receipt_path.is_file():
                 receipt = self.broker.effective_receipt(request_key)
+                # A stored count error that may be counted again is not a
+                # result to replay. The free count charged nothing, so the
+                # request goes back through the broker, which counts it again
+                # under its own retry round. Replaying it ended the chapter 3
+                # producer at 22:27 UTC on 2026-09-16, after the halt of that
+                # same count error was reviewed and lifted.
                 if not (
-                    receipt.get("state") == "not_submitted"
-                    and receipt.get("reason") in RESUMABLE_NOT_SUBMITTED_REASONS
+                    (
+                        receipt.get("state") == "not_submitted"
+                        and receipt.get("reason") in RESUMABLE_NOT_SUBMITTED_REASONS
+                    )
+                    or count_error_is_transient(receipt)
                 ):
                     _, result = self.read_receipt(
                         request_key=request_key,
@@ -386,6 +403,14 @@ def _provider_result(
             # re-trying the capped family.
             raise PaperCostCapError(reason, stage=str(receipt.get("stage") or ""))
         raise BudgetError(reason)
+    if count_error_is_transient(receipt):
+        # The free preflight stayed unavailable past its bounded retry. No call
+        # was made and nothing was charged, so this bounds one paper family:
+        # the producer records it, skips it and counts again on a later visit.
+        raise CountUnavailableError(
+            str(receipt.get("error") or "the countTokens preflight is unavailable"),
+            stage=str(receipt.get("stage") or ""),
+        )
     if state != "completed":
         raise ProviderError(f"the broker stopped with state {state}")
     response = receipt.get("response")

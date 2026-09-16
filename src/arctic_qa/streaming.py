@@ -17,6 +17,7 @@ from .errors import (
     BrokerOperationBusyError,
     BudgetError,
     CandidateRejectedError,
+    CountUnavailableError,
     PaperCostCapError,
     ProviderResponseError,
     is_run_stop,
@@ -264,6 +265,12 @@ PAPER_COST_CAP_REASON_CODE = "paper_cost_cap_reached"
 # and an option repair trigger the contract refused).
 CANDIDATE_PROCESSING_FAULT_REASON_CODE = "candidate_processing_fault"
 CANDIDATE_PROCESSING_FAULT_CONTRACT_VERSION = "candidate-processing-fault-v1"
+# The free countTokens preflight of one request stayed unavailable past the
+# broker's bounded retry. It charges nothing and submits nothing, so it bounds
+# one paper family: the family is recorded and skipped, and a later visit counts
+# it again. A transient provider 503 there halted the whole ledger and ended the
+# chapter 3 producer on 2026-09-16 at 21:11 UTC.
+COUNT_UNAVAILABLE_REASON_CODE = "count_tokens_unavailable"
 # A ledger message the producer can meet outside the broker seam, on a direct
 # read of the shared ledger. Every other whole-run refusal carries the marker
 # ``broker_provider.broker_boundary`` puts on it, so a new refusal message needs
@@ -560,6 +567,7 @@ def run_stream(
         "accepted_base_questions": 0,
         CANDIDATE_PROCESSING_FAULT_REASON_CODE: 0,
         "completion_labelled_skipped": 0,
+        COUNT_UNAVAILABLE_REASON_CODE: 0,
         "eligibility_rejected": 0,
         "eligibility_unresolved": 0,
         "generation_rejected": 0,
@@ -718,6 +726,39 @@ def run_stream(
                         policy_file=eligibility_policy_file,
                         rescreen_prompt_file=eligibility_rescreen_prompt_file,
                     )
+                except CountUnavailableError as error:
+                    # The free countTokens preflight of this paper stayed
+                    # unavailable past the broker's bounded retry. Nothing was
+                    # submitted and nothing was charged, so the family is
+                    # recorded and the run continues with the next paper.
+                    _record_count_unavailable(
+                        db,
+                        campaign_id=campaign_id,
+                        candidate_key=str(candidate_key),
+                        source_id=None,
+                        family_id=family_id,
+                        selected=selected,
+                        error=error,
+                    )
+                    counts[COUNT_UNAVAILABLE_REASON_CODE] += 1
+                    counts["processed"] += 1
+                    progress.increment(COUNT_UNAVAILABLE_REASON_CODE)
+                    paper_results.append(
+                        {
+                            "candidate_key": candidate_key,
+                            "disposition": COUNT_UNAVAILABLE_REASON_CODE,
+                            "reason_codes": [COUNT_UNAVAILABLE_REASON_CODE],
+                            "source_id": None,
+                        }
+                    )
+                    progress.paper(
+                        paper_id=candidate_key,
+                        title=access.get("title"),
+                        current_stage="completed",
+                        final_state=COUNT_UNAVAILABLE_REASON_CODE,
+                        final_reason=COUNT_UNAVAILABLE_REASON_CODE,
+                    )
+                    continue
                 except PaperCostCapError as error:
                     # The family reached the per-paper cost cap before it was
                     # screened. Nothing is charged past the cap, so the family is
@@ -3384,7 +3425,9 @@ def _ends_the_run(error: BaseException) -> bool:
     exclusive operation lock that a reviewed operation of another worker held:
     it reserved nothing and submitted nothing.
     """
-    if isinstance(error, (PaperCostCapError, BrokerOperationBusyError)):
+    if isinstance(
+        error, (PaperCostCapError, BrokerOperationBusyError, CountUnavailableError)
+    ):
         return False
     if isinstance(error, (BudgetError, AmbiguousChargeError)) or is_run_stop(error):
         return True
@@ -3556,6 +3599,54 @@ def _contain_candidate_processing_fault(
     )
     progress.last_error_stage = None
     return detail
+
+
+def _record_count_unavailable(
+    db: Database,
+    *,
+    campaign_id: str,
+    candidate_key: str,
+    source_id: str | None,
+    family_id: str,
+    selected: dict[str, Any],
+    error: CountUnavailableError,
+) -> None:
+    """Record one paper family whose free token count stayed unavailable.
+
+    The count charges nothing, so the row holds no money. It names the family,
+    the stage and the provider error, so the skipped paper is answerable and
+    can be counted again on a later visit.
+    """
+    detail = {
+        "campaign_id": campaign_id,
+        "candidate_key": candidate_key,
+        "family_id": family_id,
+        "error": str(error),
+        "selection": selected,
+        "count_tokens_unavailable": True,
+        "broker_stage": error.stage or None,
+    }
+    with db.transaction():
+        db.connection.execute(
+            """INSERT OR IGNORE INTO rejection_ledger
+            (rejection_id,item_id,source_id,stage,reason_code,detail_json,created_at)
+            VALUES (?,NULL,?,'count_tokens',?,?,?)""",
+            (
+                stable_id(
+                    "rejection",
+                    campaign_id,
+                    candidate_key,
+                    "count_tokens",
+                    family_id,
+                    error.stage or "",
+                    COUNT_UNAVAILABLE_REASON_CODE,
+                ),
+                source_id,
+                COUNT_UNAVAILABLE_REASON_CODE,
+                canonical_json(detail),
+                now(),
+            ),
+        )
 
 
 def _record_paper_cost_cap(

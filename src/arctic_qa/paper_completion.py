@@ -271,22 +271,25 @@ def classify_paper(
         return incomplete("incomplete_infra_call")
 
     capped = _paper_cost_cap(db, campaign_id=campaign_id, candidate_key=candidate_key)
-    if capped is not None:
+
+    def cost_cap_reached(decision: str | None, source_id: str | None) -> dict[str, Any]:
         return {
             "candidate_key": candidate_key,
             "paper_family_id": family_id,
             "complete": True,
             "outcome_class": "paper_cost_cap_reached",
             "reason_code": capped["reason_code"],
-            "eligibility_decision": (eligibility or {})
-            .get("validation", {})
-            .get("decision"),
-            "source_id": capped["detail"].get("source_id"),
+            "eligibility_decision": decision,
+            "source_id": source_id or capped["detail"].get("source_id"),
         }
 
     if eligibility is None or eligibility.get("execution_authority") != (
         "shared_gemini_broker"
     ):
+        # The cap stopped the family before it was screened: the producer
+        # records the cap and never asks for that screening again.
+        if capped is not None:
+            return cost_cap_reached(None, None)
         return incomplete("not_screened")
     # The stored job's own validation is the decision the producer records:
     # an invalid answer stays ``uncertain`` and is final for this prompt
@@ -356,6 +359,13 @@ def classify_paper(
             source_id=source_id,
         )
     if kind == streaming.STORED_OUTCOME_ATTEMPT:
+        # The ladder wants another paid call. A family that also holds a cost
+        # cap row is the family that cap stopped, and the producer never pays
+        # for it again. The order matters: the producer reads the accepted
+        # path before it meets the cap, so an accepted family above keeps its
+        # own class even when a cap row exists.
+        if capped is not None:
+            return cost_cap_reached(decision, source_id)
         return incomplete(
             "generation_pending",
             eligibility_decision=decision,

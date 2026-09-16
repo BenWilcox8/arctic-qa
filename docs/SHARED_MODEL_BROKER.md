@@ -275,6 +275,79 @@ Do not give a new reviewed operation the wait.
 Do not make the bound-exceeded case a run stop.
 The immediate refusal ended the chapter 3 producer on 2026-09-16 at 18:26 UTC while another task released the evaluation phase.
 
+### The free token count and its errors
+
+The broker counts the exact input tokens of each request before it reserves anything.
+It does this with the provider's `countTokens` endpoint.
+That endpoint is free.
+A `countTokens` call reserves nothing, submits nothing and charges nothing, so it can never make the money uncertain.
+
+A `countTokens` failure that is transient is retried in place.
+The transient failures are HTTP 429, 500, 502, 503 and 504, a timeout, a connection fault and an answer the broker cannot read as a token count.
+The retry makes `COUNT_RETRY_ATTEMPTS` attempts with a jittered exponential backoff of about two minutes in total.
+Each attempt is recorded in the receipt field `count_attempts`, with its start time, its end time, its error, its HTTP status and its class.
+A request that needed a retry keeps that list on its submitted receipt.
+
+A transient failure that outlives the retry becomes a count error that halts nothing.
+The receipt records `state` `count_error`, `count_failure_class` `transient` and `live_call_made` false.
+The ledger row records the same state and class.
+The broker seam raises `errors.CountUnavailableError`, which is a paper-level refusal: the producer records the family in the rejection ledger at stage `count_tokens` with the reason code `count_tokens_unavailable`, skips that paper and continues.
+A later visit of the same family counts it again, under a new count-retry round.
+
+A `countTokens` failure that is permanent halts the phase, as before.
+The permanent failures are HTTP 400, 401, 403 and 404, and every status and error the broker cannot prove transient.
+Such a failure means the request or the credential is wrong, and it repeats until one of them changes.
+Only a review clears it.
+
+Do not widen the transient set to a status the provider has not shown to be temporary.
+A transient provider 503 halted the whole shared ledger and ended the chapter 3 producer on 2026-09-16 at 21:11 UTC.
+
+### Count-retry rounds
+
+A request whose free count failed transiently counts again under its own round.
+
+The first count-error receipt stays immutable under the request key.
+Round `n` writes its receipts under the stem `<request key>.count-retry-<n>`.
+The ledger row records `count_retry_round` and `count_retry_from_sha256`, which is the hash of that first receipt.
+The chain proves the retry replaced no paid call and settled no money.
+
+`_open_count_retry` opens a round.
+
+A stored count error is never replayed as a result while it may be counted again.
+`broker_provider.invoke` reads the effective receipt of a request it already holds, and `model_broker.count_error_is_transient` decides it: a transient one goes back through `execute`, which opens the next round, and a permanent one is read back as before.
+A receipt written before the bounded retry records no class, so the class is read from the error string and fails closed to permanent.
+Replaying the reviewed count error of 2026-09-16 as a result ended the chapter 3 producer at 22:27 UTC, after its halt had been lifted.
+It refuses a permanent count error with `the paid request key already exists`, as before.
+
+### Reviewed count-error continuation
+
+`authorize-count-error-continuation` clears one reviewed count error without replaying it.
+
+The reviewed operation takes the exclusive operation lock, reads the review file and the evidence file, writes an immutable continuation record beside the receipts and lifts the ledger halt.
+It never replays, retries or settles a paid call, because a count error has none.
+
+The evidence file has one of two shapes.
+The answer-judge evidence `arctic-answer-judge-count-error-evidence-v1` stays exact for the countTokens 404 of 2026-09-15, because that review named a replacement model rather than a retry.
+Every other count error is reviewed through `shared-paid-call-count-error-continuation-evidence-v1`:
+
+```json
+{
+  "schema": "shared-paid-call-count-error-continuation-evidence-v1",
+  "request_key": "<the exact request key>",
+  "count_error": "<the exact error string the receipt recorded>",
+  "count_failure_class": "transient",
+  "live_call_made": false,
+  "replay_prohibited": true,
+  "count_retry_authorized": true,
+  "affected_family_id": "<the family of the request>",
+  "authorized_run_id": "<the run of the request>"
+}
+```
+
+Each field must match the ledger row and the receipt.
+`count_retry_authorized` true also stamps the class `transient` on the row, so the next visit of that family counts the request again.
+A permanent count error is never counted again on a review alone: the request or the credential must change first.
+
 ### Phase slots and windows
 
 Each phase counts its own in-flight requests against its own concurrency limit.

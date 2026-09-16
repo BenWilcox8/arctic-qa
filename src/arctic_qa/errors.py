@@ -58,6 +58,30 @@ class BrokerOperationBusyError(ArcticQAError, ValueError):
     code = "BROKER_OPERATION_BUSY"
 
 
+class CountUnavailableError(ArcticQAError, ValueError):
+    """The free countTokens preflight stayed unavailable past its bounded retry.
+
+    ``countTokens`` makes no charge, so a failure of it reserves nothing,
+    submits nothing and leaves no money uncertain. A transient provider fault
+    there says nothing about the money, the authorization or the request, so it
+    is a fault of one paper family and never a run stop: the producer records
+    the family, skips it and continues. The counted request keeps its immutable
+    count-error receipt, and a later visit of that family counts again under a
+    new retry round.
+
+    It subclasses ``ValueError`` for the same reason
+    ``BrokerOperationBusyError`` does: ``providers._call_externally_metered``
+    turns every unnamed exception into an ``AmbiguousChargeError``, and a free
+    call that charged nothing must never be recorded as an unknown charge.
+    """
+
+    code = "COUNT_TOKENS_UNAVAILABLE"
+
+    def __init__(self, message: str, *, stage: str | None = None) -> None:
+        super().__init__(message)
+        self.stage = stage
+
+
 class ProviderError(ArcticQAError):
     code = "PROVIDER_ERROR"
 

@@ -9,7 +9,17 @@ import pytest
 
 from arctic_qa.broker_provider import BrokerProvider, _request_payload
 from arctic_qa.cli import main as cli_main
-from arctic_qa.model_broker import SharedGeminiBroker, broker_request_key
+from arctic_qa import model_broker
+from arctic_qa.errors import CountUnavailableError
+from arctic_qa.broker_provider import _provider_result
+from arctic_qa.model_broker import (
+    COUNT_ERROR_CONTINUATION_EVIDENCE_SCHEMA,
+    COUNT_RETRY_ATTEMPTS,
+    PERMANENT_COUNT_FAILURE,
+    TRANSIENT_COUNT_FAILURE,
+    SharedGeminiBroker,
+    broker_request_key,
+)
 from arctic_qa.providers import GeminiProvider, ProviderError, make_provider
 from arctic_qa.util import canonical_json, sha256_bytes, sha256_file
 
@@ -830,12 +840,108 @@ def test_ambiguous_generation_halts_without_replay(tmp_path: Path):
     assert transport.methods == ["countTokens", "generateContent"]
 
 
-def test_count_error_is_durable_and_never_generates(tmp_path: Path):
-    transport = Transport("count")
+class ServerErrorCountTransport(Transport):
+    """Answer ``countTokens`` with an HTTP 503 a bounded number of times."""
+
+    def __init__(self, failures: int, status: int = 503) -> None:
+        super().__init__()
+        self.failures = failures
+        self.status = status
+        self.count_calls = 0
+
+    def post(self, model: str, method: str, body: dict) -> dict:
+        if method == "countTokens":
+            self.count_calls += 1
+            if self.count_calls <= self.failures:
+                self.methods.append(method)
+                raise urllib.error.HTTPError(
+                    "https://example.invalid",
+                    self.status,
+                    "Service Unavailable",
+                    {},
+                    None,
+                )
+        return super().post(model, method, body)
+
+
+@pytest.fixture()
+def instant_count_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the bounded count backoff, without its two minutes of waiting."""
+    monkeypatch.setattr(model_broker, "COUNT_RETRY_BASE_SECONDS", 0.0)
+    monkeypatch.setattr(model_broker, "COUNT_RETRY_MAXIMUM_SECONDS", 0.0)
+
+
+def test_transient_count_error_retries_and_then_generates(
+    tmp_path: Path, instant_count_retry: None
+) -> None:
+    transport = ServerErrorCountTransport(failures=1)
+    values = fixture(tmp_path, transport=transport)
+    receipt = execute(values["broker"])
+    assert receipt["state"] == "completed"
+    assert values["broker"].status()["halted"] is False
+    assert transport.methods == ["countTokens", "countTokens", "generateContent"]
+    submitted = json.loads(
+        (tmp_path / "receipts" / f"{receipt['request_key']}.submitted.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    attempts = submitted["count_attempts"]
+    assert [item["attempt"] for item in attempts] == [1, 2]
+    assert attempts[0]["http_status"] == 503
+    assert attempts[0]["failure_class"] == TRANSIENT_COUNT_FAILURE
+    assert attempts[1]["error"] is None
+
+
+def test_exhausted_transient_count_error_halts_nothing_and_counts_again(
+    tmp_path: Path, instant_count_retry: None
+) -> None:
+    transport = ServerErrorCountTransport(failures=COUNT_RETRY_ATTEMPTS)
+    values = fixture(tmp_path, transport=transport)
+    receipt = execute(values["broker"])
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    request = ledger["requests"][receipt["request_key"]]
+    assert receipt["state"] == "count_error"
+    assert receipt["live_call_made"] is False
+    assert receipt["count_failure_class"] == TRANSIENT_COUNT_FAILURE
+    assert [item["attempt"] for item in receipt["count_attempts"]] == list(
+        range(1, COUNT_RETRY_ATTEMPTS + 1)
+    )
+    assert request["state"] == "count_error"
+    assert request["count_failure_class"] == TRANSIENT_COUNT_FAILURE
+    # The free count charges nothing, so it stops one paper family and nothing
+    # else: the ledger stays open and the producer keeps its other papers.
+    assert values["broker"].status()["halted"] is False
+    assert transport.methods == ["countTokens"] * COUNT_RETRY_ATTEMPTS
+    with pytest.raises(CountUnavailableError):
+        _provider_result(receipt, "gemini-3.8-flash")
+    assert execute(values["broker"], paper="p2")["state"] == "completed"
+
+    # A later visit of the same paper counts it again, under its own round.
+    retried = execute(values["broker"])
+    assert retried["state"] == "completed"
+    retried_request = json.loads(values["ledger"].read_text(encoding="utf-8"))[
+        "requests"
+    ][receipt["request_key"]]
+    assert retried_request["count_retry_round"] == 1
+    assert retried_request["count_retry_from_sha256"] == sha256_file(
+        tmp_path / "receipts" / f"{receipt['request_key']}.json"
+    )
+    assert (
+        tmp_path / "receipts" / f"{receipt['request_key']}.count-retry-1.json"
+    ).is_file()
+    values["broker"].status()
+
+
+def test_permanent_count_error_is_durable_and_never_generates(
+    tmp_path: Path, instant_count_retry: None
+) -> None:
+    transport = ServerErrorCountTransport(failures=1, status=404)
     values = fixture(tmp_path, transport=transport)
     receipt = execute(values["broker"])
     ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
     assert receipt["state"] == "count_error"
+    assert receipt["count_failure_class"] == PERMANENT_COUNT_FAILURE
+    assert len(receipt["count_attempts"]) == 1
     assert ledger["requests"][receipt["request_key"]]["state"] == "count_error"
     assert values["broker"].status()["halted"] is True
     assert transport.methods == ["countTokens"]
@@ -950,6 +1056,69 @@ def test_reviewed_count_error_continuation_clears_halt_without_replay(
         ]
         == result["continuation_receipt_sha256"]
     )
+
+
+def test_reviewed_transient_count_error_continuation_authorizes_a_retry(
+    tmp_path: Path, instant_count_retry: None
+) -> None:
+    transport = ServerErrorCountTransport(failures=COUNT_RETRY_ATTEMPTS)
+    values = fixture(tmp_path, transport=transport)
+    receipt = execute(values["broker"])
+    key = receipt["request_key"]
+    assert values["broker"].status()["halted"] is False
+
+    # A transient count error halts nothing, so a reviewed continuation is not
+    # needed for it. The reviewed evidence is still exact about the request.
+    review = tmp_path / "count-review.md"
+    review.write_text("The countTokens 503 recovery passed review.\n", encoding="utf-8")
+    evidence = tmp_path / "count-evidence.json"
+    reviewed = {
+        "schema": COUNT_ERROR_CONTINUATION_EVIDENCE_SCHEMA,
+        "request_key": key,
+        "count_error": "HTTPError: HTTP Error 503: Service Unavailable",
+        "count_failure_class": TRANSIENT_COUNT_FAILURE,
+        "live_call_made": False,
+        "replay_prohibited": True,
+        "count_retry_authorized": True,
+        "affected_family_id": "family-p1",
+        "authorized_run_id": "run-1",
+    }
+    # The evidence must name the exact request, and the class it names must be
+    # the class the count error recorded.
+    for change in (
+        {"authorized_run_id": "run-2"},
+        {"affected_family_id": "family-p2"},
+        {"count_failure_class": PERMANENT_COUNT_FAILURE},
+        {"count_error": "HTTPError: HTTP Error 500: Internal Server Error"},
+    ):
+        write_json(evidence, {**reviewed, **change})
+        with pytest.raises(ValueError, match="not exact"):
+            values["broker"].authorize_count_error_continuation(
+                request_key=key,
+                expected_ledger_sha256=sha256_file(values["ledger"]),
+                review_file=review,
+                evidence_file=evidence,
+            )
+
+    write_json(evidence, reviewed)
+    result = values["broker"].authorize_count_error_continuation(
+        request_key=key,
+        expected_ledger_sha256=sha256_file(values["ledger"]),
+        review_file=review,
+        evidence_file=evidence,
+    )
+    assert result["applied"] is True
+    event = json.loads(
+        (tmp_path / "receipts" / f"{key}.count-error-continuation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert event["count_failure_class"] == TRANSIENT_COUNT_FAILURE
+    assert event["count_retry_authorized"] is True
+    assert event["live_call_made"] is False
+    # The reviewed request counts again and keeps its continuation record.
+    assert execute(values["broker"])["state"] == "completed"
+    values["broker"].status()
 
 
 def test_request_key_and_payload_features_fail_closed(tmp_path: Path):
