@@ -1368,10 +1368,27 @@ def test_streaming_revalidates_brokered_eligibility_on_resume(tmp_path: Path) ->
         "resolved_evidence": [],
     }
     write_json(job_path, job)
+    # The first run labelled the paper as finished. A labelled paper is skipped
+    # before its receipt is read, so the re-validation guard below runs on the
+    # unlabelled paper: remove the label first.
+    with database.transaction():
+        database.connection.execute("DELETE FROM paper_completions")
 
     resumed = run_stream(**arguments)
 
     assert resumed["paper_results"] == result["paper_results"]
+    assert transport.methods.count("generateContent") == 1
+    assert broker.status()["generation_submissions"] == 1
+
+    # The re-validated run labelled the paper again, so the next start skips
+    # it: the tampered job is not read at all, and nothing is submitted.
+    skipped = run_stream(**arguments)
+
+    assert skipped["counts"]["completion_labelled_skipped"] == 1
+    assert skipped["paper_results"][0]["disposition"] == "eligibility_unresolved"
+    assert skipped["paper_results"][0]["completion_label"]["outcome_class"] == (
+        "eligibility_unresolved"
+    )
     assert transport.methods.count("generateContent") == 1
     assert broker.status()["generation_submissions"] == 1
 
@@ -1410,6 +1427,10 @@ def test_unresolved_eligibility_resume_rejects_changed_source(tmp_path: Path) ->
     )
     source_path = Path(access_item["source_path"])
     source_path.write_bytes(source_path.read_bytes() + b"\nchanged after receipt\n")
+    # The integrity check runs on an unlabelled paper; a labelled paper is
+    # finished and is skipped before its source is read again.
+    with database.transaction():
+        database.connection.execute("DELETE FROM paper_completions")
 
     with pytest.raises(ValueError, match="ready source object is missing or changed"):
         run_stream(**arguments)
