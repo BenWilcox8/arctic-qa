@@ -50,7 +50,7 @@ Each one records a fault that stopped a run, the correction, and the live eviden
 
 | Directory | What it records |
 | --- | --- |
-| `arctic-ch3-production-run-r1/` | The first paid chapter 3 run, with three calibration cassettes and the HTTP rejection evidence. |
+| `arctic-ch3-production-run-r1/` | The first paid chapter 3 run, with the HTTP rejection evidence and three recorded calibration cassettes. `docs/REPRODUCTION.md` replays the `v6` cassette. |
 | `arctic-ch3-expansion-200-r1/` | The USD 200 expansion of the run, with the first measurement window. |
 | `arctic-ch3-paper-cap-skip-r1/` | The per-paper cost cap, and the skip that keeps the producer alive. |
 | `arctic-ch3-settle-not-submitted-r1/` | A double settlement between two workers of one shared ledger. |
