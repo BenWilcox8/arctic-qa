@@ -1376,3 +1376,61 @@ def test_an_item_scoped_stop_keeps_the_vendor_running(tmp_path: Path) -> None:
     assert [
         row for row in CostJournal(work).rows() if row.get("kind") == "vendor_pause"
     ] == []
+
+
+def test_the_watcher_publishes_its_state_after_every_poll(tmp_path: Path) -> None:
+    """A long-running unit must show its progress while it runs.
+
+    The state file used to be written only after the loop ended, and a service
+    loop never ends, so `watch-state.json` stood at the values of the first
+    pass. An operator reads that file to see whether the evaluator still
+    polls.
+    """
+    db = state_db(tmp_path, chapter3=[])
+    ledger_file = construction_ledger(tmp_path, {"family-aqa-a": ["0.01"]})
+    auth = authorization(tmp_path, db)
+    work = tmp_path / "work"
+    seen: list[int] = []
+
+    import arctic_qa.abstention_watch as module
+
+    def fake_sleep(seconds: float) -> None:
+        # Read the published state between two polls of an idle watcher.
+        seen.append(
+            json.loads((work / WATCH_STATE_FILENAME).read_text(encoding="utf-8"))[
+                "polls"
+            ]
+        )
+
+    original = module.build_vendor_runs
+    module.build_vendor_runs = lambda **_: {}  # type: ignore[assignment]
+    try:
+        result = watch(
+            authorization_file=auth,
+            plan_file=PLAN_FILE,
+            contract_file=CH3_CONTRACT,
+            evaluation_policy_file=POLICY_V2,
+            evaluation_price_config_file=PRICES,
+            subscription_models_file=MODELS_FILE,
+            state_db=db,
+            work_dir=work,
+            shared_ledger_file=ledger_file,
+            broker_factory=None,
+            subscription_ledger_root=work / "subscription",
+            list_price_file=LIST_PRICES,
+            poll_seconds=5,
+            code_commit="test-commit",
+            ledger_run_prefixes=("chapter3-",),
+            sleep=fake_sleep,
+            clock=lambda: len(seen) * 10.0,
+            deadline_seconds=25.0,
+        )
+    finally:
+        module.build_vendor_runs = original  # type: ignore[assignment]
+    # The poll count rose between the sleeps, so the file tracked the loop.
+    assert seen == sorted(seen) and len(seen) >= 2
+    assert seen[0] == 1 and seen[-1] > seen[0]
+    state = json.loads((work / WATCH_STATE_FILENAME).read_text(encoding="utf-8"))
+    assert state["polls"] == result["polls"] >= len(seen)
+    assert state["evaluated_items"] == []
+    assert state["started_at_utc"]

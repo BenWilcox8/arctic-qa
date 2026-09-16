@@ -652,6 +652,20 @@ def watch(
         if log is not None:
             log({**event, "at": _utc_now()})
 
+    def write_state() -> None:
+        """Publish the watcher state: the poll count and the items so far."""
+        atomic_json(
+            state_path,
+            {
+                **state,
+                "polls": polls,
+                "evaluated_items": [row["item_id"] for row in evaluated],
+                "active_vendors": vendors,
+                "started_at_utc": state.get("started_at_utc") or _utc_now(),
+                "updated_at_utc": _utc_now(),
+            },
+        )
+
     while True:
         polls += 1
         done = journal.completed_item_ids() | set(
@@ -813,6 +827,11 @@ def watch(
                 # run_plan raised: an error outside the recorded responses.
                 errors.append(f"{item_id}: {result['error']}")
                 break
+        # Publish the state after every poll cycle, not only at the end. A
+        # long-running unit never reaches the end, so an operator reading
+        # `watch-state.json` must see the poll count rise and the items grow
+        # while it runs.
+        write_state()
         if errors or stop["now"] or once:
             break
         if deadline_seconds is not None and clock() - started >= deadline_seconds:
@@ -820,16 +839,7 @@ def watch(
             break
         sleep(float(poll_seconds))
 
-    atomic_json(
-        state_path,
-        {
-            **state,
-            "polls": polls,
-            "evaluated_items": [row["item_id"] for row in evaluated],
-            "active_vendors": vendors,
-            "updated_at_utc": _utc_now(),
-        },
-    )
+    write_state()
     summary = summarize_journal(work_dir)
     result = {
         "schema": "abstention-streaming-watch-result-v1",

@@ -568,6 +568,11 @@ systemctl --user stop arctic-abstention-stream-r1
 
 The launcher of the first live run is `/mnt/crdata/research-abstention/arctic-qa/abstention-eval/private/streaming-eval-r1-launcher.sh`.
 The work directory holds the sets, the derived gates, the runs, the cost journal and `watch-state.json`.
+The evaluator writes `watch-state.json` after every poll, so its poll count and its item list rise while the unit runs.
+
+A per-item plan manifest binds the run id and the code commit, and it is immutable.
+So a new commit needs a new run id prefix and a new work directory.
+Give the launcher both when the service is restarted from a new snapshot.
 
 ## Limits
 
