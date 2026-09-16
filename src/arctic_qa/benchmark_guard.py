@@ -1328,6 +1328,22 @@ def evaluator_activity(
     }
 
 
+def _evaluator_error(activity: dict[str, Any]) -> str:
+    """One line that says the evaluator is not polling, and for how long."""
+    if not activity["present"]:
+        return (
+            "the streaming evaluator has no watch state in this journal "
+            "directory: it never started, or it runs elsewhere"
+        )
+    age = activity["age_seconds"]
+    return (
+        "the streaming evaluator is not running: its watch state has not "
+        f"moved for {age} seconds (the bound is "
+        f"{activity['stale_after_seconds']}), last at "
+        f"{activity['updated_at_utc']}"
+    )
+
+
 class BenchmarkGuard:
     """Read the meters, decide, and pause or resume one model at a time."""
 
@@ -1509,6 +1525,11 @@ class BenchmarkGuard:
             errors.append(f"model-pause file unreadable: {error}")
             pause = {"schema": PAUSE_SCHEMA, "paused_models": {}}
 
+        # An evaluator that stopped scores nothing, and a bound that ends it is
+        # not an error, so nothing else says the benchmark stopped.
+        if not activity["running"]:
+            errors.append(_evaluator_error(activity))
+
         findings = evaluate_rules(
             gemini=gemini,
             evaluation_ceiling_usd=ceiling,
@@ -1581,6 +1602,7 @@ class BenchmarkGuard:
             "hysteresis": holds,
             "errors": errors,
         }
+        self._report_evaluator(activity, memory)
         self.guard_dir.mkdir(parents=True, exist_ok=True)
         atomic_json(self.state_file, state)
         atomic_json(self.memory_file, memory)
@@ -1846,6 +1868,40 @@ class BenchmarkGuard:
             finally:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
+    def _report_evaluator(
+        self, activity: dict[str, Any], memory: dict[str, Any]
+    ) -> None:
+        """Tell the supervisor when the evaluator stops, and when it returns.
+
+        The guard polls every few minutes, so it reports the change of state
+        and not the state: one `blocked:` line when the evaluator stops and
+        one `working:` line when it polls again. `evaluator_reported` in the
+        guard memory holds what was reported last. A guard that has reported
+        nothing yet reports nothing about an evaluator that runs, because a
+        running evaluator is the ordinary case and there is no stop to clear.
+        """
+        running = bool(activity["running"])
+        reported = memory.get("evaluator_reported")
+        if reported == running:
+            return
+        memory["evaluator_reported"] = running
+        if not running:
+            self._append_status(f"blocked: {_evaluator_error(activity)}")
+        elif reported is not None:
+            self._append_status(
+                f"working: the streaming evaluator is polling again "
+                f"({activity['polls']} polls, {activity['evaluated_items']} items)"
+            )
+
+    def _append_status(self, line: str) -> None:
+        if self.status_file is None:
+            return
+        try:
+            with self.status_file.open("a", encoding="utf-8") as handle:
+                handle.write(f"{line}\n")
+        except OSError:  # pragma: no cover - environment
+            return
+
     def _report_status(self, action: dict[str, Any]) -> None:
         """Append one `working:` line so the supervisor sees the pause."""
         if self.status_file is None:
@@ -1855,15 +1911,10 @@ class BenchmarkGuard:
             for name, value in sorted((action.get("numbers") or {}).items())
             if value is not None
         )
-        line = (
+        self._append_status(
             f"working: {action['action']}d {action['model']} on "
             f"{action['rule']} ({numbers})"
         )
-        try:
-            with self.status_file.open("a", encoding="utf-8") as handle:
-                handle.write(f"{line}\n")
-        except OSError:  # pragma: no cover - environment
-            return
 
     def run(
         self, *, interval_seconds: int = DEFAULT_INTERVAL_SECONDS, once: bool = False

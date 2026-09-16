@@ -40,7 +40,7 @@ from .geography_correction import write_geography_correction_overlay
 from .gemini_eligibility import run_gemini_eligibility
 from .manifests import write_source_manifest
 from .metadata_prefilter import run_metadata_prefilter
-from .model_broker import SharedGeminiBroker
+from .model_broker import PHASELESS_REFUSAL_INTEGRITY_HALT_REASON, SharedGeminiBroker
 from .paths import DEFAULT_DATA_ROOT, DataPaths, default_credential_file
 from .providers import make_provider
 from .screening import screen_source
@@ -603,6 +603,23 @@ def parser() -> argparse.ArgumentParser:
     settle.add_argument("--ledger-config-transition-file", type=Path)
     settle.add_argument("--credential-file", type=Path, required=True)
     settle.add_argument("--prior-construction-spend-usd", type=Decimal, required=True)
+    phase_settlement = commands.add_parser(
+        "settle-phaseless-refusal",
+        help="Record the phase of the reviewed refusal row that carries none.",
+    )
+    phase_settlement.add_argument("--request-key", required=True)
+    phase_settlement.add_argument("--expected-ledger-sha256", required=True)
+    phase_settlement.add_argument("--review-file", type=Path, required=True)
+    phase_settlement.add_argument("--streaming-budget-policy-file", type=Path, required=True)
+    phase_settlement.add_argument("--price-config-file", type=Path, required=True)
+    phase_settlement.add_argument("--execution-gate-file", type=Path, required=True)
+    phase_settlement.add_argument("--shared-ledger-file", type=Path, required=True)
+    phase_settlement.add_argument("--model-receipts-dir", type=Path, required=True)
+    phase_settlement.add_argument("--ledger-config-transition-file", type=Path)
+    phase_settlement.add_argument("--credential-file", type=Path, required=True)
+    phase_settlement.add_argument(
+        "--prior-construction-spend-usd", type=Decimal, required=True
+    )
     count_error = commands.add_parser(
         "authorize-count-error-continuation",
         help="Authorize continuation after a reviewed countTokens error without replay.",
@@ -783,6 +800,8 @@ def main(argv: list[str] | None = None) -> int:
             return _emit(args, _authorize_orphaned_continuation(args))
         if args.command == "settle-pretransport-reservation":
             return _emit(args, _settle_pretransport_reservation(args))
+        if args.command == "settle-phaseless-refusal":
+            return _emit(args, _settle_phaseless_refusal(args))
         if args.command == "authorize-count-error-continuation":
             return _emit(args, _authorize_count_error_continuation(args))
         paths, db = _open(args)
@@ -1072,6 +1091,57 @@ def _settle_pretransport_reservation(args) -> dict[str, Any]:
         review_file=args.review_file.resolve(),
         traceback_evidence_file=args.traceback_evidence_file.resolve(),
     )
+
+
+def _settle_phaseless_refusal(args) -> dict[str, Any]:
+    """Supersede the integrity halt of this refusal, then record its phase.
+
+    Every broker start refuses while the integrity halt record is on disk, so
+    the settlement cannot run before the record moves aside. The move is part
+    of this one reviewed operation: it accepts only the halt whose reason is
+    the refused configuration transition, it renames the record rather than
+    erasing it, and it puts the record back when the settlement does not
+    apply. The settlement receipt binds the moved record by hash.
+    """
+    ledger_file = args.shared_ledger_file.resolve()
+    halt_file = ledger_file.with_name(f".{ledger_file.name}.integrity-halt.json")
+    moved = halt_file.with_name(
+        f"{halt_file.stem}.superseded-by-{args.request_key[:12]}.json"
+    )
+    if halt_file.is_file():
+        if moved.exists():
+            raise ValueError("the superseded integrity halt record already exists")
+        halt = json.loads(halt_file.read_text(encoding="utf-8"))
+        if halt.get("reason") != PHASELESS_REFUSAL_INTEGRITY_HALT_REASON:
+            raise ValueError("the integrity halt is another halt")
+        halt_file.rename(moved)
+    if not moved.is_file():
+        raise ValueError("the superseded integrity halt record is absent")
+    try:
+        broker = SharedGeminiBroker(
+            policy_file=args.streaming_budget_policy_file.resolve(),
+            price_config_file=args.price_config_file.resolve(),
+            execution_gate_file=args.execution_gate_file.resolve(),
+            ledger_file=ledger_file,
+            receipts_dir=args.model_receipts_dir.resolve(),
+            credential_file=args.credential_file.resolve(),
+            prior_construction_spend_usd=args.prior_construction_spend_usd,
+            config_transition_file=(
+                args.ledger_config_transition_file.resolve()
+                if args.ledger_config_transition_file
+                else None
+            ),
+        )
+        return broker.settle_phaseless_refusal(
+            request_key=args.request_key,
+            expected_ledger_sha256=args.expected_ledger_sha256,
+            review_file=args.review_file.resolve(),
+            superseded_integrity_halt_file=moved,
+        )
+    except BaseException:
+        if not halt_file.exists():
+            moved.rename(halt_file)
+        raise
 
 
 def _authorize_count_error_continuation(args) -> dict[str, Any]:

@@ -169,7 +169,16 @@ def fixture(
         prior_construction_spend_usd=prior_construction_spend_usd,
         transport=transport,
     )
-    return {"broker": broker, "gate": gate, "ledger": tmp_path / "shared-ledger.json"}
+    return {
+        "broker": broker,
+        "gate": gate,
+        "ledger": tmp_path / "shared-ledger.json",
+        "policy": ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
+        "price_config": (
+            price_config_file or ROOT / "config" / "gemini-eligibility-v1.json"
+        ),
+        "credential": credential,
+    }
 
 
 def reviewed_transition(
@@ -3466,3 +3475,295 @@ def test_settlement_of_a_never_submitted_request_records_and_continues(
     # A request key the ledger never held settles nothing and raises nothing.
     assert values["broker"]._settle("d" * 64, actual=None, usage=None) is False
     assert values["ledger"].read_bytes() == before
+
+
+def _phaseless_refusal_row(request_key: str, request: dict) -> dict:
+    """The shape of a refusal that snapshot `a0b9a82` wrote without a phase."""
+    return {
+        "request_key": request_key,
+        "run_id": "abstention-stream-r10-aqa-7f09e4bdf6bac5c50d4c",
+        "stage": "evaluation_answer:gemini-3.8-flash",
+        "paper_id": "aqa-7f09e4bdf6bac5c50d4c",
+        "family_id": "evaluation-item:aqa-7f09e4bdf6bac5c50d4c",
+        "source_version_id": "evaluation-item:aqa-7f09e4bdf6bac5c50d4c:payload",
+        "request_sha256": request["request_sha256"],
+        "model": "gemini-3.8-flash",
+        "state": "not_submitted",
+        "reason": "the evaluation repeat limit for this item is complete",
+        "completed_at_utc": "2026-09-16T23:03:53Z",
+        "evaluation_trial": {
+            "arm": "high",
+            "condition": "gold_present",
+            "eval_set_id": "abstention-eval-set-d8e3f6b292ee9078",
+            "item_id": "aqa-7f09e4bdf6bac5c50d4c",
+            "repeat": 3,
+            "trial_id": "abstention-trial-39d20c286827cb898c2c",
+        },
+        "evaluation_gate_sha256": "bc88530976ca06b54d161cada46ca0c8a095613adcd3ce5dbcb76ffb3230da82",
+        "gate_sha256": request["gate_sha256"],
+        "config_transition_sha256": request.get("config_transition_sha256"),
+        "timeout_seconds": 300,
+        "evaluation_policy_sha256": "983bccac3a1de605cc87a1fc69e30e05586cad488e9841d05a6a851158cf832d",
+        "policy_sha256": request["policy_sha256"],
+        "price_config_sha256": request["price_config_sha256"],
+    }
+
+
+def _bind_phaseless_refusal(
+    ledger: dict, request_key: str, row: dict, receipts_dir: Path | None = None
+) -> None:
+    """Put the row in the ledger with the bindings and receipt every row needs."""
+    if receipts_dir is not None:
+        receipts_dir.mkdir(parents=True, exist_ok=True)
+        write_json(receipts_dir / f"{request_key}.json", row)
+    ledger["requests"][request_key] = row
+    ledger["family_bindings"][row["family_id"]] = {
+        "paper_id": row["paper_id"],
+        "source_version_id": row["source_version_id"],
+    }
+    ledger["paper_bindings"][row["paper_id"]] = {
+        "family_id": row["family_id"],
+        "source_version_id": row["source_version_id"],
+    }
+    ledger["count_requests"] = len(ledger["requests"])
+
+
+def test_phase_settlement_records_the_phase_of_a_free_refusal_and_lifts_the_halt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refusal without a phase halts every later start; the settlement repairs it.
+
+    Snapshot `a0b9a82` of the streaming evaluator wrote `not_submitted` rows
+    without a `phase`, and `_only_evaluation_activity_since` reads such a row
+    as construction. One of them refused the applied configuration transition
+    of 2026-09-16T22:58:25Z and wrote an integrity halt that stopped both the
+    producer and the evaluator.
+    """
+    values = fixture(tmp_path, transport=Transport())
+    assert execute(values["broker"])["state"] == "completed"
+    ledger_file = values["ledger"]
+    ledger = json.loads(ledger_file.read_text(encoding="utf-8"))
+    template = next(iter(ledger["requests"].values()))
+    request_key = "52c5da7533e8d24f36e24e73d718cfaa06d928d64fedf6f5cfeee99a9f745ca9"
+    row = _phaseless_refusal_row(request_key, template)
+    _bind_phaseless_refusal(ledger, request_key, row, tmp_path / "receipts")
+    write_json(ledger_file, ledger)
+    # This is the fault: the refusal has no phase, so the transition check
+    # reads it as a construction request and refuses the applied transition.
+    applied_at = "2026-09-16T22:58:25Z"
+    assert not model_broker.SharedGeminiBroker._only_evaluation_activity_since(
+        {"requests": {request_key: row}}, applied_at
+    )
+
+    reviewed = {
+        key: row[key]
+        for key in (
+            "request_key",
+            "run_id",
+            "stage",
+            "paper_id",
+            "family_id",
+            "state",
+            "reason",
+            "completed_at_utc",
+        )
+    }
+    monkeypatch.setattr(
+        model_broker, "PHASELESS_REFUSAL_SETTLEMENT_REQUEST", reviewed
+    )
+    review = tmp_path / "phase-settlement-review.md"
+    review.write_text("The row holds no money.\n", encoding="utf-8")
+    halt = ledger_file.with_name(f".{ledger_file.name}.integrity-halt.json")
+    write_json(
+        halt,
+        {
+            "schema": "shared-paid-call-ledger-integrity-halt-v1",
+            "ledger_file": str(ledger_file),
+            "reason": model_broker.PHASELESS_REFUSAL_INTEGRITY_HALT_REASON,
+            "recorded_at_utc": "2026-09-16T23:03:56Z",
+        },
+    )
+
+    exit_code = cli_main(
+        [
+            "--json",
+            "settle-phaseless-refusal",
+            "--request-key",
+            request_key,
+            "--expected-ledger-sha256",
+            sha256_file(ledger_file),
+            "--review-file",
+            str(review),
+            "--streaming-budget-policy-file",
+            str(values["policy"]),
+            "--price-config-file",
+            str(values["price_config"]),
+            "--execution-gate-file",
+            str(values["gate"]),
+            "--shared-ledger-file",
+            str(ledger_file),
+            "--model-receipts-dir",
+            str(tmp_path / "receipts"),
+            "--credential-file",
+            str(values["credential"]),
+            "--prior-construction-spend-usd",
+            "0",
+        ]
+    )
+    assert exit_code == 0
+
+    assert not halt.exists()
+    superseded = halt.with_name(f"{halt.stem}.superseded-by-{request_key[:12]}.json")
+    assert superseded.is_file()
+    after = json.loads(ledger_file.read_text(encoding="utf-8"))["requests"][request_key]
+    assert after["phase"] == model_broker.EVALUATION_PHASE
+    assert after["state"] == "not_submitted"
+    assert "actual_cost_usd" not in after and "reserved_usd" not in after
+    receipt = json.loads(
+        (tmp_path / "receipts" / f"{request_key}.phase-settlement.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert receipt["schema"] == model_broker.PHASELESS_REFUSAL_SETTLEMENT_SCHEMA
+    assert receipt["actual_cost_usd"] == "0" and receipt["live_call_made"] is False
+    assert receipt["superseded_integrity_halt_sha256"] == sha256_file(superseded)
+    # The repaired row lets the applied transition validate again.
+    assert model_broker.SharedGeminiBroker._only_evaluation_activity_since(
+        {"requests": {request_key: after}}, applied_at
+    )
+    # A second run changes nothing.
+    repeated = values["broker"].settle_phaseless_refusal(
+        request_key=request_key,
+        expected_ledger_sha256=sha256_file(ledger_file),
+        review_file=review,
+        superseded_integrity_halt_file=superseded,
+    )
+    assert repeated["applied"] is False
+
+
+def test_phase_settlement_refuses_a_row_that_holds_money(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = fixture(tmp_path, transport=Transport())
+    assert execute(values["broker"])["state"] == "completed"
+    ledger_file = values["ledger"]
+    ledger = json.loads(ledger_file.read_text(encoding="utf-8"))
+    template = next(iter(ledger["requests"].values()))
+    request_key = "52c5da7533e8d24f36e24e73d718cfaa06d928d64fedf6f5cfeee99a9f745ca9"
+    row = {**_phaseless_refusal_row(request_key, template), "reserved_usd": "0.02"}
+    _bind_phaseless_refusal(ledger, request_key, row, tmp_path / "receipts")
+    write_json(ledger_file, ledger)
+    reviewed = {
+        key: row[key]
+        for key in (
+            "request_key",
+            "run_id",
+            "stage",
+            "paper_id",
+            "family_id",
+            "state",
+            "reason",
+            "completed_at_utc",
+        )
+    }
+    monkeypatch.setattr(
+        model_broker, "PHASELESS_REFUSAL_SETTLEMENT_REQUEST", reviewed
+    )
+    review = tmp_path / "phase-settlement-review.md"
+    review.write_text("The row holds no money.\n", encoding="utf-8")
+    halt = ledger_file.with_name(f".{ledger_file.name}.integrity-halt.json")
+    write_json(
+        halt,
+        {
+            "schema": "shared-paid-call-ledger-integrity-halt-v1",
+            "ledger_file": str(ledger_file),
+            "reason": model_broker.PHASELESS_REFUSAL_INTEGRITY_HALT_REASON,
+            "recorded_at_utc": "2026-09-16T23:03:56Z",
+        },
+    )
+    assert (
+        cli_main(
+            [
+                "--json",
+                "settle-phaseless-refusal",
+                "--request-key",
+                request_key,
+                "--expected-ledger-sha256",
+                sha256_file(ledger_file),
+                "--review-file",
+                str(review),
+                "--streaming-budget-policy-file",
+                str(values["policy"]),
+                "--price-config-file",
+                str(values["price_config"]),
+                "--execution-gate-file",
+                str(values["gate"]),
+                "--shared-ledger-file",
+                str(ledger_file),
+                "--model-receipts-dir",
+                str(tmp_path / "receipts"),
+                "--credential-file",
+                str(values["credential"]),
+                "--prior-construction-spend-usd",
+                "0",
+            ]
+        )
+        == 2
+    )
+    # A refused settlement puts the halt record back exactly as it was.
+    assert halt.is_file()
+    assert (
+        json.loads(halt.read_text(encoding="utf-8"))["reason"]
+        == model_broker.PHASELESS_REFUSAL_INTEGRITY_HALT_REASON
+    )
+    assert not halt.with_name(
+        f"{halt.stem}.superseded-by-{request_key[:12]}.json"
+    ).exists()
+
+
+def test_a_refusal_before_the_reservation_carries_its_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused request records its phase, so no later start reads it wrong.
+
+    `_only_evaluation_activity_since` decides whether an applied configuration
+    transition may still validate, and it reads a request without a `phase` as
+    a construction request. The phase therefore belongs to the request from
+    its first record, not from its reservation: a refusal that stops before
+    the reservation never reaches the reservation.
+    """
+    values = fixture(tmp_path, transport=Transport())
+    broker = values["broker"]
+    # Stop the request after the free count and before the reservation, which
+    # is the shape that lost its phase.
+    def refuse_before_reserve(**_: object) -> None:
+        raise ValueError("the paid-call concurrency limit is complete")
+
+    monkeypatch.setattr(broker, "_reserve", refuse_before_reserve)
+    try:
+        execute(broker)
+    except ValueError as error:
+        assert "concurrency limit is complete" in str(error)
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    request_key, request = next(iter(ledger["requests"].items()))
+    assert request.get("submitted_at_utc") is None
+    assert request["state"] == "not_submitted"
+    assert request["phase"] == "live_test"
+    # The reader of the applied configuration transition therefore sees the
+    # phase and does not take this row for a construction request.
+    assert model_broker.SharedGeminiBroker._only_evaluation_activity_since(
+        {"requests": {request_key: {**request, "completed_at_utc": "2026-09-16T23:03:53Z"}}},
+        "2026-09-16T22:58:25Z",
+    ) is False
+    assert model_broker.SharedGeminiBroker._only_evaluation_activity_since(
+        {
+            "requests": {
+                request_key: {
+                    **request,
+                    "phase": model_broker.EVALUATION_PHASE,
+                    "completed_at_utc": "2026-09-16T23:03:53Z",
+                }
+            }
+        },
+        "2026-09-16T22:58:25Z",
+    )

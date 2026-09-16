@@ -1792,3 +1792,57 @@ def test_the_ambiguous_charge_reason_is_read_from_the_request_state() -> None:
     assert not is_ambiguous_charge_reason(EVALUATION_CEILING_REASON)
     assert not is_ambiguous_charge_reason(None)
     assert not is_ambiguous_charge_reason("")
+
+
+def test_the_item_bound_writes_one_blocked_line_to_the_status_file(
+    tmp_path: Path,
+) -> None:
+    """A bound ends the run with exit code 0, so it must say so somewhere.
+
+    The unit met its item bound at 2026-09-16T19:31:44Z, exited 0, and no
+    operator saw it until the next morning.
+    """
+    db = state_db(tmp_path, chapter3=["aqa-a", "aqa-b", "aqa-c"])
+    ledger_file = construction_ledger(tmp_path, {"family-aqa-a": ["0.01"]})
+    auth = authorization(tmp_path, db, maximum_items=2)
+    status = tmp_path / "task.status"
+    first = scripted_watch(
+        db=db,
+        work_dir=tmp_path / "bounded",
+        ledger_file=ledger_file,
+        authorization_file=auth,
+        status_file=status,
+    )
+    # The first pass takes both items and stops inside the bound, so it has
+    # nothing to report.
+    assert len(first["items_this_invocation"]) == 2
+    assert not status.exists()
+
+    again = scripted_watch(
+        db=db,
+        work_dir=tmp_path / "bounded",
+        ledger_file=ledger_file,
+        authorization_file=auth,
+        status_file=status,
+    )
+    assert again["items_this_invocation"] == []
+    lines = status.read_text(encoding="utf-8").splitlines()
+    assert lines == [
+        "blocked: the streaming evaluator met its item bound of 2 items and "
+        "stopped; a larger run needs a new reviewed authorization"
+    ]
+
+
+def test_the_bound_needs_no_status_file(tmp_path: Path) -> None:
+    """The option is optional: a run without it still stops the same way."""
+    db = state_db(tmp_path, chapter3=["aqa-a"])
+    ledger_file = construction_ledger(tmp_path, {"family-aqa-a": ["0.01"]})
+    auth = authorization(tmp_path, db, maximum_items=1)
+    work_dir = tmp_path / "bounded"
+    scripted_watch(
+        db=db, work_dir=work_dir, ledger_file=ledger_file, authorization_file=auth
+    )
+    again = scripted_watch(
+        db=db, work_dir=work_dir, ledger_file=ledger_file, authorization_file=auth
+    )
+    assert again["items_this_invocation"] == []

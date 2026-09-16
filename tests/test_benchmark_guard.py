@@ -855,7 +855,14 @@ def test_the_command_line_runs_one_cycle_against_a_recorded_report(
         (workspace["guard"] / GUARD_STATE_FILENAME).read_text(encoding="utf-8")
     )
     assert state["schema"] == "benchmark-guard-state-v1"
-    assert state["errors"] == []
+    # This cycle runs on the real clock, and the workspace watch state is
+    # fixed, so the guard reports the one thing it must: the evaluator stopped.
+    assert state["evaluator"]["running"] is False
+    assert state["errors"] == [
+        "the streaming evaluator is not running: its watch state has not "
+        f"moved for {state['evaluator']['age_seconds']} seconds (the bound is "
+        f"900), last at {state['evaluator']['updated_at_utc']}"
+    ]
     assert state["quota"]["claude_session"]["percent_remaining"] == 84
 
 
@@ -978,3 +985,61 @@ def test_a_dominant_codex_share_pauses_one_model_and_holds_it(
     assert "gpt-6-astra" in after["paused_models"]
     assert after["hysteresis"][0]["clear_cycles"] == 1
     assert after["hysteresis"][0]["clear_cycles_required"] == RESUME_CLEAR_CYCLES
+
+
+def _set_watch_state(workspace: dict[str, Path], updated_at_utc: str) -> None:
+    path = workspace["journal"] / "watch-state.json"
+    state = json.loads(path.read_text(encoding="utf-8"))
+    state["updated_at_utc"] = updated_at_utc
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+
+def test_a_stopped_evaluator_is_an_error_and_one_blocked_line(
+    workspace: dict[str, Path],
+) -> None:
+    """A bound ends the evaluator with exit code 0, so the guard must say it.
+
+    The unit met its item bound at 2026-09-16T19:31:44Z, exited 0, and no
+    operator saw it until the next morning.
+    """
+    guard = guard_for(workspace, RECORDED_QUOTA)
+    running = guard.cycle(now=NOW)
+    assert running["evaluator"]["running"] is True
+    assert running["errors"] == []
+    assert not workspace["status"].exists()
+
+    # The watch state stops moving.
+    _set_watch_state(workspace, "2026-09-16T10:00:00Z")
+    stopped = guard.cycle(now=NOW)
+    assert stopped["evaluator"]["running"] is False
+    assert stopped["errors"] == [
+        "the streaming evaluator is not running: its watch state has not "
+        "moved for 7200 seconds (the bound is 900), last at "
+        "2026-09-16T10:00:00Z"
+    ]
+    lines = workspace["status"].read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1 and lines[0].startswith("blocked: the streaming evaluator")
+
+    # The guard reports the change of state, not the state: a second quiet
+    # cycle adds no line.
+    guard.cycle(now=NOW)
+    assert len(workspace["status"].read_text(encoding="utf-8").splitlines()) == 1
+
+    # And it says so when the evaluator polls again.
+    _set_watch_state(workspace, "2026-09-16T11:59:30Z")
+    back = guard.cycle(now=NOW)
+    assert back["errors"] == []
+    lines = workspace["status"].read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert lines[1].startswith("working: the streaming evaluator is polling again")
+
+
+def test_an_absent_watch_state_is_an_error_too(workspace: dict[str, Path]) -> None:
+    (workspace["journal"] / "watch-state.json").unlink()
+    state = guard_for(workspace, RECORDED_QUOTA).cycle(now=NOW)
+    assert state["evaluator"]["present"] is False
+    assert state["errors"] == [
+        "the streaming evaluator has no watch state in this journal "
+        "directory: it never started, or it runs elsewhere"
+    ]
+    assert workspace["status"].read_text(encoding="utf-8").startswith("blocked: ")
