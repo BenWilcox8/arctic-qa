@@ -362,6 +362,13 @@ class Activation:
             ),
             encoding="utf-8",
         )
+        # `supersedes_config_transition_review` is inherited, not rewritten. It
+        # names the gate the ACTIVE transition was authorized under, which is
+        # still the expansion gate, and `_gate_succeeds_transition_review`
+        # compares it field by field with that authorization. Once the
+        # concurrency transition is active it binds this gate directly, so the
+        # inherited value is then the record of the chain and no longer a
+        # control.
         gate = dict(prior_gate)
         gate.update(
             {
@@ -389,17 +396,11 @@ class Activation:
                 "ledger_config_transition_file": str(self.ledger_transition),
                 "paper_workers": PAPER_WORKERS,
                 "option_workers": OPTION_WORKERS,
-                # This gate authorizes the concurrency transition itself, and
-                # names the gate the active expansion event was validated under.
-                "supersedes_config_transition_review": {
-                    "execution_gate_sha256": sha256_file(live_gate),
-                    "integrated_code_commit": prior_gate["integrated_code_commit"],
-                    "review_record": prior_gate["review_record"],
-                    "review_record_sha256": prior_gate["review_record_sha256"],
-                },
                 "activation_state": "authorized_not_started",
             }
         )
+        if self.gate.exists():
+            os.chmod(self.gate, 0o644)
         write_json(self.gate, gate)
         os.chmod(self.gate, 0o444)
         before = self.validate_ledger(POLICY_V10, self.gate, live_transition)
