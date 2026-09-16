@@ -332,9 +332,7 @@ class CorpusArtifacts:
         self._facts_cache: (
             tuple[tuple[int, int, int, str, str], dict[str, Any]] | None
         ) = None
-        self._titles_cache: (
-            tuple[tuple[int, int, int, str, str], dict[str, str]] | None
-        ) = None
+        self._titles_cache: tuple[tuple[int, int, int], dict[str, str]] | None = None
         self.refresh()
 
     def _screening_file(self) -> Path | None:
@@ -2678,10 +2676,12 @@ class CorpusArtifacts:
         self, *, campaign_id: str, run_id: str
     ) -> dict[str, Any] | None:
         """Return the state-database half of the live view, cached per version."""
-        path = getattr(self.pipeline_trace_store, "db_file", None)
-        if path is None or not Path(path).is_file():
+        configured = getattr(self.pipeline_trace_store, "db_file", None)
+        if configured is None:
             return None
-        path = Path(path)
+        path = Path(configured)
+        if not path.is_file():
+            return None
         status = path.stat()
         key = (
             status.st_mtime_ns,
@@ -2708,7 +2708,7 @@ class CorpusArtifacts:
         if self._last_error or not self.database.is_file():
             return {}
         status = self.database.stat()
-        key = (status.st_mtime_ns, status.st_size, status.st_ino, "", "")
+        key = (status.st_mtime_ns, status.st_size, status.st_ino)
         with self._live_lock:
             cached = self._titles_cache
             if cached is not None and cached[0] == key:
