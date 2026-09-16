@@ -891,7 +891,7 @@ def test_the_rebind_refuses_to_return_the_same_unsupported_value(
 def test_the_chapter2_replay_suppresses_no_accepted_item() -> None:
     report = json.loads(
         (
-            REPO / "data" / "arctic-ch3-routing-r1" / "replay-chapter2-routing.json"
+            REPO / "research" / "arctic-ch3-routing-r1" / "replay-chapter2-routing.json"
         ).read_text(encoding="utf-8")
     )
 
