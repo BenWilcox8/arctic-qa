@@ -107,6 +107,31 @@ The start logged, at 18:28:38Z:
 
 `watch-state.json` then read `"paused_vendors":{}` with `"active_vendors":["google_gemini","anthropic_claude_code","openai_codex"]`.
 
+### The first resumed Gemini receipt
+
+The producer accepted question 11 at 18:49 UTC, and `accepted_question_count` went from 37 to 38.
+The evaluator took the item up on the next poll, with all three vendors active.
+
+| Field | Value |
+| --- | --- |
+| Request key | `f9f8d424ec861cff9e1961cab22285a280aa8004318bb926d186175ab8e113f5` |
+| Stage | `evaluation_answer:gemini-3.7-flash` |
+| Run | `abstention-stream-r10-aqa-e9b83b35d9a33a604ec0` |
+| Trial | `abstention-trial-638038a0790aca3d5aa3`, `gold_present`, arm `high`, repeat 2 |
+| Gate | `385d49868b62592fe7c6888a3bce2781623821da493911a41443d7a1ea0ff75c` |
+| Submitted | 2026-09-16T18:49:39Z |
+| Completed | 2026-09-16T18:49:56Z |
+| State | `completed`, actual USD 0.014388 of a USD 0.030892 reservation |
+| Usage | 229 input, 0 answer, 3791 thinking tokens |
+
+The whole item then finished in 253 s: 42 of 48 trials recorded, `vendors_paused` empty, and Gemini charged 12 calls for USD 0.229478 with `ambiguous_usd` 0.000000.
+The six missing trials are the `claude-fable-5-1` trials the captain's pause holds.
+So the Gemini arm is measured in full on the question after the release.
+
+Ledger at 18:53:46Z: `halted` false, `evaluation_halted` false, `spent_usd` 70.537524, `ambiguous_reserved_usd` 0.123539, 4883 requests.
+Broker status: `integrity_valid` true, `status_state` valid, `evaluation.phase_halted` false, 241 evaluation submissions, evaluation spend USD 4.089779, evaluation ambiguous USD 0.030891.
+The released reservation is still counted and the request was never replayed.
+
 ## 7. The automatic resume
 
 A restart should not be the only way back. The release is a ledger fact, so the evaluator can read it.
@@ -128,7 +153,13 @@ Tests in `tests/test_abstention_watch.py` drive the real loop over two polls, wi
 
 ## 8. The re-snapshot
 
-A new read-only runtime snapshot of the landed commit is under `/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-abstention-streaming-eval-r1/runtime/`.
+The new read-only runtime snapshot is `app-d64e8c4-arctic-abstention-streaming-eval-r1`, under `/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-abstention-streaming-eval-r1/runtime/`.
+It holds commit `d64e8c4` of this branch, made the way section 8.2 of the evaluator report gives:
+
+```sh
+APP=<runtime root>/app-d64e8c4-arctic-abstention-streaming-eval-r1
+mkdir -p $APP && git archive d64e8c4 | tar -x -C $APP && chmod -R a-w $APP
+```
 
 The running unit still runs `a0b9a82`, and switching it is a supervisor decision, not this task's.
 `data/arctic-abstention-streaming-eval-r1/report.md` section 8.2 gives the reason: a per-item plan manifest binds the run id and the code commit and is immutable, so a restart from a new commit needs a new snapshot, a new run id prefix, a new work directory, and a new reviewed authorization.
@@ -138,6 +169,7 @@ Today that switch would cost more than it gives:
 - Ten items in `streaming-r10` are incomplete only because of the captain's `claude-fable-5-1` pause, which lifts at 2026-09-16T23:00:00Z. The evaluator must revisit each one in the same work directory to run the held fable trials.
 - A revisit under another commit fails in `run_plan` with "the run directory holds a different plan manifest". `watch` then records the error and ends the loop, so the evaluator would exit non-zero on its first revisit.
 - A new work directory avoids that failure by abandoning every recorded trial of the ten items. Their 48 trials each would run again, about USD 1.6 of Gemini spend and 360 subscription calls, and the journals would hold the same questions twice.
+- The new snapshot also carries the construction work that landed on main after `a0b9a82`: `streaming.py`, `generation.py`, `errors.py`, `broker_provider.py`, and more of `model_broker.py`. A switch therefore changes more than this task's fix.
 
 The natural boundary is the item bound. The authorization allows 12 items and 10 are recorded, so two more questions end this invocation with `item_bound_reached`.
 A new authorization is needed then in any case, and the new snapshot fits that restart with no waste.
@@ -183,4 +215,6 @@ journalctl --user -u arctic-abstention-stream-r3 -f
 
 ## 11. The suite
 
-`nix develop -c bash -c 'PYTHONPATH=src pytest tests/ -q'`.
+`nix develop -c bash -c 'PYTHONPATH=src pytest tests/ -q'`: 1404 tests, all pass, no failure and no error.
+`ruff check` and `ruff format --check` are clean over `src` and `tests`.
+The package is not installed in the devshell, so `PYTHONPATH=src` is needed.
