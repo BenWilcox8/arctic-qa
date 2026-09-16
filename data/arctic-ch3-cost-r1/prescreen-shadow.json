@@ -1,0 +1,52 @@
+{
+ "contract_version": "structural-finding-prescreen-shadow-v1",
+ "groups": {
+  "froze_a_finding": {
+   "papers": 56,
+   "measured": 56,
+   "errors": {},
+   "would_reject": 12,
+   "fire_rate": 0.214,
+   "fired_source_ids": [
+    "src-0104e9235f94fa9bdaff",
+    "src-090f35262b162b20eeb2",
+    "src-3185c3a737fce48b66c6",
+    "src-62cf5e6d84f041f28131",
+    "src-8f8f202d35815f3dca96",
+    "src-9c8ed5bd4621078e7814",
+    "src-c0d0f4f903fd8f05120a",
+    "src-c106963d4bb480edc9f1",
+    "src-c2f433d3265b3ea081c5",
+    "src-ce90a5d02446d870e390",
+    "src-eb3fdf61da10aaf6280a",
+    "src-fdb38096b42d5e1949a1"
+   ],
+   "median_qualifying_spans": 5,
+   "cyrillic_papers": 6
+  },
+  "froze_nothing": {
+   "papers": 64,
+   "measured": 62,
+   "errors": {
+    "rejected:eligible_arctic_scope_finding_unbound": 2
+   },
+   "would_reject": 11,
+   "fire_rate": 0.177,
+   "fired_source_ids": [
+    "src-0c8a2bb32808e9d1b93b",
+    "src-12a16685549de1048e27",
+    "src-2027979d38d61844bdb9",
+    "src-2d1bdbbb706bf10c36fc",
+    "src-582ec03ef7a21406758e",
+    "src-a5ef3f101b609f9f8829",
+    "src-a7f057b24abd2110c66b",
+    "src-a95f77f53b9e373c0e49",
+    "src-c8abd43cea92d529ff3e",
+    "src-ddf8abd78861d1ee03cf",
+    "src-ecbf2c76d4bf76eabc36"
+   ],
+   "median_qualifying_spans": 2,
+   "cyrillic_papers": 1
+  }
+ }
+}

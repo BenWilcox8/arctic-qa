@@ -362,6 +362,54 @@ The budget is one chained ledger transition: the price config change first, then
 The run halts at exhaustion, with no replay, no retry, and no budget reset.
 The live export selects schema `2.7.0` and prompt `arctic-qa-generation-v22`, so the dataset page shows chapter 2 items only.
 
+## Chapter 3 call plan
+
+The chapter 2 yield audit (sections 4.4, 4.5 and 4.9) reordered the paid calls of one question attempt.
+The gates, the reason codes and the routing inputs did not change.
+Only the timing of the calls changed.
+
+The judge call plan (`judge-call-plan-v1`, recorded in `provenance.judge_call_plan`):
+
+1. The free checks run right after the writer, with the same names and inputs as at the QA gate.
+2. The standalone call is made for every candidate, because routing reads its codes.
+3. When a free check or the standalone gate fails, the reconstructor and the answer verifier are not called.
+   The candidate is persisted as `qa_gate_failed` with `reconstruction` and `answer_verification` set to `null`.
+   Its reason list holds the standalone codes and the free codes only, so routing reads the same input as before.
+4. When the writer's own `referent_slots` record marks a slot `unavailable_in_source`, no judge is called.
+   The reason list starts with one `writer_slot_unavailable_<slot>` code per such slot.
+5. A seeded random cohort of 5 percent (`judge-short-circuit-shadow-cohort-v1`) runs every call anyway.
+   The cohort member keeps the short-circuit reason list for routing and records the full-suite list in `shadow_gate_reasons`.
+   The draw is a hash of the policy version, the campaign and the candidate entity, so a replay selects the same members.
+
+Every role receives the evidence spans once.
+The chunk text no longer rides beside the tiled spans of the same text.
+The static instructions of the extractor, the reconstructor, the answer verifier and the option verifier ride in the system instruction, as the standalone judge's already did.
+The prompt hash binds the system instruction, so a receipt still matches its exact request.
+The finding context has a measured budget, `MAX_FINDING_CONTEXT_CHARS`.
+A paper above it is rejected with `finding_context_over_budget` before any paid call.
+
+The finding bank (`ranked-finding-bank-v1`, table `finding_bank`):
+
+- Every ranked candidate the extractor returns is persisted with its admission result and its span ids.
+- The bank is keyed to the extractor prompt, the admission contract, the span contract and the Arctic scope custody state.
+- An attempt without a frozen finding is served from the bank first.
+  A banked candidate passes the same admission path as a fresh one.
+  The extractor is called again only when the bank holds no servable candidate.
+- The extractor also returns `answer_basis_class` and `source_blind_answer_basis` per candidate.
+  Both fields stay outside the frozen answer and outside every judge payload.
+  A `study_internal_index` candidate is ranked last.
+  When only such candidates remain, the family records `no_admissible_finding`.
+- The free admission re-ask is spent only when an unexcluded eligible span remains.
+- The structural pre-screen (`structural-finding-prescreen-shadow-v1`, table `finding_prescreen_shadow`) records one shadow verdict per paper and never blocks a call.
+
+Options are verified in the writer's rank order.
+Verification stops once four distractors are verified: the floor of three for the present MCQ plus the fourth that the absent-answer form needs.
+The remaining proposals are recorded as a reserve in `provenance.option_verification_call_plan`.
+The validator's model-free option checks run before any paid option call.
+
+A production run never selects the `cost_aware` role profile.
+The `data/arctic-ch3-cost-r1/` directory holds the receipts-based measurements behind these rules.
+
 ## Viewer command
 
 The read-only viewer accepts the shared ledger, progress, budget policy, and export metadata files.
