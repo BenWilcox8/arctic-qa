@@ -1,116 +1,134 @@
 # ArcticQA
 
-ArcticQA builds source-supported scientific questions from Arctic research papers, and measures how often a model abstains when no listed option is correct.
+ArcticQA builds source-supported scientific questions from Arctic research papers.
+It also measures whether a model abstains when none of the listed answers is correct.
 
-The pipeline reads a frozen corpus of full-text papers.
-For each paper it screens the scientific eligibility, selects one finding, writes a question, builds distractors, and runs a chain of deterministic and model gates.
-A question that passes every gate becomes a multiple-choice item with the label `machine_accepted_unverified`.
-The benchmark then asks eight models each item, in a form where the correct option is present and in a form where it is absent.
+This repository contains the pipeline code, its tests, its fixed contracts, and the evidence record behind the paper.
+It does not contain copyrighted paper text, credentials, or live run state.
 
-Every paid model call goes through one shared ledger with a per-call receipt, so each number in the paper has a record.
+## Start here
 
-This repository is the code and the evidence record behind the paper.
-Read [docs/REPRODUCTION.md](docs/REPRODUCTION.md) to run it from a clean checkout.
-
-## The repository
-
-| Path | What it holds |
+| Your goal | Read this |
 | --- | --- |
-| `src/arctic_qa/` | The package: the pipeline, the evaluator, the guards and the viewers. |
-| `tests/` | The test suite. It is also the executable specification of every contract. |
-| `schemas/` | The JSON schemas of the provider responses and the exported records. |
-| `config/` | The frozen prompts, policies, price tables and model registries. Receipts bind these files by hash. |
-| `fixtures/` | Small synthetic inputs and calibration sets. No real source text. |
-| `docs/` | The operator documentation. [docs/README.md](docs/README.md) is its index. |
-| `research/` | The evidence record: one report for each task that built or corrected the pipeline. [research/README.md](research/README.md) is its index. |
-| `flake.nix` | The pinned development shell. |
+| Run the project from a clean checkout | [Reproduction guide](docs/REPRODUCTION.md) |
+| Understand the research method and its limits | [Methods](docs/METHODS.md) |
+| See every command-line stage | [CLI walkthrough](docs/CLI_WALKTHROUGH.md) |
+| Find a module | [Package guide](src/arctic_qa/README.md) |
+| Understand the tests and contracts | [Test guide](tests/README.md) |
+| Find a research record | [Research index](research/README.md) |
+| Find another operator document | [Documentation index](docs/README.md) |
 
-The pipeline never writes to the repository.
-It writes every run under the data root, which `ARCTIC_QA_DATA_ROOT` names.
+## What the pipeline does
 
-## The package
+The pipeline follows a paper from discovery to a released benchmark item.
 
-Every file named below is under `src/arctic_qa/`.
-The modules group into seven areas.
-
-**The corpus.**
-`discovery.py` finds candidate papers.
-`metadata_prefilter.py` and `source_pass.py` reduce that set before any full text is read.
-`access_readiness.py` records which papers have a readable full text.
-`extraction.py`, `pdf_layout.py` and `text_structure.py` turn a stored PDF or HTML file into sections and chunks.
-`chapter2_corpus.py` freezes a corpus for one chapter.
-
-**Eligibility.**
-`screening.py` applies the deterministic geography rules.
-`gemini_eligibility.py` asks the model the five scientific criteria.
-`geography_correction.py` applies a reviewed geography overlay.
-
-**Generation.**
-`generation.py` holds the writer, the finding bank, the judge prompts and the option stage.
-`context_projection.py`, `quality_order.py` and `distractor_order.py` decide what the writer sees and in which order the options appear.
-`validation.py` holds the deterministic gates and the composed decision.
-
-**Paid calls.**
-`model_broker.py` is the shared ledger: budgets, gates, concurrency, receipts and settlement.
-`broker_provider.py` and `providers.py` are the transports.
-`model_roles.py` maps a stage to a model.
-`gemini_batch.py` runs the batch path.
-
-**The run.**
-`streaming.py` is the producer: one paper at a time, from eligibility to export.
-`db.py` holds the resumable state, `storage.py` stores the original objects, and `manifests.py` writes the content-addressed source manifests.
-`exporting.py` and `publication_export.py` write the released files.
-`full_run_plan.py` writes a plan for a future run without starting one.
-`rerun_selection.py` chooses which papers a release repeats.
-
-**The benchmark and the guards.**
-`abstention_set.py` freezes an evaluation set, `abstention_plan.py` and `abstention_run.py` run it, and `abstention_score.py` scores it.
-`abstention_providers.py` and `abstention_subscription.py` call the Gemini API, the Claude Code binary and the Codex binary.
-`abstention_watch.py` is the streaming evaluator, `abstention_render.py` builds the exact model-facing text, and `abstention_cost.py` keeps the cost journal.
-`benchmark_guard.py` keeps the benchmark inside its budget and its subscription quotas.
-`corpus_viewer.py` is the read-only monitor, and `pipeline_trace.py` builds the per-request traces it shows.
-
-**Entry points and support.**
-`cli.py` and `abstention_cli.py` build the command-line interface, and `__main__.py` starts it.
-`paths.py` resolves the data root and the credential directory.
-`errors.py` holds the public error codes, and `util.py` holds the hashing and the atomic writes.
-`standalone_calibration.py`, `chapter2_replay.py`, `quality_summary.py` and `extraction_quality.py` are the offline measurement harnesses.
-
-## Quick start
-
-```bash
-nix develop -c bash -c 'PYTHONPATH=src python -m arctic_qa --version'
-export ARCTIC_QA_DATA_ROOT="$HOME/arctic-qa-data" && mkdir -p "$ARCTIC_QA_DATA_ROOT"
-nix develop -c bash -c 'PYTHONPATH=src python -m arctic_qa --json doctor'
-nix develop -c bash -c 'PYTHONPATH=src python -m arctic_qa --json smoke --fixture-dir fixtures --run-id smoke-r1'
-```
-
-The last command runs the whole pipeline on a synthetic fixture with a fake provider.
-It makes no network call and costs nothing.
-[docs/REPRODUCTION.md](docs/REPRODUCTION.md) continues from there.
-
-## What the labels mean
+1. Discovery collects paper metadata from Crossref, OpenAlex, or a replay file.
+2. The metadata prefilter creates a bounded review queue without downloading full text.
+3. The source pass and access pass identify a readable article for each selected paper.
+4. Extraction converts each stored article into ordered sections and source chunks.
+5. Eligibility checks five scientific criteria and records the supporting source spans.
+6. Generation selects a finding, writes a question, builds distractors, and applies validation gates.
+7. Export writes accepted multiple-choice and short-answer records with provenance.
+8. The abstention benchmark tests each item with the correct answer present and absent.
 
 The strongest automated label is `machine_accepted_unverified`.
-It means that every deterministic gate and every model gate passed.
+This label means that all configured gates passed.
 It does not mean that a human confirmed the item.
 
+## Reproduce the work
+
+The fastest complete example uses synthetic input and a fake model provider.
+It makes no network call and costs nothing.
+
+```bash
+git clone https://github.com/BenWilcox8/arctic-qa.git
+cd arctic-qa
+export ARCTIC_QA_DATA_ROOT="$HOME/arctic-qa-data"
+mkdir -p "$ARCTIC_QA_DATA_ROOT"
+nix develop -c bash -c 'PYTHONPATH=src python -m arctic_qa --json smoke \
+  --fixture-dir fixtures --run-id smoke-r1'
+```
+
+The [reproduction guide](docs/REPRODUCTION.md) continues from this free run.
+It covers setup without Nix, corpus access, calibration replay, generation, evaluation, and the cost guard.
+It marks each paid command and gives the measured cost.
+
+The repository does not redistribute the paper corpus.
+The frozen source manifest records each DOI, retrieval URL, and file hash.
+A reader can run the same methods on those articles or on another corpus.
+
+## How a generation run flows
+
+1. Files in `config/` define the eligibility prompt, role assignments, budget, and reviewed execution gate.
+2. `src/arctic_qa/streaming.py` reads the frozen access run and processes one paper family at a time.
+3. `src/arctic_qa/model_broker.py` records each paid call in the shared ledger and writes an immutable receipt.
+4. `src/arctic_qa/generation.py` and `src/arctic_qa/validation.py` build and assess each candidate.
+5. `src/arctic_qa/db.py` stores resumable state under the configured data root.
+6. `src/arctic_qa/exporting.py` writes accepted records under `$ARCTIC_QA_DATA_ROOT/arctic-qa/exports/`.
+
+Read [Streaming dataset](docs/STREAMING_DATASET.md) for the call order and resume rules.
+Read [Shared model broker](docs/SHARED_MODEL_BROKER.md) for the paid-call safety contract.
+
+## How the abstention benchmark flows
+
+1. `abstention-eval --action build-set` reads accepted items and freezes `items.jsonl` with a hashed `manifest.json`.
+2. `src/arctic_qa/abstention_render.py` creates the exact prompt and a unique option order for every call.
+3. `src/arctic_qa/abstention_plan.py` runs all configured vendors and models for each question.
+4. Each vendor directory records its manifest, trial list, responses, receipts, and summary.
+5. `src/arctic_qa/abstention_score.py` writes metric tables and confidence intervals.
+
+Read [Abstention evaluation](docs/ABSTENTION_EVALUATION.md) for the free and paid procedures.
+
+## How the cost guard flows
+
+1. `src/arctic_qa/benchmark_guard.py` reads the benchmark journal, the shared ledger, and subscription quota reports.
+2. It compares the measurements with the rules in the guard code and the evaluation plan.
+3. If a rule fires, the guard writes one model to the pause file in `config/` or a run-specific control directory.
+4. The evaluator reads that file before each item and keeps paused trials pending.
+5. The guard writes its own events and cross-cycle memory inside its guard directory.
+
+The guard never stops an evaluator process.
+Read [Benchmark guard](docs/BENCHMARK_GUARD.md) before you operate it.
+
+## Repository map
+
+| Path | Contents |
+| --- | --- |
+| [`src/arctic_qa/`](src/arctic_qa/README.md) | The Python package, command-line interface, pipeline, evaluator, guard, and viewers. |
+| [`tests/`](tests/README.md) | The executable contracts and end-to-end replay tests. |
+| [`schemas/`](schemas/README.md) | JSON Schemas for source records, progress records, provider answers, and exported items. |
+| [`config/`](config/README.md) | Versioned prompts, policies, prices, role maps, plans, and reviewed gates. |
+| [`fixtures/`](fixtures/README.md) | Small synthetic inputs, recorded quota samples, and labeled calibration sets. |
+| [`docs/`](docs/README.md) | Reproduction, operation, architecture, and method documents. |
+| [`research/`](research/README.md) | Historical reports and measurement files that support the paper. |
+| `flake.nix` and `flake.lock` | The pinned Nix development environment. |
+| `pyproject.toml` | The Python package metadata and test configuration. |
+| `CITATION.cff` | The machine-readable citation record. |
+| `LICENSE` | The MIT license. |
+| `.gitignore` | The exclusions for credentials, run state, caches, and local environments. |
+| `AGENTS.md`, `CLAUDE.md`, and `.claude/` | Contributor instructions for coding agents that do not affect the pipeline. |
+
+## Data and credentials
+
+The code resolves its data root from `ARCTIC_QA_DATA_ROOT`.
+It resolves its credential directory from `ARCTIC_QA_CONFIG_DIR`.
+The defaults preserve the environment that produced the paper, but a new checkout can use any writable data root.
+
+The pipeline writes only inside the `arctic-qa` namespace of that data root.
+The built-in example root must be a mounted drive.
+The CLI never falls back from that example root to the root disk.
+
+See [Reproduction: environment variables](docs/REPRODUCTION.md#3-environment-variables) for the complete variable list.
+
+## Research limits
+
 The system never emits `CERTAINLY_TRUE` or `CERTAINLY_FALSE`.
-It never turns model votes into a confidence probability.
+It never converts model votes into a confidence probability.
+Source content is untrusted data, so provider prompts tell models not to obey instructions inside a paper.
 
-Read [docs/METHODS.md](docs/METHODS.md) for the evidence basis and the limits.
-
-## Safety boundary
-
-The pipeline treats source content as untrusted data.
-Every provider prompt tells the model not to obey instructions inside a source and not to call a tool.
-
-The CLI writes only under the `arctic-qa` namespace of the data root.
-The built-in example root must be a mounted drive, and the CLI never falls back to the root disk.
-[docs/CLI_WALKTHROUGH.md](docs/CLI_WALKTHROUGH.md) states the full rule.
+Read [Methods](docs/METHODS.md) for the evidence basis, label meanings, and claim limits.
 
 ## License and citation
 
-The code is MIT licensed.
-See [LICENSE](LICENSE).
-[CITATION.cff](CITATION.cff) holds the citation record.
+The code is available under the [MIT license](LICENSE).
+Use [CITATION.cff](CITATION.cff) when you cite this repository.

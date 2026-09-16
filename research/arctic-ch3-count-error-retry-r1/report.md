@@ -138,3 +138,23 @@ Commit `2ebc354` closes it.
 A receipt written before the class field existed is read from its error string and fails closed to permanent, so the 503 of 21:11 UTC and the reviewed 404 of 2026-09-15 each keep their own meaning.
 
 `tests/test_count_error_retry.py` holds both regressions: the stored transient count error that is counted again rather than replayed, and the class read back from an old receipt.
+
+## 7. State at hand-off
+
+Branch `fm/arctic-ch3-count-error-retry-r1`, head `a361060`, a clean fast-forward onto local `main` at `cde15b8` (the repository layout pass is merged in, and this report moved from `data/` to `research/` with it).
+
+Suite on `a361060`, four bounded parts in parallel:
+
+- `tests/` without the three slow files: 1180 passed in 389 s.
+- `tests/test_cli_integration.py`: 98 passed in 123 s.
+- `tests/test_streaming.py`: 61 passed in 513 s.
+- `tests/test_model_broker.py`: 91 passed in 156 s.
+- Total 1430 passed. `ruff check` and `ruff format --check` clean.
+
+The run is paused on the captain's order.
+No producer is running, the ledger is unhalted at `spent_usd` 76.302066 with zero in flight, and the count error of request `39fcd0da...` waits in its reviewed, retryable state.
+The next cut-over belongs to the paper-concurrency worker, which lands this commit with its own and starts one producer.
+The activation set of this task (`live-execution-gate-ae91e40-countretry.json`, `runtime/app-ae91e40-arctic-ch3-count-error-retry-r1`, `launcher-ae91e40-countretry.sh`, `activation-receipt-ae91e40-countretry.json`, `build-count-error-retry.py`) is the `ae91e40` snapshot, one commit behind this head; a cut-over re-snapshots on the landed commit as `build-count-error-retry.py resnapshot` does.
+
+Nothing about the two exits cost money.
+`spent_usd` was 76.302066 at 21:11 UTC and is 76.302066 now.

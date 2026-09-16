@@ -16,6 +16,27 @@ Two readers still use files here.
 `tests/test_ch3_routing.py` reads the recorded chapter 2 routing replay.
 `docs/REPRODUCTION.md` replays a recorded calibration cassette.
 
+## How to read one record
+
+1. Open the directory row that matches the pipeline stage or paper result.
+2. Read `report.md` first for the question, method, result, and limitations.
+3. Open only the measurement files that the report cites.
+4. Use commit identifiers and recorded hashes to connect the report to code and run artifacts.
+5. Use `docs/REPRODUCTION.md` for current commands instead of copying a historical command.
+
+## Common artifact types
+
+| Name or suffix | Meaning |
+| --- | --- |
+| `report.md` | The main human-readable record of one task. |
+| `*.json` | A measurement, replay result, manifest, receipt, or reviewed record. |
+| `*.jsonl` | An ordered set of recorded requests, responses, or calibration rows. |
+| `*.py` | A one-off analysis or replay script kept as it ran. |
+| `*.md` beside a report | A review, cutover record, method note, or bounded contract. |
+
+The one-off scripts are evidence, not package modules.
+The project excludes this tree from Ruff so later formatting cannot change a recorded analysis.
+
 ## Chapter 2: the first production chapter
 
 Chapter 2 produced the first corpus, the first candidate questions and the first yield audit.
@@ -53,12 +74,13 @@ Each one records a fault that stopped a run, the correction, and the live eviden
 
 | Directory | What it records |
 | --- | --- |
-| `arctic-ch3-production-run-r1/` | The first paid chapter 3 run, with the HTTP rejection evidence and three recorded calibration cassettes. `docs/REPRODUCTION.md` replays the `v6` cassette. |
+| `arctic-ch3-production-run-r1/` | The first paid run, with HTTP rejection evidence and three cassettes, including the `v6` cassette used for reproduction. |
 | `arctic-ch3-expansion-200-r1/` | The USD 200 expansion of the run, with the first measurement window. |
 | `arctic-ch3-paper-cap-skip-r1/` | The per-paper cost cap, and the skip that keeps the producer alive. |
 | `arctic-ch3-settle-not-submitted-r1/` | A double settlement between two workers of one shared ledger. |
 | `arctic-ch3-candidate-fault-containment-r1/` | The rule that one faulty candidate never ends a whole run. |
 | `arctic-broker-operation-lock-wait-r1/` | The operation lock of the shared ledger, and the wait that stops a starved producer. |
+| `arctic-ch3-count-error-retry-r1/` | A free token-count 503, its bounded retry, and the paper-level containment after retry exhaustion. |
 | `arctic-ch3-paper-concurrency-r1/` | Several papers of one run in flight at once, the v11 request-rate policy, and the measured throughput before and after. |
 | `arctic-geography-fix-r1/` | The geography correction, with the correction overlay and the successor gate drafts. |
 
@@ -70,7 +92,7 @@ The benchmark measures how often a model abstains when no listed option is corre
 | --- | --- |
 | `arctic-abstention-eval-build-r1/` | The build of the evaluation harness. |
 | `arctic-abstention-subscription-providers-r1/` | The Claude Code and Codex subscription providers, and their isolation flags. |
-| `arctic-abstention-streaming-eval-r1/` | The concurrent 8-model plan and the streaming evaluator. Section 7 holds the omitted token-count incident. |
+| `arctic-abstention-streaming-eval-r1/` | The concurrent 8-model plan, the streaming evaluator, and the omitted token-count incident in section 7. |
 | `arctic-eval-503-release-r1/` | An HTTP 503 with no usage, and the reviewed release of that ambiguous charge. |
 
 ## Cost guard
