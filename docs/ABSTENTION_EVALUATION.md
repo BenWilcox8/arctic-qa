@@ -182,7 +182,7 @@ See "Subscription providers" below.
 ### Subscription providers
 
 Two providers bill a subscription instead of an API key: `anthropic_claude_code` and `openai_codex`.
-The design record is `data/arctic-abstention-subscription-providers-r1/report.md`.
+The design record is `research/arctic-abstention-subscription-providers-r1/report.md`.
 Each trial is one subprocess call of the installed harness binary from an empty scratch directory.
 The system text and the user text are the bytes that the Gemini provider sends.
 
@@ -593,7 +593,7 @@ Give the launcher both when the service is restarted from a new snapshot.
   gemini-3.7-flash returned a usage record without `candidatesTokenCount` on 2026-09-16, with a total that equals the prompt count plus the thinking count.
   The broker books that as an ambiguous charge, as `docs/SHARED_MODEL_BROKER.md` requires, and the halt stops every phase of the ledger.
   No reviewed settlement path covers an omitted answer-token count.
-  Section 7 of `data/arctic-abstention-streaming-eval-r1/report.md` holds the evidence and the two ways to settle it.
+  Section 7 of `research/arctic-abstention-streaming-eval-r1/report.md` holds the evidence and the two ways to settle it.
   Read that section before the large Gemini run.
 
 - The evaluation policy raises the per-minute pace only in the dry run. A paid run keeps the pace of the policy file.

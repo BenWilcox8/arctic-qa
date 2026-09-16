@@ -415,7 +415,7 @@ The remaining proposals are recorded as a reserve in `provenance.option_verifica
 The validator's model-free option checks run before any paid option call.
 
 A production run never selects the `cost_aware` role profile.
-The `data/arctic-ch3-cost-r1/` directory holds the receipts-based measurements behind these rules.
+The `research/arctic-ch3-cost-r1/` directory holds the receipts-based measurements behind these rules.
 
 ## Viewer command
 
