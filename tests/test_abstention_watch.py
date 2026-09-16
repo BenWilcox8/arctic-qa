@@ -1174,6 +1174,22 @@ def test_cli_pause_status_shows_the_shipped_pause_and_the_options(
     assert only["pause_file"] is None and only["pause_files"] == []
     assert only["paused_now"] == ["gpt-5.6-sol"]
     # A cost guard owns its own file; a later file wins for the same model.
+    # Both files here belong to the test: the committed file is operational,
+    # so its contents must not decide what this merge asserts.
+    standing = tmp_path / "standing-model-pause.json"
+    atomic_json(
+        standing,
+        {
+            "schema": "benchmark-evaluation-model-pause-v1",
+            "paused_models": {
+                "claude-fable-5-1": {
+                    "reason": "the captain's daily quota",
+                    "resume_at_utc": "2026-09-16T23:00:00Z",
+                },
+                "gemini-3.7-flash": {"reason": "an operator held this model"},
+            },
+        },
+    )
     guard = tmp_path / "guard-model-pause.json"
     atomic_json(
         guard,
@@ -1197,7 +1213,7 @@ def test_cli_pause_status_shows_the_shipped_pause_and_the_options(
             [
                 *base,
                 "--pause-file",
-                "config/benchmark-evaluation-model-pause-v1.json",
+                str(standing),
                 "--pause-file",
                 str(guard),
             ]
