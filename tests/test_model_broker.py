@@ -3568,9 +3568,7 @@ def test_phase_settlement_records_the_phase_of_a_free_refusal_and_lifts_the_halt
             "completed_at_utc",
         )
     }
-    monkeypatch.setattr(
-        model_broker, "PHASELESS_REFUSAL_SETTLEMENT_REQUEST", reviewed
-    )
+    monkeypatch.setattr(model_broker, "PHASELESS_REFUSAL_SETTLEMENT_REQUEST", reviewed)
     review = tmp_path / "phase-settlement-review.md"
     review.write_text("The row holds no money.\n", encoding="utf-8")
     halt = ledger_file.with_name(f".{ledger_file.name}.integrity-halt.json")
@@ -3666,9 +3664,7 @@ def test_phase_settlement_refuses_a_row_that_holds_money(
             "completed_at_utc",
         )
     }
-    monkeypatch.setattr(
-        model_broker, "PHASELESS_REFUSAL_SETTLEMENT_REQUEST", reviewed
-    )
+    monkeypatch.setattr(model_broker, "PHASELESS_REFUSAL_SETTLEMENT_REQUEST", reviewed)
     review = tmp_path / "phase-settlement-review.md"
     review.write_text("The row holds no money.\n", encoding="utf-8")
     halt = ledger_file.with_name(f".{ledger_file.name}.integrity-halt.json")
@@ -3734,6 +3730,7 @@ def test_a_refusal_before_the_reservation_carries_its_phase(
     """
     values = fixture(tmp_path, transport=Transport())
     broker = values["broker"]
+
     # Stop the request after the free count and before the reservation, which
     # is the shape that lost its phase.
     def refuse_before_reserve(**_: object) -> None:
@@ -3751,10 +3748,17 @@ def test_a_refusal_before_the_reservation_carries_its_phase(
     assert request["phase"] == "live_test"
     # The reader of the applied configuration transition therefore sees the
     # phase and does not take this row for a construction request.
-    assert model_broker.SharedGeminiBroker._only_evaluation_activity_since(
-        {"requests": {request_key: {**request, "completed_at_utc": "2026-09-16T23:03:53Z"}}},
-        "2026-09-16T22:58:25Z",
-    ) is False
+    assert (
+        model_broker.SharedGeminiBroker._only_evaluation_activity_since(
+            {
+                "requests": {
+                    request_key: {**request, "completed_at_utc": "2026-09-16T23:03:53Z"}
+                }
+            },
+            "2026-09-16T22:58:25Z",
+        )
+        is False
+    )
     assert model_broker.SharedGeminiBroker._only_evaluation_activity_since(
         {
             "requests": {

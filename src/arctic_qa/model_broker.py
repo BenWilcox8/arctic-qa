@@ -297,9 +297,7 @@ TRANSITION_GATE_SUCCESSOR_FIELDS = {
     "review_record_sha256",
 }
 PRETRANSPORT_SETTLEMENT_SCHEMA = "shared-paid-call-pretransport-settlement-v1"
-PHASELESS_REFUSAL_SETTLEMENT_SCHEMA = (
-    "shared-paid-call-phaseless-refusal-settlement-v1"
-)
+PHASELESS_REFUSAL_SETTLEMENT_SCHEMA = "shared-paid-call-phaseless-refusal-settlement-v1"
 PHASELESS_REFUSAL_INTEGRITY_HALT_REASON = (
     "ValueError: the configuration transition ledger hash changed"
 )
@@ -5927,9 +5925,7 @@ class SharedGeminiBroker:
                     "stage_prefix": f"{EVALUATION_STAGE_PREFIX}",
                     "evaluation_trial": request.get("evaluation_trial"),
                     "evaluation_gate_sha256": request.get("evaluation_gate_sha256"),
-                    "evaluation_policy_sha256": request.get(
-                        "evaluation_policy_sha256"
-                    ),
+                    "evaluation_policy_sha256": request.get("evaluation_policy_sha256"),
                 }
                 if not str(request["stage"]).startswith(EVALUATION_STAGE_PREFIX) or any(
                     value is None for value in evidence.values()

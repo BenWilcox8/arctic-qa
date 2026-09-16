@@ -615,7 +615,9 @@ def parser() -> argparse.ArgumentParser:
     phase_settlement.add_argument("--request-key", required=True)
     phase_settlement.add_argument("--expected-ledger-sha256", required=True)
     phase_settlement.add_argument("--review-file", type=Path, required=True)
-    phase_settlement.add_argument("--streaming-budget-policy-file", type=Path, required=True)
+    phase_settlement.add_argument(
+        "--streaming-budget-policy-file", type=Path, required=True
+    )
     phase_settlement.add_argument("--price-config-file", type=Path, required=True)
     phase_settlement.add_argument("--execution-gate-file", type=Path, required=True)
     phase_settlement.add_argument("--shared-ledger-file", type=Path, required=True)
