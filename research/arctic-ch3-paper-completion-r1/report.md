@@ -154,6 +154,10 @@ PENDING.
 
 ## 9. Tests
 
+The whole release suite at commit `72c395a`: 1433 tests, none failed, `ruff check` and `ruff format --check` clean.
+The log is `suite-72c395a.log` in the activation directory.
+
+
 `tests/test_paper_completion.py`:
 
 - the label rule on a fixture state with one paper per outcome class and one paper of every mid-family shape, which takes no label;
