@@ -1122,3 +1122,15 @@ def test_cli_apply_evaluation_ceiling_writes_the_event_and_calls_nothing(
     assert (
         len(list(values["broker"].receipts_dir.glob("evaluation-policy-*.json"))) == 1
     )
+    # Once the event exists the action reads the ceiling back with no
+    # transition file, which is how an operator proves it is in force.
+    flag = "--evaluation-policy-transition-file"
+    read_back = [
+        item
+        for index, item in enumerate(argv)
+        if item != flag and (index == 0 or argv[index - 1] != flag)
+    ]
+    assert cli_main(read_back) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["authorized_ceiling_usd"] == "200.00"
+    assert shown["transition_event_sha256"] == result["transition_event_sha256"]

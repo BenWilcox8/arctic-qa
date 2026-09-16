@@ -99,6 +99,8 @@ It also refuses to reopen under a different evaluation policy or vendor.
 ### 3.1 Why point 3 is not optional
 
 Point 3 looks like bookkeeping. It is the control that keeps the two phases apart.
+The expansion crew's commit `3cd57a8` on `main` makes the slots per phase; this branch adds the per-minute window, which that commit left shared.
+A shared window has the same failure mode one layer down: the evaluation limit is 30 per minute and the construction limit is 10, so evaluation calls alone could refuse a construction call on the pace.
 
 The ledger keeps one `inflight` total for every phase.
 The construction limit is 2 requests and the evaluation limit is 4.
@@ -300,6 +302,40 @@ against a limit he named.
 The lesson for this project: a control that is read in one place and consumed
 in another needs a test that drives the real path, not the scripted one. The
 pause is now proved on the path that has a broker.
+
+### 5.6 The final live pass: all vendors, the pause holding
+
+Run `streaming-r5`, 2026-09-16 13:06 to 13:13 UTC, at commit `f64d289` on
+`main` `3f7de6e`. This is the pass that proves the corrected pause on the path
+that has a broker.
+
+| Measure | Value |
+| --- | --- |
+| Item | `aqa-7f09e4bdf6bac5c50d4c` |
+| Trials | 42 recorded of 48 planned, no invalid response |
+| Held | 6 trials of `claude-fable-5-1`, `complete: false` |
+| Models scored | 7, with no Fable row in any vendor directory |
+| Gemini | 12 paid calls, USD 0.227800, one call in flight |
+| Subscription | 30 calls at USD 0: Codex 18, Claude Code 12 |
+| Wall time | 391 s, against 167 s at four Gemini calls in flight |
+| Ledger after | `integrity_valid true`, `halted false`, nothing in flight |
+| Evaluation phase | USD 0.627848 used of USD 200.00, 42 requests |
+
+The Gemini arm ran one call in flight, not the plan's four. The chapter 3
+producer runs from a read-only snapshot, and the snapshot that would make its
+next construction call could not be proved from the ledger: the applied
+construction transition binds commit `09fd733`, which precedes the per-phase
+commit `3cd57a8`. One evaluation call in flight leaves the producer a free slot
+even under the older global counting, so this pass could not repeat the outage
+of the morning. The cost is wall time only: 391 s against 167 s.
+
+The two phases stayed apart, which is the point of section 3.1. Before the run
+the construction minute window held 4 entries. After 12 evaluation calls it
+still held 4. No evaluation submission entered it.
+
+The journal row reads `complete: false` with `pending_paused_trials: 6`, so the
+item stays open. After 23:00 UTC the next pass runs those six Fable trials and
+calls no other model again.
 
 ## 6. The cost row
 
@@ -693,6 +729,7 @@ The new tests cover:
 | Commit `ffecccc`, before the rebase | 1260 passed in 13 minutes 41 seconds |
 | Commit `82ff5cc`, the restored branch | 1298 passed, 1 failed in 18 minutes 13 seconds |
 | Commit `598c34b`, the branch on main `ec0ba98` | 1344 passed in 17 minutes 42 seconds |
+| Commit `f64d289`, the branch on main `3f7de6e` | 1355 passed in 17 minutes 47 seconds |
 
 The one failure of the second run was the reviewed chapter 2 MAX_TOKENS continuation, whose case matches its receipt by the exact usage message.
 The widened usage rule of `183779b` changed that message for a record that omits both token counts.
@@ -718,13 +755,14 @@ Firstmate passed the captain's allocation for the Gemini benchmarking: USD 200 f
 ## 11. Deferred items
 
 1. The remaining 4 trials of the Gemini arm of `runs/concurrent-test-r2-gemini`. The ambiguous charge of section 7 is settled and the ledger is clean, so they can run.
-2. The evaluation ceiling of USD 200.00 is the captain's whole allocation. The streaming authorization keeps its own, much smaller, Gemini USD bound per run, so a large benchmarking pass needs a new authorization with a bound the captain sets.
-3. The evaluator derives one gate per item from one reviewed authorization. A stricter design lets a reviewer sign a contract-level gate that the broker validates directly. That design needs a new gate schema and a broker change.
-4. The scripted dry run uses one latency per vendor. A per-model latency models the real schedule better, because inside one vendor the models differ by a factor of ten.
-5. `campaign_usd_per_accepted_item` divides the campaign spend by the accepted items of the whole campaign. A per-window number, over the last N items, reacts faster to a change in the pipeline yield.
-6. The subscription vendors have no decoder temperature and a residual harness prompt of 700 to 2600 tokens. Section 1.5 of `data/arctic-abstention-subscription-providers-r1/report.md` holds the full fairness caveat. Nothing in this task changes it.
-7. Two processes must not share one evaluation run id. The in-process admission lock covers the window between the reservation and the in-flight lock inside one process, and the file lock covers every later step. A second process on the same run id can see a request of that window as an orphan. One reviewed gate authorizes one run id and one launcher, so the case does not arise today. A cross-process admission lock closes it.
-8. The v1 evidence stays on disk: `runs/concurrent-test-r1` and `streaming-r1-smoke`. Their outcome counts belong to the v1 contract, where every model of one trial shared one option order. Their cost and wall-time numbers do not depend on the order.
-9. Both Gemini models are paused now, by firstmate's order of 2026-09-16, until the per-phase in-flight fix of the expansion crew is on `main` and the production run is re-snapshotted. The evaluator keeps the subscription vendors running under that pause. The live all-vendor proof of section 5.4 ran before that pause.
-10. A paused *vendor* stays paused until the operator restarts the unit. An automatic re-test after a quiet period needs a new control in the policy file. A paused *model* needs no restart: section 8.4 holds that control, and its resume time frees the model by itself.
-11. `gemini-3.7-flash` now has a price entry (USD 0.75 input, USD 3.75 output including thinking, the rate valid through 2026-12-31, read from the official pricing page on 2026-09-16). Its presets are low, medium and high: the model page states that `minimal` returns an error.
+2. A live pass at the plan's four Gemini calls in flight. Section 5.6 ran one, because the producer snapshot that will make the next construction call could not be proved to carry `3cd57a8`. A producer snapshot at `3cd57a8` or later removes that caution.
+3. The evaluation ceiling of USD 200.00 is the captain's whole allocation. The streaming authorization keeps its own, much smaller, Gemini USD bound per run, so a large benchmarking pass needs a new authorization with a bound the captain sets.
+4. The evaluator derives one gate per item from one reviewed authorization. A stricter design lets a reviewer sign a contract-level gate that the broker validates directly. That design needs a new gate schema and a broker change.
+5. The scripted dry run uses one latency per vendor. A per-model latency models the real schedule better, because inside one vendor the models differ by a factor of ten.
+6. `campaign_usd_per_accepted_item` divides the campaign spend by the accepted items of the whole campaign. A per-window number, over the last N items, reacts faster to a change in the pipeline yield.
+7. The subscription vendors have no decoder temperature and a residual harness prompt of 700 to 2600 tokens. Section 1.5 of `data/arctic-abstention-subscription-providers-r1/report.md` holds the full fairness caveat. Nothing in this task changes it.
+8. Two processes must not share one evaluation run id. The in-process admission lock covers the window between the reservation and the in-flight lock inside one process, and the file lock covers every later step. A second process on the same run id can see a request of that window as an orphan. One reviewed gate authorizes one run id and one launcher, so the case does not arise today. A cross-process admission lock closes it.
+9. The v1 evidence stays on disk: `runs/concurrent-test-r1` and `streaming-r1-smoke`. Their outcome counts belong to the v1 contract, where every model of one trial shared one option order. Their cost and wall-time numbers do not depend on the order.
+10. Both Gemini models were paused for about an hour on 2026-09-16, by firstmate's order, while the shared ledger counted in-flight requests globally. The evaluator kept the subscription vendors running throughout. The pause is lifted: `main` carries `3cd57a8` and this branch carries the per-phase window. Only Claude Fable 5.1 is held now, until 23:00 UTC.
+11. A paused *vendor* stays paused until the operator restarts the unit. An automatic re-test after a quiet period needs a new control in the policy file. A paused *model* needs no restart: section 8.4 holds that control, and its resume time frees the model by itself.
+12. `gemini-3.7-flash` now has a price entry (USD 0.75 input, USD 3.75 output including thinking, the rate valid through 2026-12-31, read from the official pricing page on 2026-09-16). Its presets are low, medium and high: the model page states that `minimal` returns an error.

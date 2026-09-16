@@ -674,7 +674,10 @@ def _apply_evaluation_ceiling(args: argparse.Namespace) -> dict[str, Any]:
     writes its immutable event. Every later start, the evaluator included,
     reads that event. The action makes no paid call.
     """
-    _require(args, "evaluation_gate_file", "evaluation_policy_transition_file")
+    # The transition file is needed only for the first start under a larger
+    # ceiling. Once the event exists, this action reads the authorized ceiling
+    # back, which is how an operator proves the transition is in force.
+    _require(args, "evaluation_gate_file")
     broker = _broker(args, evaluation_gate_file=args.evaluation_gate_file)
     status = broker.status()
     return {
