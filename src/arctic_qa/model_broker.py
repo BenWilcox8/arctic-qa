@@ -50,6 +50,19 @@ EVALUATION_POLICY_SCHEMA = "benchmark-evaluation-policy-v1"
 EVALUATION_PRICE_CONFIG_SCHEMA = "benchmark-evaluation-price-config-v1"
 EVALUATION_GATE_SCHEMA = "benchmark-evaluation-execution-gate-v1"
 EVALUATION_CEILING_REASON = "the paid request exceeds the evaluation ceiling"
+# An ambiguous evaluation charge halts the evaluation phase only. Construction
+# keeps running under its own ceiling (firstmate instruction 2026-09-16: an
+# evaluation error must never stop the production pipeline). These two optional
+# ledger fields carry that halt; a ledger written before this change has
+# neither, which reads as "not halted".
+EVALUATION_HALT_FIELDS = ("evaluation_halted", "evaluation_halt_reason")
+AMBIGUOUS_HALT_REASON = "ambiguous_generation_charge"
+# The ambiguous-charge errors that one reviewed usage reconciliation can
+# settle from the saved response, without a provider call.
+RECONCILABLE_USAGE_ERRORS = (
+    "KeyError: 'thoughtsTokenCount'",
+    "ValueError: provider usage is inconsistent",
+)
 EVALUATION_GATE_BINDING_FIELDS = {
     "eval_set_id",
     "eval_set_manifest_sha256",
@@ -323,6 +336,10 @@ USAGE_RECONCILIATION_FIELDS = {
     "review_record_sha256",
     "reconciled_at_utc",
 }
+# Two fields that an event written before 2026-09-16 does not carry: which
+# token count the provider omitted, and the phase of the request. An older
+# event stays valid without them.
+USAGE_RECONCILIATION_OPTIONAL_FIELDS = {"omitted_zero_usage_field", "phase"}
 EXCLUSIVE_BATCH_SCHEMA = "shared-gemini-exclusive-batch-v1"
 ACCEPTED_ITEM_V1_SCHEMA = "shared-paid-call-accepted-item-v1"
 ACCEPTED_ITEM_V2_SCHEMA = "shared-paid-call-accepted-item-v2"
@@ -504,25 +521,60 @@ def activate_exclusive_batch_mode(
             return marker
 
 
+def _omitted_zero_usage_field(usage: dict[str, Any]) -> str | None:
+    """Return the one token field the provider omitted as zero, or None.
+
+    The provider can omit a token count when its value is zero. The broker
+    accepts that only when the other three counts are nonnegative integers and
+    the recorded total proves the omitted value is zero. Two shapes occur:
+
+    - ``thoughtsTokenCount`` absent, with ``total == prompt + candidates``.
+    - ``candidatesTokenCount`` absent, with ``total == prompt + thoughts``.
+      gemini-3.7-flash returned that shape on 2026-09-16 for a one-letter
+      answer (data/arctic-abstention-streaming-eval-r1/report.md, section 7).
+
+    Anything else is an inconsistent usage record and stays an ambiguous
+    charge.
+    """
+    for omitted, others in (
+        ("thoughtsTokenCount", ("promptTokenCount", "candidatesTokenCount")),
+        ("candidatesTokenCount", ("promptTokenCount", "thoughtsTokenCount")),
+    ):
+        if omitted in usage:
+            continue
+        values = [usage.get(name) for name in (*others, "totalTokenCount")]
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in values
+        ):
+            return None
+        if values[2] == values[0] + values[1]:
+            return omitted
+        return None
+    return None
+
+
+OMITTED_ZERO_REASON = {
+    "thoughtsTokenCount": "provider usage cannot prove zero thinking tokens",
+    "candidatesTokenCount": "provider usage cannot prove zero answer tokens",
+}
+
+
 def _normalized_usage(response: Any) -> dict[str, Any]:
     usage = response.get("usageMetadata") if isinstance(response, dict) else None
     if not isinstance(usage, dict):
         raise ValueError("provider usage is absent")
     normalized = dict(usage)
-    if "thoughtsTokenCount" not in normalized:
-        prompt = normalized.get("promptTokenCount")
-        candidates = normalized.get("candidatesTokenCount")
-        total = normalized.get("totalTokenCount")
-        values = (prompt, candidates, total)
-        if (
-            any(
-                isinstance(value, bool) or not isinstance(value, int) or value < 0
-                for value in values
-            )
-            or total != prompt + candidates
-        ):
-            raise ValueError("provider usage cannot prove zero thinking tokens")
-        normalized["thoughtsTokenCount"] = 0
+    absent = [
+        name
+        for name in ("thoughtsTokenCount", "candidatesTokenCount")
+        if name not in normalized
+    ]
+    if len(absent) == 1:
+        omitted = _omitted_zero_usage_field(normalized)
+        if omitted is None:
+            raise ValueError(OMITTED_ZERO_REASON[absent[0]])
+        normalized[omitted] = 0
     names = (
         "promptTokenCount",
         "candidatesTokenCount",
@@ -2481,7 +2533,11 @@ class SharedGeminiBroker:
 
     def _read_usage_reconciliation(self, path: Path) -> dict[str, Any]:
         event = _read(path)
-        if not isinstance(event, dict) or set(event) != USAGE_RECONCILIATION_FIELDS:
+        if (
+            not isinstance(event, dict)
+            or set(event) - USAGE_RECONCILIATION_OPTIONAL_FIELDS
+            != USAGE_RECONCILIATION_FIELDS
+        ):
             raise ValueError("a usage reconciliation event changed")
         request_key = event.get("request_key")
         if (
@@ -2507,7 +2563,15 @@ class SharedGeminiBroker:
         ):
             raise ValueError("a usage reconciliation event changed")
         usage = _normalized_usage({"usageMetadata": event.get("normalized_usage")})
-        if usage != event["normalized_usage"] or usage["thoughtsTokenCount"] != 0:
+        # Exactly one token count is the proved zero: the thinking count of the
+        # older shape, or the answer count of the shape gemini-3.7-flash
+        # returned on 2026-09-16.
+        omitted = event.get("omitted_zero_usage_field") or "thoughtsTokenCount"
+        if (
+            usage != event["normalized_usage"]
+            or omitted not in ("thoughtsTokenCount", "candidatesTokenCount")
+            or usage[omitted] != 0
+        ):
             raise ValueError("a usage reconciliation event changed")
         matching_receipts = [
             candidate
@@ -2517,16 +2581,28 @@ class SharedGeminiBroker:
         if len(matching_receipts) != 1:
             raise ValueError("the usage reconciliation request model is unavailable")
         request_record = _read(matching_receipts[0])
-        request_config = self.config_for_stage(str(request_record.get("stage") or ""))
-        if request_record.get("model") != request_config["model"]:
-            raise ValueError("the usage reconciliation request model changed")
-        actual = _cost(
-            request_config,
-            usage["promptTokenCount"],
-            usage["candidatesTokenCount"] + usage["thoughtsTokenCount"],
+        stage = str(request_record.get("stage") or "")
+        # A construction-only broker has no evaluation price config, so it
+        # cannot recompute the cost of an evaluation stage. It still validates
+        # every hash, the usage record and the review of the event, and it
+        # reads the recorded cost, which the ledger totals already prove.
+        # An evaluation-capable broker recomputes the cost.
+        recomputable = not is_evaluation_stage(stage) or (
+            self.evaluation_config is not None
         )
-        if _money(event.get("actual_cost_usd"), "reconciled cost") != actual:
-            raise ValueError("a usage reconciliation event changed")
+        if recomputable:
+            request_config = self.config_for_stage(stage)
+            if request_record.get("model") != request_config["model"]:
+                raise ValueError("the usage reconciliation request model changed")
+            actual = _cost(
+                request_config,
+                usage["promptTokenCount"],
+                usage["candidatesTokenCount"] + usage["thoughtsTokenCount"],
+            )
+            if _money(event.get("actual_cost_usd"), "reconciled cost") != actual:
+                raise ValueError("a usage reconciliation event changed")
+        else:
+            _money(event.get("actual_cost_usd"), "reconciled cost")
         review_path = Path(str(event.get("review_record") or "")).resolve()
         if (
             not str(event.get("integrated_code_commit") or "").strip()
@@ -3058,8 +3134,15 @@ class SharedGeminiBroker:
             "created_at_utc",
             "updated_at_utc",
         }
-        if not isinstance(ledger, dict) or set(ledger) != required:
+        if (
+            not isinstance(ledger, dict)
+            or set(ledger) - set(EVALUATION_HALT_FIELDS) != required
+        ):
             raise ValueError("the shared paid-call ledger fields changed")
+        if ledger.get("evaluation_halted") is not None and not isinstance(
+            ledger["evaluation_halted"], bool
+        ):
+            raise ValueError("the benchmark evaluation halt state is invalid")
         if ledger["schema"] != "shared-paid-call-ledger-v1":
             raise ValueError("the shared paid-call ledger schema changed")
         if (
@@ -3333,6 +3416,40 @@ class SharedGeminiBroker:
             datetime.fromisoformat(str(value).replace("Z", "+00:00"))
 
     @staticmethod
+    def _phase_halted(ledger: dict[str, Any], phase: str) -> str | None:
+        """Return the halt reason that blocks one phase, or None.
+
+        The ledger halt blocks every phase. The evaluation halt blocks the
+        evaluation phase only, so an ambiguous evaluation charge never stops
+        the construction pipeline.
+        """
+        if ledger.get("halted"):
+            return str(ledger.get("halt_reason") or "halted")
+        if phase == EVALUATION_PHASE and ledger.get("evaluation_halted"):
+            return str(ledger.get("evaluation_halt_reason") or "halted")
+        return None
+
+    def _lift_settled_halts(self, ledger: dict[str, Any]) -> None:
+        """Lift each halt whose ambiguous requests are all settled.
+
+        An ambiguous request with a reviewed continuation event is settled for
+        this purpose, which is the rule the reservation path already applies.
+        """
+        continuations = self._ambiguous_continuation_events(ledger)
+        blocking = [
+            row
+            for key, row in ledger["requests"].items()
+            if row.get("state") == "ambiguous_charge" and key not in continuations
+        ]
+        if not blocking and int(ledger["inflight"]) == 0:
+            ledger["halted"] = False
+            ledger["halt_reason"] = None
+        if not any(row.get("phase") == EVALUATION_PHASE for row in blocking):
+            if ledger.get("evaluation_halted"):
+                ledger["evaluation_halted"] = False
+                ledger["evaluation_halt_reason"] = None
+
+    @staticmethod
     def _evaluation_totals(ledger: dict[str, Any]) -> dict[str, Any]:
         """Sum the evaluation-phase liabilities recorded in the ledger requests."""
         totals: dict[str, Any] = {
@@ -3560,12 +3677,14 @@ class SharedGeminiBroker:
             "limits": limits,
             "usage": usage,
             "remaining": remaining,
-            "evaluation": self._evaluation_status(evaluation),
+            "evaluation": self._evaluation_status(evaluation, ledger),
             "stages": ledger["stages"],
             "papers": papers,
         }
 
-    def _evaluation_status(self, evaluation: dict[str, Any]) -> dict[str, Any]:
+    def _evaluation_status(
+        self, evaluation: dict[str, Any], ledger: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         """Report the evaluation phase beside, never inside, construction totals."""
         policy = self.evaluation_policy
         ceiling = (
@@ -3595,6 +3714,19 @@ class SharedGeminiBroker:
             "remaining_usd": (
                 str(ceiling - evaluation["used_usd"]) if ceiling is not None else None
             ),
+            "halted": bool(
+                (ledger or {}).get("evaluation_halted") or (ledger or {}).get("halted")
+            ),
+            "halt_reason": (
+                str((ledger or {}).get("halt_reason"))
+                if (ledger or {}).get("halted")
+                else (
+                    str((ledger or {}).get("evaluation_halt_reason"))
+                    if (ledger or {}).get("evaluation_halted")
+                    else None
+                )
+            ),
+            "phase_halted": bool((ledger or {}).get("evaluation_halted")),
             "submissions": evaluation["submissions"],
             "inflight": evaluation["inflight"],
             "input_tokens": evaluation["input_tokens"],
@@ -3913,7 +4045,17 @@ class SharedGeminiBroker:
         return self.status()
 
     def reconcile_omitted_thought_usage(self, request_key: str) -> dict[str, Any]:
-        """Settle one saved response whose exact token total proves zero thoughts."""
+        """Settle one saved response whose token total proves an omitted zero.
+
+        Two shapes qualify, both proved by the recorded total: an omitted
+        ``thoughtsTokenCount`` and an omitted ``candidatesTokenCount`` (see
+        :func:`_omitted_zero_usage_field`). The settlement reads the immutable
+        received response, computes the cost from the normalized usage, writes
+        one immutable reconciliation receipt, moves the exact reservation from
+        the ambiguous funds to the spend, and lifts the halt of that phase when
+        no ambiguous request and no in-flight request remain. It reads no
+        credential and makes no provider call.
+        """
         if not re.fullmatch(r"[a-f0-9]{64}", request_key):
             raise ValueError("the reconciled request key is invalid")
         operation = self._operation_lock_file.open("a+")
@@ -3934,6 +4076,16 @@ class SharedGeminiBroker:
                 )
                 if request.get("usage_reconciliation_sha256") is not None:
                     event = self._read_usage_reconciliation(reconciliation_path)
+                    # The request is settled. Leave the ledger in the state the
+                    # halt rule implies: a halt whose blocking ambiguous
+                    # requests are all settled does not stand.
+                    before = (ledger["halted"], ledger.get("evaluation_halted"))
+                    self._lift_settled_halts(ledger)
+                    if before != (ledger["halted"], ledger.get("evaluation_halted")):
+                        ledger["updated_at_utc"] = _now()
+                        self._validate_ledger(ledger)
+                        self._validate_immutable_events(ledger)
+                        self._commit_ledger(ledger)
                     return {
                         "schema": "shared-paid-call-usage-reconciliation-result-v1",
                         "request_key": request_key,
@@ -3946,9 +4098,12 @@ class SharedGeminiBroker:
                     }
                 if request.get("state") != "ambiguous_charge":
                     raise ValueError("the request does not have an ambiguous charge")
+                # The halt of the request's own phase must still stand: the
+                # ledger halt for a construction request, the evaluation halt
+                # for an evaluation request.
                 if (
-                    ledger.get("halted") is not True
-                    or ledger.get("halt_reason") != "ambiguous_generation_charge"
+                    self._phase_halted(ledger, request["phase"])
+                    != AMBIGUOUS_HALT_REASON
                 ):
                     raise ValueError("the ambiguous-charge halt state changed")
 
@@ -3959,28 +4114,22 @@ class SharedGeminiBroker:
                 received = _read(received_path)
                 if (
                     final.get("state") != "ambiguous_charge"
-                    or final.get("error") != "KeyError: 'thoughtsTokenCount'"
+                    or final.get("error") not in RECONCILABLE_USAGE_ERRORS
                     or received.get("state") != "response_received"
                     or final.get("response") != received.get("response")
                 ):
                     raise ValueError(
-                        "the ambiguous response is not the omitted-thoughts case"
+                        "the ambiguous response is not an omitted-zero usage case"
                     )
                 raw_usage = received["response"].get("usageMetadata")
-                if (
-                    not isinstance(raw_usage, dict)
-                    or "thoughtsTokenCount" in raw_usage
-                    or any(
-                        field not in raw_usage
-                        for field in (
-                            "promptTokenCount",
-                            "candidatesTokenCount",
-                            "totalTokenCount",
-                        )
-                    )
-                ):
+                omitted = (
+                    _omitted_zero_usage_field(raw_usage)
+                    if isinstance(raw_usage, dict)
+                    else None
+                )
+                if omitted is None:
                     raise ValueError(
-                        "the saved usage does not omit only the thought-token value"
+                        "the saved usage does not omit exactly one zero token value"
                     )
                 usage = _normalized_usage(received["response"])
                 request_config = self.config_for_stage(request["stage"])
@@ -3997,7 +4146,16 @@ class SharedGeminiBroker:
                 if actual > reserved:
                     raise ValueError("the reconciled cost exceeds the reservation")
 
-                gate = _validate_gate(self.execution_gate_file, request["phase"])
+                # An evaluation request is reviewed by its own evaluation gate;
+                # the construction gate never allows that phase.
+                if request["phase"] == EVALUATION_PHASE:
+                    self._require_evaluation()
+                    gate_file = self.evaluation_gate_file
+                    gate = _validate_evaluation_gate(gate_file)  # type: ignore[arg-type]
+                    self._validate_evaluation_gate_hashes(gate)
+                else:
+                    gate_file = self.execution_gate_file
+                    gate = _validate_gate(gate_file, request["phase"])
                 review_path = Path(gate["review_record"]).resolve()
                 if not review_path.is_file() or gate.get(
                     "review_record_sha256"
@@ -4015,7 +4173,9 @@ class SharedGeminiBroker:
                     "normalized_usage": usage,
                     "actual_cost_usd": str(actual),
                     "ledger_sha256_before": sha256_file(self.ledger_file),
-                    "gate_sha256": sha256_file(self.execution_gate_file),
+                    "omitted_zero_usage_field": omitted,
+                    "phase": request["phase"],
+                    "gate_sha256": sha256_file(gate_file),
                     "integrated_code_commit": gate["integrated_code_commit"],
                     "review_record": str(review_path),
                     "review_record_sha256": gate["review_record_sha256"],
@@ -4063,13 +4223,7 @@ class SharedGeminiBroker:
                         "reconciled_at_utc": event["reconciled_at_utc"],
                     }
                 )
-                unresolved = any(
-                    row.get("state") == "ambiguous_charge"
-                    for row in ledger["requests"].values()
-                )
-                if not unresolved and int(ledger["inflight"]) == 0:
-                    ledger["halted"] = False
-                    ledger["halt_reason"] = None
+                self._lift_settled_halts(ledger)
                 ledger["updated_at_utc"] = _now()
                 self._validate_ledger(ledger)
                 self._validate_immutable_events(ledger)
@@ -5022,12 +5176,16 @@ class SharedGeminiBroker:
         finally:
             operation.close()
 
-    def _halt(self, reason: str) -> None:
+    def _halt(self, reason: str, *, phase: str | None = None) -> None:
         with self._lock_file.open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             ledger = self._validated_ledger()
-            ledger["halted"] = True
-            ledger["halt_reason"] = reason
+            if phase == EVALUATION_PHASE:
+                ledger["evaluation_halted"] = True
+                ledger["evaluation_halt_reason"] = reason
+            else:
+                ledger["halted"] = True
+                ledger["halt_reason"] = reason
             ledger["updated_at_utc"] = _now()
             self._commit_ledger(ledger)
 
@@ -5044,14 +5202,15 @@ class SharedGeminiBroker:
             ledger["updated_at_utc"] = _now()
             self._commit_ledger(ledger)
 
-    def _count_event(self, request_key: str, base: dict[str, Any]) -> None:
+    def _count_event(
+        self, request_key: str, base: dict[str, Any], *, phase: str | None = None
+    ) -> None:
         with self._lock_file.open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             ledger = self._validated_ledger()
-            if ledger["halted"]:
-                raise ValueError(
-                    f"the paid-call broker is halted: {ledger['halt_reason']}"
-                )
+            halt = self._phase_halted(ledger, phase or base.get("phase") or "live_test")
+            if halt is not None:
+                raise ValueError(f"the paid-call broker is halted: {halt}")
             if request_key in ledger["requests"]:
                 raise ValueError("the paid request key already exists")
             binding = {
@@ -5255,7 +5414,14 @@ class SharedGeminiBroker:
                 for key, row in ledger["requests"].items()
                 if row.get("state") == "ambiguous_charge"
             }
-            if ledger["halted"] or ambiguous_requests - continuation_events.keys():
+            unresolved_ambiguous = ambiguous_requests - continuation_events.keys()
+            blocking = {
+                key
+                for key in unresolved_ambiguous
+                if phase == EVALUATION_PHASE
+                or ledger["requests"][key].get("phase") != EVALUATION_PHASE
+            }
+            if self._phase_halted(ledger, phase) is not None or blocking:
                 raise ValueError("the paid-call broker is halted")
             evaluation_used = self._evaluation_totals(ledger)["used_usd"]
             evaluation_submissions = self._evaluation_totals(ledger)["submissions"]
@@ -5479,8 +5645,14 @@ class SharedGeminiBroker:
                         _money(live["ambiguous_usd"], "live ambiguous") + amount
                     )
                 request["state"] = "ambiguous_charge"
-                ledger["halted"] = True
-                ledger["halt_reason"] = "ambiguous_generation_charge"
+                if request["phase"] == EVALUATION_PHASE:
+                    # Halt the evaluation phase only. The construction phase
+                    # keeps its own ceiling, slots and window.
+                    ledger["evaluation_halted"] = True
+                    ledger["evaluation_halt_reason"] = AMBIGUOUS_HALT_REASON
+                else:
+                    ledger["halted"] = True
+                    ledger["halt_reason"] = AMBIGUOUS_HALT_REASON
             else:
                 actual = _money(actual, "actual cost")
                 if actual > reserved:
@@ -5762,7 +5934,7 @@ class SharedGeminiBroker:
             exact_input = self._resume_not_submitted(request_key, base)
             resumed = exact_input is not None
             if exact_input is None:
-                self._count_event(request_key, base)
+                self._count_event(request_key, base, phase=phase)
                 try:
                     counted = client.post(
                         request_config["model"],
@@ -5799,7 +5971,9 @@ class SharedGeminiBroker:
                     self._mark_not_submitted(
                         request_key, "count_error", f"{type(error).__name__}: {error}"
                     )
-                    self._halt(f"countTokens error: {type(error).__name__}")
+                    self._halt(
+                        f"countTokens error: {type(error).__name__}", phase=phase
+                    )
                     return receipt
             event_stem = (
                 f"{request_key}.resume-{self._config_transition_sha256}"
@@ -5824,7 +5998,7 @@ class SharedGeminiBroker:
                     "too_large_not_ready",
                     "counted request exceeds the model input limit",
                 )
-                self._halt("counted request exceeds the model input limit")
+                self._halt("counted request exceeds the model input limit", phase=phase)
                 return receipt
             output_limit = int(payload["generationConfig"]["maxOutputTokens"])
             reserved = _cost(request_config, exact_input, output_limit)

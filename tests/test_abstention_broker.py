@@ -525,19 +525,70 @@ def test_evaluation_policy_and_price_config_are_validated(tmp_path: Path) -> Non
         evaluation_fixture(tmp_path / "f", models=["gemini-9-pro"])
 
 
-def test_ambiguous_evaluation_charge_halts_and_scripted_transport_keys_by_model(
+def test_ambiguous_evaluation_charge_halts_only_the_evaluation_phase(
     tmp_path: Path,
 ) -> None:
+    """An evaluation ambiguity must never stop the construction pipeline.
+
+    Firstmate instruction, 2026-09-16: a `benchmark_evaluation` request that
+    ends ambiguous pauses the evaluation phase only, with its own halt flag and
+    reason in the evaluation block, while construction continues under its own
+    ceiling. On 2026-09-16 one evaluation call halted the whole shared ledger
+    and the chapter 3 production producer exited.
+    """
     values = evaluation_fixture(tmp_path, transport=Transport(failure="generate"))
     bind(values)
     receipt = execute(values, trial_id="t1")
     assert receipt["state"] == "ambiguous_charge"
     status = values["broker"].status()
-    assert status["halted"] is True
+    assert status["halted"] is False and status["halt_reason"] is None
+    assert status["evaluation"]["halted"] is True
+    assert status["evaluation"]["phase_halted"] is True
+    assert status["evaluation"]["halt_reason"] == "ambiguous_generation_charge"
     assert Decimal(status["evaluation"]["ambiguous_usd"]) > 0
     assert Decimal(status["usage"]["dataset_construction_usd"]) == 0
+    ledger = json.loads(values["ledger"].read_text())
+    assert ledger["halted"] is False and ledger["evaluation_halted"] is True
+    # A second evaluation call is refused.
     with pytest.raises(ValueError, match="halted"):
         execute(values, trial_id="t2", repeat=2)
+    # A construction call on the same ledger still goes out.
+    write_json(
+        values["construction_gate"],
+        {
+            "schema": "streaming-live-execution-gate-v1",
+            "live_generation_enabled": True,
+            "allowed_phase": "live_test",
+            "integrated_code_commit": "fixture-commit",
+            "independent_review_verdict": "pass",
+            "review_record": "fixture-review",
+        },
+    )
+    values["broker"].transport = Transport()
+    construction_payload = payload()
+    construction = values["broker"].execute(
+        phase="live_test",
+        run_id="construction-run",
+        stage="question_generation",
+        paper_id="paper",
+        family_id="family",
+        source_version_id="source",
+        request_key=broker_request_key(
+            model="gemini-3.8-flash",
+            run_id="construction-run",
+            phase="live_test",
+            stage="question_generation",
+            paper_id="paper",
+            family_id="family",
+            source_version_id="source",
+            payload=construction_payload,
+        ),
+        payload=construction_payload,
+    )
+    assert construction["state"] == "completed"
+    after = values["broker"].status()
+    assert Decimal(after["usage"]["dataset_construction_usd"]) > 0
+    assert after["evaluation"]["halted"] is True
     body = trial_payload(values)
     transport = ScriptedTransport({scripted_key(PRO, body): {"text": "C"}})
     assert transport.post(PRO, "generateContent", body)["candidates"][0]["content"][
@@ -545,3 +596,177 @@ def test_ambiguous_evaluation_charge_halts_and_scripted_transport_keys_by_model(
     ] == [{"text": "C"}]
     with pytest.raises(ValueError, match="no answer for this payload"):
         transport.post("gemini-3.8-flash", "generateContent", body)
+
+
+RECORDED_37_FLASH_USAGE = {
+    "promptTokenCount": 174,
+    "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 174}],
+    "serviceTier": "standard",
+    "thoughtsTokenCount": 1421,
+    "totalTokenCount": 1595,
+}
+"""The usage record gemini-3.7-flash returned on 2026-09-16 at 10:01:08Z.
+
+`candidatesTokenCount` is absent although the answer text was the letter `C`.
+The total equals the prompt count plus the thinking count, so the omitted
+value is zero. Receipt:
+`.../streaming-dataset-r1/model-receipts/684400ee....received.json`.
+"""
+
+
+def test_omitted_answer_token_count_normalizes_from_the_recorded_response() -> None:
+    from arctic_qa.model_broker import _normalized_usage, _omitted_zero_usage_field
+
+    usage = _normalized_usage({"usageMetadata": RECORDED_37_FLASH_USAGE})
+    assert usage["candidatesTokenCount"] == 0
+    assert usage["thoughtsTokenCount"] == 1421
+    assert usage["promptTokenCount"] == 174 and usage["totalTokenCount"] == 1595
+    assert _omitted_zero_usage_field(RECORDED_37_FLASH_USAGE) == "candidatesTokenCount"
+    # The older shape still normalizes.
+    omitted_thoughts = {
+        "promptTokenCount": 100,
+        "candidatesTokenCount": 10,
+        "totalTokenCount": 110,
+    }
+    assert _omitted_zero_usage_field(omitted_thoughts) == "thoughtsTokenCount"
+    assert (
+        _normalized_usage({"usageMetadata": omitted_thoughts})["thoughtsTokenCount"]
+        == 0
+    )
+    # A total that does not prove the omitted zero stays an error.
+    for usage_record, message in (
+        (
+            {
+                "promptTokenCount": 174,
+                "thoughtsTokenCount": 1421,
+                "totalTokenCount": 1596,
+            },
+            "zero answer tokens",
+        ),
+        (
+            {
+                "promptTokenCount": 100,
+                "candidatesTokenCount": 10,
+                "totalTokenCount": 120,
+            },
+            "zero thinking tokens",
+        ),
+    ):
+        with pytest.raises(ValueError, match=message):
+            _normalized_usage({"usageMetadata": usage_record})
+    # Two absent counts are never proved by one total.
+    with pytest.raises(ValueError, match="inconsistent"):
+        _normalized_usage(
+            {"usageMetadata": {"promptTokenCount": 174, "totalTokenCount": 174}}
+        )
+
+
+class OmittedCandidatesTransport(Transport):
+    """Answer one letter with the recorded gemini-3.7-flash usage shape."""
+
+    def post(self, model: str, method: str, body: dict) -> dict:
+        self.methods.append(method)
+        if method == "countTokens":
+            return {"totalTokens": 174}
+        return {
+            "responseId": "omitted-candidates",
+            "modelVersion": model,
+            "candidates": [
+                {"finishReason": "STOP", "content": {"parts": [{"text": "C"}]}}
+            ],
+            "usageMetadata": dict(RECORDED_37_FLASH_USAGE),
+        }
+
+
+def test_an_omitted_answer_count_now_settles_without_an_ambiguous_charge(
+    tmp_path: Path,
+) -> None:
+    """The live stop of 2026-09-16 must not repeat."""
+    values = evaluation_fixture(tmp_path, transport=OmittedCandidatesTransport())
+    bind(values)
+    receipt = execute(values, trial_id="t1")
+    assert receipt["state"] == "completed"
+    assert receipt["usage"]["candidatesTokenCount"] == 0
+    assert receipt["usage"]["thoughtsTokenCount"] == 1421
+    # gemini-3.1-pro-preview: 174 x 2e-6 + 1421 x 12e-6 = 0.017400.
+    assert Decimal(receipt["actual_cost_usd"]) == Decimal("0.017400")
+    status = values["broker"].status()
+    assert status["halted"] is False
+    assert status["evaluation"]["halted"] is False
+    assert status["evaluation"]["spent_usd"] == "0.017400"
+
+
+def test_reconciliation_settles_a_recorded_omitted_candidates_charge(
+    tmp_path: Path,
+) -> None:
+    """The settlement path for the request that halted the shared ledger.
+
+    The broker had no reviewed path for an omitted answer-token count, so the
+    reconciliation now accepts both omitted-zero shapes and reads the
+    evaluation gate for an evaluation request.
+    """
+    values = evaluation_fixture(tmp_path, transport=OmittedCandidatesTransport())
+    bind(values)
+    broker = values["broker"]
+    # Reproduce the old behaviour: the response is saved, the usage rule of the
+    # day refused it, and the request is an ambiguous charge.
+    import arctic_qa.model_broker as module
+
+    original = module._normalized_usage
+
+    def refusing(response):
+        usage = (response or {}).get("usageMetadata")
+        if isinstance(usage, dict) and "candidatesTokenCount" not in usage:
+            raise ValueError("provider usage is inconsistent")
+        return original(response)
+
+    module._normalized_usage = refusing
+    try:
+        receipt = execute(values, trial_id="t1")
+    finally:
+        module._normalized_usage = original
+    assert receipt["state"] == "ambiguous_charge"
+    assert receipt["error"] == "ValueError: provider usage is inconsistent"
+    request_key = receipt["request_key"]
+    status = broker.status()
+    assert status["halted"] is False and status["evaluation"]["halted"] is True
+    ambiguous_before = Decimal(status["evaluation"]["ambiguous_usd"])
+    assert ambiguous_before > 0
+
+    result = broker.reconcile_omitted_thought_usage(request_key)
+    assert result["applied"] is True
+    assert Decimal(result["actual_cost_usd"]) == Decimal("0.017400")
+    event = json.loads(Path(result["reconciliation_receipt"]).read_text())
+    assert event["omitted_zero_usage_field"] == "candidatesTokenCount"
+    assert event["phase"] == EVALUATION_PHASE
+    assert event["normalized_usage"]["candidatesTokenCount"] == 0
+    assert event["gate_sha256"] == sha256_file(values["gate"])
+    after = broker.status()
+    assert after["halted"] is False
+    assert after["evaluation"]["halted"] is False
+    assert after["evaluation"]["ambiguous_usd"] == "0"
+    assert after["evaluation"]["spent_usd"] == "0.017400"
+    ledger = json.loads(values["ledger"].read_text())
+    assert ledger["requests"][request_key]["state"] == "completed"
+    assert ledger["evaluation_halted"] is False
+    # The original receipts stay untouched and a repeat changes nothing.
+    again = broker.reconcile_omitted_thought_usage(request_key)
+    assert again["applied"] is False
+    assert again["actual_cost_usd"] == result["actual_cost_usd"]
+    # A repeat also leaves no halt standing that has no blocking cause.
+    stale = json.loads(values["ledger"].read_text())
+    stale["halted"] = True
+    stale["halt_reason"] = "ambiguous_generation_charge"
+    stale["evaluation_halted"] = True
+    stale["evaluation_halt_reason"] = "ambiguous_generation_charge"
+    write_json(values["ledger"], stale)
+    repeat = broker.reconcile_omitted_thought_usage(request_key)
+    assert repeat["applied"] is False
+    lifted = json.loads(values["ledger"].read_text())
+    assert lifted["halted"] is False and lifted["evaluation_halted"] is False
+    final = json.loads((tmp_path / "receipts" / f"{request_key}.json").read_text())
+    assert final["state"] == "ambiguous_charge"
+    # The effective receipt reads as a completed call.
+    effective = broker.effective_receipt(request_key)
+    assert effective["state"] == "completed"
+    assert effective["usage"]["candidatesTokenCount"] == 0
