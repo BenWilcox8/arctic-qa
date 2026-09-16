@@ -90,7 +90,7 @@ The validator produces this detail where it raises the code, under `validation.f
 The repair answer is refused when either holds:
 
 - it moved a criterion status (`_repair_moved_a_status`, unchanged), recorded as `repair_changed_criterion_status`;
-- a repaired `question_scope_phrases` value no longer names a station, region, stratum, population or modeled domain, recorded as `eligible_arctic_scope_phrase_not_specific`. `phrase_is_specific` refuses a bare number, a number with a percent sign or a bare unit, and the vague labels "In the Arctic", "the Arctic", "the study area", "this study", "the region", "the site", "the sites", "the station". This test runs on a repair answer only, so it cannot change what a first-pass answer decides.
+- a repaired `question_scope_phrases` value no longer names a station, region, stratum, population or modeled domain, recorded as `eligible_arctic_scope_phrase_not_specific`. `phrase_is_specific` refuses a bare number, a number with a percent sign or a bare unit, and the vague labels "In the Arctic", "the Arctic", "the study area", "this study", "the region", "the site", "the sites", "the station". A bare coordinate such as "80 N" is refused for the same reason, because it names no station, region or stratum; a phrase that carries more than the coordinate, such as "north of 80 N in the Beaufort Sea", passes. This test runs on a repair answer only, so it cannot change what a first-pass answer decides, and a false refusal costs one unresolved paper, never a wrong decision.
 
 A paper that spends its attempts on the shape of its answer ends as `unresolved_rescreenable`, not as a terminal `screening_error`. `_brokered_eligibility_state` keeps that state through the resume-time re-validation.
 
