@@ -668,8 +668,19 @@ def watch(
 
     while True:
         polls += 1
-        done = journal.completed_item_ids() | set(
-            row["item_id"] for row in journal.rows() if row.get("kind") == SKIP_KIND
+        # An item whose only missing trials belong to a model that is still
+        # paused cannot advance: a revisit records nothing, calls nothing and
+        # appends one more journal row. So it waits here until the pause
+        # lifts, and the evaluator spends its poll on the items that can move.
+        held_now = paused_models(
+            merge_pause(*(load_pause(path) for path in pause_files), pause_models)
+        )
+        done = (
+            journal.completed_item_ids()
+            | journal.items_held_by(held_now)
+            | set(
+                row["item_id"] for row in journal.rows() if row.get("kind") == SKIP_KIND
+            )
         )
         pending: list[str] = []
         for index, contract in enumerate(contracts):

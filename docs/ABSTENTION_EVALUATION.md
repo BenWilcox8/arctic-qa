@@ -505,7 +505,8 @@ A paused model's trials are held.
 They are not dispatched, not recorded and not counted as invalid.
 The item's journal row names the paused models in `evaluation.models_paused`, counts the held trials in `evaluation.pending_paused_trials`, and sets `evaluation.complete` to `false`.
 The other models of the plan run on that item in the same pass.
-A later pass, after the resume time, takes the item up again and runs only the trials that are missing, because the run directory keeps every recorded trial.
+An item whose every missing trial belongs to a model that is still paused waits: a revisit could record nothing and call nothing, so the evaluator leaves it alone and spends its poll on the items that can move.
+When the pause lifts, the next pass takes the item up and runs only the trials that are missing, because the run directory keeps every recorded trial.
 That pass appends a later row for the same item.
 Read a run's totals through `CostJournal.latest_item_rows`, which keeps the last row of each item, so a revisited item is never counted twice.
 

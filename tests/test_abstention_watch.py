@@ -1105,8 +1105,9 @@ def test_the_fable_pause_holds_its_trials_and_the_item_is_revisited(
     assert summary["complete_items"] == 0
     assert summary["paused_models"] == ["claude-fable-5-1"]
     assert summary["pending_paused_trials"] == 6
-    # A pass before the resume time holds the trials again and journals a
-    # second row, and the model is still not called.
+    # A pass before the resume time leaves the item alone: it can only
+    # advance when the pause lifts, so a revisit would record nothing, call
+    # nothing and append one more journal row.
     again = scripted_watch(
         db=db,
         work_dir=work,
@@ -1114,7 +1115,8 @@ def test_the_fable_pause_holds_its_trials_and_the_item_is_revisited(
         authorization_file=auth,
         pause_models=parse_pause_models(["claude-fable-5-1=2026-09-16T23:00:00Z"]),
     )
-    assert [r["item_id"] for r in again["items_this_invocation"]] == ["aqa-c3a"]
+    assert again["items_this_invocation"] == []
+    assert len(CostJournal(work).item_rows()) == 1
     assert (
         CostJournal(work).latest_item_rows()[-1]["evaluation"]["pending_paused_trials"]
         == 6
@@ -1131,7 +1133,7 @@ def test_the_fable_pause_holds_its_trials_and_the_item_is_revisited(
     journal = CostJournal(work)
     latest = journal.latest_item_rows()
     # One item, whatever the number of passes: the totals never double-count.
-    assert len(latest) == 1 and len(journal.item_rows()) == 3
+    assert len(latest) == 1 and len(journal.item_rows()) == 2
     final = latest[0]
     assert final["evaluation"]["recorded_trials"] == 48
     assert final["evaluation"]["pending_paused_trials"] == 0
@@ -1434,3 +1436,56 @@ def test_the_watcher_publishes_its_state_after_every_poll(tmp_path: Path) -> Non
     assert state["polls"] == result["polls"] >= len(seen)
     assert state["evaluated_items"] == []
     assert state["started_at_utc"]
+
+
+def test_a_fully_held_item_waits_for_the_resume_instead_of_every_poll(
+    tmp_path: Path,
+) -> None:
+    """A held item must not be re-journalled on every poll.
+
+    The running service showed this on 2026-09-16: an item whose six Claude
+    Fable trials were held was revisited every 30 seconds, and each revisit
+    recorded nothing, called nothing and appended one more journal row. The
+    item can only advance when the pause lifts, so it waits until then.
+    """
+    db = state_db(tmp_path, chapter3=["aqa-a"])
+    ledger_file = construction_ledger(tmp_path, {"family-aqa-a": ["0.01"]})
+    auth = authorization(tmp_path, db)
+    work = tmp_path / "work"
+    held = parse_pause_models(["claude-fable-5-1=2026-09-16T23:00:00Z"])
+    first = scripted_watch(
+        db=db,
+        work_dir=work,
+        ledger_file=ledger_file,
+        authorization_file=auth,
+        pause_models=held,
+    )
+    assert [row["item_id"] for row in first["items_this_invocation"]] == ["aqa-a"]
+    journal = CostJournal(work)
+    assert len(journal.item_rows()) == 1
+    assert journal.items_held_by(frozenset({"claude-fable-5-1"})) == {"aqa-a"}
+    # A second pass under the same pause leaves the item alone.
+    again = scripted_watch(
+        db=db,
+        work_dir=work,
+        ledger_file=ledger_file,
+        authorization_file=auth,
+        pause_models=held,
+    )
+    assert again["items_this_invocation"] == []
+    assert len(CostJournal(work).item_rows()) == 1
+    # The pause of another model does not hold this item.
+    assert journal.items_held_by(frozenset({"gpt-5.6-sol"})) == set()
+    # After the resume time the item is taken up and finished.
+    done = scripted_watch(
+        db=db,
+        work_dir=work,
+        ledger_file=ledger_file,
+        authorization_file=auth,
+        pause_models=parse_pause_models(["claude-fable-5-1=2026-09-16T00:00:00Z"]),
+    )
+    assert [row["item_id"] for row in done["items_this_invocation"]] == ["aqa-a"]
+    journal = CostJournal(work)
+    assert len(journal.item_rows()) == 2
+    assert journal.completed_item_ids() == {"aqa-a"}
+    assert journal.latest_item_rows()[0]["evaluation"]["recorded_trials"] == 48

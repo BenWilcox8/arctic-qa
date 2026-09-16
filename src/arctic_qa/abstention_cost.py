@@ -536,6 +536,23 @@ class CostJournal:
             if not self.row_is_complete(row)
         }
 
+    def items_held_by(self, paused: frozenset[str] | set[str]) -> set[str]:
+        """The held items whose every missing trial belongs to a paused model.
+
+        Such an item cannot advance while those models stay paused: a revisit
+        records nothing and calls nothing. So the evaluator leaves it alone
+        and takes it up when the pause lifts. An item held for any other
+        reason is revisited as usual, because a later pass can finish it.
+        """
+        result = set()
+        for row in self.latest_item_rows():
+            if self.row_is_complete(row):
+                continue
+            models = (row.get("evaluation") or {}).get("models_paused") or []
+            if models and all(model in paused for model in models):
+                result.add(str(row["item_id"]))
+        return result
+
     def append(self, row: dict[str, Any]) -> None:
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(canonical_json(row) + "\n")

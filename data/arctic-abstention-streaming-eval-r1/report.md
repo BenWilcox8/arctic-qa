@@ -363,6 +363,12 @@ test that fails on the old code.
    only after the loop ended, and a service loop does not end, so
    `watch-state.json` stood at the values of the first pass. It is written
    after every poll now.
+3. **A held item was revisited on every poll.** The six questions of the first
+   pass each held six Claude Fable trials, and every poll took all six items
+   up again: each revisit recorded nothing, called nothing and appended one
+   more journal row. Twelve rows for six questions after two polls. An item
+   whose every missing trial belongs to a model that is still paused now
+   waits, and the next pass after the resume takes it up.
 
 The starts also showed two operational rules that the report had not stated.
 A per-item plan manifest binds the run id and the code commit and is
@@ -617,6 +623,8 @@ systemd-run --user --unit=arctic-abstention-stream-r3 --working-directory=$APP \
   /mnt/crdata/research-abstention/arctic-qa/abstention-eval/private/streaming-eval-r6-launcher.sh
 ```
 
+The snapshot is of commit `1b6fffa`. The branch tip adds this report section and nothing else, so the running code is the code of the tip: `git diff 1b6fffa HEAD -- src config` is empty.
+
 The launcher uses `nix develop "path:$APP"`, with the `path:` prefix, because the snapshot lives inside a git repository that does not track it.
 It carries no `--concurrency` override, so each vendor runs at the concurrency of the plan file: Gemini 4 calls in flight, Claude Code 3, Codex 3.
 It gives the evaluator both pause files, the committed one and the cost guard's own.
@@ -772,6 +780,8 @@ The new tests cover:
 - The paused model in the streaming evaluator: the item's row names the held model and counts its trials, the item is not complete, a second pass before the resume holds the trials again, the pass after it completes the item, the totals read one row per item, and the finished item is never evaluated again.
 - The `pause-status` action: the standing pause, the command-line pause, `--no-pause-file`, and two pause files where the guard's entry wins for the same model and its resume time frees it.
 - The item-scoped stop: the per-item repeat limit records a stop on that item and keeps every vendor active, while a ceiling stop or a harness error still pauses the vendor.
+- The published state: the poll count and the item list of `watch-state.json` rise between two polls of a running watcher.
+- The held item that waits: a second pass under the same pause leaves it alone and journals no second row, a pause of another model does not hold it, and the pass after the resume finishes its 48 trials.
 - The model pause on the path that has a broker: the ceiling precheck of the Gemini vendor keeps its own record, so a paused model stays held while Gemini keeps its slot. This is the defect of section 5.5.
 - The evaluation ceiling: the shipped v3 policy differs from v2 in the ceiling and its names only, the registered step is the only one, and the construction reserve still covers it.
 - The applied ceiling transition: the larger ceiling is refused without it, the event is immutable and names its predecessor, a later start needs no file, a paid call binds the event hash, and a fork of the chain is refused.
