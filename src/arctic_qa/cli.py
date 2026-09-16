@@ -42,7 +42,7 @@ from .manifests import write_source_manifest
 from .metadata_prefilter import run_metadata_prefilter
 from .model_broker import SharedGeminiBroker
 from . import paper_completion
-from .paths import DEFAULT_DATA_ROOT, DataPaths
+from .paths import DEFAULT_DATA_ROOT, DataPaths, default_credential_file
 from .providers import make_provider
 from .screening import screen_source
 from .source_pass import run_source_pass
@@ -224,7 +224,7 @@ def parser() -> argparse.ArgumentParser:
     gemini.add_argument(
         "--credential-file",
         type=Path,
-        default=Path("/home/ben/.config/arctic-qa/gemini-api-key"),
+        default=default_credential_file(),
     )
     gemini.add_argument("--max-cost-usd", type=Decimal, required=True)
 

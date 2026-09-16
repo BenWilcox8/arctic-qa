@@ -3,6 +3,9 @@
 The chapter 2 corpus is a new extraction of the same stored article objects.
 It does not change, move, or remove a chapter 1 object.
 
+The commands of this document write path variables such as `$ARCTIC_QA_DATA_ROOT`.
+The "Environment variables" section of `docs/REPRODUCTION.md` gives their values.
+
 ## Why the corpus was extracted again
 
 The chapter 1 extractor called `pdftotext -layout`.
@@ -36,7 +39,7 @@ The extractor needs no new package.
 
 ## Where the chapter 2 corpus lives
 
-The root is `/mnt/crdata/research-abstention/arctic-qa/chapter2/`.
+The root is `$ARCTIC_QA_DATA_ROOT/arctic-qa/chapter2/`.
 
 | Path | Content |
 | --- | --- |
@@ -70,8 +73,8 @@ The pass is resumable: a completed article writes a checkpoint line and an index
 ```bash
 nix develop -c bash -c 'PYTHONPATH=src nice -n 19 python -m arctic_qa chapter2-corpus \
   --action extract \
-  --access-run-dir /mnt/crdata/research-abstention/arctic-qa/article-access-r1/run-20260912T060442Z \
-  --legacy-freeze-dir /mnt/crdata/research-abstention/arctic-qa/corpus-freeze-r1/full-text-ready-4420-seed20260912-r1 \
+  --access-run-dir $ARCTIC_QA_DATA_ROOT/arctic-qa/article-access-r1/run-20260912T060442Z \
+  --legacy-freeze-dir $ARCTIC_QA_DATA_ROOT/arctic-qa/corpus-freeze-r1/full-text-ready-4420-seed20260912-r1 \
   --code-commit "$(git rev-parse HEAD)" --jobs 2'
 ```
 

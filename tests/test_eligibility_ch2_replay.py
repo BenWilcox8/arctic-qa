@@ -3,8 +3,9 @@
 The fixture `fixtures/ch2-eligibility-non-eligible-v1.jsonl` holds one row for
 each of the 79 papers that chapter 2 did not admit. Each row carries the recorded
 decision, the recorded validation errors and the parsed criterion records, taken
-from the yield audit evidence bundle
-`data/arctic-ch2-yield-audit-r1/evidence/eligibility/batch-*.json`.
+from the `eligibility/batch-*.json` files of the yield audit evidence bundle.
+That bundle is an external input, not a file of this repository:
+`ARCTIC_CH2_EVIDENCE_DIR` gives its directory.
 
 The replay answers one question: how many of those papers the corrected contract
 would record as eligible, unresolved or excluded. It reads the real validation

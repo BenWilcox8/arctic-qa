@@ -1,6 +1,6 @@
 """Chapter 3 integration: the six slices work as one release.
 
-Two invariants the integration owns (plan ``data/arctic-chapter3/plan.md``):
+Two invariants the integration owns:
 
 1. Phase D sits behind phase C. The pre-judge free checks of the judge call
    plan (cost slice) are exactly the corrected gates (gates slice): the same
@@ -19,6 +19,9 @@ import pytest
 from arctic_qa import generation, streaming, validation
 from arctic_qa.chapter2_replay import load_family_bundles, replay_candidate
 
+# The chapter 2 yield-audit evidence bundle. It is an external input, so these
+# tests skip when it is absent. The default is the path of the machine that
+# produced the run; `docs/REPRODUCTION.md` says how to point it somewhere else.
 EVIDENCE_DIR = Path(
     os.environ.get(
         "ARCTIC_CH2_EVIDENCE_DIR",

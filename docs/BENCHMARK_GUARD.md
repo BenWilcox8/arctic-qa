@@ -258,7 +258,7 @@ systemd-run --user --unit=arctic-benchmark-guard-r1 --working-directory=$APP \
     --shared-ledger-file <shared paid-call ledger> \
     --construction-policy-file <active chapter 3 budget policy> \
     --evaluation-policy-file <active benchmark evaluation policy> \
-    --quota-binary /home/ben/.npm-global/bin/quota-axi \
+    --quota-binary "$HOME/.npm-global/bin/quota-axi" \
     --status-file <task status file> \
     --interval-seconds 300
 ```
@@ -271,7 +271,7 @@ Options:
 - `--once` runs one cycle and exits. Use it for a test.
 - `--gemini-budget-usd` changes the allocation. The default is 200.00.
 - `--plan-file` reads the models of each vendor from `config/benchmark-evaluation-plan-high-v1.json`. Without it the guard uses the captain's eight models.
-- `--quota-binary` gives the absolute path of `quota-axi`. The nix devshell has no npm global bin on its PATH, so a service must pass `/home/ben/.npm-global/bin/quota-axi`.
+- `--quota-binary` gives the absolute path of `quota-axi`. The nix devshell has no npm global bin on its PATH, so a service must pass the absolute path, `~/.npm-global/bin/quota-axi` for an npm global prefix in the home directory.
 - `--recorded-quota-file` reads a saved `quota-axi --json --full` report instead of the live command. Use it for a test.
 - `--evaluator-stale-seconds` sets how long the watch state can be old before the evaluator counts as idle. The default is 900.
 - `--codex-attribution-window-seconds` sets the trailing window of the Codex attribution. The default is 1800, which is also the smallest value the guard accepts.

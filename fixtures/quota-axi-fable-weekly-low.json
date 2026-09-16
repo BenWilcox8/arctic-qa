@@ -4,10 +4,10 @@
   "providers": [
     {
       "account": {
-        "accountId": "93dfbcd5-1ee7-45b9-9589-8c9757a7f2aa",
-        "email": "benwilcox101@gmail.com",
+        "accountId": "00000000-0000-0000-0000-000000000001",
+        "email": "researcher@example.invalid",
         "identityStatus": "verified",
-        "organization": "Ben Wilcox"
+        "organization": "Example Org"
       },
       "attempts": [
         {
@@ -163,8 +163,8 @@
     },
     {
       "account": {
-        "accountId": "41ad93bd-b6bd-48cd-a2c7-a9f1f8b287e9",
-        "email": "benwilcox101@gmail.com"
+        "accountId": "00000000-0000-0000-0000-000000000002",
+        "email": "researcher@example.invalid"
       },
       "attempts": [
         {
