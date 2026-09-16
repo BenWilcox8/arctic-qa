@@ -30,6 +30,7 @@ It writes every run under the data root, which `ARCTIC_QA_DATA_ROOT` names.
 
 ## The package
 
+Every file named below is under `src/arctic_qa/`.
 The modules group into seven areas.
 
 **The corpus.**

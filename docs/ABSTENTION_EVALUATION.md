@@ -12,7 +12,8 @@ The "Environment variables" section of `docs/REPRODUCTION.md` gives their values
 ## Decisions
 
 The captain locked these decisions on 2026-09-16.
-The decision record is `data/arctic-abstention-eval/decisions.md` in the firstmate data folder.
+The decision record is `arctic-abstention-eval/decisions.md` in the agent data folder.
+It is outside this repository.
 The exact words of the captain are quoted here.
 
 1. Distractor order.
