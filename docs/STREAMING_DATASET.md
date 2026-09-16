@@ -7,6 +7,9 @@ It does not require a separate eligibility batch or manual stage relaunch.
 It uses the answer-first method for the current commission.
 It retains the direct-joint code without spending on that arm.
 
+The commands of this document write path variables such as `$ARCTIC_QA_DATA_ROOT`.
+The "Environment variables" section of `docs/REPRODUCTION.md` gives their values.
+
 Automated acceptance does not establish scientific truth.
 The strongest release label is `machine_accepted_unverified`.
 
@@ -111,8 +114,8 @@ After that review gate passes, use one of these phases:
 Both phases must use the same central ledger and receipt directory:
 
 ```text
-/mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json
-/mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/model-receipts/
+$ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json
+$ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/model-receipts/
 ```
 
 Supply the credential through a private file with mode `0600`.
@@ -126,16 +129,16 @@ PYTHONPATH=src python -m arctic_qa --json stream \
   --phase live_test \
   --run-id live-test-r1 \
   --campaign-id streaming-commission-r1 \
-  --access-run-dir /mnt/crdata/research-abstention/arctic-qa/ARTICLE_ACCESS_RUN \
-  --eligibility-run-dir /mnt/crdata/research-abstention/arctic-qa/ELIGIBILITY_RUN \
+  --access-run-dir $ARCTIC_QA_DATA_ROOT/arctic-qa/ARTICLE_ACCESS_RUN \
+  --eligibility-run-dir $ARCTIC_QA_DATA_ROOT/arctic-qa/ELIGIBILITY_RUN \
   --eligibility-prompt-file config/gemini-eligibility-prompt-v3.txt \
-  --eligibility-policy-file /mnt/crdata/research-abstention/arctic-qa/ELIGIBILITY_POLICY.json \
+  --eligibility-policy-file $ARCTIC_QA_DATA_ROOT/arctic-qa/ELIGIBILITY_POLICY.json \
   --credential-file /PRIVATE/DIRECTORY/gemini.key \
   --prior-construction-spend-usd KNOWN_VALUE \
-  --shared-ledger-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
-  --model-receipts-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/model-receipts \
+  --shared-ledger-file $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
+  --model-receipts-dir $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/model-receipts \
   --ledger-config-transition-file /PRIVATE/DIRECTORY/config-transition.json \
-  --progress-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/progress.json \
+  --progress-file $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/progress.json \
   --max-papers 20
 ```
 
@@ -415,7 +418,7 @@ The remaining proposals are recorded as a reserve in `provenance.option_verifica
 The validator's model-free option checks run before any paid option call.
 
 A production run never selects the `cost_aware` role profile.
-The `data/arctic-ch3-cost-r1/` directory holds the receipts-based measurements behind these rules.
+The `research/arctic-ch3-cost-r1/` directory holds the receipts-based measurements behind these rules.
 
 ## Viewer command
 

@@ -2,15 +2,18 @@
 
 The streaming pipeline must send every paid model request through one broker.
 
+The commands of this document write path variables such as `$ARCTIC_QA_DATA_ROOT`.
+The "Environment variables" section of `docs/REPRODUCTION.md` gives their values.
+
 Use `SharedGeminiBroker` from `arctic_qa.model_broker`.
 
 Use one central ledger for all runs and stages:
 
-`/mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json`
+`$ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json`
 
 Keep provider receipts in this private directory:
 
-`/mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/model-receipts/`
+`$ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/model-receipts/`
 
 The ledger schema is `shared-paid-call-ledger-v1`.
 
@@ -602,8 +605,8 @@ Use this command after an independent PASS and supervisor release:
 PYTHONPATH=src python -m arctic_qa --json reconcile-usage \
   --request-key REQUEST_SHA256 \
   --execution-gate-file /PRIVATE/DIRECTORY/reconciliation-gate.json \
-  --shared-ledger-file /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
-  --model-receipts-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/model-receipts \
+  --shared-ledger-file $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
+  --model-receipts-dir $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/model-receipts \
   --credential-file /PRIVATE/DIRECTORY/gemini.key \
   --prior-construction-spend-usd KNOWN_VALUE
 ```
