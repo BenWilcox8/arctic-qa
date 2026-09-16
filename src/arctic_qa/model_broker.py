@@ -416,8 +416,14 @@ def _is_received_max_tokens_ambiguous_case(
     generation = payload.get("generationConfig") if isinstance(payload, dict) else None
     return (
         final.get("state") == "ambiguous_charge"
+        # The chapter 2 receipt recorded the message of the one-field rule; a
+        # response with both counts absent is inconsistent under the two-field
+        # rule of 2026-09-16. The shape test above is the same for both.
         and final.get("error")
-        == "ValueError: provider usage cannot prove zero thinking tokens"
+        in (
+            "ValueError: provider usage cannot prove zero thinking tokens",
+            "ValueError: provider usage is inconsistent",
+        )
         and final.get("live_call_made") is True
         and final.get("response") == response
         and final.get("reserved_usd") == request.get("reserved_usd")
