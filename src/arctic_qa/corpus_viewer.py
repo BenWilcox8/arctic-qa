@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+from .benchmark_guard import benchmark_report
 from .metadata_prefilter import DISPOSITIONS
 from .util import sha256_file
 
@@ -250,6 +251,8 @@ class CorpusArtifacts:
         live_dataset_dir: Path | None = None,
         project_overview_file: Path | None = None,
         research_timeline_file: Path | None = None,
+        benchmark_journal_dir: Path | None = None,
+        benchmark_guard_state_file: Path | None = None,
         pipeline_trace_store: Any | None = None,
         stale_after_seconds: int = 86400,
         process_stale_after_seconds: int = 300,
@@ -301,6 +304,12 @@ class CorpusArtifacts:
         )
         self.research_timeline_file = (
             research_timeline_file.resolve() if research_timeline_file else None
+        )
+        self.benchmark_journal_dir = (
+            benchmark_journal_dir.resolve() if benchmark_journal_dir else None
+        )
+        self.benchmark_guard_state_file = (
+            benchmark_guard_state_file.resolve() if benchmark_guard_state_file else None
         )
         self.pipeline_trace_store = pipeline_trace_store
         self.stale_after_seconds = stale_after_seconds
@@ -2623,6 +2632,20 @@ class CorpusArtifacts:
         ]
         return payload
 
+    def live_benchmark(self) -> dict[str, Any]:
+        """Return the live-benchmarking view, rebuilt from the files each request.
+
+        The per-model table and the per-question cost rows come from the
+        streaming evaluator's cost journal. The budget, the extrapolation, the
+        quota readings and the pause state come from the guard-state file that
+        `arctic_qa.benchmark_guard` writes. This route reads files only: it
+        never makes a paid call and never writes.
+        """
+        return benchmark_report(
+            journal_dir=self.benchmark_journal_dir,
+            guard_state_file=self.benchmark_guard_state_file,
+        )
+
     def candidates(self, parameters: dict[str, list[str]]) -> dict[str, Any]:
         self.refresh()
         if self._last_error or not self.database.is_file():
@@ -2793,6 +2816,8 @@ class CorpusRequestHandler(BaseHTTPRequestHandler):
                         parse_qs(parsed.query, keep_blank_values=True)
                     ),
                 )
+            elif parsed.path == "/api/live-benchmark":
+                self._json(HTTPStatus.OK, self.artifacts.live_benchmark())
             elif parsed.path == "/api/pipeline-trace":
                 self._json(
                     HTTPStatus.OK,
@@ -2899,6 +2924,8 @@ def serve_corpus_viewer(
     pipeline_db_file: Path | None = None,
     pipeline_receipts_dir: Path | None = None,
     pipeline_eligibility_roots: tuple[Path, ...] = (),
+    benchmark_journal_dir: Path | None = None,
+    benchmark_guard_state_file: Path | None = None,
 ) -> None:
     if not 0 <= port <= 65535:
         raise ValueError("port must be between 0 and 65535")
@@ -2933,6 +2960,8 @@ def serve_corpus_viewer(
         live_dataset_dir=live_dataset_dir,
         project_overview_file=project_overview_file,
         research_timeline_file=research_timeline_file,
+        benchmark_journal_dir=benchmark_journal_dir,
+        benchmark_guard_state_file=benchmark_guard_state_file,
         pipeline_trace_store=pipeline_trace_store,
         stale_after_seconds=stale_after_seconds,
         process_stale_after_seconds=process_stale_after_seconds,
@@ -2971,6 +3000,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--live-dataset-dir", type=Path)
     parser.add_argument("--project-overview-file", type=Path)
     parser.add_argument("--research-timeline-file", type=Path)
+    parser.add_argument("--benchmark-journal-dir", type=Path)
+    parser.add_argument("--benchmark-guard-state-file", type=Path)
     parser.add_argument("--pipeline-namespace", type=Path)
     parser.add_argument("--pipeline-db-file", type=Path)
     parser.add_argument("--pipeline-receipts-dir", type=Path)
@@ -3002,6 +3033,8 @@ def main(argv: list[str] | None = None) -> int:
         live_dataset_dir=args.live_dataset_dir,
         project_overview_file=args.project_overview_file,
         research_timeline_file=args.research_timeline_file,
+        benchmark_journal_dir=args.benchmark_journal_dir,
+        benchmark_guard_state_file=args.benchmark_guard_state_file,
         pipeline_namespace=args.pipeline_namespace,
         pipeline_db_file=args.pipeline_db_file,
         pipeline_receipts_dir=args.pipeline_receipts_dir,
