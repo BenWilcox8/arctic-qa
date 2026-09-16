@@ -172,7 +172,9 @@ def response_row(
     }
 
 
-def summarize_run(rows: list[dict[str, Any]], manifest: dict[str, Any]) -> dict[str, Any]:
+def summarize_run(
+    rows: list[dict[str, Any]], manifest: dict[str, Any]
+) -> dict[str, Any]:
     """Aggregate cost, tokens, latency and the invalid rate per model and arm."""
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in rows:
@@ -194,13 +196,17 @@ def summarize_run(rows: list[dict[str, Any]], manifest: dict[str, Any]) -> dict[
         ]
         usage_keys = ("promptTokenCount", "candidatesTokenCount", "thoughtsTokenCount")
         tokens = {
-            key: sum(int((row["response"]["usage"] or {}).get(key, 0)) for row in completed)
+            key: sum(
+                int((row["response"]["usage"] or {}).get(key, 0)) for row in completed
+            )
             for key in usage_keys
         }
         invalid = [row for row in group if not row["valid"]]
         reasons: dict[str, int] = {}
         for row in invalid:
-            reasons[str(row["invalid_reason"])] = reasons.get(str(row["invalid_reason"]), 0) + 1
+            reasons[str(row["invalid_reason"])] = (
+                reasons.get(str(row["invalid_reason"]), 0) + 1
+            )
         cost_sum = sum(costs, Decimal("0"))
         total_cost += cost_sum
         per_model.append(
@@ -222,12 +228,18 @@ def summarize_run(rows: list[dict[str, Any]], manifest: dict[str, Any]) -> dict[
                 },
                 "latency_seconds": {
                     "count": len(latencies),
-                    "mean": round(statistics.fmean(latencies), 3) if latencies else None,
-                    "median": round(statistics.median(latencies), 3) if latencies else None,
+                    "mean": round(statistics.fmean(latencies), 3)
+                    if latencies
+                    else None,
+                    "median": round(statistics.median(latencies), 3)
+                    if latencies
+                    else None,
                     "max": round(max(latencies), 3) if latencies else None,
                 },
                 "invalid_count": len(invalid),
-                "invalid_rate": (round(len(invalid) / len(group), 4) if group else None),
+                "invalid_rate": (
+                    round(len(invalid) / len(group), 4) if group else None
+                ),
                 "invalid_reasons": reasons,
                 "outcomes": {
                     name: sum(1 for row in group if row["outcome"] == name)
@@ -314,12 +326,16 @@ def run_evaluation(
     manifest_path = output_dir / RUN_MANIFEST_FILENAME
     if manifest_path.is_file():
         existing = json.loads(manifest_path.read_text(encoding="utf-8"))
-        stable = {key: value for key, value in existing.items() if key != "created_at_utc"}
+        stable = {
+            key: value for key, value in existing.items() if key != "created_at_utc"
+        }
         if stable != run_manifest:
             raise ValueError("the run directory holds a different run manifest")
     else:
         atomic_json(
-            manifest_path, {**run_manifest, "created_at_utc": _utc_now()}, immutable=True
+            manifest_path,
+            {**run_manifest, "created_at_utc": _utc_now()},
+            immutable=True,
         )
     trials_path = output_dir / TRIALS_FILENAME
     if not trials_path.is_file():
@@ -517,9 +533,7 @@ def dry_run(
             encoding="utf-8",
         )
     manifest, _ = load_eval_set(set_dir)
-    price_config = json.loads(
-        evaluation_price_config_file.read_text(encoding="utf-8")
-    )
+    price_config = json.loads(evaluation_price_config_file.read_text(encoding="utf-8"))
     decoding = decoding_record(price_config, models, arms)
     # The dry run keeps every control of the given evaluation policy except
     # the per-minute pace, which exists to protect a paid provider quota. The
@@ -550,11 +564,17 @@ def dry_run(
     items = items_all[: int(item_limit)] if item_limit is not None else items_all
     trials = plan_trials(manifest, items, models=models, arms=arms, repeats=repeats)
     transport = ScriptedTransport(
-        scripted_answers(trials, decoding, policy=policy, seed=seed, overrides=overrides)
+        scripted_answers(
+            trials, decoding, policy=policy, seed=seed, overrides=overrides
+        )
     )
     # A private copy of the construction files keeps the dry-run ledger
     # self-contained and reproducible.
-    for source in (construction_policy_file, construction_price_config_file, construction_gate_file):
+    for source in (
+        construction_policy_file,
+        construction_price_config_file,
+        construction_gate_file,
+    ):
         target = ledger_dir / source.name
         if not target.is_file():
             shutil.copy2(source, target)

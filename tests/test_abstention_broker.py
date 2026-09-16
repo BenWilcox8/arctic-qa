@@ -59,7 +59,9 @@ def evaluation_fixture(
     construction_gate = tmp_path / "construction-gate.json"
     write_json(
         construction_gate,
-        json.loads((ROOT / "config" / "streaming-live-execution-gate-v1.json").read_text()),
+        json.loads(
+            (ROOT / "config" / "streaming-live-execution-gate-v1.json").read_text()
+        ),
     )
     credential = tmp_path / "private" / "gemini.key"
     credential.parent.mkdir(mode=0o700, exist_ok=True)
@@ -74,7 +76,9 @@ def evaluation_fixture(
         state_db=None,
     )
     set_dir = tmp_path / "sets" / set_manifest["eval_set_id"]
-    policy_file = _write_policy(tmp_path / "evaluation-policy.json", **(policy_changes or {}))
+    policy_file = _write_policy(
+        tmp_path / "evaluation-policy.json", **(policy_changes or {})
+    )
     prices_file = ROOT / "config" / "benchmark-evaluation-prices-v1.json"
     price_config = json.loads(prices_file.read_text())
     decoding = decoding_record(price_config, models, arms)
@@ -141,7 +145,9 @@ def bind(values: dict, **changes: object) -> None:
     values["broker"].bind_evaluation(**binding)
 
 
-def trial_payload(values: dict, *, model: str = PRO, arm: str = "medium", text: str = "Q") -> dict:
+def trial_payload(
+    values: dict, *, model: str = PRO, arm: str = "medium", text: str = "Q"
+) -> dict:
     return evaluation_payload(
         system_text="Reply with one letter.",
         user_text=text,
@@ -152,8 +158,17 @@ def trial_payload(values: dict, *, model: str = PRO, arm: str = "medium", text: 
     )
 
 
-def execute(values: dict, *, trial_id: str, condition: str = "gold_present", repeat: int = 1,
-            model: str = PRO, arm: str = "medium", text: str = "Q", item_id: str = "aqa-one") -> dict:
+def execute(
+    values: dict,
+    *,
+    trial_id: str,
+    condition: str = "gold_present",
+    repeat: int = 1,
+    model: str = PRO,
+    arm: str = "medium",
+    text: str = "Q",
+    item_id: str = "aqa-one",
+) -> dict:
     request_payload = trial_payload(values, model=model, arm=arm, text=text)
     identity = {
         "paper_id": item_id,
@@ -215,12 +230,22 @@ class LetterTransport(Transport):
 def test_stage_family_and_request_key_bind_trials() -> None:
     assert is_evaluation_stage("evaluation_answer:gemini-3.1-pro-preview")
     assert not is_evaluation_stage("evaluation_answer:Bad Model")
-    assert stage_supported("question_generation") and stage_supported(evaluation_stage(PRO))
+    assert stage_supported("question_generation") and stage_supported(
+        evaluation_stage(PRO)
+    )
     assert not stage_supported("evaluation_answer")
     with pytest.raises(ValueError, match="cannot form a stage"):
         evaluation_stage("Gemini Pro")
-    common = dict(model=PRO, run_id="r", phase=EVALUATION_PHASE, stage=evaluation_stage(PRO),
-                  paper_id="p", family_id="f", source_version_id="s", payload=payload())
+    common = dict(
+        model=PRO,
+        run_id="r",
+        phase=EVALUATION_PHASE,
+        stage=evaluation_stage(PRO),
+        paper_id="p",
+        family_id="f",
+        source_version_id="s",
+        payload=payload(),
+    )
     first = broker_request_key(trial_id="t1", **common)
     second = broker_request_key(trial_id="t2", **common)
     assert first != second
@@ -230,7 +255,9 @@ def test_stage_family_and_request_key_bind_trials() -> None:
         broker_request_key(**common)
 
 
-def test_evaluation_call_meters_under_its_own_phase_and_never_touches_construction(tmp_path: Path) -> None:
+def test_evaluation_call_meters_under_its_own_phase_and_never_touches_construction(
+    tmp_path: Path,
+) -> None:
     transport = LetterTransport("B")
     values = evaluation_fixture(tmp_path, transport=transport)
     with pytest.raises(ValueError, match="not bound"):
@@ -251,32 +278,48 @@ def test_evaluation_call_meters_under_its_own_phase_and_never_touches_constructi
     assert Decimal(status["usage"]["away_session_usd"]) == 0
     assert status["usage"]["project_lifetime_usd"] == "0.006512"
     assert status["usage"]["away_generation_submissions"] == 0
-    assert status["remaining"]["benchmark_evaluation_usd"] == str(Decimal("500.00") - Decimal("0.006512"))
-    assert status["remaining"]["project_lifetime_usd"] == str(Decimal("1000.00") - Decimal("0.006512"))
+    assert status["remaining"]["benchmark_evaluation_usd"] == str(
+        Decimal("500.00") - Decimal("0.006512")
+    )
+    assert status["remaining"]["project_lifetime_usd"] == str(
+        Decimal("1000.00") - Decimal("0.006512")
+    )
     assert Decimal(status["remaining"]["away_session_usd"]) == Decimal("25.00")
     assert status["evaluation"]["phase"] == EVALUATION_PHASE
     assert status["evaluation"]["spent_usd"] == "0.006512"
-    assert status["evaluation"]["remaining_usd"] == str(Decimal("5.00") - Decimal("0.006512"))
+    assert status["evaluation"]["remaining_usd"] == str(
+        Decimal("5.00") - Decimal("0.006512")
+    )
     assert status["evaluation"]["thinking_tokens"] == 500
     assert set(status["stages"]) == {evaluation_stage(PRO)}
     ledger = json.loads(values["ledger"].read_text())
     request = next(iter(ledger["requests"].values()))
-    assert request["phase"] == EVALUATION_PHASE and request["stage"] == evaluation_stage(PRO)
+    assert request["phase"] == EVALUATION_PHASE and request[
+        "stage"
+    ] == evaluation_stage(PRO)
     assert ledger["family_bindings"]["evaluation-item:aqa-one"]["paper_id"] == "aqa-one"
     assert ledger["live_test_papers"] == {}
     # The same trial is never replayed; a second repeat is a new request.
     with pytest.raises(ValueError, match="already exists"):
         execute(values, trial_id="t1")
     second = execute(values, trial_id="t2", repeat=2)
-    assert second["state"] == "completed" and second["request_key"] != receipt["request_key"]
+    assert (
+        second["state"] == "completed"
+        and second["request_key"] != receipt["request_key"]
+    )
     assert values["broker"].status()["evaluation"]["submissions"] == 2
 
 
-def test_evaluation_ceiling_reserve_and_repeat_limit_are_enforced(tmp_path: Path) -> None:
+def test_evaluation_ceiling_reserve_and_repeat_limit_are_enforced(
+    tmp_path: Path,
+) -> None:
     values = evaluation_fixture(
         tmp_path,
         transport=LetterTransport("A"),
-        policy_changes={"evaluation_ceiling_usd": "0.05", "maximum_calls_per_item_condition_model_arm": 1},
+        policy_changes={
+            "evaluation_ceiling_usd": "0.05",
+            "maximum_calls_per_item_condition_model_arm": 1,
+        },
     )
     bind(values)
     # Reservation at the 4096-token medium cap: 250 x 2e-6 + 4096 x 12e-6 = 0.049652.
@@ -298,7 +341,10 @@ def test_evaluation_ceiling_reserve_and_repeat_limit_are_enforced(tmp_path: Path
     repeat = execute(generous, trial_id="t2", repeat=2)
     assert repeat["state"] == "not_submitted"
     assert "repeat limit" in repeat["reason"]
-    assert execute(generous, trial_id="t3", condition="gold_absent")["state"] == "completed"
+    assert (
+        execute(generous, trial_id="t3", condition="gold_absent")["state"]
+        == "completed"
+    )
     # The per-request cap of the evaluation policy still applies.
     capped = evaluation_fixture(
         tmp_path / "capped",
@@ -309,7 +355,9 @@ def test_evaluation_ceiling_reserve_and_repeat_limit_are_enforced(tmp_path: Path
     assert execute(capped, trial_id="t1")["reason"] == PER_REQUEST_CAP_REASON
 
 
-def test_evaluation_gate_binding_stops_a_changed_set_prompt_model_or_run(tmp_path: Path) -> None:
+def test_evaluation_gate_binding_stops_a_changed_set_prompt_model_or_run(
+    tmp_path: Path,
+) -> None:
     values = evaluation_fixture(tmp_path, transport=LetterTransport("A"))
     with pytest.raises(ValueError, match="prompt changed"):
         bind(values, prompt_sha256="0" * 64)
@@ -322,7 +370,10 @@ def test_evaluation_gate_binding_stops_a_changed_set_prompt_model_or_run(tmp_pat
     with pytest.raises(ValueError, match="repeat count changed"):
         bind(values, repeats=3)
     with pytest.raises(ValueError, match="decoding settings changed"):
-        bind(values, decoding={**values["decoding"], "temperature_by_model": {PRO: "1.0"}})
+        bind(
+            values,
+            decoding={**values["decoding"], "temperature_by_model": {PRO: "1.0"}},
+        )
     bind(values)
     # A manifest edit after binding stops before countTokens.
     manifest_path = values["set_dir"] / "manifest.json"
@@ -342,23 +393,53 @@ def test_evaluation_gate_binding_stops_a_changed_set_prompt_model_or_run(tmp_pat
     assert execute(values, trial_id="t1")["state"] == "completed"
 
 
-def test_evaluation_payload_rules_pin_temperature_preset_and_enum(tmp_path: Path) -> None:
+def test_evaluation_payload_rules_pin_temperature_preset_and_enum(
+    tmp_path: Path,
+) -> None:
     values = evaluation_fixture(tmp_path, transport=LetterTransport("A"))
     bind(values)
     broker = values["broker"]
-    identity = {"paper_id": "aqa-one", "family_id": "evaluation-item:aqa-one", "source_version_id": "s"}
+    identity = {
+        "paper_id": "aqa-one",
+        "family_id": "evaluation-item:aqa-one",
+        "source_version_id": "s",
+    }
 
-    def attempt(request_payload: dict, *, stage: str = evaluation_stage(PRO), phase: str = EVALUATION_PHASE, trial=None, key_trial_id: str | None = None):
+    def attempt(
+        request_payload: dict,
+        *,
+        stage: str = evaluation_stage(PRO),
+        phase: str = EVALUATION_PHASE,
+        trial=None,
+        key_trial_id: str | None = None,
+    ):
         key = broker_request_key(
-            model=PRO, run_id=values["run_id"], phase=phase, stage=stage, payload=request_payload,
-            trial_id=key_trial_id or (trial or {}).get("trial_id"), **identity,
+            model=PRO,
+            run_id=values["run_id"],
+            phase=phase,
+            stage=stage,
+            payload=request_payload,
+            trial_id=key_trial_id or (trial or {}).get("trial_id"),
+            **identity,
         )
         return broker.execute(
-            phase=phase, run_id=values["run_id"], stage=stage, request_key=key,
-            payload=request_payload, trial=trial, **identity,
+            phase=phase,
+            run_id=values["run_id"],
+            stage=stage,
+            request_key=key,
+            payload=request_payload,
+            trial=trial,
+            **identity,
         )
 
-    trial = {"trial_id": "t", "eval_set_id": "x", "item_id": "aqa-one", "condition": "gold_present", "arm": "medium", "repeat": 1}
+    trial = {
+        "trial_id": "t",
+        "eval_set_id": "x",
+        "item_id": "aqa-one",
+        "condition": "gold_present",
+        "arm": "medium",
+        "repeat": 1,
+    }
     good = trial_payload(values)
     cold = json.loads(json.dumps(good))
     cold["generationConfig"]["temperature"] = 1.0
@@ -383,7 +464,9 @@ def test_evaluation_payload_rules_pin_temperature_preset_and_enum(tmp_path: Path
     assert broker.transport.methods == []
 
 
-def test_construction_broker_without_evaluation_files_rejects_evaluation_work(tmp_path: Path) -> None:
+def test_construction_broker_without_evaluation_files_rejects_evaluation_work(
+    tmp_path: Path,
+) -> None:
     values = evaluation_fixture(tmp_path, transport=LetterTransport("A"))
     bind(values)
     assert execute(values, trial_id="t1")["state"] == "completed"
@@ -421,20 +504,30 @@ def test_construction_broker_without_evaluation_files_rejects_evaluation_work(tm
 
 def test_evaluation_policy_and_price_config_are_validated(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="exceeds the evaluation reserve"):
-        evaluation_fixture(tmp_path / "a", policy_changes={"evaluation_ceiling_usd": "600"})
+        evaluation_fixture(
+            tmp_path / "a", policy_changes={"evaluation_ceiling_usd": "600"}
+        )
     with pytest.raises(ValueError, match="permits retries"):
-        evaluation_fixture(tmp_path / "b", policy_changes={"automatic_transport_retries": 1})
+        evaluation_fixture(
+            tmp_path / "b", policy_changes={"automatic_transport_retries": 1}
+        )
     with pytest.raises(ValueError, match="re_ask_on_invalid_response"):
-        evaluation_fixture(tmp_path / "c", policy_changes={"re_ask_on_invalid_response": True})
+        evaluation_fixture(
+            tmp_path / "c", policy_changes={"re_ask_on_invalid_response": True}
+        )
     with pytest.raises(ValueError, match="exceeds the construction cap"):
-        evaluation_fixture(tmp_path / "d", policy_changes={"maximum_request_reserved_cost_usd": "1.00"})
+        evaluation_fixture(
+            tmp_path / "d", policy_changes={"maximum_request_reserved_cost_usd": "1.00"}
+        )
     with pytest.raises(ValueError, match="not an official preset"):
         evaluation_fixture(tmp_path / "e", arms=["ultra"])
     with pytest.raises(ValueError, match="no price entry"):
         evaluation_fixture(tmp_path / "f", models=["gemini-9-pro"])
 
 
-def test_ambiguous_evaluation_charge_halts_and_scripted_transport_keys_by_model(tmp_path: Path) -> None:
+def test_ambiguous_evaluation_charge_halts_and_scripted_transport_keys_by_model(
+    tmp_path: Path,
+) -> None:
     values = evaluation_fixture(tmp_path, transport=Transport(failure="generate"))
     bind(values)
     receipt = execute(values, trial_id="t1")
@@ -447,6 +540,8 @@ def test_ambiguous_evaluation_charge_halts_and_scripted_transport_keys_by_model(
         execute(values, trial_id="t2", repeat=2)
     body = trial_payload(values)
     transport = ScriptedTransport({scripted_key(PRO, body): {"text": "C"}})
-    assert transport.post(PRO, "generateContent", body)["candidates"][0]["content"]["parts"] == [{"text": "C"}]
+    assert transport.post(PRO, "generateContent", body)["candidates"][0]["content"][
+        "parts"
+    ] == [{"text": "C"}]
     with pytest.raises(ValueError, match="no answer for this payload"):
         transport.post("gemini-3.8-flash", "generateContent", body)

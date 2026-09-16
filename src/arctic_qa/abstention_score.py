@@ -92,7 +92,9 @@ def tally(rows: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
-def uniform_baseline(gold_present_options: int, gold_absent_options: int) -> dict[str, Any]:
+def uniform_baseline(
+    gold_present_options: int, gold_absent_options: int
+) -> dict[str, Any]:
     """Expected counts and metrics of a uniform guess over the displayed options.
 
     One item per condition. Gold-present with n options: N1 = 1/n, N3 = 1/n,
@@ -111,7 +113,9 @@ def uniform_baseline(gold_present_options: int, gold_absent_options: int) -> dic
     return {
         "gold_present_options": gold_present_options,
         "gold_absent_options": gold_absent_options,
-        "expected_counts_per_item": {name: float(value) for name, value in counts.items()},
+        "expected_counts_per_item": {
+            name: float(value) for name, value in counts.items()
+        },
         "metrics": metrics_from_counts(counts),
     }
 
@@ -131,7 +135,8 @@ def ideal_pair_rate(rows: list[dict[str, Any]]) -> float | None:
     complete = [
         pair
         for pair in pairs.values()
-        if GOLD_PRESENT in pair and GOLD_ABSENT in pair
+        if GOLD_PRESENT in pair
+        and GOLD_ABSENT in pair
         and pair[GOLD_PRESENT] != N0
         and pair[GOLD_ABSENT] != N0
     ]
@@ -158,7 +163,8 @@ def letter_distribution(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "valid_responses": len(valid),
         "chosen_letter_counts": dict(sorted(letters.items())),
         "chosen_letter_share": {
-            letter: round(count / len(valid), 4) for letter, count in sorted(letters.items())
+            letter: round(count / len(valid), 4)
+            for letter, count in sorted(letters.items())
         }
         if valid
         else {},
@@ -286,7 +292,9 @@ def contamination_table(
                 "items_by_role": dict(sorted(role_counts.items())),
                 "items_without_role": len({row["item_id"] for row in clean}),
                 "metrics_all_items": metrics_from_counts(tally(group)),
-                "metrics_without_role": metrics_from_counts(tally(clean)) if clean else None,
+                "metrics_without_role": metrics_from_counts(tally(clean))
+                if clean
+                else None,
             }
         )
     return table
@@ -362,7 +370,9 @@ def main_table_rows(scores: dict[str, Any]) -> list[dict[str, Any]]:
             **{name: _fmt(baseline["metrics"][name]) for name in METRIC_NAMES},
             **{f"{name}_ci_low": "" for name in METRIC_NAMES},
             **{f"{name}_ci_high": "" for name in METRIC_NAMES},
-            "recall_abs_absent_only": _fmt(baseline["metrics"]["recall_abs_absent_only"]),
+            "recall_abs_absent_only": _fmt(
+                baseline["metrics"]["recall_abs_absent_only"]
+            ),
             "ideal_pair_rate": "",
         }
     )
@@ -389,10 +399,14 @@ def main_table_latex(scores: dict[str, Any]) -> str:
     """A booktabs table in the previous paper's layout, with 95% intervals."""
     header = (
         r"\begin{tabular}{llrrrrrr" + "c" * len(METRIC_NAMES) + "}\n"
-        r"\toprule" "\n"
+        r"\toprule"
+        "\n"
         r"\textbf{Model} & \textbf{Arm} & $N_0$ & $N_1$ & $N_2$ & $N_3$ & $N_4$ & $N_5$ & "
         + " & ".join(r"\textbf{" + METRIC_LATEX[name] + "}" for name in METRIC_NAMES)
-        + r" \\" "\n" r"\midrule" "\n"
+        + r" \\"
+        "\n"
+        r"\midrule"
+        "\n"
     )
     lines = []
     for key, group in scores["groups"].items():
@@ -407,7 +421,11 @@ def main_table_latex(scores: dict[str, Any]) -> str:
             point = _fmt(group["metrics"][name])
             if interval:
                 point += (
-                    r" {\scriptsize[" + _fmt(interval["low"]) + ", " + _fmt(interval["high"]) + "]}"
+                    r" {\scriptsize["
+                    + _fmt(interval["low"])
+                    + ", "
+                    + _fmt(interval["high"])
+                    + "]}"
                 )
             cells.append(point)
         lines.append(" & ".join(cells) + r" \\")
@@ -429,7 +447,17 @@ def main_table_latex(scores: dict[str, Any]) -> str:
         r"$N_0$ (invalid responses) is excluded from every metric. Brackets hold "
         r"95\% percentile intervals from a paired item bootstrap.}"
     )
-    return header + "\n".join(lines) + "\n" + r"\bottomrule" + "\n" + r"\end{tabular}" + "\n" + caption + "\n"
+    return (
+        header
+        + "\n".join(lines)
+        + "\n"
+        + r"\bottomrule"
+        + "\n"
+        + r"\end{tabular}"
+        + "\n"
+        + caption
+        + "\n"
+    )
 
 
 def contamination_latex(table: list[dict[str, Any]]) -> str:
@@ -494,7 +522,12 @@ def score_run(
         "k": k,
         "displayed_options": k + 1,
         "trials": len(rows),
-        "bootstrap": {"resamples": resamples, "seed": seed, "unit": "item", "level": 0.95},
+        "bootstrap": {
+            "resamples": resamples,
+            "seed": seed,
+            "unit": "item",
+            "level": 0.95,
+        },
         "taxonomy": {
             N0: "invalid response (excluded from metrics)",
             N1: "gold present, gold chosen",
@@ -514,7 +547,9 @@ def score_run(
     output_dir.mkdir(parents=True, exist_ok=True)
     atomic_json(output_dir / "scores.json", scores)
     write_csv(output_dir / "main-table.csv", main_table_rows(scores))
-    (output_dir / "main-table.tex").write_text(main_table_latex(scores), encoding="utf-8")
+    (output_dir / "main-table.tex").write_text(
+        main_table_latex(scores), encoding="utf-8"
+    )
     write_csv(
         output_dir / "condition-table.csv",
         [
@@ -563,9 +598,13 @@ def score_run(
                     for role in ("writer", "judge", "writer_and_judge", "none")
                 },
                 "ssr_all_items": _fmt(row["metrics_all_items"]["ssr"]),
-                "ssr_without_role": _fmt((row["metrics_without_role"] or {}).get("ssr")),
+                "ssr_without_role": _fmt(
+                    (row["metrics_without_role"] or {}).get("ssr")
+                ),
                 "acc_all_items": _fmt(row["metrics_all_items"]["acc"]),
-                "acc_without_role": _fmt((row["metrics_without_role"] or {}).get("acc")),
+                "acc_without_role": _fmt(
+                    (row["metrics_without_role"] or {}).get("acc")
+                ),
             }
             for row in scores["contamination"]
         ],

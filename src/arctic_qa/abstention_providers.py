@@ -388,16 +388,16 @@ class ScriptedTransport:
             raise TimeoutError("scripted provider timeout")
         if event.get("raise") == "http":
             raise urllib.error.HTTPError(
-                "https://scripted.invalid", int(event.get("status", 503)), "scripted", None, None
+                "https://scripted.invalid",
+                int(event.get("status", 503)),
+                "scripted",
+                None,
+                None,
             )
         prompt = int(event.get("prompt_tokens", 200))
         candidates = int(event.get("candidate_tokens", 1))
         thoughts = int(event.get("thinking_tokens", 40))
-        parts = (
-            [{"text": event["text"]}]
-            if event.get("text") is not None
-            else []
-        )
+        parts = [{"text": event["text"]}] if event.get("text") is not None else []
         return {
             "responseId": f"scripted-{key[:12]}",
             "modelVersion": model,
@@ -416,9 +416,7 @@ class ScriptedTransport:
         }
 
 
-def scripted_letter(
-    trial: dict[str, Any], policy: str, *, seed: str
-) -> dict[str, Any]:
+def scripted_letter(trial: dict[str, Any], policy: str, *, seed: str) -> dict[str, Any]:
     """Return the scripted event for one trial under one answer policy."""
     if policy == "gold":
         letter = trial["gold_letter"] or trial["abstain_letter"]

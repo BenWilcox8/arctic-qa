@@ -31,7 +31,15 @@ from .distractor_order import (
     apply_order,
     resolve_order,
 )
-from .util import atomic_json, atomic_write, canonical_json, jsonl_bytes, sha256_bytes, sha256_file, stable_id
+from .util import (
+    atomic_json,
+    atomic_write,
+    canonical_json,
+    jsonl_bytes,
+    sha256_bytes,
+    sha256_file,
+    stable_id,
+)
 
 
 EVAL_SET_SCHEMA = "abstention-eval-set-v1"
@@ -164,7 +172,11 @@ def _item_row(
         order = resolve_order(candidate)
         ordered = apply_order(order, accepted)
     except ValueError as error:
-        return None, {"item_id": item_id, "reason": "invalid_distractor_order", "detail": str(error)}
+        return None, {
+            "item_id": item_id,
+            "reason": "invalid_distractor_order",
+            "detail": str(error),
+        }
     candidate_hash = stable_id("candidate-payload", row["candidate_json"])
     answer = candidate.get("answer") or {}
     question = str(candidate["question"])

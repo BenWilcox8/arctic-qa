@@ -186,7 +186,9 @@ def trial_id(
     )
 
 
-def user_content(question: str, question_context: str, lettered: list[tuple[str, str]]) -> str:
+def user_content(
+    question: str, question_context: str, lettered: list[tuple[str, str]]
+) -> str:
     """Render the user turn; question and context stay in separate blocks."""
     context = question_context.strip() if question_context else ""
     return USER_CONTENT_TEMPLATE.format(

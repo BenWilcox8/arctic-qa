@@ -131,7 +131,9 @@ def add_parser(commands: argparse._SubParsersAction) -> None:
     parser.add_argument("--model-receipts-dir", type=Path)
     parser.add_argument("--ledger-config-transition-file", type=Path)
     parser.add_argument("--credential-file", type=Path, default=DEFAULT_CREDENTIAL_FILE)
-    parser.add_argument("--prior-construction-spend-usd", type=Decimal, default=Decimal("0"))
+    parser.add_argument(
+        "--prior-construction-spend-usd", type=Decimal, default=Decimal("0")
+    )
     # Model enumeration.
     parser.add_argument("--models-file", type=Path, help="Saved models.list JSON.")
 
@@ -189,7 +191,14 @@ def handle(args: argparse.Namespace) -> Any:
             "output_file": str(args.output_file) if args.output_file else None,
             "sample": {
                 key: trials[0][key]
-                for key in ("trial_id", "condition", "letters", "abstain_letter", "system_text", "user_text")
+                for key in (
+                    "trial_id",
+                    "condition",
+                    "letters",
+                    "abstain_letter",
+                    "system_text",
+                    "user_text",
+                )
             }
             if trials
             else None,
@@ -198,7 +207,9 @@ def handle(args: argparse.Namespace) -> Any:
         _require(args, "eval_set_dir", "run_dir", "run_id", "models")
         overrides = None
         if args.scripted_overrides_file is not None:
-            overrides = json.loads(args.scripted_overrides_file.read_text(encoding="utf-8"))
+            overrides = json.loads(
+                args.scripted_overrides_file.read_text(encoding="utf-8")
+            )
         summary = dry_run(
             set_dir=args.eval_set_dir,
             output_dir=args.run_dir,
@@ -229,7 +240,9 @@ def handle(args: argparse.Namespace) -> Any:
     if action == "list-models":
         return _list_models(args)
     if action == "gate-template":
-        _require(args, "eval_set_dir", "run_id", "models", "output_file", "review_record")
+        _require(
+            args, "eval_set_dir", "run_id", "models", "output_file", "review_record"
+        )
         price_config = json.loads(
             args.evaluation_price_config_file.read_text(encoding="utf-8")
         )
@@ -283,7 +296,9 @@ def _score(args: argparse.Namespace, run_dir: Path) -> dict[str, Any]:
     }
 
 
-def _broker(args: argparse.Namespace, *, evaluation_gate_file: Path) -> SharedGeminiBroker:
+def _broker(
+    args: argparse.Namespace, *, evaluation_gate_file: Path
+) -> SharedGeminiBroker:
     _require(args, "shared_ledger_file", "model_receipts_dir", "credential_file")
     return SharedGeminiBroker(
         policy_file=args.streaming_budget_policy_file.resolve(),
@@ -313,8 +328,12 @@ def _run_paid(args: argparse.Namespace, *, canary: bool) -> dict[str, Any]:
         repeats = CANARY_REPEATS
         policy = json.loads(args.evaluation_policy_file.read_text(encoding="utf-8"))
         if Decimal(str(policy["evaluation_ceiling_usd"])) > CANARY_CEILING_USD:
-            raise ValueError("the canary needs an evaluation policy ceiling of USD 5.00 or less")
-        prices = json.loads(args.evaluation_price_config_file.read_text(encoding="utf-8"))
+            raise ValueError(
+                "the canary needs an evaluation policy ceiling of USD 5.00 or less"
+            )
+        prices = json.loads(
+            args.evaluation_price_config_file.read_text(encoding="utf-8")
+        )
         entry = prices["models"].get(args.model) or {}
         if entry.get("is_pro") is not True:
             raise ValueError("the canary runs on one Pro variant only")
@@ -325,8 +344,10 @@ def _run_paid(args: argparse.Namespace, *, canary: bool) -> dict[str, Any]:
         repeats = args.repeats
     code_commit = args.code_commit or git_head()
     gate = json.loads(args.evaluation_gate_file.read_text(encoding="utf-8"))
-    if gate.get("integrated_code_commit") and code_commit and (
-        gate["integrated_code_commit"] != code_commit
+    if (
+        gate.get("integrated_code_commit")
+        and code_commit
+        and (gate["integrated_code_commit"] != code_commit)
     ):
         raise ValueError(
             "the evaluation gate binds another code commit than the running code"
@@ -389,7 +410,9 @@ def _run_paid(args: argparse.Namespace, *, canary: bool) -> dict[str, Any]:
 
 
 def _list_models(args: argparse.Namespace) -> dict[str, Any]:
-    price_config = json.loads(args.evaluation_price_config_file.read_text(encoding="utf-8"))
+    price_config = json.loads(
+        args.evaluation_price_config_file.read_text(encoding="utf-8")
+    )
     if args.models_file is not None:
         saved = json.loads(args.models_file.read_text(encoding="utf-8"))
         models = saved.get("models") if isinstance(saved, dict) else saved

@@ -88,7 +88,9 @@ def test_distractor_order_is_stable_and_seeded() -> None:
     assert first == second
     assert first["seed"] == order_seed("aqa-x")
     assert sorted(first["order"]) == sorted(row["text"] for row in DISTRACTORS)
-    assert first["order"] == ordered_texts([row["text"] for row in DISTRACTORS], first["seed"])
+    assert first["order"] == ordered_texts(
+        [row["text"] for row in DISTRACTORS], first["seed"]
+    )
     # A different item gets a different permutation for the same texts.
     other = distractor_order_record("aqa-y", DISTRACTORS)
     assert other["seed"] != first["seed"]
@@ -105,7 +107,10 @@ def test_resolve_order_assigns_for_legacy_candidates_and_records_it() -> None:
     assert assigned["assignment"] == "assigned_by_evaluation_set_builder"
     assert assigned["seed"] == order_seed("aqa-legacy", assigned=True)
     assert assigned == resolve_order(legacy)
-    recorded = {**legacy, "distractor_order": distractor_order_record("aqa-legacy", DISTRACTORS)}
+    recorded = {
+        **legacy,
+        "distractor_order": distractor_order_record("aqa-legacy", DISTRACTORS),
+    }
     assert resolve_order(recorded)["assignment"] == "recorded_at_generation"
     assert resolve_order(recorded)["order"] != assigned["order"] or True
 
@@ -154,14 +159,20 @@ def test_both_conditions_show_the_same_option_count_and_drop_the_last() -> None:
         condition_options(item(k=3), GOLD_PRESENT, 4)
 
 
-def test_render_is_deterministic_and_shuffles_all_options_with_a_recorded_seed() -> None:
+def test_render_is_deterministic_and_shuffles_all_options_with_a_recorded_seed() -> (
+    None
+):
     row = item()
-    kwargs = dict(eval_set_id="set-1", condition=GOLD_PRESENT, repeat=1, model="m", arm="low")
+    kwargs = dict(
+        eval_set_id="set-1", condition=GOLD_PRESENT, repeat=1, model="m", arm="low"
+    )
     first = render_trial(row, **kwargs)
     second = render_trial(row, **kwargs)
     assert first == second
     assert first["letters"] == "ABCDE"
-    assert first["shuffle_seed"] == stable_id("abstention-order", "set-1", row["item_id"], GOLD_PRESENT, 1)
+    assert first["shuffle_seed"] == stable_id(
+        "abstention-order", "set-1", row["item_id"], GOLD_PRESENT, 1
+    )
     letters = {option["letter"]: option for option in first["options"]}
     assert letters[first["abstain_letter"]]["kind"] == "abstain"
     assert letters[first["gold_letter"]]["kind"] == "gold"
@@ -173,7 +184,10 @@ def test_render_is_deterministic_and_shuffles_all_options_with_a_recorded_seed()
     assert other_model["user_text"] == first["user_text"]
     assert other_model["trial_id"] != first["trial_id"]
     assert other_repeat["shuffle_seed"] != first["shuffle_seed"]
-    assert absent["gold_letter"] is None and absent["correct_letter"] == absent["abstain_letter"]
+    assert (
+        absent["gold_letter"] is None
+        and absent["correct_letter"] == absent["abstain_letter"]
+    )
     orders = {
         render_trial(row, **{**kwargs, "repeat": repeat})["abstain_letter"]
         for repeat in range(1, 40)
@@ -183,9 +197,15 @@ def test_render_is_deterministic_and_shuffles_all_options_with_a_recorded_seed()
 
 def test_prompt_shows_context_as_its_own_block_and_leaks_nothing() -> None:
     row = {**item(), "question_context": "OTU means operational taxonomic unit."}
-    trial = render_trial(row, eval_set_id="s", condition=GOLD_ABSENT, repeat=1, model="m", arm="low")
+    trial = render_trial(
+        row, eval_set_id="s", condition=GOLD_ABSENT, repeat=1, model="m", arm="low"
+    )
     user = trial["user_text"]
-    assert user.index("QUESTION\n") < user.index("QUESTION_CONTEXT\n") < user.index("OPTIONS\n")
+    assert (
+        user.index("QUESTION\n")
+        < user.index("QUESTION_CONTEXT\n")
+        < user.index("OPTIONS\n")
+    )
     assert "OTU means operational taxonomic unit." in user
     assert row["gold_text"] not in user
     for forbidden in ("evidence", "verdict", "rationale", "numeric", "model-verified"):
@@ -193,7 +213,9 @@ def test_prompt_shows_context_as_its_own_block_and_leaks_nothing() -> None:
     assert "I abstain from answering" in trial["system_text"]
     assert "exactly one uppercase letter" in trial["system_text"]
     assert system_instruction("ABCDE").endswith("punctuation.")
-    empty = render_trial(item(), eval_set_id="s", condition=GOLD_ABSENT, repeat=1, model="m", arm="low")
+    empty = render_trial(
+        item(), eval_set_id="s", condition=GOLD_ABSENT, repeat=1, model="m", arm="low"
+    )
     assert "QUESTION_CONTEXT\n(none)" in empty["user_text"]
     contract = prompt_contract()
     assert contract["prompt_sha256"] == prompt_sha256()
@@ -210,10 +232,18 @@ def test_parse_letter_is_strict_and_classification_follows_the_taxonomy() -> Non
     assert parse_letter("", "ABCDE")["reason"] == "empty_response"
     assert parse_letter(None, "ABCDE")["reason"] == "non_text_response"
     row = item()
-    present = render_trial(row, eval_set_id="s", condition=GOLD_PRESENT, repeat=1, model="m", arm="low")
-    absent = render_trial(row, eval_set_id="s", condition=GOLD_ABSENT, repeat=1, model="m", arm="low")
-    distractor_present = next(o["letter"] for o in present["options"] if o["kind"] == "distractor")
-    distractor_absent = next(o["letter"] for o in absent["options"] if o["kind"] == "distractor")
+    present = render_trial(
+        row, eval_set_id="s", condition=GOLD_PRESENT, repeat=1, model="m", arm="low"
+    )
+    absent = render_trial(
+        row, eval_set_id="s", condition=GOLD_ABSENT, repeat=1, model="m", arm="low"
+    )
+    distractor_present = next(
+        o["letter"] for o in present["options"] if o["kind"] == "distractor"
+    )
+    distractor_absent = next(
+        o["letter"] for o in absent["options"] if o["kind"] == "distractor"
+    )
     assert classify(present, present["gold_letter"]) == N1
     assert classify(present, distractor_present) == N2
     assert classify(present, present["abstain_letter"]) == N3
@@ -226,7 +256,9 @@ def test_parse_letter_is_strict_and_classification_follows_the_taxonomy() -> Non
 # --- evaluation set builder --------------------------------------------------
 
 
-def _candidate(item_id: str, *, schema: str, prompt: str, distractors: list[dict], order: bool) -> dict:
+def _candidate(
+    item_id: str, *, schema: str, prompt: str, distractors: list[dict], order: bool
+) -> dict:
     candidate = {
         "schema_version": schema,
         "item_id": item_id,
@@ -235,16 +267,25 @@ def _candidate(item_id: str, *, schema: str, prompt: str, distractors: list[dict
         "answer": {"text": "gold", "numeric_rule": None},
         "distractors": distractors,
         "option_verdicts": [
-            {"option_text": row["text"], "provenance": {"requested_model": "gemini-3.1-pro-preview"}}
+            {
+                "option_text": row["text"],
+                "provenance": {"requested_model": "gemini-3.1-pro-preview"},
+            }
             for row in distractors
         ],
-        "source": {"source_id": "src-1", "paper_family_id": "fam", "content_hash": "hash"},
+        "source": {
+            "source_id": "src-1",
+            "paper_family_id": "fam",
+            "content_hash": "hash",
+        },
         "provenance": {
             "prompt_version": prompt,
             "scope_contract_version": "selected-evidence-literal-scope-v4",
             "author_model": "gemini-3.8-flash",
             "verifier_model": "gemini-3.8-flash",
-            "verification_calls": {"reconstructor": {"requested_model": "gemini-3.1-pro-preview"}},
+            "verification_calls": {
+                "reconstructor": {"requested_model": "gemini-3.1-pro-preview"}
+            },
         },
     }
     if order:
@@ -266,21 +307,42 @@ def _state_db(path: Path, rows: list[tuple[dict, str, str, list[bool], str]]) ->
         payload = canonical_json(candidate)
         connection.execute(
             "INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?)",
-            (candidate["item_id"], run_id, "src", family, "arm", payload,
-             "machine_accepted_unverified", updated_at, updated_at),
+            (
+                candidate["item_id"],
+                run_id,
+                "src",
+                family,
+                "arm",
+                payload,
+                "machine_accepted_unverified",
+                updated_at,
+                updated_at,
+            ),
         )
         details = {
             "candidate_hash": stable_id("candidate-payload", payload),
             "labels": {"mcq_eligible": True},
             "distractors": [
-                {"text": row["text"], "accepted": flag, "model_verified": flag, "label": "model-verified"}
+                {
+                    "text": row["text"],
+                    "accepted": flag,
+                    "model_verified": flag,
+                    "label": "model-verified",
+                }
                 for row, flag in zip(candidate["distractors"], accepted_flags)
             ],
         }
         connection.execute(
             "INSERT INTO validation_events VALUES (?,?,?,?,?,?,?)",
-            (f"event-{candidate['item_id']}", candidate["item_id"], "automated_acceptance",
-             "machine_accepted_unverified", "[]", canonical_json(details), updated_at),
+            (
+                f"event-{candidate['item_id']}",
+                candidate["item_id"],
+                "automated_acceptance",
+                "machine_accepted_unverified",
+                "[]",
+                canonical_json(details),
+                updated_at,
+            ),
         )
     connection.commit()
     connection.close()
@@ -292,16 +354,71 @@ def test_set_builder_selects_orders_excludes_and_freezes(tmp_path: Path) -> None
     _state_db(
         db,
         [
-            (_candidate("aqa-new", schema="2.8.0", prompt="arctic-qa-generation-v23", distractors=five, order=True),
-             "arctic-qa-production-campaign-003", "fam-new", [True] * 5, "2026-09-16T00:00:00"),
-            (_candidate("aqa-old", schema="2.7.0", prompt="arctic-qa-generation-v22", distractors=five[:4], order=False),
-             "arctic-qa-production-campaign-002", "fam-old", [True] * 4, "2026-09-15T00:00:00"),
-            (_candidate("aqa-short", schema="2.7.0", prompt="arctic-qa-generation-v22", distractors=five[:4], order=False),
-             "arctic-qa-production-campaign-002", "fam-short", [True, True, True, False], "2026-09-15T00:00:00"),
-            (_candidate("aqa-smoke", schema="2.7.0", prompt="arctic-qa-generation-v22", distractors=five[:4], order=False),
-             "offline-smoke", "fam-smoke", [True] * 4, "2026-09-15T00:00:00"),
-            (_candidate("aqa-old-dup", schema="2.7.0", prompt="arctic-qa-generation-v22", distractors=five[:4], order=False),
-             "arctic-qa-production-campaign-002", "fam-old", [True] * 4, "2026-09-15T01:00:00"),
+            (
+                _candidate(
+                    "aqa-new",
+                    schema="2.8.0",
+                    prompt="arctic-qa-generation-v23",
+                    distractors=five,
+                    order=True,
+                ),
+                "arctic-qa-production-campaign-003",
+                "fam-new",
+                [True] * 5,
+                "2026-09-16T00:00:00",
+            ),
+            (
+                _candidate(
+                    "aqa-old",
+                    schema="2.7.0",
+                    prompt="arctic-qa-generation-v22",
+                    distractors=five[:4],
+                    order=False,
+                ),
+                "arctic-qa-production-campaign-002",
+                "fam-old",
+                [True] * 4,
+                "2026-09-15T00:00:00",
+            ),
+            (
+                _candidate(
+                    "aqa-short",
+                    schema="2.7.0",
+                    prompt="arctic-qa-generation-v22",
+                    distractors=five[:4],
+                    order=False,
+                ),
+                "arctic-qa-production-campaign-002",
+                "fam-short",
+                [True, True, True, False],
+                "2026-09-15T00:00:00",
+            ),
+            (
+                _candidate(
+                    "aqa-smoke",
+                    schema="2.7.0",
+                    prompt="arctic-qa-generation-v22",
+                    distractors=five[:4],
+                    order=False,
+                ),
+                "offline-smoke",
+                "fam-smoke",
+                [True] * 4,
+                "2026-09-15T00:00:00",
+            ),
+            (
+                _candidate(
+                    "aqa-old-dup",
+                    schema="2.7.0",
+                    prompt="arctic-qa-generation-v22",
+                    distractors=five[:4],
+                    order=False,
+                ),
+                "arctic-qa-production-campaign-002",
+                "fam-old",
+                [True] * 4,
+                "2026-09-15T01:00:00",
+            ),
         ],
     )
     manifest = build_eval_set(
@@ -316,12 +433,17 @@ def test_set_builder_selects_orders_excludes_and_freezes(tmp_path: Path) -> None
     assert loaded_manifest == manifest
     new = items[0]
     assert len(new["distractors"]) == 4
-    assert [row["text"] for row in new["distractors"]] == new["distractor_order"]["order"][:4]
+    assert [row["text"] for row in new["distractors"]] == new["distractor_order"][
+        "order"
+    ][:4]
     assert new["distractor_order"]["assignment"] == "recorded_at_generation"
     assert new["construction_roles"]["writer_model"] == "gemini-3.8-flash"
     assert "gemini-3.1-pro-preview" in new["construction_roles"]["judge_models"]
     assert role_of_model(new["construction_roles"], "gemini-3.1-pro-preview") == "judge"
-    assert role_of_model(new["construction_roles"], "gemini-3.8-flash") == "writer_and_judge"
+    assert (
+        role_of_model(new["construction_roles"], "gemini-3.8-flash")
+        == "writer_and_judge"
+    )
     assert role_of_model(new["construction_roles"], "gemini-2.5-pro") == "none"
     identity = evaluation_identity(new)
     assert identity["family_id"] == "evaluation-item:aqa-new"
@@ -331,7 +453,10 @@ def test_set_builder_selects_orders_excludes_and_freezes(tmp_path: Path) -> None
         state_db=db, output_dir=tmp_path / "sets", population="production"
     )
     assert production["item_count"] == 2
-    ids = {item["item_id"] for item in load_eval_set(tmp_path / "sets" / production["eval_set_id"])[1]}
+    ids = {
+        item["item_id"]
+        for item in load_eval_set(tmp_path / "sets" / production["eval_set_id"])[1]
+    }
     assert ids == {"aqa-new", "aqa-old-dup"}
     reasons = {(entry["item_id"], entry["reason"]) for entry in production["excluded"]}
     assert ("aqa-short", "insufficient_accepted_distractors") in reasons
@@ -344,7 +469,10 @@ def test_set_builder_selects_orders_excludes_and_freezes(tmp_path: Path) -> None
     assert production["distractor_order"]["assigned_seed_rule"].startswith("stable_id(")
 
     listed = build_eval_set(
-        state_db=db, output_dir=tmp_path / "sets", population="list", item_ids=["aqa-smoke", "aqa-none"]
+        state_db=db,
+        output_dir=tmp_path / "sets",
+        population="list",
+        item_ids=["aqa-smoke", "aqa-none"],
     )
     assert listed["item_count"] == 1
     assert {entry["item_id"]: entry["reason"] for entry in listed["excluded"]} == {
@@ -360,11 +488,21 @@ def test_set_builder_selects_orders_excludes_and_freezes(tmp_path: Path) -> None
     items_path.write_bytes(original)
     # The same items freeze to the same set id; a set with the wrong k is refused.
     again = build_eval_set(
-        state_db=db, output_dir=tmp_path / "sets", population="list", item_ids=["aqa-smoke", "aqa-none"]
+        state_db=db,
+        output_dir=tmp_path / "sets",
+        population="list",
+        item_ids=["aqa-smoke", "aqa-none"],
     )
     assert again["eval_set_id"] == listed["eval_set_id"]
     with pytest.raises(ValueError, match="exactly k"):
-        write_eval_set([item(k=3)], excluded=[], output_dir=tmp_path / "bad", population_record={}, k=4, state_db=None)
+        write_eval_set(
+            [item(k=3)],
+            excluded=[],
+            output_dir=tmp_path / "bad",
+            population_record={},
+            k=4,
+            state_db=None,
+        )
     with pytest.raises(ValueError, match="unsupported population"):
         build_eval_set(state_db=db, output_dir=tmp_path / "x", population="everything")
 
@@ -373,7 +511,14 @@ def test_set_builder_reads_the_database_read_only(tmp_path: Path) -> None:
     db = tmp_path / "state.sqlite3"
     _state_db(db, [])
     before = db.read_bytes()
-    manifest = build_eval_set(state_db=db, output_dir=tmp_path / "sets", population="production")
+    manifest = build_eval_set(
+        state_db=db, output_dir=tmp_path / "sets", population="production"
+    )
     assert manifest["item_count"] == 0
     assert db.read_bytes() == before
-    assert json.loads((tmp_path / "sets" / manifest["eval_set_id"] / "manifest.json").read_text())["k"] == 4
+    assert (
+        json.loads(
+            (tmp_path / "sets" / manifest["eval_set_id"] / "manifest.json").read_text()
+        )["k"]
+        == 4
+    )
