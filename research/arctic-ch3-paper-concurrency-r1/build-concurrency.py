@@ -538,6 +538,8 @@ class Activation:
     # ---- launch -----------------------------------------------------------
 
     def write_launcher(self) -> None:
+        if self.launcher.exists():
+            os.chmod(self.launcher, 0o644)
         self.launcher.write_text(
             "\n".join(
                 [
