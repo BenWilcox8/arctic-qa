@@ -167,6 +167,23 @@ class Activation:
         return result
 
     @staticmethod
+    def our_submissions(ledger: dict) -> int:
+        """Count the paid requests THIS run has submitted.
+
+        ``generation_submissions`` counts every caller of the shared ledger,
+        and the benchmark evaluator keeps calling. A launch measured against
+        that counter reads the evaluator's next call as its own first paid
+        call, which is how a dead producer once looked like a 23-second start
+        (2026-09-16 23:39 UTC).
+        """
+        return sum(
+            1
+            for request in ledger.get("requests", {}).values()
+            if str(request.get("run_id")) == RUN_ID
+            and request.get("submitted_at_utc")
+        )
+
+    @staticmethod
     def our_inflight(ledger: dict) -> int:
         """Count the requests of THIS run that are on the wire.
 
@@ -603,7 +620,11 @@ class Activation:
 
     def launch(self) -> None:
         state = read_json(self.state)
-        assert "launch" not in state, "this activation was launched"
+        if "launch" in state:
+            # A start that lost its settled window leaves the label applied and
+            # no producer. The relaunch keeps the earlier record and adds its
+            # own attempt; the label itself is idempotent.
+            state.setdefault("earlier_launches", []).append(state.pop("launch"))
         live = self.live_producer()
         if live is not None:
             pid, _ = live
@@ -678,20 +699,33 @@ class Activation:
                     f"bash {self.launcher} >> {self.log} 2>&1",
                 ]
             )
+            # A process that is merely up proves nothing: the broker is
+            # constructed seconds later, and a refusal there exits at once.
+            # The producer has started when its own progress record moves.
             live = None
-            for _ in range(45):
+            deadline = time.monotonic() + 240
+            while time.monotonic() < deadline:
                 live = self.live_producer()
-                if live is not None:
+                if live is None and self.log.exists():
+                    if self.log.stat().st_size > log_before:
+                        break
+                progress = read_json(PROGRESS) if PROGRESS.is_file() else {}
+                moved = str(progress.get("updated_at_utc") or "") > launched_at
+                if live is not None and moved and progress.get("state") == "running":
                     break
-                time.sleep(1)
-            if live is not None:
-                # Past construction: the process is up and the broker accepted
-                # the ledger. Give it a moment to prove it stays up.
-                time.sleep(20)
+                time.sleep(2)
+            else:
                 live = self.live_producer()
-            if live is not None:
+            progress = read_json(PROGRESS) if PROGRESS.is_file() else {}
+            started = (
+                live is not None
+                and str(progress.get("updated_at_utc") or "") > launched_at
+                and progress.get("state") == "running"
+            )
+            if started:
                 print(f"the producer started on attempt {attempt}", file=sys.stderr)
                 break
+            live = None
             tail = ""
             if self.log.exists():
                 with self.log.open("rb") as handle:
@@ -722,11 +756,11 @@ class Activation:
         write_json(self.state, state)
         print(json.dumps({"pid": pid, "launcher": str(self.launcher)}, indent=2))
         # Launch to first paid call: the number the label is for.
-        base = int(before["generation_submissions"])
+        base = self.our_submissions(read_json(LEDGER))
         waited = 0.0
         while waited < FIRST_CALL_WAIT_SECONDS:
             ledger = read_json(LEDGER)
-            if int(ledger["generation_submissions"]) > base:
+            if self.our_submissions(ledger) > base:
                 break
             if self.live_producer() is None:
                 raise SystemExit(f"the producer exited before a paid call; see {self.log}")
@@ -738,8 +772,8 @@ class Activation:
             "seen": waited < FIRST_CALL_WAIT_SECONDS,
             "seconds_after_launch": round(elapsed, 1),
             "at_utc": now(),
-            "generation_submissions_before": base,
-            "generation_submissions_after": int(read_json(LEDGER)["generation_submissions"]),
+            "run_submissions_before": base,
+            "run_submissions_after": self.our_submissions(read_json(LEDGER)),
             "progress_counts": progress.get("counts"),
             "progress_message": progress.get("message"),
         }
