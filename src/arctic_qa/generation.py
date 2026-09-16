@@ -3794,6 +3794,7 @@ def _generate_distractors(
                 timeout,
                 retries,
                 rate_limit_seconds,
+                system=OPTION_VERIFIER_SYSTEM,
             )
             reasks.append(
                 {
