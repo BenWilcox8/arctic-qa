@@ -9,18 +9,18 @@ Nothing under `chapter2/` or `streaming-dataset-r1/` changed except the shared l
 
 ## 1. Result in six lines
 
-1. The producer is NOT launched. The standalone calibration failed the release rule twice: once under contract v4 (three held-out controls passed), and once under the v5 revision that firstmate ordered (three must-pass rows now fail and one new held-out control passes). Rule 4 of the brief blocks the launch. The second decision is with firstmate (status `needs-decision`).
+1. The producer was launched at 07:24:36 UTC on the v6 judge and stopped 17 seconds later: the first eligibility call (paper 1, `gemini-3.8-flash`, prompt v8, schema v4) returned HTTP 400, the broker booked an ambiguous charge and halted the ledger. No paper was screened. Section 6 has the evidence. The task is blocked on that halt.
 2. The shared ledger carries two new chained transitions: price config v8, then the construction ceiling of USD 73.990121. Section 3 gives every number.
-3. Both cassettes were recorded through the same gate and ledger. Section 5 names every misjudged row. Spend: USD 0.238626 on 41 Pro calls for v4, USD 0.244198 on 41 for v5, USD 0.482824 in total, inside the USD 20.
-4. Two code changes were necessary before the activation could be built. Section 2 explains them. The prepared commit is `61d2ea6`: `7dc6485` plus five commits of this task (the v5 prompt revision is the last).
-5. The gate (a reviewed successor of the `9f4cb18` gate), the launcher, the runtime snapshot, the chapter 3 root and the streaming input are built and bound. A launch after the decision needs a re-snapshot only if the judge prompt changes again.
+3. Three calibration cassettes were recorded through the same gate and ledger: v4 failed (three held-out controls passed), v5 failed (three must-pass rows failed, one control passed), v6 met the release rule (no control passed, 19 of 20 must-pass). Section 5 names every misjudged row. Spend: USD 0.238626, 0.244198 and 0.262088, USD 0.744912 in total, inside the USD 20.
+4. Two code changes were necessary before the activation could be built, and two prompt revisions followed the decisions. Section 2 explains them. The deployed commit is `e2a8cba`: `7dc6485` plus seven commits of this task.
+5. The gate (a reviewed successor of the `9f4cb18` gate), the launcher, the runtime snapshot, the chapter 3 root and the streaming input are built and bound.
 6. The phase E script is beside the run and was proven on the chapter 2 artifacts. It has no chapter 3 run to read yet. Section 8.
 
 ## 2. Deviations from the fixed decisions, and why
 
 The brief fixed the deployed commit as local `main` at `7dc6485`.
-The prepared runtime is `61d2ea6` instead.
-That commit is `7dc6485` plus five commits of this task, and no other change:
+The deployed runtime is `e2a8cba` instead.
+That commit is `7dc6485` plus seven commits of this task, and no other change:
 
 | Commit | Change | Reason |
 |---|---|---|
@@ -29,6 +29,8 @@ That commit is `7dc6485` plus five commits of this task, and no other change:
 | `9f4cb18` | `data/arctic-ch3-production-run-r1/phase_e_measures.py`. | The phase E script travels with the deployed runtime. |
 | `dfb87f6` | The report and the v4 cassette. | Evidence for the first decision. |
 | `61d2ea6` | `STANDALONE_SYSTEM` revised to contract v5 (three fail clauses, no pass rule changed); the three v4 misses moved to a `seen` slice; every test that pinned the live literal moved to v5. | Firstmate decision of 2026-09-16 05:52 UTC, option (a). |
+| `089a016` | The report and the v5 cassette. | Evidence for the second decision. |
+| `e2a8cba` | `STANDALONE_SYSTEM` revised to contract v6: the unit clause excludes a unit implied by a named metric, the sample clause covers only an absent sample type, a comparison-basis clause is added; the two held-out rows v6 was written on moved to `seen`. | Captain decision of 2026-09-16 06:56 UTC. |
 
 **The ceiling.** The broker accepts only registered policy transitions.
 `POLICY_TRANSITION_CHANGES` lists every allowed change set, and `_validate_policy` lists every allowed value of `away_session_total_ceiling_usd`.
@@ -50,7 +52,7 @@ The CLI binds the gate's streaming input before the first call, with the same fi
 
 The run id stays `chapter3-7dc6485-r1` as the brief fixed it.
 The first gate binds `9f4cb18` and names `7dc6485` as `deploy_base_commit`.
-The successor gate `live-execution-gate-61d2ea6-ch3.json` (sha256 `6e718fc9...`) binds `61d2ea6` and names the `9f4cb18` gate in `supersedes_config_transition_review`, so the two applied transition events stay valid under it. The broker accepted 41 requests under the successor gate.
+The successor gates `live-execution-gate-61d2ea6-ch3.json` (sha256 `6e718fc9...`) and `live-execution-gate-e2a8cba-ch3.json` (sha256 `8e6a2123...`) bind their commits and name the `9f4cb18` gate in `supersedes_config_transition_review`, so the two applied transition events stay valid under them. The broker accepted 41 requests under each successor gate, and the producer's first request under the last one.
 
 ## 3. The ledger transitions
 
@@ -115,21 +117,24 @@ The eligibility run directory is `chapter3/gemini-eligibility/chapter3-7dc6485-r
 
 ## 5. The calibration
 
-Two recordings, both with `calibrate-standalone --mode record --provider broker --phase away_production --run-id chapter3-7dc6485-r1 --campaign-id arctic-qa-production-campaign-003`, the gate, the policy v9, the ledger transition and the five stream-input options, from the runtime snapshot of the commit named.
+Three recordings, all with `calibrate-standalone --mode record --provider broker --phase away_production --run-id chapter3-7dc6485-r1 --campaign-id arctic-qa-production-campaign-003`, the gate of the commit named, the policy v9, the ledger transition and the five stream-input options, from that commit's runtime snapshot.
 
-| Quantity | v4 recording (commit `9f4cb18`) | v5 recording (commit `61d2ea6`) |
-|---|---|---|
-| Recorded (UTC) | 05:39:48 to 05:48:49 | 06:16:20 to 06:25:46 |
-| Calls, all `completed`, stage `standalone_verification`, `gemini-3.1-pro-preview` | 41 | 41 |
-| Ledger paper family | `standalone-calibration:standalone-calibration-v2:2a7b6da0146b` | `standalone-calibration:standalone-calibration-v2:144b05368c26` |
-| Spend | USD 0.238626 | USD 0.244198 |
-| Cassette (copied into this directory) | `standalone-calibration-v2.cassette.v4.jsonl`, sha256 `0d4a0eff...` | `standalone-calibration-v2.cassette.v5.jsonl`, sha256 `ebd1cfe2...` |
-| Report (copied into this directory) | `calibration-report-9f4cb18-ch3.v4.json` | `calibration-report-61d2ea6-ch3.v5.json` |
-| Must-pass | 20 of 20 | 17 of 20 (12 of 14 core, 5 of 6 held-out) |
-| Must-fail | 18 of 21 failed as required; 3 held-out controls passed | 20 of 21 failed as required, including the 3 seen rows; 1 held-out control passed |
-| Release rule | not met | not met |
+| Quantity | v4 (`9f4cb18`) | v5 (`61d2ea6`) | v6 (`e2a8cba`) |
+|---|---|---|---|
+| Recorded (UTC) | 05:39:48 to 05:48:49 | 06:16:20 to 06:25:46 | 07:14:43 to 07:24:15 |
+| Calls, all `completed`, stage `standalone_verification`, `gemini-3.1-pro-preview` | 41 | 41 | 41 |
+| Ledger paper family suffix (`standalone-calibration:standalone-calibration-v2:`) | `2a7b6da0146b` | `144b05368c26` | the v6 prompt hash prefix, in the ledger |
+| Spend | USD 0.238626 | USD 0.244198 | USD 0.262088 |
+| Cassette (copied into this directory) | `...cassette.v4.jsonl`, sha256 `0d4a0eff...` | `...cassette.v5.jsonl`, sha256 `ebd1cfe2...` | `...cassette.v6.jsonl`, sha256 `68ff6bc2...` |
+| Report (copied into this directory) | `calibration-report-9f4cb18-ch3.v4.json` | `calibration-report-61d2ea6-ch3.v5.json` | `calibration-report-e2a8cba-ch3.v6.json` |
+| Must-pass | 20 of 20 | 17 of 20 | 19 of 20 (14 of 14 core, 5 of 5 held-out, 0 of 1 seen) |
+| Must-fail | 18 of 21; 3 held-out controls passed | 20 of 21; 1 held-out control passed | 21 of 21 |
+| Release rule | not met | not met | met |
 
-Ledger after the second recording: spent 54.533621, inflight 0, not halted, `integrity_valid` true, construction headroom USD 19.403512.
+Ledger after the third recording: spent 54.795709, inflight 0, not halted at that time, `integrity_valid` true, construction headroom USD 19.141424.
+The one v6 must-pass miss is `aqa-a355163ada6a2e646d0e` ("RMS error" of the ITP 103 reconstruction, unit not named), a seen row; the v6 judge still reads `undefined_measured_variable` on it although the clause names "RMS error" as a metric that implies its unit.
+The must-pass rate of 95 percent is above the 80 percent floor.
+The v5 and v6 results stand as evidence for a later prompt slice.
 
 **The v4 misses** (both labelers, judge):
 
@@ -157,24 +162,43 @@ The unit clause now kills two named quantities ("mean net N2O flux", "RMS error"
 The v4 judge already passed the krill row, so that miss is not new to v5; it is a comparison-basis defect that neither prompt names.
 The must-pass rate (17 of 20, 85 percent) is above the 80 percent floor, but one must-fail violation fails the rule on its own.
 
-## 6. The launch
+## 6. The launch and the halt
 
-Not performed.
-No tmux session `arctic-ch3-production-r1` exists, no producer process runs, and no request of the run other than the 41 calibration calls is in the ledger.
-The launcher `launcher-61d2ea6-ch3.sh` is ready and names the `61d2ea6` runtime, the successor gate, the ledger transition applied under the `9f4cb18` gate, the policy v9 and every input of section 4.
-`build-activation.py 61d2ea6 launch` refuses to start while the calibration record says `passed: false`.
+Launched at 2026-09-16 07:24:36 UTC by `build-activation.py e2a8cba launch`: tmux session `arctic-ch3-production-r1`, pane `%29`, producer PID 3595066, launcher `launcher-e2a8cba-ch3.sh`, runtime `app-e2a8cba-arctic-ch3-production-run-r1`, gate sha256 `8e6a2123...`.
+The receipt `activation-receipt-e2a8cba-ch3.json` recorded a fresh progress observation at 07:24:41 UTC: state `running`, stage `eligibility`, 4420 papers ready, 0 completed.
+
+At 07:24:51 UTC the first paid call of the run, the eligibility screening of paper 1 (`10.37482/issn2221-2698.2025.59.44`, family `family-4a182d987f95fb00f5ed`, `gemini-3.8-flash`, prompt v8, schema v4), returned HTTP 400 from `generateContent` after `countTokens` had accepted the same request at 23,298 input tokens.
+The broker booked the reservation of USD 0.048194 as an ambiguous charge (`known_http_response_unknown_charge`), halted the ledger (`ambiguous_generation_charge`), and the producer stopped itself with `AMBIGUOUS_CHARGE` at 07:24:53 UTC.
+The tmux session ended with it.
+No paper was screened, no eligibility row was written, and no other request of the run exists.
+
+| Quantity | Value |
+|---|---|
+| Request key | `585436686ba860d2a789530888a8a8d15d11045d7489df09d62f53344190d680` |
+| Receipt, request trace | `model-receipts/<key>.json`, `model-receipts/<key>.request-trace.json` |
+| Ledger after | halted, reason `ambiguous_generation_charge`, inflight 0, ambiguous reserved USD 0.140842 (0.092648 chapter 2 plus this 0.048194), spent 54.795709, `integrity_valid` true |
+| Provider error body | not on record: the broker keeps the status code and `Retry-After` only |
+
+What is known and what is not:
+
+- Schema v4 and prompt v8 had never been sent live (integration report, section 12: "The eligibility re-screen and prompt v8 have no live calibration").
+- Compared with schema v3, which chapter 2 sent 202 times without a 400, schema v4 adds only one JSON-schema keyword (`description`), one nested object type in `activity_spans`, and an 18-value enum for the reason codes. None of these is documented as unsupported, so the cause is not settled from the artifacts.
+- A 400 is a request rejection, so a charge is unlikely, but the broker's rule books every known HTTP response without usage as an unknown charge, and this report does not relax it.
+- The reviewed ambiguous-continuation release in the broker accepts `known_http_response_unknown_charge` only for a 5xx status (`_is_server_error_status`). A 400 halt has no release path in the deployed code.
+
+A relaunch without a diagnosis would repeat the same call and the same halt on paper 1.
 
 ## 7. The eligibility watch
 
-Not reached.
-`build-activation.py 61d2ea6 watch-eligibility` implements rule 5: after the producer passes paper 20, it reads the last row of each of the first 20 papers in frozen order.
-If more than 5 are `screening_error` or `unresolved_rescreenable`, it waits for zero in-flight requests, sends SIGINT and records the interrupt.
+Not reached: no paper was screened.
+`build-activation.py e2a8cba watch-eligibility` implements rule 5 (after the producer passes paper 20, read the last row of each of the first 20 papers; more than 5 `screening_error` or `unresolved_rescreenable` rows interrupt at a zero-in-flight boundary).
+The watch ran once after the halt and recorded 0 papers with rows in `eligibility-watch-e2a8cba-ch3.json`.
 
 ## 8. The first phase E readout
 
 `phase_e_measures.py` is in this directory and in the deployed runtime.
 On the chapter 2 artifacts it reproduces the yield audit's values: 38 of 200 screening errors, USD 19.995149 over 6 items, USD 3.3325 per item, and the stage costs of the audit cost summary.
-On the chapter 3 artifacts it has nothing to read yet, because the run did not start.
+On the chapter 3 artifacts it has nothing to read: the run halted before its first eligibility row.
 The command for the run is:
 
 ```
@@ -208,7 +232,9 @@ The offline calibration tests pin the v5 clauses and the `seen` slice.
 
 | Item | Owner |
 |---|---|
-| The second launch decision. The v5 judge is over-strict on two named quantities without a unit and on a counted sample set, and under-strict on one comparison-basis control. Options this report sees: (a) a v6 prompt that narrows the unit clause to quantities with no name at all (or with a bare word such as "value" or "concentration"), narrows the sample clause to quantities that vary with the sample type, adds a comparison-basis clause for "higher", "lower" or "more" with no stated baseline, then a third recording at about USD 0.24; (b) launch on the v4 or the v5 judge as recorded, with the misses on record. Relabeling rows is not proposed: both labelers agree on every row. | firstmate and captain |
-| The exporter rebind to the chapter 3 runtime (step 7 of the pattern) waits for the launch, so the dataset page keeps showing the chapter 2 snapshot until then. | this task, after the decision |
+| The 400 halt. Options this report sees: (a) a broker change that keeps the HTTP error body in the ambiguous receipt, plus a reviewed release path for a 4xx `known_http_response_unknown_charge` (a documented request rejection), then a reviewed continuation of `585436686ba8...` and a relaunch that captures the message; (b) one authorized diagnostic `generateContent` call with the exact traced payload, outside the producer, to read the 400 message before any code change; (c) revert the eligibility request to prompt v7 and schema v3 for chapter 3, which chapter 2 sent live 202 times, and record that the v8 re-screen is untested. Every option is a rule or scope decision above this task. | firstmate and captain |
+| Merge local `main` (`76eba30`) into the branch with a merge commit and rerun the abstention tests, before "ready in branch" (inbox message 002). Not done: the task is blocked before that point. | this task |
+| The exporter rebind to the chapter 3 runtime (step 7 of the pattern) waits for a running producer, so the dataset page keeps showing the chapter 2 snapshot. | this task, after the halt clears |
 | Measures 4 and 5 (reader labels) are outside this task. | phase E |
-| The `standalone-calibration` paper family in the shared ledger is bound to set v2 and prompt hash `2a7b6da0146b`; a re-recording under a new prompt binds a new family. | whoever revises the prompt |
+| The v6 judge's one must-pass miss ("RMS error") and the v5 evidence are input for a later prompt slice. | a later judge slice |
+| Three `standalone-calibration` paper families exist in the shared ledger, one per recorded prompt hash. | whoever revises the prompt |

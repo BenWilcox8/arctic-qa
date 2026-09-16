@@ -1,0 +1,651 @@
+{
+  "call_states": [
+    "completed"
+  ],
+  "calls": 123,
+  "cassette": "/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-ch3-production-run-r1/standalone-calibration-v2.cassette.jsonl",
+  "cassette_sha256": "68ff6bc2d69ec10161d436cb58ea49d3b2d32fb0db5b33bc29de1681cd868f3e",
+  "exit_code": 0,
+  "finished_at_utc": "2026-09-16T07:24:15Z",
+  "ledger_halted_after": false,
+  "ledger_inflight_after": 0,
+  "ledger_request_delta": 41,
+  "ledger_sha256_after": "54ff372a7fd2d9c22f2ff4cd1e87edb33ce72469679ccf4500e6b91c00b24c56",
+  "ledger_spent_delta_usd": "0.262088",
+  "must_fail_violations": [],
+  "must_pass_passed": 19,
+  "must_pass_total": 20,
+  "paper_id": "standalone-calibration:standalone-calibration-v2:144b05368c26",
+  "passed": true,
+  "report": {
+    "calibration_set_version": "standalone-calibration-v2",
+    "cassette": "/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-ch3-production-run-r1/standalone-calibration-v2.cassette.jsonl",
+    "cassette_contract_version": "standalone-calibration-cassette-v1",
+    "cassette_recorded_at_utc": "2026-09-16T07:24:14.935305+00:00",
+    "contract_version": "source-blind-scientific-referent-v6",
+    "must_fail_violations": [],
+    "must_pass_passed": 19,
+    "must_pass_rate": "0.95",
+    "must_pass_rate_required": "0.8",
+    "must_pass_total": 20,
+    "parameters": {
+      "billable_token_overhead": 1024,
+      "max_tokens": 2048,
+      "reasoning_token_cap": 2048,
+      "temperature": 0
+    },
+    "passed": true,
+    "provider": "gemini",
+    "record": "cassette_header",
+    "recorded_at_utc": "2026-09-16T07:24:14.935305+00:00",
+    "requested_model": "gemini-3.1-pro-preview",
+    "rows": [
+      {
+        "item_id": "aqa-c41f7b966ed75ade3d86",
+        "judge_pass": true,
+        "judge_reasons": [],
+        "label": "must_pass",
+        "passed": true,
+        "reasons": [],
+        "review_rationale": "The task asks for a specific percentage of glacially-sourced iron that is potentially bioavailable prior to biogeochemical cycling. All referents are clear and self-contained. No necessary details are missing.",
+        "slice": "core",
+        "unresolved_phrases": []
+      },
+      {
+        "item_id": "aqa-59d163e551f1bd921ed3",
+        "judge_pass": true,
+        "judge_reasons": [],
+        "label": "must_pass",
+        "passed": true,
+        "reasons": [],
+        "review_rationale": "The task clearly asks for the bacterial phyla identified as abundant in nine soil samples from a specified location (London Island, Svalbard). All referents are defined and no necessary details are missing.",
+        "slice": "core",
+        "unresolved_phrases": []
+      },
+      {
+        "item_id": "aqa-d78c4e56e9c4ba136fbf",
+        "judge_pass": true,
+        "judge_reasons": [],
+        "label": "must_pass",
+        "passed": true,
+        "reasons": [],
+        "review_rationale": "The task asks for the abundant bacterial phyla identified in nine soil samples from an Arctic lake area on London Island, Svalbard. The context provides the study design (four sites, nine soil samples, three sediment samples). All referents are clear and no necessary details are missing.",
+        "slice": "core",
+        "unresolved_phrases": []
+      },
+      {
+        "item_id": "aqa-430c0f90a7a08e3649ed",
+        "judge_pass": true,
+        "judge_reasons": [],
+        "label": "must_pass",
+        "passed": true,
+        "reasons": [],
+        "review_rationale": "The task clearly asks for the abundant bacterial phyla in the nine soil samples from the described study on London Island, Svalbard. All referents are defined and no necessary details are missing.",
+        "slice": "core",
+        "unresolved_phrases": []
+      },
+      {
+        "item_id": "aqa-c5dda2a6e05032b16358",
+        "judge_pass": true,
+        "judge_reasons": [],
+        "label": "must_pass",
+        "passed": true,
+        "reasons": [],
+        "review_rationale": "The task asks for the number of groups into which 12 samples were clustered based on OTU cluster analysis. The referents (Hill, Up, Down, Sedi sampling sites, 12 samples, OTU cluster analysis) are all defined in the text. The task is interpretable without the source paper.",
+        "slice": "core",
+        "unresolved_phrases": []
+      },
+      {
+        "item_id": "aqa-950e9ae4b70336903e74",
+        "judge_pass": true,
+        "judge_reasons": [],
+        "label": "must_pass",
+        "passed": true,
+        "reasons": [],
+        "review_rationale": "The task asks for a count of groups from a cluster analysis of 12 samples. The prompt explicitly states that a sample set that the task only counts does not need its sample type. All referents are clear and no necessary details are missing.",
+        "slice": "core",
+        "unresolved_phrases": []
+      },
+      {
+        "item_id": "aqa-3965238d4821bc9ca3b8",
+        "judge_pass": true,
+        "judge_reasons": [],
+        "label": "must_pass",
+        "passed": true,
+        "reasons": [],
+        "review_rationale": "The task asks for the sea ice condition at a specific station (74.5 \u00b0N) during a specific period (summer solstice under Midnight Sun) in a described study. All referents are clearly defined in the text, and the task is interpretable without the source paper.",
+        "slice": "core",
+        "unresolved_phrases": []
+      },
+      {
+        "item_id": "aqa-1c26e80c0b4cd1221363",
+        "judge_pass": true,
+        "judge_reasons": [],
+        "label": "must_pass",
+        "passed": true,
+        "reasons": [],
+        "review_rationale": "The task asks for the sea ice condition observed at a specific station (the southern station at 74.5 \u00b0N) during a specific study (investigating daily transcriptomes of Calanus finmarchicus during the Midnight Sun at the summer solstice). The answer type is a description of a condition (e.g., 'ice-free', 'pack ice'). All referents are defined in the text. No necessary details are missing.",
+        "slice": "core",
+        "unresolved_phrases": []
+      },
+      {
+        "item_id": "aqa-497edf069890264bbc11",
+        "judge_pass": true,
+        "judge_reasons": [],
+        "label": "must_pass",
+        "passed": true,
+        "reasons": [],
+        "review_rationale": "The task asks for the sea ice condition at a specific station during a specific sampling event. The station is identified by its coordinate and relative position in a two-station design, and the event is identified by the summer solstice. All referents are clear and no necessary details are missing.",
+        "slice": "core",
+        "unresolved_phrases": []
+      },
+      {
+        "item_id": "aqa-4879bbe8febc48c0b1aa",
+        "judge_pass": true,
+        "judge_reasons": [],
+        "label": "must_pass",
+        "passed": true,
+        "reasons": [],
+        "review_rationale": "The task asks for a specific mean value (net N2O flux) for a defined location (Stordalen permafrost peatland) and sample size (n = 1383). The metric 'net N2O flux' implies its unit convention, as specified in the guidelines. All referents are clear and no necessary details are missing.",
+        "slice": "core",
+        "unresolved_phrases": []
+      },
+      {
+        "item_id": "aqa-d70953c06bd3bf1fde05",
+        "judge_pass": true,
+        "judge_reasons": [],
+        "label": "must_pass",
+        "passed": true,
+        "reasons": [],
+        "review_rationale": "The task asks which environment (lake or wetland) exhibited a higher potential for methane cycling based on McrA transcript analyses. The answer is a category (lake or wetland). All referents are defined in the context (lake, adjacent wetland, McrA transcripts, sediment bacterial and archaeal communities). No necessary details are missing.",
+        "slice": "core",
+        "unresolved_phrases": []
+      },
+      {
+        "item_id": "aqa-e664f7dc39ba775368b8",
+        "judge_pass": true,
+        "judge_reasons": [],
+        "label": "must_pass",
+        "passed": true,
+        "reasons": [],
+        "review_rationale": "The task asks for the relationship (how Cw varies) with an increasing stability parameter (\u00b5) during a specific transition period at 5 m depth. The context defines Cw as the drag coefficient. All referents are clear and no necessary details are missing.",
+        "slice": "core",
+        "unresolved_phrases": []
+      },
+      {
+        "item_id": "aqa-1844f8d56386aafd806d",
+        "judge_pass": true,
+        "judge_reasons": [],
+        "label": "must_pass",
+        "passed": true,
+        "reasons": [],
+        "review_rationale": "The task asks for a percentage of parasitism in a specific sample (Sympistis nigrita collected in 2011, n = 457). All referents are clearly defined and no necessary details are missing.",
+        "slice": "core",
+        "unresolved_phrases": []
+      },
+      {
+        "item_id": "aqa-adfe6c6aed58bb7d06c5",
+        "judge_pass": true,
+        "judge_reasons": [],
+        "label": "must_pass",
+        "passed": true,
+        "reasons": [],
+        "review_rationale": "The task asks for the contents of the final matrix after specific filtering steps on a defined dataset of 12 plant samples. All referents are clear and the question is interpretable without the source paper.",
+        "slice": "core",
+        "unresolved_phrases": []
+      },
+      {
+        "item_id": "aqa-b0b612392ec0742dabdb",
+        "judge_pass": false,
+        "judge_reasons": [
+          "undefined_acronym"
+        ],
+        "label": "must_fail",
+        "passed": false,
+        "reasons": [
+          "standalone_undefined_acronym"
+        ],
+        "review_rationale": "The acronym 'ITPs' is used in the question but is never expanded or defined in the displayed text.",
+        "slice": "core",
+        "unresolved_phrases": [
+          "ITPs"
+        ]
+      },
+      {
+        "item_id": "aqa-0537a12f5a9d2d56db8f",
+        "judge_pass": false,
+        "judge_reasons": [
+          "undefined_measured_variable"
+        ],
+        "label": "must_fail",
+        "passed": false,
+        "reasons": [
+          "standalone_det_question_context_missing",
+          "standalone_undefined_measured_variable"
+        ],
+        "review_rationale": "The phrase 'perform better' does not specify the metric used to evaluate performance (e.g., RMSE, bias, correlation), leaving the measured variable undefined.",
+        "slice": "core",
+        "unresolved_phrases": [
+          "perform better"
+        ]
+      },
+      {
+        "item_id": "aqa-2de4e3ca7ea4e892a26b",
+        "judge_pass": false,
+        "judge_reasons": [
+          "undefined_acronym"
+        ],
+        "label": "must_fail",
+        "passed": false,
+        "reasons": [
+          "standalone_det_question_context_missing",
+          "standalone_undefined_acronym"
+        ],
+        "review_rationale": "The acronym 'GHSZ' is used in the question but is never expanded in the displayed text.",
+        "slice": "core",
+        "unresolved_phrases": [
+          "GHSZ"
+        ]
+      },
+      {
+        "item_id": "aqa-0d9e43ed311f31ccd936",
+        "judge_pass": false,
+        "judge_reasons": [
+          "undefined_acronym"
+        ],
+        "label": "must_fail",
+        "passed": false,
+        "reasons": [
+          "standalone_det_question_context_missing",
+          "standalone_undefined_acronym"
+        ],
+        "review_rationale": "The task uses the unexpanded experiment labels 'CTL' and 'NoAraon', which cannot be interpreted without the source paper.",
+        "slice": "core",
+        "unresolved_phrases": [
+          "CTL",
+          "NoAraon"
+        ]
+      },
+      {
+        "item_id": "aqa-69529d1c73565c373c82",
+        "judge_pass": false,
+        "judge_reasons": [
+          "source_dependent_locator"
+        ],
+        "label": "must_fail",
+        "passed": false,
+        "reasons": [
+          "standalone_det_source_dependent_locator",
+          "standalone_source_dependent_locator"
+        ],
+        "review_rationale": "The task asks for a value in 'the fourth column' of 'the reported tabular data'. These are pointers to source material that the reader cannot see, making the task uninterpretable without the paper.",
+        "slice": "core",
+        "unresolved_phrases": [
+          "the fourth column",
+          "the reported tabular data"
+        ]
+      },
+      {
+        "item_id": "aqa-ac041676dc19b3055d5c",
+        "judge_pass": false,
+        "judge_reasons": [
+          "undefined_period_or_event"
+        ],
+        "label": "must_fail",
+        "passed": false,
+        "reasons": [
+          "standalone_det_publication_relative_period",
+          "standalone_undefined_period_or_event"
+        ],
+        "review_rationale": "The phrase 'the past 20 years' defines a period relative to the publication date, which is not provided in the displayed text. This makes the period undefined.",
+        "slice": "core",
+        "unresolved_phrases": [
+          "the past 20 years"
+        ]
+      },
+      {
+        "item_id": "aqa-ce20675201e750a1ed2c",
+        "judge_pass": false,
+        "judge_reasons": [
+          "malformed_text"
+        ],
+        "label": "must_fail",
+        "passed": false,
+        "reasons": [
+          "standalone_det_benchmark_text_malformed",
+          "standalone_malformed_text"
+        ],
+        "review_rationale": "The displayed text contains a garbled insertion in the middle of a word: 'pri-              first to ascertain nutrient limitation in melt ponds. We also\\nmary production'. This makes the text malformed.",
+        "slice": "core",
+        "unresolved_phrases": [
+          "pri-              first to ascertain nutrient limitation in melt ponds. We also\nmary production"
+        ]
+      },
+      {
+        "item_id": "aqa-46f97018fd684214a349",
+        "judge_pass": false,
+        "judge_reasons": [
+          "undefined_location"
+        ],
+        "label": "must_fail",
+        "passed": false,
+        "reasons": [
+          "standalone_det_question_context_missing",
+          "standalone_undefined_location"
+        ],
+        "review_rationale": "The phrase 'the lake and wetland' is a definite description with no antecedent in the task, leaving the location or specific system undefined.",
+        "slice": "core",
+        "unresolved_phrases": [
+          "the lake and wetland"
+        ]
+      },
+      {
+        "item_id": "aqa-f4c3865d97eea7c26c05",
+        "judge_pass": false,
+        "judge_reasons": [
+          "undefined_location",
+          "source_dependent_locator"
+        ],
+        "label": "must_fail",
+        "passed": false,
+        "reasons": [
+          "standalone_det_benchmark_text_malformed",
+          "standalone_undefined_location",
+          "standalone_source_dependent_locator"
+        ],
+        "review_rationale": "The phrase 'this archipelago' is a definite description with no antecedent, leaving the location undefined. Additionally, the phrase 'are noted when stating that' points to a specific statement in the unseen source text.",
+        "slice": "core",
+        "unresolved_phrases": [
+          "this archipelago",
+          "are noted when stating that"
+        ]
+      },
+      {
+        "item_id": "aqa-5296cfd429f04af1877a",
+        "judge_pass": false,
+        "judge_reasons": [
+          "answer_leakage"
+        ],
+        "label": "must_fail",
+        "passed": false,
+        "reasons": [
+          "question_answer_leakage",
+          "standalone_answer_leakage"
+        ],
+        "review_rationale": "The question asks for the estimated value and standard error (\u03b2) for the peak activity, but it explicitly states 'given as \"\u03b2 = 1.73 \u00b1 0.17\"' in the question text itself. This is answer leakage.",
+        "slice": "core",
+        "unresolved_phrases": []
+      },
+      {
+        "item_id": "aqa-3af119e6f5b0e447d8fd",
+        "judge_pass": false,
+        "judge_reasons": [
+          "answer_leakage",
+          "undefined_population_or_sample"
+        ],
+        "label": "must_fail",
+        "passed": false,
+        "reasons": [
+          "standalone_det_benchmark_text_malformed",
+          "standalone_answer_leakage",
+          "standalone_undefined_population_or_sample"
+        ],
+        "review_rationale": "The task asks for a percentage that is already provided as a fraction ('2 out of 72'), which constitutes answer leakage. Additionally, the phrase 'the combined expeditions' is a definite description with no antecedent in the text.",
+        "slice": "core",
+        "unresolved_phrases": [
+          "the combined expeditions"
+        ]
+      },
+      {
+        "item_id": "aqa-0e07e2ac78c048db8c31",
+        "judge_pass": false,
+        "judge_reasons": [
+          "answer_leakage"
+        ],
+        "label": "must_fail",
+        "passed": false,
+        "reasons": [
+          "standalone_det_benchmark_text_malformed",
+          "standalone_answer_leakage"
+        ],
+        "review_rationale": "The question asks 'what percentage equals the overall frequency of occurrence of non-fibrous microplastic particles found in 2 out of 72 polar cods?'. The answer is mathematically derivable from the question itself (2 / 72 = 2.77%), which constitutes answer leakage.",
+        "slice": "core",
+        "unresolved_phrases": []
+      },
+      {
+        "item_id": "aqa-bee40b6e31a626d3d328",
+        "judge_pass": true,
+        "judge_reasons": [],
+        "label": "must_pass",
+        "passed": true,
+        "reasons": [],
+        "review_rationale": "The task asks for the mean age of the participating mine workers who completed the questionnaire. The context provides the sample size (1323 workers) and the locations (mines in Finland, Norway, Russia, and Sweden). All referents are clear and no necessary details are missing.",
+        "slice": "held_out",
+        "unresolved_phrases": []
+      },
+      {
+        "item_id": "aqa-ee5df9adc713fa735272",
+        "judge_pass": true,
+        "judge_reasons": [],
+        "label": "must_pass",
+        "passed": true,
+        "reasons": [],
+        "review_rationale": "The task asks for a specific count (maximum number of recorded nudibranch species during a single locality survey) and provides sufficient context about the study location, habitats, and duration. All referents are clear and no necessary details are missing.",
+        "slice": "held_out",
+        "unresolved_phrases": []
+      },
+      {
+        "item_id": "aqa-a355163ada6a2e646d0e",
+        "judge_pass": false,
+        "judge_reasons": [
+          "undefined_measured_variable"
+        ],
+        "label": "must_pass",
+        "passed": false,
+        "reasons": [
+          "standalone_undefined_measured_variable"
+        ],
+        "review_rationale": "The task asks for the RMS error in reconstruction of ITP 103, but it does not specify the unit of the RMS error (e.g., meters, kilometers, cm/s).",
+        "slice": "seen",
+        "unresolved_phrases": [
+          "RMS error"
+        ]
+      },
+      {
+        "item_id": "aqa-2d68deb63c8686378cef",
+        "judge_pass": true,
+        "judge_reasons": [],
+        "label": "must_pass",
+        "passed": true,
+        "reasons": [],
+        "review_rationale": "The task asks for the RMS error in reconstruction of ITP 103. The context defines ITP as Ice-Tethered Profiler buoys. The unit is implied by the comparison value (0.078 km). All referents are defined.",
+        "slice": "held_out",
+        "unresolved_phrases": []
+      },
+      {
+        "item_id": "aqa-a924258eebdf6e5157b0",
+        "judge_pass": true,
+        "judge_reasons": [],
+        "label": "must_pass",
+        "passed": true,
+        "reasons": [],
+        "review_rationale": "The task asks for a rate (in days per year) at which the 95% quantile date of fall migration for the bowhead whale occurred later between 2008 and 2018. The context provides the location (Beaufort shelfbreak jet, DBO Region 6, 71.4\u00b0N, 152.0\u00b0W) and the method (acoustic data via hydrophone). All referents are clear and the task is interpretable without the source paper.",
+        "slice": "held_out",
+        "unresolved_phrases": []
+      },
+      {
+        "item_id": "aqa-7395ea4c47eda89b6268",
+        "judge_pass": true,
+        "judge_reasons": [],
+        "label": "must_pass",
+        "passed": true,
+        "reasons": [],
+        "review_rationale": "The task asks for a specific count (number of gouges) found during a named cruise (52nd cruise of RV 'Akademik Nikolaj Strakhov') in a named location (Kara Sea). All referents are clear and no necessary details are missing.",
+        "slice": "held_out",
+        "unresolved_phrases": []
+      },
+      {
+        "item_id": "aqa-69212ceec983481ba3b4",
+        "judge_pass": false,
+        "judge_reasons": [
+          "undefined_measured_variable"
+        ],
+        "label": "must_fail",
+        "passed": false,
+        "reasons": [
+          "standalone_undefined_measured_variable"
+        ],
+        "review_rationale": "The task asks for an 'airborne fungal concentration value' but does not name or imply the unit of measurement (e.g., CFU/m3, spores/m3).",
+        "slice": "seen",
+        "unresolved_phrases": [
+          "airborne fungal concentration value"
+        ]
+      },
+      {
+        "item_id": "aqa-75eec503337a30ec9192",
+        "judge_pass": false,
+        "judge_reasons": [
+          "undefined_population_or_sample"
+        ],
+        "label": "must_fail",
+        "passed": false,
+        "reasons": [
+          "standalone_undefined_population_or_sample"
+        ],
+        "review_rationale": "The task asks for the relative abundance in 'samples from Resolute Bay' but does not specify the sample type (e.g., water, soil, ice, biological tissue).",
+        "slice": "seen",
+        "unresolved_phrases": [
+          "samples from Resolute Bay"
+        ]
+      },
+      {
+        "item_id": "aqa-da1169b9217f1a161cfe",
+        "judge_pass": false,
+        "judge_reasons": [
+          "undefined_location",
+          "undefined_subject_or_system"
+        ],
+        "label": "must_fail",
+        "passed": false,
+        "reasons": [
+          "standalone_undefined_location",
+          "standalone_undefined_subject_or_system"
+        ],
+        "review_rationale": "The task uses the unexpanded station code 'Station #4' and the definite description 'the floe' without an antecedent in the text, making it impossible to resolve these referents without the source paper.",
+        "slice": "held_out",
+        "unresolved_phrases": [
+          "Station #4",
+          "the floe"
+        ]
+      },
+      {
+        "item_id": "aqa-9a23291d1740d9e3e81f",
+        "judge_pass": false,
+        "judge_reasons": [
+          "source_dependent_locator"
+        ],
+        "label": "must_fail",
+        "passed": false,
+        "reasons": [
+          "standalone_source_dependent_locator"
+        ],
+        "review_rationale": "The task asks for the statistical measure denoted by numbers outside parentheses in an 'overview table'. This is a source-dependent locator ('In the overview table... showing turning angles') that points to a specific formatting choice in a table the reader cannot see.",
+        "slice": "held_out",
+        "unresolved_phrases": [
+          "the overview table"
+        ]
+      },
+      {
+        "item_id": "aqa-556e4fe34fa790311e30",
+        "judge_pass": false,
+        "judge_reasons": [
+          "undefined_measured_variable"
+        ],
+        "label": "must_fail",
+        "passed": false,
+        "reasons": [
+          "standalone_undefined_measured_variable"
+        ],
+        "review_rationale": "The task asks for the 'smallest interval' but does not state or imply the unit of measurement (e.g., seconds, minutes) for the interval.",
+        "slice": "held_out",
+        "unresolved_phrases": [
+          "smallest interval"
+        ]
+      },
+      {
+        "item_id": "aqa-590325c3fba229c0e14f",
+        "judge_pass": false,
+        "judge_reasons": [
+          "undefined_comparison_basis"
+        ],
+        "label": "must_fail",
+        "passed": false,
+        "reasons": [
+          "standalone_undefined_comparison_basis"
+        ],
+        "review_rationale": "The task asks for a 'percentage higher' but does not state the baseline for the comparison (e.g., higher than what?).",
+        "slice": "seen",
+        "unresolved_phrases": [
+          "percentage higher"
+        ]
+      },
+      {
+        "item_id": "aqa-ada85a8246f0e1d0a319",
+        "judge_pass": false,
+        "judge_reasons": [
+          "source_dependent_locator"
+        ],
+        "label": "must_fail",
+        "passed": false,
+        "reasons": [
+          "standalone_source_dependent_locator"
+        ],
+        "review_rationale": "The phrase 'listed in association with' points to a list or record in the source paper that the reader cannot see. An empty question context does not excuse this.",
+        "slice": "seen",
+        "unresolved_phrases": [
+          "listed in association with"
+        ]
+      },
+      {
+        "item_id": "aqa-d66dc0e51a5bfdaa5f24",
+        "judge_pass": false,
+        "judge_reasons": [
+          "undefined_measured_variable"
+        ],
+        "label": "must_fail",
+        "passed": false,
+        "reasons": [
+          "standalone_undefined_measured_variable"
+        ],
+        "review_rationale": "The task asks for an 'orientation angle' for Herschel Island, but does not specify what feature or property of the island this angle describes (e.g., coastline orientation, geological fault, ice wedge, etc.). The measured variable is therefore undefined.",
+        "slice": "held_out",
+        "unresolved_phrases": [
+          "orientation angle"
+        ]
+      },
+      {
+        "item_id": "aqa-c622f0bb92187af40a21",
+        "judge_pass": false,
+        "judge_reasons": [
+          "undefined_location",
+          "undefined_subject_or_system"
+        ],
+        "label": "must_fail",
+        "passed": false,
+        "reasons": [
+          "standalone_undefined_location",
+          "standalone_undefined_subject_or_system"
+        ],
+        "review_rationale": "The task asks for a depth associated with furrows on the bottom, but provides no context about the location, study area, or which specific furrows are being referred to. The phrase '\u0431\u043e\u0440\u043e\u0437\u0434\u044b \u043d\u0430 \u0434\u043d\u0435' acts as a definite description with no antecedent.",
+        "slice": "held_out",
+        "unresolved_phrases": [
+          "\u0431\u043e\u0440\u043e\u0437\u0434\u044b \u043d\u0430 \u0434\u043d\u0435"
+        ]
+      }
+    ],
+    "standalone_system_sha256": "9b67586410964f6142c3d749a5dddd90a299142ab306e96ed7b2a1b68e252ccd"
+  },
+  "spent_usd": "0.744912",
+  "started_at_utc": "2026-09-16T07:14:43Z",
+  "stderr_tail": ""
+}
