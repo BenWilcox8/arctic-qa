@@ -28,6 +28,10 @@ Provider prompts tell models not to obey source instructions or call tools.
 
 ## Staged workflow
 
+Run every command from the repository root, inside the development shell.
+Enter it with `nix develop`, or use the `arctic-qa` console script of a plain Python install.
+`docs/REPRODUCTION.md`, section 2, sets both up.
+
 All commands use the default data root unless you supply a test root.
 
 ### 1. Check the environment
