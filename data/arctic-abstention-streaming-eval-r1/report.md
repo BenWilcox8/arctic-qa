@@ -686,11 +686,23 @@ The new tests cover:
 
 ### 9.1 Whole test suite
 
-`nix develop -c bash -c 'PYTHONPATH=src pytest tests -o addopts="" -q'`: 1260 passed in 13 minutes 41 seconds, at commit `ffecccc`.
-That run covers every change of this task, the per-call option order included.
-`ruff check src tests` passes.
-`ruff format --check` passes on every file this task touched.
-Six abstention files were already unformatted before this branch. Three of them hold the new tests of this task. Every new line in them is format-clean, and the pre-existing lines are untouched.
+`nix develop -c bash -c 'PYTHONPATH=src pytest tests -o addopts="" -q'`.
+
+| Run | Result |
+| --- | --- |
+| Commit `ffecccc`, before the rebase | 1260 passed in 13 minutes 41 seconds |
+| Commit `82ff5cc`, the restored branch | 1298 passed, 1 failed in 18 minutes 13 seconds |
+| Commit `598c34b`, the branch on main `ec0ba98` | 1344 passed in 17 minutes 42 seconds |
+
+The one failure of the second run was the reviewed chapter 2 MAX_TOKENS continuation, whose case matches its receipt by the exact usage message.
+The widened usage rule of `183779b` changed that message for a record that omits both token counts.
+Commit `3c45273` restores it, and the expansion crew's commit `09fd733` widens the case to accept either message, so the two fixes compose.
+That defect was on `main`, not only on this branch: it broke a money-settlement path, and no named suite of this task covered it.
+
+The third run also found two tests of this task that read the committed pause file, which is operational: an operator or the cost guard edits it while a run goes on.
+Commit `598c34b` gives those tests their own record and asserts the committed file once, for the captain's standing entry.
+
+`ruff check src tests` passes. `ruff format --check src tests` passes on all 115 files.
 
 ## 10. The captain's instructions, in his words
 
