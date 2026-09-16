@@ -12,12 +12,14 @@ from arctic_qa.abstention_providers import (
     evaluation_payload,
     scripted_key,
 )
-from arctic_qa.abstention_render import prompt_sha256
+from arctic_qa.abstention_render import PROMPT_VERSION, prompt_sha256
 from arctic_qa.abstention_run import write_evaluation_gate
 from arctic_qa.abstention_set import write_eval_set
 from arctic_qa.model_broker import (
+    EVALUATION_CEILING_CHANGES,
     EVALUATION_CEILING_REASON,
     EVALUATION_PHASE,
+    EVALUATION_POLICY_TRANSITION_SCHEMA,
     PER_REQUEST_CAP_REASON,
     SharedGeminiBroker,
     broker_request_key,
@@ -25,7 +27,7 @@ from arctic_qa.model_broker import (
     is_evaluation_stage,
     stage_supported,
 )
-from arctic_qa.util import sha256_file
+from arctic_qa.util import canonical_json, sha256_bytes, sha256_file
 from test_abstention_render import item
 from test_model_broker import Transport, payload, write_json
 
@@ -136,7 +138,7 @@ def bind(values: dict, **changes: object) -> None:
         "models": values["models"],
         "arms": values["arms"],
         "repeats": values["repeats"],
-        "prompt_version": "abstention-eval-prompt-v1",
+        "prompt_version": PROMPT_VERSION,
         "prompt_sha256": prompt_sha256(),
         "abstention_option_text": "I abstain from answering",
         "decoding": values["decoding"],
@@ -533,14 +535,14 @@ def test_ambiguous_evaluation_charge_halts_only_the_evaluation_phase(
     Firstmate instruction, 2026-09-16: a `benchmark_evaluation` request that
     ends ambiguous pauses the evaluation phase only, with its own halt flag and
     reason in the evaluation block, while construction continues under its own
-    ceiling. On 2026-09-16 one evaluation call halted the whole shared ledger
-    and the chapter 3 production producer exited.
+    ceiling.
     """
     values = evaluation_fixture(tmp_path, transport=Transport(failure="generate"))
     bind(values)
     receipt = execute(values, trial_id="t1")
     assert receipt["state"] == "ambiguous_charge"
     status = values["broker"].status()
+    # The ledger itself is not halted; the evaluation phase is.
     assert status["halted"] is False and status["halt_reason"] is None
     assert status["evaluation"]["halted"] is True
     assert status["evaluation"]["phase_halted"] is True
@@ -548,7 +550,8 @@ def test_ambiguous_evaluation_charge_halts_only_the_evaluation_phase(
     assert Decimal(status["evaluation"]["ambiguous_usd"]) > 0
     assert Decimal(status["usage"]["dataset_construction_usd"]) == 0
     ledger = json.loads(values["ledger"].read_text())
-    assert ledger["halted"] is False and ledger["evaluation_halted"] is True
+    assert ledger["halted"] is False
+    assert ledger["evaluation_halted"] is True
     # A second evaluation call is refused.
     with pytest.raises(ValueError, match="halted"):
         execute(values, trial_id="t2", repeat=2)
@@ -564,6 +567,8 @@ def test_ambiguous_evaluation_charge_halts_only_the_evaluation_phase(
             "review_record": "fixture-review",
         },
     )
+    # A healthy transport for the construction call; the evaluation transport
+    # failed on purpose above.
     values["broker"].transport = Transport()
     construction_payload = payload()
     construction = values["broker"].execute(
@@ -770,3 +775,281 @@ def test_reconciliation_settles_a_recorded_omitted_candidates_charge(
     effective = broker.effective_receipt(request_key)
     assert effective["state"] == "completed"
     assert effective["usage"]["candidatesTokenCount"] == 0
+
+
+def _transition_file(
+    tmp_path: Path,
+    values: dict,
+    *,
+    source: Path,
+    target_policy: Path,
+    gate: Path,
+    review: Path,
+    predecessor: str | None = None,
+    **changes: object,
+) -> Path:
+    authorization = {
+        "schema": EVALUATION_POLICY_TRANSITION_SCHEMA,
+        "ledger_file": str(values["ledger"]),
+        "from_evaluation_transition_sha256": predecessor,
+        "from_policy_file": str(source),
+        "from_policy_sha256": sha256_file(source),
+        "to_policy_sha256": sha256_file(target_policy),
+        "changed_policy_fields": {
+            "evaluation_ceiling_usd": {"from": "5.00", "to": "200.00"}
+        },
+        "expected_ledger_sha256": sha256_file(values["ledger"]),
+        "evaluation_gate_sha256": sha256_file(gate),
+        "integrated_code_commit": "fixture-commit",
+        "review_record": str(review),
+        "review_record_sha256": sha256_file(review),
+        "reason": (
+            "Captain allocation 2026-09-16: USD 200 for benchmarking the Gemini "
+            "models on the abstention benchmark."
+        ),
+        "authorized_at_utc": "2026-09-16T11:00:00Z",
+    }
+    authorization.update(changes)
+    path = tmp_path / f"evaluation-transition-{len(list(tmp_path.glob('*.json')))}.json"
+    write_json(path, authorization)
+    return path
+
+
+def _raised_ceiling(
+    tmp_path: Path, values: dict, **changes: object
+) -> tuple[Path, Path, Path, Path]:
+    """Write the USD 200 policy, its gate and the transition file."""
+    source = values["policy"]
+    raised = tmp_path / "evaluation-policy-v3.json"
+    policy = json.loads(source.read_text())
+    policy["policy_id"] = "fixture-v3"
+    policy["evaluation_ceiling_usd"] = "200.00"
+    write_json(raised, policy)
+    gate = tmp_path / "evaluation-gate-v3.json"
+    review = tmp_path / "review.md"
+    write_evaluation_gate(
+        gate,
+        set_dir=values["set_dir"],
+        run_id=values["run_id"],
+        models=values["models"],
+        arms=values["arms"],
+        repeats_maximum=values["repeats"],
+        decoding=values["decoding"],
+        evaluation_policy_file=raised,
+        evaluation_price_config_file=values["prices"],
+        integrated_code_commit="fixture-commit",
+        review_record=review,
+    )
+    transition = _transition_file(
+        tmp_path,
+        values,
+        source=source,
+        target_policy=raised,
+        gate=gate,
+        review=review,
+        **changes,
+    )
+    return raised, gate, review, transition
+
+
+def _raised_broker(
+    tmp_path: Path, values: dict, *, raised: Path, gate: Path, transition: Path | None
+) -> SharedGeminiBroker:
+    return SharedGeminiBroker(
+        policy_file=ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
+        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=values["construction_gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=values["broker"].receipts_dir,
+        credential_file=values["broker"].credential_file,
+        prior_construction_spend_usd=Decimal("0"),
+        transport=LetterTransport(),
+        evaluation_policy_file=raised,
+        evaluation_price_config_file=values["prices"],
+        evaluation_gate_file=gate,
+        evaluation_policy_transition_file=transition,
+    )
+
+
+def test_the_shipped_policy_v3_raises_the_ceiling_to_the_captains_allocation() -> None:
+    """The USD 200 policy differs from v2 only in the ceiling and its names.
+
+    Captain allocation 2026-09-16: USD 200 for benchmarking the Gemini models.
+    The registered change set of the broker names exactly that step, so no
+    other ceiling can be applied without a code change and a review.
+    """
+    two = json.loads(
+        (ROOT / "config" / "benchmark-evaluation-policy-v2.json").read_text()
+    )
+    three = json.loads(
+        (ROOT / "config" / "benchmark-evaluation-policy-v3.json").read_text()
+    )
+    assert two["evaluation_ceiling_usd"] == "5.00"
+    assert three["evaluation_ceiling_usd"] == "200.00"
+    assert sorted(k for k in set(two) | set(three) if two.get(k) != three.get(k)) == [
+        "evaluation_ceiling_usd",
+        "policy_id",
+        "purpose",
+    ]
+    assert EVALUATION_CEILING_CHANGES == (
+        {"evaluation_ceiling_usd": {"from": "5.00", "to": "200.00"}},
+    )
+    # The reserve of the construction policy still covers the new ceiling.
+    construction = json.loads(
+        (ROOT / "config" / "streaming-dataset-budget-policy-v1.json").read_text()
+    )
+    assert Decimal(construction["reserved_for_benchmark_evaluation_usd"]) >= Decimal(
+        three["evaluation_ceiling_usd"]
+    )
+
+
+def test_a_larger_evaluation_ceiling_needs_a_reviewed_chained_transition(
+    tmp_path: Path,
+) -> None:
+    """The evaluation ceiling moves only through a reviewed chained transition.
+
+    The baseline is USD 5.00. A policy with a larger ceiling is refused until
+    a transition file, whose change set the broker registers, is applied. The
+    event is immutable, it names its predecessor, and every later start reads
+    the event instead of the file.
+    """
+    values = evaluation_fixture(tmp_path, transport=LetterTransport())
+    bind(values)
+    assert values["broker"].authorized_evaluation_ceiling_usd() == Decimal("5.00")
+    raised, gate, _, transition = _raised_ceiling(tmp_path, values)
+    # Without the transition the larger ceiling is refused.
+    with pytest.raises(ValueError, match="requires a reviewed transition"):
+        _raised_broker(tmp_path, values, raised=raised, gate=gate, transition=None)
+    broker = _raised_broker(
+        tmp_path, values, raised=raised, gate=gate, transition=transition
+    )
+    assert broker.authorized_evaluation_ceiling_usd() == Decimal("200.00")
+    status = broker.status()
+    assert Decimal(status["evaluation"]["ceiling_usd"]) == Decimal("200.00")
+    events = sorted(values["broker"].receipts_dir.glob("evaluation-policy-*.json"))
+    assert len(events) == 1
+    event = json.loads(events[0].read_text())
+    assert event["authorization"]["from_evaluation_transition_sha256"] is None
+    assert event["authorization"]["changed_policy_fields"] == {
+        "evaluation_ceiling_usd": {"from": "5.00", "to": "200.00"}
+    }
+    assert events[0].name == (
+        f"evaluation-policy-transition-{event['transition_authorization_sha256']}.json"
+    )
+    # A later start needs no transition file: the event authorizes the ceiling.
+    again = _raised_broker(tmp_path, values, raised=raised, gate=gate, transition=None)
+    assert again.authorized_evaluation_ceiling_usd() == Decimal("200.00")
+    assert (
+        len(list(values["broker"].receipts_dir.glob("evaluation-policy-*.json"))) == 1
+    )
+    # A paid call under the raised ceiling binds the transition event.
+    values["broker"] = again
+    values["gate"] = gate
+    bind(values)
+    receipt = execute(values, trial_id="raised-1")
+    assert receipt["state"] == "completed"
+    request = json.loads(values["ledger"].read_text())["requests"][
+        receipt["request_key"]
+    ]
+    assert (
+        request["evaluation_policy_transition_sha256"]
+        == event["transition_authorization_sha256"]
+    )
+    # A second event on the same predecessor forks the chain and is refused.
+    fork = _transition_file(
+        tmp_path,
+        values,
+        source=values["policy"],
+        target_policy=raised,
+        gate=gate,
+        review=tmp_path / "review.md",
+        reason="a forked authorization",
+    )
+    forked = json.loads(fork.read_text())
+    digest = sha256_bytes(canonical_json(forked).encode())
+    write_json(
+        values["broker"].receipts_dir / f"evaluation-policy-transition-{digest}.json",
+        {
+            "schema": "benchmark-evaluation-policy-transition-event-v1",
+            "authorization": forked,
+            "transition_authorization_sha256": digest,
+            "applied_at_utc": "2026-09-16T11:30:00Z",
+        },
+    )
+    with pytest.raises(ValueError, match="share one predecessor"):
+        _raised_broker(tmp_path, values, raised=raised, gate=gate, transition=None)
+
+
+def test_an_unauthorized_evaluation_ceiling_transition_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Every binding of the transition is validated before it is applied."""
+    values = evaluation_fixture(tmp_path, transport=LetterTransport())
+    bind(values)
+    raised, gate, review, _ = _raised_ceiling(tmp_path, values)
+
+    def refuse(match: str, **changes: object) -> None:
+        path = _transition_file(
+            tmp_path,
+            values,
+            source=values["policy"],
+            target_policy=raised,
+            gate=gate,
+            review=review,
+            **changes,
+        )
+        with pytest.raises(ValueError, match=match):
+            _raised_broker(tmp_path, values, raised=raised, gate=gate, transition=path)
+
+    refuse(
+        "change set is not authorized",
+        changed_policy_fields={
+            "evaluation_ceiling_usd": {"from": "5.00", "to": "500.00"}
+        },
+    )
+    refuse("names another ledger", ledger_file=str(tmp_path / "other-ledger.json"))
+    refuse("ledger snapshot changed", expected_ledger_sha256="0" * 64)
+    refuse("binds another gate", evaluation_gate_sha256="0" * 64)
+    refuse("source changed", from_policy_sha256="0" * 64)
+    refuse("target changed", to_policy_sha256="0" * 64)
+    refuse("source is absent", from_policy_file=str(tmp_path / "absent.json"))
+    refuse("names another predecessor", from_evaluation_transition_sha256="0" * 64)
+    refuse("lacks its code commit", integrated_code_commit="  ")
+    refuse("lacks its reason", reason="")
+    refuse("authorization time is invalid", authorized_at_utc="not-a-time")
+    refuse("review record is absent", review_record=str(tmp_path / "absent.md"))
+    refuse("review record changed", review_record_sha256="0" * 64)
+    refuse("transition file is invalid", schema="another-schema")
+    # A policy that also changes a control field is refused.
+    tampered = tmp_path / "tampered-policy.json"
+    policy = json.loads(raised.read_text())
+    policy["maximum_concurrent_requests"] = 8
+    write_json(tampered, policy)
+    tampered_gate = tmp_path / "tampered-gate.json"
+    write_evaluation_gate(
+        tampered_gate,
+        set_dir=values["set_dir"],
+        run_id=values["run_id"],
+        models=values["models"],
+        arms=values["arms"],
+        repeats_maximum=values["repeats"],
+        decoding=values["decoding"],
+        evaluation_policy_file=tampered,
+        evaluation_price_config_file=values["prices"],
+        integrated_code_commit="fixture-commit",
+        review_record=review,
+    )
+    path = _transition_file(
+        tmp_path,
+        values,
+        source=values["policy"],
+        target_policy=tampered,
+        gate=tampered_gate,
+        review=review,
+    )
+    with pytest.raises(ValueError, match="changes another field"):
+        _raised_broker(
+            tmp_path, values, raised=tampered, gate=tampered_gate, transition=path
+        )
+    # No event was written by any refused attempt.
+    assert list(values["broker"].receipts_dir.glob("evaluation-policy-*.json")) == []

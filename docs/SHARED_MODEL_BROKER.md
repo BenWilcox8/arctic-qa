@@ -263,6 +263,12 @@ The abstention evaluation uses the phase `benchmark_evaluation` and the stage fa
 That phase has its own policy, price config, and gate, and never counts toward construction totals.
 Read `docs/ABSTENTION_EVALUATION.md` before you meter an evaluation call.
 
+An ambiguous evaluation request halts the evaluation phase only, through the ledger field `evaluation_halted`.
+Construction continues under its own ceiling.
+
+The evaluation ceiling needs its own reviewed chained transition, with schema `benchmark-evaluation-policy-transition-v1` and the registered change set of `EVALUATION_CEILING_CHANGES`.
+The "The evaluation ceiling" section of `docs/ABSTENTION_EVALUATION.md` holds that contract.
+
 The broker checks the offline-review execution gate before it reads a credential.
 
 The broker binds each family to one paper ID and one source-version ID.
@@ -297,13 +303,17 @@ An unknown provider outcome reserves the full amount and stops the broker.
 
 Do not retry an ambiguous request.
 
-The provider can omit `thoughtsTokenCount` when its value is zero.
+The provider can omit `thoughtsTokenCount` or `candidatesTokenCount` when its value is zero.
 
 The broker uses zero only when the other three token counts are nonnegative integers.
 
-The total must equal the sum of the prompt and candidate counts.
+The total must equal the sum of the two counts the provider reported.
+
+The broker accepts one omitted count, never two.
 
 All other missing or inconsistent usage values cause an ambiguous charge.
+
+gemini-3.7-flash omitted `candidatesTokenCount` once in three calls on 2026-09-16, with a `STOP` finish reason and a one-letter answer.
 
 The broker writes an immutable response event before it settles a successful request.
 
@@ -341,7 +351,11 @@ PYTHONPATH=src python -m arctic_qa --json settle-http-rejection \
 
 ## Usage reconciliation
 
-Use reconciliation only for a saved response with the exact omitted-zero pattern.
+Use reconciliation only for a saved response with an omitted-zero pattern: an absent `thoughtsTokenCount` or an absent `candidatesTokenCount`.
+
+The receipt records which count the provider omitted, in `omitted_zero_usage_field`.
+
+An evaluation request validates the evaluation gate, and a construction-only broker reads the recorded cost instead of recomputing it, because it has no evaluation price config.
 
 The reconciliation needs a private gate for the reviewed repair commit.
 

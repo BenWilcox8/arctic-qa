@@ -489,6 +489,7 @@ def test_ledger_enforces_the_per_item_cap_and_pace(tmp_path: Path) -> None:
     trial = values["trials"][0]
     ledger.policy["maximum_requests_per_minute"] = 2
     ledger.policy["maximum_calls_per_item_condition_model_arm"] = 10
+    ledger.policy["maximum_concurrent_requests"] = 10
     assert ledger.submit("k1", trial) is None
     assert ledger.submit("k2", trial) is None
     assert ledger.submit("k3", trial) is None

@@ -44,7 +44,12 @@ from .abstention_render import (
     prompt_sha256,
     render_trial,
 )
-from .abstention_set import evaluation_identity, load_eval_set, manifest_sha256
+from .abstention_set import (
+    evaluation_identity,
+    load_eval_set,
+    manifest_sha256,
+    require_current_prompt_contract,
+)
 from .model_broker import EVALUATION_PHASE, SharedGeminiBroker
 from .util import atomic_json, canonical_json, sha256_bytes, sha256_file
 
@@ -270,7 +275,7 @@ def summarize_run(
     }
 
 
-def run_evaluation(
+def prepare_run(
     *,
     set_dir: Path,
     output_dir: Path,
@@ -280,13 +285,17 @@ def run_evaluation(
     repeats: int,
     provider: EvaluationProvider,
     decoding: dict[str, Any],
-    max_calls: int | None = None,
     code_commit: str | None = None,
     item_limit: int | None = None,
-    progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    """Run or resume one evaluation and return its summary."""
+    """Write or verify the run manifest and trials; load the recorded rows.
+
+    Returns the run manifest, the items, the planned trials and the rows of
+    ``responses.jsonl`` so far. A run directory that holds a different
+    manifest is refused: one directory is one plan.
+    """
     manifest, items = load_eval_set(set_dir)
+    require_current_prompt_contract(manifest)
     if item_limit is not None:
         items = items[: int(item_limit)]
     trials = plan_trials(manifest, items, models=models, arms=arms, repeats=repeats)
@@ -343,7 +352,48 @@ def run_evaluation(
             "".join(canonical_json(row) + "\n" for row in trials), encoding="utf-8"
         )
     responses_path = output_dir / RESPONSES_FILENAME
-    rows = _load_rows(responses_path)
+    return {
+        "run_manifest": run_manifest,
+        "items": items,
+        "trials": trials,
+        "rows": _load_rows(responses_path),
+        "responses_path": responses_path,
+    }
+
+
+def run_evaluation(
+    *,
+    set_dir: Path,
+    output_dir: Path,
+    run_id: str,
+    models: list[str],
+    arms: list[str],
+    repeats: int,
+    provider: EvaluationProvider,
+    decoding: dict[str, Any],
+    max_calls: int | None = None,
+    code_commit: str | None = None,
+    item_limit: int | None = None,
+    progress: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Run or resume one evaluation, one call at a time, and return its summary."""
+    prepared = prepare_run(
+        set_dir=set_dir,
+        output_dir=output_dir,
+        run_id=run_id,
+        models=models,
+        arms=arms,
+        repeats=repeats,
+        provider=provider,
+        decoding=decoding,
+        code_commit=code_commit,
+        item_limit=item_limit,
+    )
+    run_manifest = prepared["run_manifest"]
+    items = prepared["items"]
+    trials = prepared["trials"]
+    rows = prepared["rows"]
+    responses_path = prepared["responses_path"]
     done = {row["trial_id"] for row in rows}
     calls = 0
     with responses_path.open("a", encoding="utf-8") as handle:
@@ -502,14 +552,34 @@ def scripted_answers(
     return answers
 
 
-def dry_run(
+def dry_run_policy(evaluation_policy_file: Path, output_path: Path) -> Path:
+    """Write the private dry-run copy of an evaluation policy.
+
+    The dry run keeps every control of the given evaluation policy except
+    the per-minute pace, which exists to protect a paid provider quota. The
+    scripted transport has no quota, so the private copy raises that one
+    limit for every vendor; the ceiling, request cap, concurrency limit,
+    repeat limit and retry ban stay exact.
+    """
+    budget_policy = json.loads(evaluation_policy_file.read_text(encoding="utf-8"))
+    budget_policy["policy_id"] = f"{budget_policy['policy_id']}-dry-run"
+    budget_policy["maximum_requests_per_minute"] = DRY_RUN_REQUESTS_PER_MINUTE
+    for overrides in (budget_policy.get("vendors") or {}).values():
+        if "maximum_requests_per_minute" in overrides:
+            overrides["maximum_requests_per_minute"] = DRY_RUN_REQUESTS_PER_MINUTE
+    atomic_json(output_path, budget_policy)
+    return output_path
+
+
+def dry_run_broker(
     *,
+    ledger_dir: Path,
     set_dir: Path,
-    output_dir: Path,
     run_id: str,
     models: list[str],
     arms: list[str],
     repeats: int,
+    trials: list[dict[str, Any]],
     construction_policy_file: Path,
     construction_price_config_file: Path,
     construction_gate_file: Path,
@@ -518,33 +588,22 @@ def dry_run(
     policy: str = "random",
     seed: str = "dry-run",
     overrides: dict[str, dict[str, Any]] | None = None,
-    max_calls: int | None = None,
-    item_limit: int | None = None,
+    latency_seconds: float = 0.0,
     code_commit: str | None = None,
-) -> dict[str, Any]:
-    """Run the whole harness on a private ledger with a scripted transport."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    ledger_dir = output_dir / "ledger"
-    ledger_dir.mkdir(exist_ok=True)
+) -> tuple[SharedGeminiBroker, ScriptedTransport, Path]:
+    """Build the private dry-run ledger, gate and scripted broker for a plan."""
+    ledger_dir.mkdir(parents=True, exist_ok=True)
     review = ledger_dir / "dry-run-review.md"
     if not review.is_file():
         review.write_text(
             "Dry run: scripted transport, no paid call, no credential read.\n",
             encoding="utf-8",
         )
-    manifest, _ = load_eval_set(set_dir)
     price_config = json.loads(evaluation_price_config_file.read_text(encoding="utf-8"))
     decoding = decoding_record(price_config, models, arms)
-    # The dry run keeps every control of the given evaluation policy except
-    # the per-minute pace, which exists to protect a paid provider quota. The
-    # scripted transport has no quota, so the private copy raises that one
-    # limit; the ceiling, request cap, repeat limit and retry ban stay exact.
-    budget_policy = json.loads(evaluation_policy_file.read_text(encoding="utf-8"))
-    budget_policy["policy_id"] = f"{budget_policy['policy_id']}-dry-run"
-    budget_policy["maximum_requests_per_minute"] = DRY_RUN_REQUESTS_PER_MINUTE
-    dry_policy_path = ledger_dir / "evaluation-policy-dry-run.json"
-    atomic_json(dry_policy_path, budget_policy)
-    evaluation_policy_file = dry_policy_path
+    evaluation_policy_file = dry_run_policy(
+        evaluation_policy_file, ledger_dir / "evaluation-policy-dry-run.json"
+    )
     gate_path = ledger_dir / "evaluation-gate.json"
     write_evaluation_gate(
         gate_path,
@@ -559,14 +618,11 @@ def dry_run(
         integrated_code_commit=code_commit or "dry-run",
         review_record=review,
     )
-    # The scripted transport answers by payload hash, so plan first.
-    items_all = load_eval_set(set_dir)[1]
-    items = items_all[: int(item_limit)] if item_limit is not None else items_all
-    trials = plan_trials(manifest, items, models=models, arms=arms, repeats=repeats)
     transport = ScriptedTransport(
         scripted_answers(
             trials, decoding, policy=policy, seed=seed, overrides=overrides
-        )
+        ),
+        latency_seconds=latency_seconds,
     )
     # A private copy of the construction files keeps the dry-run ledger
     # self-contained and reproducible.
@@ -590,6 +646,53 @@ def dry_run(
         evaluation_policy_file=evaluation_policy_file,
         evaluation_price_config_file=evaluation_price_config_file,
         evaluation_gate_file=gate_path,
+    )
+    return broker, transport, gate_path
+
+
+def dry_run(
+    *,
+    set_dir: Path,
+    output_dir: Path,
+    run_id: str,
+    models: list[str],
+    arms: list[str],
+    repeats: int,
+    construction_policy_file: Path,
+    construction_price_config_file: Path,
+    construction_gate_file: Path,
+    evaluation_policy_file: Path,
+    evaluation_price_config_file: Path,
+    policy: str = "random",
+    seed: str = "dry-run",
+    overrides: dict[str, dict[str, Any]] | None = None,
+    max_calls: int | None = None,
+    item_limit: int | None = None,
+    code_commit: str | None = None,
+) -> dict[str, Any]:
+    """Run the whole harness on a private ledger with a scripted transport."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ledger_dir = output_dir / "ledger"
+    manifest, items_all = load_eval_set(set_dir)
+    items = items_all[: int(item_limit)] if item_limit is not None else items_all
+    trials = plan_trials(manifest, items, models=models, arms=arms, repeats=repeats)
+    broker, transport, _ = dry_run_broker(
+        ledger_dir=ledger_dir,
+        set_dir=set_dir,
+        run_id=run_id,
+        models=models,
+        arms=arms,
+        repeats=repeats,
+        trials=trials,
+        construction_policy_file=construction_policy_file,
+        construction_price_config_file=construction_price_config_file,
+        construction_gate_file=construction_gate_file,
+        evaluation_policy_file=evaluation_policy_file,
+        evaluation_price_config_file=evaluation_price_config_file,
+        policy=policy,
+        seed=seed,
+        overrides=overrides,
+        code_commit=code_commit,
     )
     provider, bound_decoding = build_broker_provider(
         broker=broker,

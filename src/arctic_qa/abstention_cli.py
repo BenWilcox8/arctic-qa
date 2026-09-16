@@ -6,6 +6,20 @@ Actions: ``build-set``, ``render``, ``dry-run``, ``run``, ``canary``, ``score``,
 ``list-models``, ``gate-template``. ``--provider`` selects Google Gemini (the
 default, through the shared paid-call broker) or one of the subscription
 providers, Claude Code and Codex. See docs/ABSTENTION_EVALUATION.md.
+
+The plan actions run every vendor of one evaluation plan file together, the
+vendors in parallel and N calls in flight per vendor: ``plan-gates`` writes
+one gate per vendor, ``dry-run-plan`` runs the whole plan offline,
+``run-plan`` runs it live, and ``score-plan`` scores every vendor of one plan
+run together.
+
+The streaming actions evaluate every accepted question as it lands:
+``watch-authorization`` writes the streaming authorization for a reviewer,
+``watch`` runs the evaluator, ``pause-status`` shows which models are held,
+and ``cost-summary`` prints the run so far:
+the accepted items, the USD per item on generation and on Gemini evaluation,
+the subscription tokens per item, the projected cost of N items, and the
+per-model abstention metrics.
 """
 
 from __future__ import annotations
@@ -23,6 +37,24 @@ from .abstention_providers import (
     fetch_model_list,
 )
 from .abstention_render import CONDITIONS
+from .abstention_cost import DEFAULT_LIST_PRICE_FILE, summarize_journal
+from .abstention_plan import (
+    DEFAULT_PAUSE_FILE,
+    DEFAULT_PLAN_FILE,
+    GATE_FILENAME_BY_VENDOR,
+    build_vendor_runs,
+    dry_run_plan,
+    load_pause,
+    load_plan,
+    merge_pause,
+    parse_concurrency,
+    parse_pause_models,
+    paused_models,
+    plan_vendors,
+    run_plan,
+    score_plan,
+    write_plan_gates,
+)
 from .abstention_run import (
     RESPONSES_FILENAME,
     RUN_MANIFEST_FILENAME,
@@ -50,6 +82,11 @@ from .abstention_subscription import (
     subscription_gate_record,
     vendor_entry,
 )
+from .abstention_watch import (
+    DEFAULT_POLL_SECONDS,
+    authorization_record,
+    watch,
+)
 from .model_broker import SharedGeminiBroker
 from .util import atomic_json, canonical_json
 
@@ -63,6 +100,14 @@ ACTIONS = (
     "score",
     "list-models",
     "gate-template",
+    "plan-gates",
+    "dry-run-plan",
+    "run-plan",
+    "score-plan",
+    "watch-authorization",
+    "watch",
+    "cost-summary",
+    "pause-status",
 )
 CANARY_CEILING_USD = Decimal("5.00")
 CANARY_ARM = "medium"
@@ -186,6 +231,166 @@ def add_parser(commands: argparse._SubParsersAction) -> None:
         action="store_true",
         help="list-models: read the model catalog bundled in the codex binary, no refresh.",
     )
+    # Concurrent plan actions (every vendor of one plan on each item).
+    parser.add_argument(
+        "--plan-file",
+        type=Path,
+        default=DEFAULT_PLAN_FILE,
+        help="The evaluation plan: the models of each vendor, the arms, the repeats.",
+    )
+    parser.add_argument(
+        "--plan-gate-dir",
+        type=Path,
+        help="The directory that holds one reviewed evaluation gate per vendor.",
+    )
+    parser.add_argument(
+        "--vendors",
+        help="Comma-separated subset of the plan's vendors (default: every vendor).",
+    )
+    parser.add_argument(
+        "--concurrency",
+        help="Override the calls in flight per vendor, as vendor=N,vendor=N.",
+    )
+    parser.add_argument(
+        "--serial",
+        action="store_true",
+        help="Run the vendors one after another with one call in flight (the baseline).",
+    )
+    parser.add_argument(
+        "--latency-seconds",
+        type=float,
+        default=0.0,
+        help="dry-run-plan: make every scripted call sleep, to measure the schedule.",
+    )
+    parser.add_argument(
+        "--binary-version",
+        action="append",
+        default=[],
+        metavar="VENDOR=VERSION",
+        help="plan-gates: pin the harness version of a subscription vendor.",
+    )
+    parser.add_argument(
+        "--subscription-ledger-root",
+        type=Path,
+        help="run-plan: the parent of the per-vendor subscription ledger directories.",
+    )
+    parser.add_argument(
+        "--list-price-file",
+        type=Path,
+        default=DEFAULT_LIST_PRICE_FILE,
+        help="Informational list prices of the subscription vendors for the cost journal.",
+    )
+    # Streaming evaluator and cost journal.
+    parser.add_argument(
+        "--work-dir",
+        type=Path,
+        help="The streaming evaluator's directory: sets, runs, gates, cost journal.",
+    )
+    parser.add_argument(
+        "--authorization-file",
+        type=Path,
+        help="The reviewed streaming authorization that bounds the derived gates.",
+    )
+    parser.add_argument(
+        "--campaign-id",
+        help="The production campaign whose accepted items the evaluator watches.",
+    )
+    parser.add_argument(
+        "--ledger-run-prefix",
+        action="append",
+        default=[],
+        help="A construction ledger run id prefix of the campaign (repeatable).",
+    )
+    parser.add_argument(
+        "--run-id-prefix",
+        help="The evaluation run id prefix; each item runs as <prefix>-<item id>.",
+    )
+    parser.add_argument(
+        "--maximum-items",
+        type=int,
+        help="Stop taking new items after this many (the authorization also bounds it).",
+    )
+    parser.add_argument(
+        "--maximum-gemini-usd",
+        default="1.00",
+        help="watch-authorization: the Gemini USD bound of the streaming run.",
+    )
+    parser.add_argument(
+        "--poll-seconds",
+        type=int,
+        default=DEFAULT_POLL_SECONDS,
+        help="How long the evaluator waits when no new item exists (5 to 600).",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="watch: run one pass over the pending items and return.",
+    )
+    parser.add_argument(
+        "--deadline-seconds",
+        type=float,
+        help="watch: return after this many seconds of waiting (for a bounded test).",
+    )
+    parser.add_argument(
+        "--backfill",
+        action="store_true",
+        help="watch: also evaluate the items of --backfill-contract-file (off by default).",
+    )
+    parser.add_argument(
+        "--backfill-contract-file",
+        type=Path,
+        default=Path("config/abstention-eval-chapter2-contract-v1.json"),
+        help="The population contract of the backfill items (chapter 2).",
+    )
+    parser.add_argument(
+        "--project-items",
+        type=int,
+        help="cost-summary: project the run's cost onto this many accepted items.",
+    )
+    parser.add_argument(
+        "--evaluation-policy-transition-file",
+        type=Path,
+        help=(
+            "The reviewed transition that raises the evaluation ceiling. It is "
+            "needed only for the first start under the larger ceiling; later "
+            "starts read the immutable event."
+        ),
+    )
+    parser.add_argument(
+        "--pause-file",
+        type=Path,
+        default=DEFAULT_PAUSE_FILE,
+        help=(
+            "The paused-model file. The evaluator re-reads it before every item, "
+            "so a cost guard can pause or resume a model while it runs."
+        ),
+    )
+    parser.add_argument(
+        "--no-pause-file",
+        action="store_true",
+        help="Ignore the paused-model file (the command line still pauses).",
+    )
+    parser.add_argument(
+        "--pause-model",
+        action="append",
+        default=[],
+        metavar="MODEL[=RESUME_UTC]",
+        help=(
+            "Pause one model for this invocation, with an optional resume time, "
+            "for example claude-fable-5-1=2026-09-16T23:00:00Z (repeatable)."
+        ),
+    )
+
+
+def _pairs(values: list[str]) -> dict[str, str]:
+    """Parse repeated ``name=value`` options."""
+    result: dict[str, str] = {}
+    for item in values or []:
+        name, _, value = str(item).partition("=")
+        if not name or not value:
+            raise ValueError(f"expected name=value, received: {item}")
+        result[name] = value
+    return result
 
 
 def _split(value: str | None) -> list[str]:
@@ -315,6 +520,41 @@ def handle(args: argparse.Namespace) -> Any:
         return _score(args, args.run_dir)
     if action == "list-models":
         return _list_models(args)
+    if action == "watch-authorization":
+        return _watch_authorization(args)
+    if action == "watch":
+        return _watch(args)
+    if action == "cost-summary":
+        _require(args, "work_dir")
+        return summarize_journal(args.work_dir, project_items=args.project_items)
+    if action == "pause-status":
+        return _pause_status(args)
+    if action == "plan-gates":
+        return _plan_gates(args)
+    if action == "dry-run-plan":
+        return _dry_run_plan(args)
+    if action == "run-plan":
+        return _run_plan(args)
+    if action == "score-plan":
+        _require(args, "run_dir")
+        scores = score_plan(
+            args.run_dir,
+            output_dir=args.output_dir,
+            resamples=args.bootstrap,
+            seed=args.bootstrap_seed,
+        )
+        return {
+            "scores_dir": str(args.output_dir or (args.run_dir / "scores")),
+            "random_baseline": scores["random_baseline"]["metrics"],
+            "summary": {
+                key: {
+                    "counts": group["counts"],
+                    "invalid_rate": group["invalid_rate"],
+                    "metrics": group["metrics"],
+                }
+                for key, group in scores["groups"].items()
+            },
+        }
     if action == "gate-template" and args.provider != PROVIDER_GOOGLE_GEMINI:
         return _subscription_gate_template(args)
     if action == "gate-template":
@@ -343,6 +583,271 @@ def handle(args: argparse.Namespace) -> Any:
         )
         return {"gate_file": str(args.output_file), "gate": gate}
     raise ValueError(f"unsupported action: {action}")
+
+
+def _watch_authorization(args: argparse.Namespace) -> dict[str, Any]:
+    _require(
+        args, "state_db", "campaign_id", "run_id_prefix", "review_record", "output_file"
+    )
+    record = authorization_record(
+        contract_file=args.contract_file,
+        plan_file=args.plan_file,
+        evaluation_policy_file=args.evaluation_policy_file,
+        evaluation_price_config_file=args.evaluation_price_config_file,
+        subscription_models_file=args.subscription_models_file,
+        state_db=args.state_db,
+        campaign_id=args.campaign_id,
+        run_id_prefix=args.run_id_prefix,
+        maximum_items=args.maximum_items or 1,
+        maximum_gemini_usd=args.maximum_gemini_usd,
+        integrated_code_commit=args.code_commit or git_head() or "unknown",
+        review_record=args.review_record,
+    )
+    atomic_json(args.output_file, record)
+    return {
+        "authorization_file": str(args.output_file),
+        "authorization": record,
+        "next_step": (
+            "An independent reviewer sets independent_review_verdict to pass and "
+            "authorization_enabled to true."
+        ),
+    }
+
+
+def _watch(args: argparse.Namespace) -> dict[str, Any]:
+    _require(args, "authorization_file", "state_db", "work_dir", "shared_ledger_file")
+    plan = load_plan(args.plan_file)
+    chosen = _split(args.vendors) or plan_vendors(plan)
+    needs_broker = PROVIDER_GOOGLE_GEMINI in chosen
+    return watch(
+        authorization_file=args.authorization_file,
+        plan_file=args.plan_file,
+        contract_file=args.contract_file,
+        evaluation_policy_file=args.evaluation_policy_file,
+        evaluation_price_config_file=args.evaluation_price_config_file,
+        subscription_models_file=args.subscription_models_file,
+        state_db=args.state_db,
+        work_dir=args.work_dir,
+        shared_ledger_file=args.shared_ledger_file,
+        broker_factory=(
+            (lambda gate: _broker(args, evaluation_gate_file=gate))
+            if needs_broker
+            else None
+        ),
+        subscription_ledger_root=(
+            args.subscription_ledger_root.resolve()
+            if args.subscription_ledger_root
+            else None
+        ),
+        list_price_file=args.list_price_file,
+        poll_seconds=args.poll_seconds,
+        maximum_items=args.maximum_items,
+        once=args.once,
+        backfill=args.backfill,
+        backfill_contract_file=args.backfill_contract_file,
+        concurrency=parse_concurrency(args.concurrency),
+        vendors=_split(args.vendors) or None,
+        scratch_root=args.scratch_dir.resolve() if args.scratch_dir else None,
+        code_commit=args.code_commit or git_head(),
+        ledger_run_prefixes=tuple(args.ledger_run_prefix),
+        pause_file=_pause_file(args),
+        pause_models=parse_pause_models(args.pause_model),
+        progress=_progress,
+        log=_watch_log,
+        deadline_seconds=args.deadline_seconds,
+    )
+
+
+def _pause_status(args: argparse.Namespace) -> dict[str, Any]:
+    """Show which models the evaluator holds now, and which the file names.
+
+    This is the read side of the pause interface. A cost guard writes the
+    ``benchmark-evaluation-model-pause-v1`` file and reads this action back to
+    prove the pause is in force. The evaluator re-reads the same file before
+    every item, so it needs no restart.
+    """
+    path = _pause_file(args)
+    record = _pause_record(args)
+    return {
+        "schema": "abstention-eval-pause-status-v1",
+        "pause_file": str(path) if path is not None else None,
+        "paused_now": sorted(paused_models(record)),
+        "entries": record["paused_models"],
+    }
+
+
+def _pause_file(args: argparse.Namespace) -> Path | None:
+    """The paused-model file of this invocation, or None when it is off."""
+    if args.no_pause_file:
+        return None
+    return args.pause_file
+
+
+def _pause_record(args: argparse.Namespace) -> dict[str, Any]:
+    """Merge the paused-model file with the repeated ``--pause-model`` options."""
+    path = _pause_file(args)
+    return merge_pause(
+        load_pause(path) if path is not None else None,
+        parse_pause_models(args.pause_model),
+    )
+
+
+def _watch_log(event: dict[str, Any]) -> None:
+    print(canonical_json(event), flush=True)
+
+
+def _plan_gates(args: argparse.Namespace) -> dict[str, Any]:
+    _require(args, "eval_set_dir", "run_id", "review_record", "output_dir")
+    plan = load_plan(args.plan_file)
+    paths = write_plan_gates(
+        plan=plan,
+        set_dir=args.eval_set_dir,
+        run_id=args.run_id,
+        output_dir=args.output_dir,
+        review_record=args.review_record,
+        review_verdict="pending",
+        evaluation_policy_file=args.evaluation_policy_file,
+        evaluation_price_config_file=args.evaluation_price_config_file,
+        subscription_models_file=args.subscription_models_file,
+        integrated_code_commit=args.code_commit or git_head() or "unknown",
+        binary_versions=_pairs(args.binary_version),
+        vendors=_split(args.vendors) or None,
+    )
+    return {
+        "plan_id": plan["plan_id"],
+        "gate_dir": str(args.output_dir),
+        "trials_per_item": plan["trials_per_item"],
+        "gates": {
+            vendor: {
+                "file": str(path),
+                "gate": json.loads(path.read_text(encoding="utf-8")),
+            }
+            for vendor, path in paths.items()
+        },
+        "next_step": (
+            "An independent reviewer sets independent_review_verdict to pass and "
+            "evaluation_enabled to true in every gate file."
+        ),
+    }
+
+
+def _dry_run_plan(args: argparse.Namespace) -> dict[str, Any]:
+    _require(args, "eval_set_dir", "run_dir", "run_id")
+    overrides = None
+    if args.scripted_overrides_file is not None:
+        overrides = json.loads(args.scripted_overrides_file.read_text(encoding="utf-8"))
+    summary = dry_run_plan(
+        plan=load_plan(args.plan_file),
+        set_dir=args.eval_set_dir,
+        output_dir=args.run_dir,
+        run_id=args.run_id,
+        construction_policy_file=args.streaming_budget_policy_file,
+        construction_price_config_file=args.price_config_file,
+        construction_gate_file=args.execution_gate_file,
+        evaluation_policy_file=args.evaluation_policy_file,
+        evaluation_price_config_file=args.evaluation_price_config_file,
+        subscription_models_file=args.subscription_models_file,
+        policy=args.scripted_policy,
+        seed=args.seed,
+        overrides=overrides,
+        latency_seconds=args.latency_seconds,
+        serial=args.serial,
+        item_limit=args.item_limit,
+        max_calls=args.max_calls,
+        code_commit=args.code_commit or git_head(),
+        concurrency=parse_concurrency(args.concurrency),
+        vendors=_split(args.vendors) or None,
+        # A dry run makes no call and uses no quota, so the standing pause
+        # file does not apply to it. Only an explicit --pause-model does,
+        # which is how the held-trial accounting is exercised offline.
+        pause=parse_pause_models(args.pause_model),
+    )
+    if not args.no_score and summary["recorded_trials"]:
+        summary["scores"] = _score_plan_summary(args)
+    return summary
+
+
+def _score_plan_summary(args: argparse.Namespace) -> dict[str, Any]:
+    scores = score_plan(
+        args.run_dir,
+        output_dir=args.output_dir,
+        resamples=args.bootstrap,
+        seed=args.bootstrap_seed,
+    )
+    return {
+        key: {
+            "counts": group["counts"],
+            "invalid_rate": group["invalid_rate"],
+            "metrics": group["metrics"],
+        }
+        for key, group in scores["groups"].items()
+    }
+
+
+def _run_plan(args: argparse.Namespace) -> dict[str, Any]:
+    _require(args, "eval_set_dir", "run_dir", "run_id", "plan_gate_dir")
+    plan = load_plan(args.plan_file)
+    vendors = _split(args.vendors) or plan_vendors(plan)
+    code_commit = args.code_commit or git_head()
+    for vendor in vendors:
+        gate_file = args.plan_gate_dir / GATE_FILENAME_BY_VENDOR[vendor]
+        gate = json.loads(gate_file.read_text(encoding="utf-8"))
+        if (
+            gate.get("integrated_code_commit")
+            and code_commit
+            and gate["integrated_code_commit"] != code_commit
+        ):
+            raise ValueError(
+                "an evaluation gate binds another code commit than the running code"
+            )
+    needs_broker = PROVIDER_GOOGLE_GEMINI in vendors
+    vendor_runs = build_vendor_runs(
+        plan=plan,
+        set_dir=args.eval_set_dir,
+        run_id=args.run_id,
+        gate_dir=args.plan_gate_dir,
+        evaluation_policy_file=args.evaluation_policy_file,
+        subscription_models_file=args.subscription_models_file.resolve(),
+        broker_factory=(
+            (lambda gate: _broker(args, evaluation_gate_file=gate))
+            if needs_broker
+            else None
+        ),
+        subscription_ledger_root=(
+            args.subscription_ledger_root.resolve()
+            if args.subscription_ledger_root
+            else None
+        ),
+        concurrency=parse_concurrency(args.concurrency),
+        vendors=vendors,
+        scratch_root=args.scratch_dir.resolve() if args.scratch_dir else None,
+    )
+    summary = run_plan(
+        set_dir=args.eval_set_dir,
+        output_dir=args.run_dir,
+        run_id=args.run_id,
+        plan=plan,
+        vendor_runs=vendor_runs,
+        item_limit=args.item_limit,
+        max_calls=args.max_calls,
+        code_commit=code_commit,
+        progress=_progress,
+        serial=args.serial,
+        gate_dir=args.plan_gate_dir,
+        pause=_pause_record(args),
+    )
+    gemini = vendor_runs.get(PROVIDER_GOOGLE_GEMINI)
+    if gemini is not None:
+        status = gemini.provider.broker.status()
+        summary["ledger"] = {
+            "evaluation": status["evaluation"],
+            "usage": status["usage"],
+            "remaining": status["remaining"],
+        }
+    atomic_json(args.run_dir / "plan-summary.json", summary)
+    if not args.no_score and summary["recorded_trials"]:
+        summary["scores"] = _score_plan_summary(args)
+    return summary
 
 
 def _score(args: argparse.Namespace, run_dir: Path) -> dict[str, Any]:
@@ -394,6 +899,11 @@ def _broker(
         evaluation_policy_file=args.evaluation_policy_file.resolve(),
         evaluation_price_config_file=args.evaluation_price_config_file.resolve(),
         evaluation_gate_file=evaluation_gate_file.resolve(),
+        evaluation_policy_transition_file=(
+            args.evaluation_policy_transition_file.resolve()
+            if args.evaluation_policy_transition_file
+            else None
+        ),
     )
 
 

@@ -1,0 +1,80 @@
+{
+  "schema": "benchmark-evaluation-list-prices-v1",
+  "config_id": "arctic-abstention-list-prices-v1",
+  "purpose": "List-price equivalents for the subscription vendors. The cost journal multiplies the token counts of every Claude Code and Codex call by these rates to show what the same calls would cost on the API. Nothing is charged: the calls bill the claude.ai and ChatGPT subscriptions at USD 0. This file is informational and is not bound into a gate.",
+  "unit": "USD per million tokens",
+  "vendors": {
+    "anthropic_claude_code": {
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "checked_at_utc": "2026-09-16T09:30:00Z",
+      "usage_mapping": {
+        "input_tokens": "base input",
+        "cache_creation_input_tokens": "5-minute cache write (1.25x base input)",
+        "cache_read_input_tokens": "cache hit (0.1x base input; 0.025x on Claude Fable 5.1)",
+        "output_tokens": "output (thinking tokens included)"
+      },
+      "models": {
+        "claude-fable-5-1": {
+          "input": "10.00",
+          "cache_write_5m": "12.50",
+          "cache_read": "0.25",
+          "output": "50.00"
+        },
+        "claude-opus-5": {
+          "input": "5.00",
+          "cache_write_5m": "6.25",
+          "cache_read": "0.50",
+          "output": "25.00"
+        },
+        "claude-sonnet-5": {
+          "input": "2.00",
+          "cache_write_5m": "2.50",
+          "cache_read": "0.20",
+          "output": "10.00"
+        },
+        "claude-haiku-4-5-20251001": {
+          "input": "1.00",
+          "cache_write_5m": "1.25",
+          "cache_read": "0.10",
+          "output": "5.00"
+        }
+      }
+    },
+    "openai_codex": {
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "checked_at_utc": "2026-09-16T09:30:00Z",
+      "usage_mapping": {
+        "input_tokens minus cached_input_tokens": "input",
+        "cached_input_tokens": "cached input",
+        "output_tokens": "output (reasoning tokens included)"
+      },
+      "models": {
+        "gpt-6-astra": {
+          "input": "10.00",
+          "cached_input": "1.00",
+          "output": "50.00"
+        },
+        "gpt-5.6-sol": {
+          "input": "4.00",
+          "cached_input": "0.40",
+          "output": "20.00"
+        },
+        "gpt-5.6-terra": {
+          "input": "2.00",
+          "cached_input": "0.20",
+          "output": "12.00"
+        },
+        "gpt-5.6-luna": {
+          "input": "0.20",
+          "cached_input": "0.02",
+          "output": "1.20"
+        },
+        "gpt-5.5": {
+          "input": "5.00",
+          "cached_input": "0.50",
+          "output": "30.00"
+        }
+      }
+    }
+  }
+}

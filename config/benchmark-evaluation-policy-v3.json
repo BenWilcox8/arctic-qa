@@ -1,0 +1,29 @@
+{
+  "schema": "benchmark-evaluation-policy-v1",
+  "policy_id": "arctic-abstention-evaluation-policy-v3-gemini-benchmark",
+  "purpose": "Third benchmark evaluation budget policy: the USD 200.00 ceiling the captain allocated on 2026-09-16 for benchmarking the Gemini models, with the same controls, concurrency and pace as v2. A larger ceiling needs a new policy file, a registered change set in EVALUATION_CEILING_CHANGES of src/arctic_qa/model_broker.py, a reviewed chained transition and a new gate.",
+  "evaluation_ceiling_usd": "200.00",
+  "ceiling_scope": "cumulative benchmark_evaluation spend, reservations and ambiguous charges in the shared ledger; halt at exhaustion, no reset",
+  "maximum_request_reserved_cost_usd": "0.25",
+  "maximum_calls_per_item_condition_model_arm": 8,
+  "maximum_concurrent_requests": 4,
+  "maximum_requests_per_minute": 30,
+  "maximum_output_tokens_including_thinking": 8192,
+  "automatic_transport_retries": 0,
+  "automatic_model_fallback": false,
+  "re_ask_on_invalid_response": false,
+  "automatic_budget_rearm": false,
+  "stop_on_first_infrastructure_error_or_ambiguous_charge": true,
+  "scope": "Google Gemini models only until another credential is enabled; evaluation spend counts toward the project lifetime ceiling and never toward dataset construction totals",
+  "concurrency_note": "Gemini: 4 in flight and 30 per minute; the key's own quota is far above this and the construction run keeps its separate slots and window in the shared ledger. Claude Code and Codex: 3 in flight and 12 per minute each, because both quotas are shared with the live agent crews on this machine and one harness call takes 3 to 15 seconds.",
+  "vendors": {
+    "anthropic_claude_code": {
+      "maximum_concurrent_requests": 3,
+      "maximum_requests_per_minute": 12
+    },
+    "openai_codex": {
+      "maximum_concurrent_requests": 3,
+      "maximum_requests_per_minute": 12
+    }
+  }
+}

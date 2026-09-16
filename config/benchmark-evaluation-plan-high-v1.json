@@ -1,0 +1,39 @@
+{
+  "schema": "benchmark-evaluation-plan-v1",
+  "plan_id": "arctic-abstention-plan-8-models-high-3-repeats-v1",
+  "purpose": "The captain's evaluation plan of 2026-09-16: eight models at the high reasoning preset, each question once with the gold answer present and once absent, three times each, 48 trials per question, the three vendors in parallel.",
+  "arms": [
+    "high"
+  ],
+  "repeats": 3,
+  "k": 4,
+  "vendors": {
+    "google_gemini": {
+      "models": [
+        "gemini-3.8-flash",
+        "gemini-3.7-flash"
+      ],
+      "preset_control": "thinkingConfig.thinkingLevel = high",
+      "concurrency": 4
+    },
+    "anthropic_claude_code": {
+      "models": [
+        "claude-fable-5-1",
+        "claude-opus-5",
+        "claude-sonnet-5"
+      ],
+      "preset_control": "claude -p --effort high",
+      "concurrency": 3
+    },
+    "openai_codex": {
+      "models": [
+        "gpt-6-astra",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra"
+      ],
+      "preset_control": "codex exec -c model_reasoning_effort=high",
+      "concurrency": 3
+    }
+  },
+  "trials_per_item": 48
+}

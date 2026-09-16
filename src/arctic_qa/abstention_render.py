@@ -14,6 +14,11 @@ Locked decisions (captain, 2026-09-16):
   shows all k distractors. No rotation.
 - All displayed options, the abstention option included, are shuffled with a
   recorded seed. The abstention letter is recorded.
+- The order is unique per trial (captain, 2026-09-16): "Make sure that the
+  options are always shuffled between every model call, even the same model
+  with the same effort level". The seed therefore binds the model and the
+  thinking arm as well as the set, the item, the condition and the repeat.
+  Prompt version v1 shared one order across the models of one trial.
 - The abstention option reads "I abstain from answering".
 - The model must reply with exactly one option letter. Any other response is
   invalid (N0). There is no re-ask.
@@ -27,7 +32,16 @@ from typing import Any
 from .util import canonical_json, sha256_bytes, stable_id
 
 
-PROMPT_VERSION = "abstention-eval-prompt-v1"
+PROMPT_VERSION = "abstention-eval-prompt-v2"
+# v1 derived the option order from the set, the item, the condition and the
+# repeat only, so every model and every arm saw the same order for one trial.
+# v2 binds the model and the arm into the seed, so no two calls share an
+# order (captain order 2026-09-16).
+PROMPT_VERSION_HISTORY = {
+    "abstention-eval-prompt-v1": "one option order per item, condition and repeat",
+    "abstention-eval-prompt-v2": "one option order per call: the seed binds the model and the arm",
+}
+ORDER_SCOPE = "eval_set_id, item_id, condition, repeat, model, arm"
 ABSTENTION_OPTION_TEXT = "I abstain from answering"
 GOLD_PRESENT = "gold_present"
 GOLD_ABSENT = "gold_absent"
@@ -96,6 +110,7 @@ def prompt_sha256() -> str:
                 "user_content_template": USER_CONTENT_TEMPLATE,
                 "abstention_option_text": ABSTENTION_OPTION_TEXT,
                 "no_context_text": NO_CONTEXT_TEXT,
+                "order_scope": ORDER_SCOPE,
             }
         ).encode()
     )
@@ -108,6 +123,8 @@ def prompt_contract() -> dict[str, Any]:
         "prompt_sha256": prompt_sha256(),
         "abstention_option_text": ABSTENTION_OPTION_TEXT,
         "output_contract": "exactly one uppercase option letter; no re-ask",
+        "order_scope": ORDER_SCOPE,
+        "order_note": PROMPT_VERSION_HISTORY[PROMPT_VERSION],
     }
 
 
@@ -161,13 +178,25 @@ def condition_options(
     return options, None
 
 
-def shuffle_seed(eval_set_id: str, item_id: str, condition: str, repeat: int) -> str:
+def shuffle_seed(
+    eval_set_id: str,
+    item_id: str,
+    condition: str,
+    repeat: int,
+    model: str,
+    arm: str,
+) -> str:
     """Return the recorded seed of one trial's option permutation.
 
-    The seed excludes the model and the thinking arm, so every model sees the
-    same stimulus for the same item, condition, and repeat.
+    The seed binds the set, the item, the condition, the repeat, the model and
+    the thinking arm, so every call sees its own order (captain order
+    2026-09-16). Two models at one preset on one item and condition therefore
+    differ, and so do the repeats of one model. The seed is deterministic and
+    is recorded in the trial, the response row and the receipt.
     """
-    return stable_id("abstention-order", eval_set_id, item_id, condition, repeat)
+    return stable_id(
+        "abstention-order-v2", eval_set_id, item_id, condition, repeat, model, arm
+    )
 
 
 def shuffled(options: list[dict[str, Any]], seed: str) -> list[dict[str, Any]]:
@@ -212,7 +241,9 @@ def render_trial(
     if isinstance(repeat, bool) or not isinstance(repeat, int) or repeat < 1:
         raise ValueError("the repeat index must be a positive integer")
     options, dropped = condition_options(item, condition, k)
-    seed = shuffle_seed(eval_set_id, str(item["item_id"]), condition, repeat)
+    seed = shuffle_seed(
+        eval_set_id, str(item["item_id"]), condition, repeat, model, arm
+    )
     ordered = shuffled(options, seed)
     letters = letters_for(len(ordered))
     lettered = [
@@ -249,6 +280,7 @@ def render_trial(
         "correct_letter": gold_letter if condition == GOLD_PRESENT else abstain_letter,
         "dropped_distractor_text": dropped["text"] if dropped else None,
         "shuffle_seed": seed,
+        "order_scope": ORDER_SCOPE,
         "prompt_version": PROMPT_VERSION,
         "prompt_sha256": prompt_sha256(),
         "system_text": system_text,

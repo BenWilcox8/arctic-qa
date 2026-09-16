@@ -24,7 +24,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .abstention_render import DEFAULT_CONTENT_OPTION_COUNT, prompt_contract
+from .abstention_render import (
+    DEFAULT_CONTENT_OPTION_COUNT,
+    PROMPT_VERSION,
+    prompt_contract,
+    prompt_sha256,
+)
 from .distractor_order import (
     DISTRACTOR_ORDER_CONTRACT_VERSION,
     ASSIGNED_SEED_LABEL,
@@ -345,8 +350,17 @@ def write_eval_set(
             raise ValueError("every frozen item must carry exactly k distractors")
     items_bytes = jsonl_bytes(items)
     items_sha256 = sha256_bytes(items_bytes)
+    # The prompt contract is part of the set identity. A changed contract, for
+    # example the per-call option order of v2, therefore freezes a new set
+    # directory instead of reusing an immutable manifest of the old contract.
+    contract = prompt_contract()
     eval_set_id = stable_id(
-        "abstention-eval-set", population_record, k, items_sha256, length=16
+        "abstention-eval-set",
+        population_record,
+        k,
+        items_sha256,
+        contract["prompt_sha256"],
+        length=16,
     )
     set_dir = output_dir / eval_set_id
     atomic_write(set_dir / ITEMS_FILENAME, items_bytes, immutable=True)
@@ -386,7 +400,7 @@ def write_eval_set(
                 item["item_id"] for item in items if item["item_id"] not in assigned
             ],
         },
-        "prompt_contract": prompt_contract(),
+        "prompt_contract": contract,
         "excluded": excluded,
         "exclusion_counts": counts,
         "construction_models": sorted(
@@ -415,6 +429,25 @@ def load_eval_set(set_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         if expected != sha256_bytes(canonical_json(item).encode()):
             raise ValueError("an evaluation set item changed after it was frozen")
     return manifest, items
+
+
+def require_current_prompt_contract(manifest: dict[str, Any]) -> None:
+    """Refuse to start a run on a set that another prompt contract froze.
+
+    The evaluation set manifest is immutable and records the prompt contract
+    of its build. A run renders its trials with the contract of the running
+    code, so the two must agree. An older set stays readable, which keeps the
+    scores of its own runs reproducible.
+    """
+    contract = manifest.get("prompt_contract") or {}
+    if (
+        contract.get("prompt_version") != PROMPT_VERSION
+        or contract.get("prompt_sha256") != prompt_sha256()
+    ):
+        raise ValueError(
+            "the evaluation set was frozen under another prompt contract: "
+            f"{contract.get('prompt_version')} against {PROMPT_VERSION}"
+        )
 
 
 def manifest_sha256(set_dir: Path) -> str:

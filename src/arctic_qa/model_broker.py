@@ -4,6 +4,7 @@ import fcntl
 import json
 import re
 import stat
+import threading
 import time
 import urllib.error
 from collections.abc import Callable
@@ -63,6 +64,37 @@ RECONCILABLE_USAGE_ERRORS = (
     "KeyError: 'thoughtsTokenCount'",
     "ValueError: provider usage is inconsistent",
 )
+# The evaluation ceiling is a money control, so a larger one needs a reviewed
+# transition, chained on the applied predecessor, exactly as a construction
+# ceiling does. The baseline is the ceiling the first two evaluation policies
+# shared; a policy that changes only the pace or the concurrency needs no
+# transition, because it moves no money.
+EVALUATION_POLICY_TRANSITION_SCHEMA = "benchmark-evaluation-policy-transition-v1"
+EVALUATION_POLICY_TRANSITION_EVENT_SCHEMA = (
+    "benchmark-evaluation-policy-transition-event-v1"
+)
+EVALUATION_BASELINE_CEILING_USD = Decimal("5.00")
+# Captain allocation 2026-09-16: USD 200 for benchmarking the Gemini models.
+EVALUATION_CEILING_CHANGES = (
+    {"evaluation_ceiling_usd": {"from": "5.00", "to": "200.00"}},
+)
+EVALUATION_POLICY_TRANSITION_FIELDS = {
+    "schema",
+    "ledger_file",
+    "from_evaluation_transition_sha256",
+    "from_policy_file",
+    "from_policy_sha256",
+    "to_policy_sha256",
+    "changed_policy_fields",
+    "expected_ledger_sha256",
+    "evaluation_gate_sha256",
+    "integrated_code_commit",
+    "review_record",
+    "review_record_sha256",
+    "reason",
+    "authorized_at_utc",
+}
+EVALUATION_TRANSITION_CHANGED_REASON = "an applied evaluation policy transition changed"
 EVALUATION_GATE_BINDING_FIELDS = {
     "eval_set_id",
     "eval_set_manifest_sha256",
@@ -1125,6 +1157,7 @@ class SharedGeminiBroker:
         evaluation_policy_file: Path | None = None,
         evaluation_price_config_file: Path | None = None,
         evaluation_gate_file: Path | None = None,
+        evaluation_policy_transition_file: Path | None = None,
     ) -> None:
         self.policy_file = policy_file.resolve()
         self.price_config_file = price_config_file.resolve()
@@ -1145,6 +1178,11 @@ class SharedGeminiBroker:
         self._authorized_live_test_ceiling_usd: Decimal | None = None
         self._status_observer: Callable[[Path], None] | None = None
         self._stream_input_binding: dict[str, Any] | None = None
+        # Evaluation-phase concurrency (docs/SHARED_MODEL_BROKER.md, "Concurrent
+        # evaluation requests"): one admission at a time per process, N calls
+        # in flight, each guarded by its own in-flight lock file.
+        self._evaluation_admission_lock = threading.Lock()
+        self._pacing_state = threading.local()
         evaluation_files = (
             evaluation_policy_file,
             evaluation_price_config_file,
@@ -1165,6 +1203,12 @@ class SharedGeminiBroker:
         self.evaluation_gate_file = (
             evaluation_gate_file.resolve() if evaluation_gate_file else None
         )
+        self.evaluation_policy_transition_file = (
+            evaluation_policy_transition_file.resolve()
+            if evaluation_policy_transition_file
+            else None
+        )
+        self._evaluation_transition_sha256: str | None = None
         self.evaluation_policy: dict[str, Any] | None = None
         self.evaluation_config: dict[str, Any] | None = None
         self.active_evaluation_price_config_sha256: str | None = None
@@ -1183,6 +1227,8 @@ class SharedGeminiBroker:
             gate = _validate_evaluation_gate(self.evaluation_gate_file)  # type: ignore[arg-type]
             self._validate_evaluation_gate_hashes(gate)
         self._initialize()
+        if self.evaluation_policy is not None:
+            self._authorize_evaluation_ceiling()
 
     def _validate_evaluation_gate_hashes(self, gate: dict[str, Any]) -> None:
         if gate["evaluation_policy_sha256"] != sha256_file(
@@ -1202,6 +1248,219 @@ class SharedGeminiBroker:
                     raise ValueError(
                         f"the gate arm {arm} is not an official preset of {model}"
                     )
+
+    # --- Reviewed evaluation ceiling ---------------------------------------
+
+    def _evaluation_transition_events(self) -> list[tuple[Path, dict[str, Any]]]:
+        """Read every applied evaluation-policy transition event, unordered."""
+        events: list[tuple[Path, dict[str, Any]]] = []
+        for path in sorted(
+            self.receipts_dir.glob("evaluation-policy-transition-*.json")
+        ):
+            event = _read(path)
+            authorization = event.get("authorization")
+            if (
+                event.get("schema") != EVALUATION_POLICY_TRANSITION_EVENT_SCHEMA
+                or not isinstance(authorization, dict)
+                or set(authorization) != EVALUATION_POLICY_TRANSITION_FIELDS
+            ):
+                raise ValueError(EVALUATION_TRANSITION_CHANGED_REASON)
+            digest = sha256_bytes(canonical_json(authorization).encode())
+            if (
+                event.get("transition_authorization_sha256") != digest
+                or path.name != f"evaluation-policy-transition-{digest}.json"
+            ):
+                raise ValueError(EVALUATION_TRANSITION_CHANGED_REASON)
+            applied = str(event.get("applied_at_utc") or "")
+            try:
+                stamp = datetime.fromisoformat(applied.replace("Z", "+00:00"))
+            except ValueError as error:
+                raise ValueError(EVALUATION_TRANSITION_CHANGED_REASON) from error
+            if stamp.tzinfo is None:
+                raise ValueError(EVALUATION_TRANSITION_CHANGED_REASON)
+            events.append((path, event))
+        return events
+
+    def _evaluation_transition_chain(self) -> list[dict[str, Any]]:
+        """Order the applied events by their predecessor links.
+
+        Each event names the authorization hash of the event before it, or
+        ``None`` when it is the first. A missing predecessor, a fork or an
+        extra event is an error, so a replaced or added event cannot widen
+        the ceiling.
+        """
+        by_predecessor: dict[str | None, dict[str, Any]] = {}
+        for _, event in self._evaluation_transition_events():
+            key = event["authorization"]["from_evaluation_transition_sha256"]
+            if key in by_predecessor:
+                raise ValueError(
+                    "two evaluation policy transitions share one predecessor"
+                )
+            by_predecessor[key] = event
+        chain: list[dict[str, Any]] = []
+        predecessor: str | None = None
+        while predecessor in by_predecessor:
+            event = by_predecessor.pop(predecessor)
+            chain.append(event)
+            predecessor = event["transition_authorization_sha256"]
+        if by_predecessor:
+            raise ValueError(
+                "an evaluation policy transition has no applied predecessor"
+            )
+        return chain
+
+    def authorized_evaluation_ceiling_usd(self) -> Decimal:
+        """The evaluation ceiling the reviewed transition chain authorizes."""
+        chain = self._evaluation_transition_chain()
+        if not chain:
+            return EVALUATION_BASELINE_CEILING_USD
+        change = chain[-1]["authorization"]["changed_policy_fields"]
+        return _money(change["evaluation_ceiling_usd"]["to"], "authorized ceiling")
+
+    def _active_evaluation_transition_sha256(self) -> str | None:
+        chain = self._evaluation_transition_chain()
+        return chain[-1]["transition_authorization_sha256"] if chain else None
+
+    def _authorize_evaluation_ceiling(self) -> None:
+        """Bind the active evaluation ceiling to the reviewed chain.
+
+        A ceiling at or below the authorized one needs nothing: a smaller
+        ceiling only tightens the control. A larger one needs
+        ``evaluation_policy_transition_file``, whose change set must be one of
+        ``EVALUATION_CEILING_CHANGES``. Applying it writes one immutable
+        event, and every later start reads that event instead of the file.
+        """
+        policy = self.evaluation_policy or {}
+        active = _money(policy["evaluation_ceiling_usd"], "evaluation ceiling")
+        authorized = self.authorized_evaluation_ceiling_usd()
+        if active <= authorized:
+            self._evaluation_transition_sha256 = (
+                self._active_evaluation_transition_sha256()
+            )
+            return
+        if self.evaluation_policy_transition_file is None:
+            raise ValueError(
+                "the active evaluation ceiling requires a reviewed transition"
+            )
+        authorization = _read(self.evaluation_policy_transition_file)
+        self._validate_evaluation_policy_transition(authorization)
+        digest = sha256_bytes(canonical_json(authorization).encode())
+        event_path = self.receipts_dir / f"evaluation-policy-transition-{digest}.json"
+        if not event_path.exists():
+            atomic_json(
+                event_path,
+                {
+                    "schema": EVALUATION_POLICY_TRANSITION_EVENT_SCHEMA,
+                    "authorization": authorization,
+                    "transition_authorization_sha256": digest,
+                    "applied_at_utc": _now(),
+                },
+                immutable=True,
+            )
+        self._evaluation_transition_sha256 = digest
+        if self.authorized_evaluation_ceiling_usd() < active:
+            raise ValueError(EVALUATION_TRANSITION_CHANGED_REASON)
+
+    def _validate_evaluation_policy_transition(
+        self, authorization: dict[str, Any]
+    ) -> None:
+        """Validate one evaluation-policy transition before it is applied."""
+        if (
+            not isinstance(authorization, dict)
+            or set(authorization) != EVALUATION_POLICY_TRANSITION_FIELDS
+            or authorization.get("schema") != EVALUATION_POLICY_TRANSITION_SCHEMA
+        ):
+            raise ValueError("the evaluation policy transition file is invalid")
+        change = authorization["changed_policy_fields"]
+        if change not in EVALUATION_CEILING_CHANGES:
+            raise ValueError("the evaluation policy change set is not authorized")
+        if Path(str(authorization["ledger_file"])).resolve() != self.ledger_file:
+            raise ValueError("the evaluation policy transition names another ledger")
+        if authorization["expected_ledger_sha256"] != sha256_file(self.ledger_file):
+            raise ValueError("the evaluation policy transition ledger snapshot changed")
+        if authorization["evaluation_gate_sha256"] != sha256_file(
+            self.evaluation_gate_file  # type: ignore[arg-type]
+        ):
+            raise ValueError("the evaluation policy transition binds another gate")
+        source_path = Path(str(authorization["from_policy_file"]))
+        if not source_path.is_file():
+            raise ValueError("the evaluation policy transition source is absent")
+        if sha256_file(source_path) != authorization["from_policy_sha256"]:
+            raise ValueError("the evaluation policy transition source changed")
+        if authorization["to_policy_sha256"] != sha256_file(
+            self.evaluation_policy_file  # type: ignore[arg-type]
+        ):
+            raise ValueError("the evaluation policy transition target changed")
+        source = _read(source_path)
+        target = _read(self.evaluation_policy_file)  # type: ignore[arg-type]
+        for field, values in change.items():
+            if str(source.get(field)) != str(values["from"]):
+                raise ValueError(
+                    f"the evaluation policy source {field} is not the authorized value"
+                )
+            if str(target.get(field)) != str(values["to"]):
+                raise ValueError(
+                    f"the evaluation policy target {field} is not the authorized value"
+                )
+        # Only the authorized fields may differ, and `policy_id` and `purpose`
+        # name the new revision. Every control field must stay identical.
+        described = set(change) | {"policy_id", "purpose"}
+        if {k: v for k, v in source.items() if k not in described} != {
+            k: v for k, v in target.items() if k not in described
+        }:
+            raise ValueError("the evaluation policy transition changes another field")
+        if (
+            _money(
+                change["evaluation_ceiling_usd"]["from"],
+                "authorized predecessor ceiling",
+            )
+            != self.authorized_evaluation_ceiling_usd()
+        ):
+            raise ValueError(
+                "the evaluation policy transition does not start at the active ceiling"
+            )
+        if (
+            authorization["from_evaluation_transition_sha256"]
+            != self._active_evaluation_transition_sha256()
+        ):
+            raise ValueError(
+                "the evaluation policy transition names another predecessor"
+            )
+        if not str(authorization["integrated_code_commit"] or "").strip():
+            raise ValueError("the evaluation policy transition lacks its code commit")
+        if not str(authorization["reason"] or "").strip():
+            raise ValueError("the evaluation policy transition lacks its reason")
+        try:
+            stamp = datetime.fromisoformat(
+                str(authorization["authorized_at_utc"]).replace("Z", "+00:00")
+            )
+        except ValueError as error:
+            raise ValueError(
+                "the evaluation policy transition authorization time is invalid"
+            ) from error
+        if stamp.tzinfo is None:
+            raise ValueError(
+                "the evaluation policy transition authorization time is invalid"
+            )
+        review_path = Path(str(authorization["review_record"]))
+        if not review_path.is_file():
+            raise ValueError("the evaluation policy transition review record is absent")
+        if sha256_file(review_path) != authorization["review_record_sha256"]:
+            raise ValueError("the evaluation policy transition review record changed")
+        with self._lock_file.open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            ledger = self._validated_ledger()
+        if ledger["halted"] or self._phase_halted(ledger, EVALUATION_PHASE):
+            raise ValueError("the ledger is halted")
+        evaluation = self._evaluation_totals(ledger)
+        if evaluation["inflight"]:
+            raise ValueError("an evaluation request is in flight")
+        if evaluation["ambiguous_usd"] > 0:
+            raise ValueError("an evaluation request has an ambiguous charge")
+        if evaluation["used_usd"] > _money(
+            change["evaluation_ceiling_usd"]["to"], "authorized ceiling"
+        ):
+            raise ValueError("the evaluation spend already exceeds the new ceiling")
 
     def evaluation_enabled(self) -> bool:
         return self.evaluation_policy is not None
@@ -1306,8 +1565,70 @@ class SharedGeminiBroker:
         return call_timeout_seconds(self.config, stage)
 
     @property
+    def _pacing_phase(self) -> str:
+        return getattr(self._pacing_state, "phase", "live_test")
+
+    @_pacing_phase.setter
+    def _pacing_phase(self, phase: str) -> None:
+        self._pacing_state.phase = phase
+
+    @property
     def _lock_file(self) -> Path:
         return self.ledger_file.with_name(f".{self.ledger_file.name}.lock")
+
+    @property
+    def _inflight_lock_dir(self) -> Path:
+        return self.receipts_dir / ".inflight"
+
+    def _inflight_lock_path(self, request_key: str) -> Path:
+        return self._inflight_lock_dir / f"{request_key}.lock"
+
+    def _hold_inflight(self, request_key: str) -> Any:
+        """Hold the in-flight lock of one submitted request for its live call.
+
+        The lock is an ``flock`` on a per-request file. Orphan recovery skips
+        a submitted request whose lock is held, so N evaluation calls of one
+        run can be in flight at once. A crashed holder releases the lock, and
+        the next recovery settles the request as before.
+        """
+        self._inflight_lock_dir.mkdir(parents=True, exist_ok=True)
+        handle = self._inflight_lock_path(request_key).open("a+")
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        return handle
+
+    def _inflight_held(self, request_key: str) -> bool:
+        path = self._inflight_lock_path(request_key)
+        if not path.exists():
+            return False
+        with path.open("a+") as probe:
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(probe, fcntl.LOCK_UN)
+        return False
+
+    @staticmethod
+    def _evaluation_recent_submission_times(
+        ledger: dict[str, Any], cutoff: datetime
+    ) -> list[datetime]:
+        """Return the evaluation submissions inside the current minute window.
+
+        The evaluation phase keeps its own window, read from the submission
+        times of its requests, so it never consumes the construction window
+        ``recent_submission_times_utc`` and the construction pace stays exact.
+        """
+        times = []
+        for request in ledger["requests"].values():
+            if request.get("phase") != EVALUATION_PHASE:
+                continue
+            submitted = request.get("submitted_at_utc")
+            if not submitted:
+                continue
+            value = datetime.fromisoformat(str(submitted).replace("Z", "+00:00"))
+            if value > cutoff:
+                times.append(value)
+        return sorted(times)
 
     @property
     def _operation_lock_file(self) -> Path:
@@ -4235,7 +4556,10 @@ class SharedGeminiBroker:
                     # The request is settled. Leave the ledger in the state the
                     # halt rule implies: a halt whose blocking ambiguous
                     # requests are all settled does not stand.
-                    before = (ledger["halted"], ledger.get("evaluation_halted"))
+                    before = (
+                        ledger["halted"],
+                        ledger.get("evaluation_halted"),
+                    )
                     self._lift_settled_halts(ledger)
                     if before != (ledger["halted"], ledger.get("evaluation_halted")):
                         ledger["updated_at_utc"] = _now()
@@ -5495,17 +5819,20 @@ class SharedGeminiBroker:
         The active phase is read from ``_pacing_phase``, which ``execute`` sets
         before the wait, so the method keeps its historical one-argument shape.
         """
-        phase = getattr(self, "_pacing_phase", "live_test")
+        phase = self._pacing_phase
         while True:
             with self._lock_file.open("a+") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 ledger = self._validated_ledger()
             cutoff = datetime.now(UTC) - timedelta(minutes=1)
-            recent = sorted(
-                datetime.fromisoformat(value.replace("Z", "+00:00"))
-                for value in ledger["recent_submission_times_utc"]
-                if datetime.fromisoformat(value.replace("Z", "+00:00")) > cutoff
-            )
+            if phase == EVALUATION_PHASE:
+                recent = self._evaluation_recent_submission_times(ledger, cutoff)
+            else:
+                recent = sorted(
+                    datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    for value in ledger["recent_submission_times_utc"]
+                    if datetime.fromisoformat(value.replace("Z", "+00:00")) > cutoff
+                )
             limit = self._minute_limit(phase)
             if len(recent) < limit:
                 return
@@ -5671,14 +5998,30 @@ class SharedGeminiBroker:
             if self._phase_inflight(ledger, phase) >= self._concurrency_limit(phase):
                 raise ValueError(CONCURRENCY_LIMIT_REASON)
             cutoff = datetime.now(UTC) - timedelta(minutes=1)
-            recent = [
-                value
-                for value in ledger["recent_submission_times_utc"]
-                if datetime.fromisoformat(value.replace("Z", "+00:00")) > cutoff
-            ]
-            if len(recent) >= self._minute_limit(phase):
+            # Each phase owns its minute window as well as its slots. The
+            # construction window is `recent_submission_times_utc`; the
+            # evaluation window is read from the submission times of the
+            # evaluation requests. The evaluation limit is higher than the
+            # construction limit, so a shared window would let evaluation
+            # calls refuse construction calls on the pace alone.
+            if phase == EVALUATION_PHASE:
+                recent_count = len(
+                    self._evaluation_recent_submission_times(ledger, cutoff)
+                )
+            else:
+                recent_count = sum(
+                    1
+                    for value in ledger["recent_submission_times_utc"]
+                    if datetime.fromisoformat(value.replace("Z", "+00:00")) > cutoff
+                )
+            if recent_count >= self._minute_limit(phase):
                 raise ValueError(MINUTE_LIMIT_REASON)
-            ledger["recent_submission_times_utc"] = recent + [_now()]
+            if phase != EVALUATION_PHASE:
+                ledger["recent_submission_times_utc"] = [
+                    value
+                    for value in ledger["recent_submission_times_utc"]
+                    if datetime.fromisoformat(value.replace("Z", "+00:00")) > cutoff
+                ] + [_now()]
             ledger["reserved_usd"] = str(
                 _money(ledger["reserved_usd"], "reserved") + reserved
             )
@@ -5915,7 +6258,18 @@ class SharedGeminiBroker:
             usage,
         )
 
-    def _recover_orphans(self, *, active_run_id: str | None = None) -> None:
+    def _recover_orphans(
+        self, *, active_run_id: str | None = None, own_run_only: bool = False
+    ) -> None:
+        """Settle every interrupted request, then return.
+
+        ``own_run_only`` limits the recovery to the active run. A concurrent
+        evaluation request does not hold the exclusive operation lock, so a
+        construction run of another run id can be inside a live call with a
+        durable response written and its settlement still pending. Recovering
+        that request would settle it twice. The evaluation path therefore
+        recovers only its own run, whose in-flight locks it can see.
+        """
         with self._lock_file.open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             ledger = self._validated_ledger()
@@ -5925,6 +6279,8 @@ class SharedGeminiBroker:
             final_path = self.receipts_dir / f"{event_stem}.json"
             received_path = self.receipts_dir / f"{event_stem}.received.json"
             if request["state"] in {"completed", "ambiguous_charge"}:
+                # Every terminal request keeps its custody check, whichever
+                # run wrote it.
                 if not final_path.is_file():
                     error = ValueError(
                         "a terminal paid request lacks its immutable final receipt"
@@ -5933,6 +6289,16 @@ class SharedGeminiBroker:
                     raise error
                 continue
             if request["state"] != "submitted":
+                continue
+            if (
+                own_run_only
+                and active_run_id is not None
+                and request.get("run_id") != active_run_id
+            ):
+                continue
+            if self._inflight_held(request_key):
+                # A live worker holds this request's in-flight lock: the
+                # provider call is still running. It is not an orphan.
                 continue
             if (
                 active_run_id is not None
@@ -6076,18 +6442,37 @@ class SharedGeminiBroker:
                         self.active_evaluation_price_config_sha256
                     ),
                     "evaluation_gate_sha256": base["gate_sha256"],
+                    "evaluation_policy_transition_sha256": (
+                        self._evaluation_transition_sha256
+                    ),
                 }
             )
-        operation = self._operation_lock_file.open("a+")
-        try:
-            fcntl.flock(operation, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            operation.close()
-            raise ValueError("another paid broker operation is active") from error
+        # A construction request holds the exclusive operation lock for its
+        # whole call, as before. An evaluation request never takes that lock:
+        # it serialises its admission (recovery, gate check, pace, count,
+        # reserve) behind the in-process admission lock, then releases the
+        # admission and holds only its own in-flight lock during the live
+        # call. So N evaluation calls run at once, a construction run on the
+        # same ledger keeps its own lock, slots and window, and every ledger
+        # write stays under the ledger lock.
+        concurrent = phase == EVALUATION_PHASE
+        operation = None
+        inflight_lock = None
+        admitted = False
+        if concurrent:
+            self._evaluation_admission_lock.acquire()
+            admitted = True
+        else:
+            operation = self._operation_lock_file.open("a+")
+            try:
+                fcntl.flock(operation, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                operation.close()
+                raise ValueError("another paid broker operation is active") from error
         try:
             if exclusive_batch_marker_path(self.ledger_file).exists():
                 raise ValueError("exclusive Gemini batch mode is active")
-            self._recover_orphans(active_run_id=run_id)
+            self._recover_orphans(active_run_id=run_id, own_run_only=concurrent)
             if phase == EVALUATION_PHASE:
                 gate = _validate_evaluation_gate(self.evaluation_gate_file)  # type: ignore[arg-type]
                 self._validate_evaluation_gate_hashes(gate)
@@ -6238,6 +6623,10 @@ class SharedGeminiBroker:
                 # The trace is explicitly non-authoritative. Even an unexpected
                 # observability failure cannot strand a paid reservation.
                 pass
+            if concurrent:
+                inflight_lock = self._hold_inflight(request_key)
+                self._evaluation_admission_lock.release()
+                admitted = False
             try:
                 response = client.post(
                     request_config["model"], "generateContent", payload
@@ -6300,4 +6689,11 @@ class SharedGeminiBroker:
             self._settle(request_key, actual=actual, usage=usage)
             return receipt
         finally:
-            operation.close()
+            if inflight_lock is not None:
+                fcntl.flock(inflight_lock, fcntl.LOCK_UN)
+                inflight_lock.close()
+                self._inflight_lock_path(request_key).unlink(missing_ok=True)
+            if admitted:
+                self._evaluation_admission_lock.release()
+            if operation is not None:
+                operation.close()

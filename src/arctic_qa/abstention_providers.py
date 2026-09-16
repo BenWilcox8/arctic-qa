@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -372,12 +373,17 @@ class ScriptedTransport:
     script (see the positional-fixture note in the project memory).
     """
 
-    def __init__(self, answers: dict[str, dict[str, Any]]) -> None:
+    def __init__(
+        self, answers: dict[str, dict[str, Any]], *, latency_seconds: float = 0.0
+    ) -> None:
         self.answers = answers
+        self.latency_seconds = latency_seconds
         self.calls: list[tuple[str, str]] = []
+        self._lock = threading.Lock()
 
     def post(self, model: str, method: str, body: dict[str, Any]) -> dict[str, Any]:
-        self.calls.append((model, method))
+        with self._lock:
+            self.calls.append((model, method))
         if method == "countTokens":
             request = body["generateContentRequest"]
             text = canonical_json(request.get("contents"))
@@ -389,6 +395,9 @@ class ScriptedTransport:
         event = self.answers.get(key)
         if event is None:
             raise ValueError("the scripted transport has no answer for this payload")
+        latency = float(event.get("latency_seconds") or self.latency_seconds or 0)
+        if latency > 0:
+            time.sleep(latency)
         if event.get("raise") == "timeout":
             raise TimeoutError("scripted provider timeout")
         if event.get("raise") == "http":

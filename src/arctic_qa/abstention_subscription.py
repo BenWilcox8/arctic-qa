@@ -20,9 +20,12 @@ constraint.
 
 Calls do not enter the shared paid-call ledger, whose validators are Gemini
 only. They enter a sibling subscription ledger that applies the same
-evaluation policy file (per-item cap, per-minute pace, one request at a time,
-no retries, stop on the first error), binds the same gate schema, and writes
-one immutable receipt per request key with USD 0 and the token counts.
+evaluation policy file (per-item cap, per-minute pace, a per-vendor limit on
+the calls in flight, no retries, stop on the first error), binds the same
+gate schema, and writes one immutable receipt per request key with USD 0 and
+the token counts. A submitted request holds an in-flight lock file while its
+harness runs, so N calls of one vendor can run at once and a request that a
+crashed process left behind is settled as ``interrupted`` on the next open.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -74,6 +78,9 @@ CODEX_HOME_DIRNAME = "codex-home"
 STATE_FAILED = "failed"
 STATE_TIMEOUT = "timeout"
 STATE_POLICY_STOP = "policy_stop"
+STATE_INTERRUPTED = "interrupted"
+INFLIGHT_DIRNAME = ".inflight"
+SLOT_WAIT_SECONDS = 0.2
 # Environment variables that must never reach the harness: a parent Claude
 # Code session, an API key that would change the billing, or a Codex home.
 STRIPPED_ENV_PREFIXES = ("CLAUDE", "ANTHROPIC_", "OPENAI_", "CODEX_")
@@ -399,14 +406,21 @@ class ScriptedSubscriptionTransport:
     """
 
     def __init__(
-        self, answers: dict[str, dict[str, Any]], *, version: str = "scripted"
+        self,
+        answers: dict[str, dict[str, Any]],
+        *,
+        version: str = "scripted",
+        latency_seconds: float = 0.0,
     ) -> None:
         self.answers = answers
         self.version = version
+        self.latency_seconds = latency_seconds
         self.invocations: list[dict[str, Any]] = []
+        self._lock = threading.Lock()
 
     def run(self, invocation: dict[str, Any]) -> dict[str, Any]:
-        self.invocations.append(invocation)
+        with self._lock:
+            self.invocations.append(invocation)
         if invocation.get("purpose") == "version":
             return {
                 "returncode": 0,
@@ -418,6 +432,9 @@ class ScriptedSubscriptionTransport:
         event = self.answers.get(key)
         if event is None:
             raise ValueError("the scripted transport has no answer for this prompt")
+        latency = float(event.get("latency_seconds") or self.latency_seconds or 0)
+        if latency > 0:
+            time.sleep(latency)
         if event.get("raise") == "timeout":
             return {"returncode": None, "stdout": "", "stderr": "", "timed_out": True}
         if event.get("raise") == "exit":
@@ -646,7 +663,29 @@ def _validate_subscription_policy(path: Path) -> dict[str, Any]:
     }.items():
         if value.get(field) is not expected:
             raise ValueError(f"benchmark evaluation control changed: {field}")
+    vendors = value.get("vendors") or {}
+    if not isinstance(vendors, dict):
+        raise ValueError("the benchmark evaluation policy vendors block is invalid")
+    for vendor, overrides in vendors.items():
+        if not isinstance(overrides, dict):
+            raise ValueError(
+                f"the benchmark evaluation policy vendor {vendor} is invalid"
+            )
+        for field in ("maximum_concurrent_requests", "maximum_requests_per_minute"):
+            if field not in overrides:
+                continue
+            item = overrides[field]
+            if isinstance(item, bool) or not isinstance(item, int) or item < 1:
+                raise ValueError(
+                    f"the benchmark evaluation policy {vendor} {field} is invalid"
+                )
     return value
+
+
+def vendor_policy_limit(policy: dict[str, Any], vendor: str, field: str) -> int:
+    """Return one pacing limit of a vendor: its override, else the policy value."""
+    overrides = (policy.get("vendors") or {}).get(vendor) or {}
+    return int(overrides.get(field, policy[field]))
 
 
 def _validate_subscription_gate(path: Path, *, vendor: str) -> dict[str, Any]:
@@ -717,11 +756,24 @@ class SubscriptionLedger:
             raise ValueError(
                 "the evaluation gate binds another subscription models file"
             )
+        self.gate_sha256 = sha256_file(gate_file)
         self.ledger_dir.mkdir(parents=True, exist_ok=True)
         self.receipts_dir = ledger_dir / RECEIPTS_DIRNAME
         self.receipts_dir.mkdir(exist_ok=True)
+        self.inflight_dir = self.receipts_dir / INFLIGHT_DIRNAME
+        self.inflight_dir.mkdir(exist_ok=True)
+        self._inflight: dict[str, Any] = {}
+        self._inflight_guard = threading.Lock()
         self.ledger_file = ledger_dir / LEDGER_FILENAME
-        if not self.ledger_file.is_file():
+        if self.ledger_file.is_file():
+            existing = self._read()
+            if existing.get("vendor") != vendor:
+                raise ValueError("the subscription ledger belongs to another vendor")
+            if existing.get("policy_sha256") != sha256_file(policy_file):
+                raise ValueError(
+                    "the subscription ledger was opened under another evaluation policy"
+                )
+        else:
             atomic_json(
                 self.ledger_file,
                 {
@@ -783,6 +835,85 @@ class SubscriptionLedger:
     def receipt_path(self, request_key: str) -> Path:
         return self.receipts_dir / f"{request_key}.json"
 
+    def limit(self, field: str) -> int:
+        """Return the pacing limit of this vendor under the evaluation policy."""
+        return vendor_policy_limit(self.policy, self.vendor, field)
+
+    # -- in-flight locks ------------------------------------------------------
+
+    def _inflight_path(self, request_key: str) -> Path:
+        return self.inflight_dir / f"{request_key}.lock"
+
+    def _hold_inflight(self, request_key: str) -> None:
+        handle = self._inflight_path(request_key).open("a+")
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        with self._inflight_guard:
+            self._inflight[request_key] = handle
+
+    def _release_inflight(self, request_key: str) -> None:
+        with self._inflight_guard:
+            handle = self._inflight.pop(request_key, None)
+        if handle is not None:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+            handle.close()
+        self._inflight_path(request_key).unlink(missing_ok=True)
+
+    def _inflight_held(self, request_key: str) -> bool:
+        path = self._inflight_path(request_key)
+        if not path.exists():
+            return False
+        with path.open("a+") as probe:
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(probe, fcntl.LOCK_UN)
+        return False
+
+    def _recover_stale(self, ledger: dict[str, Any]) -> bool:
+        """Settle every submitted row whose holder is gone. Return whether any."""
+        changed = False
+        for request_key, row in ledger["requests"].items():
+            if row["state"] != "submitted" or self._inflight_held(request_key):
+                continue
+            receipt = {
+                "schema": SUBSCRIPTION_RECEIPT_SCHEMA,
+                "request_key": request_key,
+                "request_sha256": None,
+                "phase": EVALUATION_PHASE,
+                "vendor": self.vendor,
+                "model": row["model"],
+                "arm": row["arm"],
+                "trial": {"trial_id": row["trial_id"]},
+                "billing": "subscription",
+                "cost_usd": SUBSCRIPTION_COST_USD,
+                "state": STATE_INTERRUPTED,
+                "error": "the harness process did not settle this request",
+                "usage": None,
+                "submitted_at_utc": row["submitted_at_utc"],
+                "completed_at_utc": _utc_now(),
+            }
+            path = self.receipt_path(request_key)
+            if not path.is_file():
+                atomic_json(path, receipt, immutable=True)
+            row["state"] = STATE_INTERRUPTED
+            row["completed_at_utc"] = receipt["completed_at_utc"]
+            row["usage"] = {
+                "promptTokenCount": 0,
+                "candidatesTokenCount": 0,
+                "thoughtsTokenCount": 0,
+            }
+            row["receipt_sha256"] = sha256_file(path)
+            self._inflight_path(request_key).unlink(missing_ok=True)
+            changed = True
+        return changed
+
+    @staticmethod
+    def _inflight_count(ledger: dict[str, Any]) -> int:
+        return sum(
+            1 for row in ledger["requests"].values() if row["state"] == "submitted"
+        )
+
     def _item_key(self, trial: dict[str, Any]) -> str:
         return "/".join(
             (trial["item_id"], trial["condition"], trial["model"], trial["arm"])
@@ -800,6 +931,9 @@ class SubscriptionLedger:
             "gate_sha256": ledger["gate_sha256"],
             "submissions": len(ledger["requests"]),
             "completed": len(completed),
+            "inflight": self._inflight_count(ledger),
+            "maximum_concurrent_requests": self.limit("maximum_concurrent_requests"),
+            "maximum_requests_per_minute": self.limit("maximum_requests_per_minute"),
             "input_tokens": sum(
                 int(row["usage"]["promptTokenCount"]) for row in completed
             ),
@@ -826,62 +960,97 @@ class SubscriptionLedger:
             return f"the per-item call cap of {cap} is reached for {item_key}"
         return None
 
+    def _window_wait(self, ledger: dict[str, Any], now: float) -> float:
+        """Return how long the per-minute window needs before one more call."""
+        limit = self.limit("maximum_requests_per_minute")
+        recent = sorted(
+            float(row["submitted_at_epoch"])
+            for row in ledger["requests"].values()
+            if now - float(row["submitted_at_epoch"]) < 60.0
+        )
+        if len(recent) < limit:
+            return 0.0
+        return max(60.0 - (now - recent[0]) + 0.05, 0.05)
+
     def _pace(self, now: float) -> None:
-        limit = int(self.policy["maximum_requests_per_minute"])
+        """Wait until the per-minute window has room (the ledger lock is free)."""
         while True:
-            ledger = self._read()
-            recent = sorted(
-                float(row["submitted_at_epoch"])
-                for row in ledger["requests"].values()
-                if now - float(row["submitted_at_epoch"]) < 60.0
-            )
-            if len(recent) < limit:
+            with _FileLock(self._lock_path()):
+                wait = self._window_wait(self._read(), now)
+            if wait <= 0:
                 return
-            wait = 60.0 - (now - recent[0]) + 0.05
-            self._sleep(max(wait, 0.05))
+            self._sleep(wait)
             now = self._clock()
 
     def submit(self, request_key: str, trial: dict[str, Any]) -> dict[str, Any] | None:
-        """Register one outgoing call, or return a policy stop record."""
+        """Register one outgoing call, or return a policy stop record.
+
+        The admission runs under the ledger lock: stale rows are settled, the
+        per-item cap and the duplicate key are checked, the vendor's in-flight
+        limit and its minute window are applied, and the row is written with
+        the in-flight lock held. The harness call itself runs outside the
+        ledger lock, so other calls of the vendor proceed in parallel.
+        """
         now = self._clock()
         stop = self._admit(request_key, trial, now)
         if stop is not None:
             return {"state": STATE_POLICY_STOP, "error": stop}
-        self._pace(now)
-        ledger = self._read()
-        ledger["requests"][request_key] = {
-            "trial_id": trial["trial_id"],
-            "item_key": self._item_key(trial),
-            "model": trial["model"],
-            "arm": trial["arm"],
-            "state": "submitted",
-            "submitted_at_utc": _utc_now(),
-            "submitted_at_epoch": self._clock(),
-            "cost_usd": SUBSCRIPTION_COST_USD,
-        }
-        atomic_json(self.ledger_file, ledger)
-        return None
+        deadline = now + 3600.0
+        while True:
+            with _FileLock(self._lock_path()):
+                ledger = self._read()
+                if self._recover_stale(ledger):
+                    atomic_json(self.ledger_file, ledger)
+                if request_key in ledger["requests"]:
+                    return {
+                        "state": STATE_POLICY_STOP,
+                        "error": "duplicate request key",
+                    }
+                wait = self._window_wait(ledger, now)
+                slots = self.limit("maximum_concurrent_requests")
+                if wait <= 0 and self._inflight_count(ledger) < slots:
+                    ledger["requests"][request_key] = {
+                        "trial_id": trial["trial_id"],
+                        "item_key": self._item_key(trial),
+                        "model": trial["model"],
+                        "arm": trial["arm"],
+                        "state": "submitted",
+                        "submitted_at_utc": _utc_now(),
+                        "submitted_at_epoch": self._clock(),
+                        "gate_sha256": self.gate_sha256,
+                        "cost_usd": SUBSCRIPTION_COST_USD,
+                    }
+                    self._hold_inflight(request_key)
+                    atomic_json(self.ledger_file, ledger)
+                    return None
+            if now >= deadline:
+                return {
+                    "state": STATE_POLICY_STOP,
+                    "error": "the vendor in-flight limit stayed full for an hour",
+                }
+            self._sleep(wait if wait > 0 else SLOT_WAIT_SECONDS)
+            now = self._clock()
 
     def settle(self, request_key: str, receipt: dict[str, Any]) -> Path:
-        """Write the immutable receipt and close the ledger row."""
+        """Write the immutable receipt, close the ledger row, free the slot."""
         path = self.receipt_path(request_key)
         atomic_json(path, receipt, immutable=True)
-        ledger = self._read()
-        row = ledger["requests"][request_key]
-        row["state"] = receipt["state"]
-        row["completed_at_utc"] = receipt["completed_at_utc"]
-        row["usage"] = receipt.get("usage") or {
-            "promptTokenCount": 0,
-            "candidatesTokenCount": 0,
-            "thoughtsTokenCount": 0,
-        }
-        row["receipt_sha256"] = sha256_file(path)
-        atomic_json(self.ledger_file, ledger)
+        try:
+            with _FileLock(self._lock_path()):
+                ledger = self._read()
+                row = ledger["requests"][request_key]
+                row["state"] = receipt["state"]
+                row["completed_at_utc"] = receipt["completed_at_utc"]
+                row["usage"] = receipt.get("usage") or {
+                    "promptTokenCount": 0,
+                    "candidatesTokenCount": 0,
+                    "thoughtsTokenCount": 0,
+                }
+                row["receipt_sha256"] = sha256_file(path)
+                atomic_json(self.ledger_file, ledger)
+        finally:
+            self._release_inflight(request_key)
         return path
-
-    def hold(self):
-        """Hold the one-request-at-a-time lock for the duration of a call."""
-        return _FileLock(self._lock_path())
 
 
 class _FileLock:
@@ -1160,24 +1329,29 @@ class SubscriptionEvaluationProvider:
                     }
                 ).encode()
             )
-            with self.ledger.hold():
-                stop = self.ledger.submit(request_key, trial)
-                if stop is not None:
-                    receipt = self._receipt(
-                        trial,
-                        request_key,
-                        request_sha256,
-                        invocation,
-                        result=None,
-                        parsed=stop,
-                        latency=None,
-                        submitted_at=_utc_now(),
-                    )
-                    return self._response(receipt, path=None, resumed=False)
-                submitted_at = _utc_now()
-                started = time.monotonic()
+            stop = self.ledger.submit(request_key, trial)
+            if stop is not None:
+                receipt = self._receipt(
+                    trial,
+                    request_key,
+                    request_sha256,
+                    invocation,
+                    result=None,
+                    parsed=stop,
+                    latency=None,
+                    submitted_at=_utc_now(),
+                )
+                return self._response(receipt, path=None, resumed=False)
+            submitted_at = _utc_now()
+            started = time.monotonic()
+            try:
                 result = self.transport.run(invocation)
-                latency = time.monotonic() - started
+            except BaseException:
+                # The row stays submitted; the next open settles it as
+                # interrupted. Nothing is retried.
+                self.ledger._release_inflight(request_key)
+                raise
+            latency = time.monotonic() - started
             if result.get("timed_out"):
                 parsed: dict[str, Any] = {
                     "state": STATE_TIMEOUT,
@@ -1489,32 +1663,29 @@ def annotate_subscription_models(
 # --- Dry run with the scripted transport ----------------------------------------
 
 
-def subscription_dry_run(
+def subscription_dry_run_provider(
     *,
     vendor: str,
     set_dir: Path,
-    output_dir: Path,
+    ledger_dir: Path,
     run_id: str,
     models: list[str],
     arms: list[str],
     repeats: int,
+    trials: list[dict[str, Any]],
     evaluation_policy_file: Path,
     subscription_models_file: Path,
     policy: str = "random",
     seed: str = "dry-run",
     overrides: dict[str, dict[str, Any]] | None = None,
-    max_calls: int | None = None,
-    item_limit: int | None = None,
+    latency_seconds: float = 0.0,
     code_commit: str | None = None,
     binary: str | None = None,
-) -> dict[str, Any]:
-    """Run the whole subscription path offline: gate, ledger, receipts, scoring."""
-    from .abstention_run import plan_trials, run_evaluation
-    from .abstention_set import load_eval_set
+) -> tuple[SubscriptionEvaluationProvider, dict[str, Any], Any, Path]:
+    """Build the private dry-run gate, ledger and scripted provider of a vendor."""
+    from .abstention_run import dry_run_policy
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    ledger_dir = output_dir / "ledger"
-    ledger_dir.mkdir(exist_ok=True)
+    ledger_dir.mkdir(parents=True, exist_ok=True)
     review = ledger_dir / "dry-run-review.md"
     if not review.is_file():
         review.write_text(
@@ -1523,17 +1694,18 @@ def subscription_dry_run(
         )
     config = load_subscription_models(subscription_models_file)
     binary = binary or str(vendor_entry(config, vendor)["binary"])
-    manifest, items_all = load_eval_set(set_dir)
-    items = items_all[: int(item_limit)] if item_limit is not None else items_all
-    trials = plan_trials(manifest, items, models=models, arms=arms, repeats=repeats)
     transport = ScriptedSubscriptionTransport(
         scripted_subscription_answers(
             vendor, trials, policy=policy, seed=seed, overrides=overrides
         ),
         version="dry-run",
+        latency_seconds=latency_seconds,
     )
     decoding = subscription_decoding_record(
         config, vendor, models, arms, binary=binary, binary_version="dry-run"
+    )
+    evaluation_policy_file = dry_run_policy(
+        evaluation_policy_file, ledger_dir / "evaluation-policy-dry-run.json"
     )
     gate_path = ledger_dir / "evaluation-gate.json"
     atomic_json(
@@ -1565,6 +1737,53 @@ def subscription_dry_run(
         evaluation_gate_file=gate_path,
         subscription_models_file=subscription_models_file,
         transport=transport,
+        binary=binary,
+    )
+    return provider, bound_decoding, transport, gate_path
+
+
+def subscription_dry_run(
+    *,
+    vendor: str,
+    set_dir: Path,
+    output_dir: Path,
+    run_id: str,
+    models: list[str],
+    arms: list[str],
+    repeats: int,
+    evaluation_policy_file: Path,
+    subscription_models_file: Path,
+    policy: str = "random",
+    seed: str = "dry-run",
+    overrides: dict[str, dict[str, Any]] | None = None,
+    max_calls: int | None = None,
+    item_limit: int | None = None,
+    code_commit: str | None = None,
+    binary: str | None = None,
+) -> dict[str, Any]:
+    """Run the whole subscription path offline: gate, ledger, receipts, scoring."""
+    from .abstention_run import plan_trials, run_evaluation
+    from .abstention_set import load_eval_set
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest, items_all = load_eval_set(set_dir)
+    items = items_all[: int(item_limit)] if item_limit is not None else items_all
+    trials = plan_trials(manifest, items, models=models, arms=arms, repeats=repeats)
+    provider, bound_decoding, transport, _ = subscription_dry_run_provider(
+        vendor=vendor,
+        set_dir=set_dir,
+        ledger_dir=output_dir / "ledger",
+        run_id=run_id,
+        models=models,
+        arms=arms,
+        repeats=repeats,
+        trials=trials,
+        evaluation_policy_file=evaluation_policy_file,
+        subscription_models_file=subscription_models_file,
+        policy=policy,
+        seed=seed,
+        overrides=overrides,
+        code_commit=code_commit,
         binary=binary,
     )
     summary = run_evaluation(

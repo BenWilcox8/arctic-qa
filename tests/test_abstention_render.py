@@ -17,18 +17,22 @@ from arctic_qa.abstention_render import (
     N3,
     N4,
     N5,
+    ORDER_SCOPE,
+    PROMPT_VERSION,
     classify,
     condition_options,
     parse_letter,
     prompt_contract,
     prompt_sha256,
     render_trial,
+    shuffle_seed,
     system_instruction,
 )
 from arctic_qa.abstention_set import (
     build_eval_set,
     evaluation_identity,
     load_eval_set,
+    require_current_prompt_contract,
     role_of_model,
     write_eval_set,
 )
@@ -171,19 +175,21 @@ def test_render_is_deterministic_and_shuffles_all_options_with_a_recorded_seed()
     assert first == second
     assert first["letters"] == "ABCDE"
     assert first["shuffle_seed"] == stable_id(
-        "abstention-order", "set-1", row["item_id"], GOLD_PRESENT, 1
+        "abstention-order-v2", "set-1", row["item_id"], GOLD_PRESENT, 1, "m", "low"
     )
     letters = {option["letter"]: option for option in first["options"]}
     assert letters[first["abstain_letter"]]["kind"] == "abstain"
     assert letters[first["gold_letter"]]["kind"] == "gold"
     assert first["correct_letter"] == first["gold_letter"]
-    # Repeats and conditions permute independently; models share a stimulus.
+    # Every repeat, condition, model and arm permutes independently.
     other_repeat = render_trial(row, **{**kwargs, "repeat": 2})
     other_model = render_trial(row, **{**kwargs, "model": "n"})
+    other_arm = render_trial(row, **{**kwargs, "arm": "high"})
     absent = render_trial(row, **{**kwargs, "condition": GOLD_ABSENT})
-    assert other_model["user_text"] == first["user_text"]
+    assert other_model["user_text"] != first["user_text"]
     assert other_model["trial_id"] != first["trial_id"]
     assert other_repeat["shuffle_seed"] != first["shuffle_seed"]
+    assert other_arm["shuffle_seed"] != first["shuffle_seed"]
     assert (
         absent["gold_letter"] is None
         and absent["correct_letter"] == absent["abstain_letter"]
@@ -522,3 +528,88 @@ def test_set_builder_reads_the_database_read_only(tmp_path: Path) -> None:
         )["k"]
         == 4
     )
+
+
+# --- per-call option order (captain order 2026-09-16) ------------------------
+
+
+def test_every_call_gets_its_own_option_order() -> None:
+    """The captain's order of 2026-09-16, in the words of the instruction:
+
+    "Make sure that the options are always shuffled between every model call,
+    even the same model with the same effort level".
+    """
+    row = item()
+    common = dict(eval_set_id="set-1", condition=GOLD_ABSENT, k=4)
+    first = render_trial(row, repeat=1, model="gemini-3.8-flash", arm="high", **common)
+    second = render_trial(row, repeat=1, model="claude-opus-5", arm="high", **common)
+    # Two models at one preset, one item, one condition, one repeat.
+    assert first["shuffle_seed"] != second["shuffle_seed"]
+    assert [option["text"] for option in first["options"]] != [
+        option["text"] for option in second["options"]
+    ]
+    assert first["stimulus_sha256"] != second["stimulus_sha256"]
+    # The same model at two presets.
+    other_arm = render_trial(
+        row, repeat=1, model="gemini-3.8-flash", arm="medium", **common
+    )
+    assert other_arm["shuffle_seed"] != first["shuffle_seed"]
+    # The three repeats of one model at one preset.
+    repeats = [
+        render_trial(row, repeat=index, model="gpt-6-astra", arm="high", **common)
+        for index in (1, 2, 3)
+    ]
+    seeds = [trial["shuffle_seed"] for trial in repeats]
+    assert len(set(seeds)) == 3
+    orders = [tuple(option["text"] for option in trial["options"]) for trial in repeats]
+    assert len(set(orders)) == 3
+    # Every order is a permutation of the same option set, and the seed is
+    # deterministic and recorded.
+    for trial in [first, second, other_arm, *repeats]:
+        assert sorted(option["text"] for option in trial["options"]) == sorted(
+            option["text"] for option in first["options"]
+        )
+        assert trial["prompt_version"] == PROMPT_VERSION == "abstention-eval-prompt-v2"
+        assert trial["order_scope"] == ORDER_SCOPE
+        assert trial["shuffle_seed"] == shuffle_seed(
+            "set-1",
+            row["item_id"],
+            GOLD_ABSENT,
+            trial["repeat"],
+            trial["model"],
+            trial["arm"],
+        )
+    # The abstention letter moves with the order and stays recorded.
+    letters = {
+        trial["abstain_letter"] for trial in [first, second, other_arm, *repeats]
+    }
+    assert len(letters) > 1
+    assert prompt_contract()["order_scope"] == ORDER_SCOPE
+    assert "per call" in prompt_contract()["order_note"]
+
+
+def test_a_new_prompt_contract_freezes_a_new_set_and_refuses_an_old_one(
+    tmp_path: Path,
+) -> None:
+    """The set identity binds the prompt contract, so v1 and v2 never mix."""
+    manifest = write_eval_set(
+        [item(item_id="aqa-one")],
+        excluded=[],
+        output_dir=tmp_path / "sets",
+        population_record={"population": "list"},
+        k=4,
+        state_db=None,
+    )
+    assert manifest["prompt_contract"]["prompt_version"] == PROMPT_VERSION
+    require_current_prompt_contract(manifest)
+    stale = {
+        **manifest,
+        "prompt_contract": {
+            **manifest["prompt_contract"],
+            "prompt_version": "abstention-eval-prompt-v1",
+        },
+    }
+    with pytest.raises(ValueError, match="another prompt contract"):
+        require_current_prompt_contract(stale)
+    with pytest.raises(ValueError, match="another prompt contract"):
+        require_current_prompt_contract({})

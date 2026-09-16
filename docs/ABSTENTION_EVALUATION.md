@@ -25,6 +25,8 @@ The exact words of the captain are quoted here.
 3. Option order.
    "Order should be shuffled randomly."
    All displayed options, the abstention option included, are shuffled with a recorded seed.
+   "Make sure that the options are always shuffled between every model call, even the same model with the same effort level" (2026-09-16).
+   The seed binds the model and the thinking arm, so every call has its own order.
 4. Abstention wording.
    "wording should be "I abstain from answering"".
 5. Output contract.
@@ -79,11 +81,15 @@ The gold-present condition shows the gold answer, the first k-1 distractors, and
 The gold-absent condition shows all k distractors and the abstention option.
 Both conditions show k+1 options.
 The option order is a seeded permutation.
-The seed depends on the set, the item, the condition, and the repeat.
-Every model sees the same stimulus for the same item, condition, and repeat.
+The seed depends on the set, the item, the condition, the repeat, the model and the thinking arm.
+No two calls therefore share one order.
+The captain ordered that on 2026-09-16: "Make sure that the options are always shuffled between every model call, even the same model with the same effort level".
+Prompt version `abstention-eval-prompt-v1` shared one order across the models of one trial.
+Version `abstention-eval-prompt-v2` is the current contract.
+The seed stays deterministic and is recorded in the trial, the response row and the receipt.
 The system instruction asks for exactly one uppercase letter.
 The user content shows `QUESTION`, `QUESTION_CONTEXT`, and `OPTIONS` as separate blocks, as `docs/BENCHMARK_INPUT_CONTRACT.md` requires.
-The prompt version is `abstention-eval-prompt-v1`.
+The prompt version is `abstention-eval-prompt-v2`.
 The prompt hash binds the templates and the abstention text into the gate.
 
 ### Output contract
@@ -120,7 +126,46 @@ Each evaluated item is its own ledger paper family.
 A per-item repeat limit replaces the per-paper construction cap.
 The construction price config and its transition chain stay unchanged.
 The evaluation policy and price config are bound into the gate by hash.
-A changed ceiling needs a new policy file and a new reviewed gate.
+
+### The evaluation ceiling
+
+The evaluation ceiling is a money control, so a larger one needs a reviewed transition, chained on the applied predecessor, as a construction ceiling does.
+The baseline is USD 5.00, the ceiling of the first two policies.
+A policy with a ceiling at or below the authorized one needs no transition, because a smaller ceiling only tightens the control.
+A policy with a larger ceiling is refused until its transition is applied.
+
+The broker registers the exact authorized step in `EVALUATION_CEILING_CHANGES` of `src/arctic_qa/model_broker.py`.
+One step is registered today: USD 5.00 to USD 200.00, the captain's allocation of 2026-09-16 for benchmarking the Gemini models.
+`config/benchmark-evaluation-policy-v3.json` is the target policy, and it differs from v2 only in the ceiling, the policy id and the purpose.
+Another ceiling needs its own constant and its own review before a transition file can apply.
+
+The transition file has schema `benchmark-evaluation-policy-transition-v1` and these fields:
+
+- `ledger_file`
+- `from_evaluation_transition_sha256` (the applied predecessor event, or `null` for the first)
+- `from_policy_file`
+- `from_policy_sha256`
+- `to_policy_sha256`
+- `changed_policy_fields`
+- `expected_ledger_sha256`
+- `evaluation_gate_sha256`
+- `integrated_code_commit`
+- `review_record`
+- `review_record_sha256`
+- `reason`
+- `authorized_at_utc`
+
+The broker validates every one of them before it applies the transition.
+The change set must be registered, the source policy must be present and match its hash, and the target must equal the source except the ceiling, the policy id and the purpose.
+The gate must bind the target policy.
+The ledger must validate, with no halt, no evaluation request in flight, no ambiguous evaluation charge, and an evaluation spend at or under the new ceiling.
+
+The broker then writes one immutable `evaluation-policy-transition-<hash>.json` event in the receipt directory.
+Every later start reads that event and needs no transition file.
+Each new evaluation receipt records the event hash in `evaluation_policy_transition_sha256`.
+A replaced event, an added event or a fork of the chain stops the broker.
+
+The CLI option is `--evaluation-policy-transition-file`.
 
 The gate binds the evaluation set manifest hash, the prompt version and hash, the abstention text, the model list, the arms, the decoding record, the repeat limit, and one run id.
 The broker validates the gate and the binding before it reads the credential and before every request.
@@ -310,7 +355,215 @@ Prefix each command with `PYTHONPATH=src python -m arctic_qa --json abstention-e
 
 The launcher of the first live test is `/mnt/crdata/research-abstention/arctic-qa/abstention-eval/private/subscription-test-r1-launcher.sh`.
 
+## Concurrent plan
+
+The captain fixed the evaluation plan on 2026-09-16.
+Every question runs on eight models at the `high` reasoning preset.
+Each model answers the question once with the gold answer present and once with it absent.
+Each condition repeats three times.
+One question is therefore 48 trials.
+
+The plan file `config/benchmark-evaluation-plan-high-v1.json` holds that plan.
+It lists the models of each vendor, the arms, the repeats, k, and the calls in flight per vendor.
+The module `src/arctic_qa/abstention_plan.py` runs it.
+
+| Vendor | Models | Calls in flight |
+| --- | --- | --- |
+| `google_gemini` | gemini-3.8-flash, gemini-3.7-flash | 4 |
+| `anthropic_claude_code` | claude-fable-5-1, claude-opus-5, claude-sonnet-5 | 3 |
+| `openai_codex` | gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra | 3 |
+
+The three vendors always run at the same time.
+Inside one vendor the runner keeps N calls in flight.
+N is the smallest of the plan value, the policy limit of that vendor, and the `--concurrency` override.
+The policy file `config/benchmark-evaluation-policy-v2.json` holds the per-vendor limits in its `vendors` block.
+The Gemini limit is the headroom of the API key.
+The two subscription limits stay low because those quotas are shared with every agent session on this machine.
+
+One plan run directory holds one subdirectory per vendor.
+Each vendor subdirectory is a complete serial-runner directory, so `--action score` reads it without a change.
+The file `plan-manifest.json` binds the plan, and `plan-summary.json` holds the totals of the run.
+
+Every invariant of the serial runner stays:
+
+- One immutable receipt per request key.
+- The caps of the evaluation policy.
+- Resume from `responses.jsonl` and from the receipts.
+- Stop on the first response that is not complete, per vendor.
+  The calls already in flight finish and are recorded.
+  The other vendors continue.
+- One gate per vendor that binds the models, the arms, the repeats, the decoding record, the policy hash and the price-config hash.
+
+### Concurrent evaluation requests in the shared ledger
+
+The shared paid-call ledger serialised every request with one exclusive operation lock.
+The evaluation phase now has its own concurrency slots and its own per-minute window.
+Four changes make that safe:
+
+1. A construction request still holds the exclusive operation lock for its whole call.
+   An evaluation request never takes that lock.
+   It serialises only its admission: the recovery, the gate check, the pace, `countTokens` and the reservation.
+2. During the live call an evaluation request holds an in-flight lock file of its own request key.
+   The lock files live in the hidden directory `.inflight` inside the receipts directory.
+   Orphan recovery skips a submitted request whose lock another process holds.
+   A crashed holder releases the lock, and the next recovery settles the request as before.
+   Two processes must not share one evaluation run id.
+   One reviewed gate authorizes one run id, so one launcher operates one run.
+3. The concurrency check and the minute window count the requests of the active phase only.
+   The construction view is the ledger total minus the evaluation requests in flight.
+   An evaluation submission does not enter `recent_submission_times_utc`, so the construction pace stays exact.
+4. An evaluation admission recovers only its own run.
+   A construction run of another run id can be inside a live call with its response already durable and its settlement pending.
+   A second recovery of that request settles it twice.
+
+The tests `tests/test_abstention_plan.py` prove each of these four.
+
+## Streaming evaluator
+
+The module `src/arctic_qa/abstention_watch.py` evaluates every accepted question as soon as it appears.
+It reads the production state database read-only.
+It selects the accepted candidates of one campaign that match the population contract.
+It freezes each one as a one-item evaluation set with its fixed distractor order and k = 4.
+It runs the whole plan on that item.
+Then it appends one row to the cost journal and waits for the next item.
+
+### Authorization
+
+A paid Gemini call needs a gate that binds one evaluation set.
+A streaming run meets a new set at every item, so a human cannot review each gate in time.
+The evaluator therefore needs one reviewed streaming authorization.
+That file binds the population contract, the plan file, the evaluation policy, the price config, the subscription registry, the code commit, and two bounds: the item count and the Gemini USD.
+From the authorization the evaluator derives one gate per item and per vendor.
+Every field of a derived gate comes from the authorization.
+Only the evaluation set identity and the run id change per item.
+The authorization is the review record of every derived gate, and each derived gate stays on disk beside its item.
+A changed contract, plan, policy, price config, registry or commit stops the evaluator before the first call.
+
+### Cost journal
+
+The module `src/arctic_qa/abstention_cost.py` writes one row per question to `cost-journal.jsonl`.
+One row holds:
+
+- The question id, its paper family and the campaign.
+- The generation cost: the paid calls that the construction ledger booked to that item's paper family, with the calls per stage, and the campaign spend divided by the accepted items so far.
+- The evaluation cost: the Gemini USD of that item in the evaluation phase of the shared ledger.
+- The token counts of every Claude Code and Codex call, with the list-price equivalent of those tokens.
+  The equivalent is information only.
+  The calls bill the subscriptions at USD 0.
+  The rates live in `config/benchmark-evaluation-list-prices-v1.json`, which no gate binds.
+- The per-model N0 to N5 outcomes, the invalid rate, the wall time and the cumulative totals.
+
+The action `cost-summary` prints the run so far: the accepted items, the USD per item on generation, the USD per item on Gemini evaluation, the subscription tokens per item, the projected cost of N items, and the per-model abstention metrics.
+The metrics come from the scorer, so the summary and the tables cannot drift apart.
+
+### Bounds and idempotency
+
+The journal is the record of finished work.
+A restarted evaluator reads it and never runs a completed question again.
+The evaluator stops taking new items at the authorized item count.
+A Gemini call never passes the evaluation ceiling: the broker refuses the call.
+Before each item the evaluator also compares the remaining ceiling with the reservation that the item needs.
+If one more item passes a bound, the evaluator pauses the Gemini vendor, writes a pause row in the journal, and keeps the subscription vendors running.
+A vendor that stops on an item is paused the same way, whatever the reason: a budget stop, a harness error, a timeout or an ambiguous charge.
+The policy forbids a retry, so the next item repeats that stop.
+The pause row names the vendor and the reason, and a restart clears it.
+The evaluator stops when every vendor is paused.
+It exits non-zero only on a real error.
+
+### Paused models
+
+A model can be paused without a stop of the run.
+Captain order 2026-09-16: "pause the fable evaluation because I only have ~80% fable usage left today; I will run the fable benchmarking after the reset at 6:00pm today".
+
+The pause file is `config/benchmark-evaluation-model-pause-v1.json`, with schema `benchmark-evaluation-model-pause-v1`.
+It holds one `paused_models` block.
+Each key is a model id, and its entry takes a `reason` and an optional `resume_at_utc`.
+A model with no resume time stays paused until an operator removes its entry.
+A model whose resume time has passed is not paused any more.
+
+The evaluator re-reads this file before every item.
+So an operator or a cost guard can pause or resume a model while the evaluator runs, and the evaluator needs no restart.
+The repeatable `--pause-model MODEL[=RESUME_UTC]` option pauses a model for one invocation, and it wins over the file for the same model.
+`--no-pause-file` ignores the file.
+
+The pause protects a real quota, so the pause file applies to `run-plan` and `watch`.
+A dry run makes no call and uses no quota, so `dry-run-plan` reads only an explicit `--pause-model`.
+
+A paused model's trials are held.
+They are not dispatched, not recorded and not counted as invalid.
+The item's journal row names the paused models in `evaluation.models_paused`, counts the held trials in `evaluation.pending_paused_trials`, and sets `evaluation.complete` to `false`.
+The other models of the plan run on that item in the same pass.
+A later pass, after the resume time, takes the item up again and runs only the trials that are missing, because the run directory keeps every recorded trial.
+That pass appends a later row for the same item.
+Read a run's totals through `CostJournal.latest_item_rows`, which keeps the last row of each item, so a revisited item is never counted twice.
+
+This is the interface for a cost guard:
+
+- write the pause file (schema above) to pause a model;
+- read `--action pause-status` to prove which models are held now;
+- read `cost-journal.jsonl` in the work directory for the per-item cost, and `--action cost-summary` for the totals, the per-item averages and the projection.
+
+```bash
+--action pause-status --pause-file <pause-file>
+```
+
+The answer has schema `abstention-eval-pause-status-v1`, with `paused_now` and the entries the evaluator read.
+
+### Procedure
+
+1. Write the authorization for a reviewer.
+
+   ```bash
+   --action watch-authorization --state-db <state-db> --campaign-id <campaign> \
+     --run-id-prefix <prefix> --contract-file <contract> --plan-file <plan> \
+     --maximum-items <n> --maximum-gemini-usd <usd> \
+     --review-record <review-file> --output-file <authorization>
+   ```
+
+   An independent reviewer sets `independent_review_verdict` to `pass` and `authorization_enabled` to `true`.
+
+2. Operate the evaluator.
+
+   ```bash
+   --action watch --authorization-file <authorization> --plan-file <plan> \
+     --contract-file <contract> --state-db <state-db> --work-dir <work-dir> \
+     --shared-ledger-file <ledger> --subscription-ledger-root <root> \
+     --ledger-run-prefix <ledger run prefix> --campaign-id <campaign> \
+     --poll-seconds 30
+   ```
+
+   Add `--vendors` to run a subset of the plan.
+   Add `--backfill` to evaluate the chapter 2 items too.
+   Backfill is off by default.
+   Add `--once` for one pass, or `--deadline-seconds` for a bounded test.
+   Add `--pause-file` or `--pause-model` to hold one model's trials.
+
+3. Read the cost summary.
+
+   ```bash
+   --action cost-summary --work-dir <work-dir> --project-items 500
+   ```
+
+The evaluator runs as a systemd user unit, like the live publication snapshot service:
+
+```sh
+systemd-run --user --unit=arctic-abstention-stream-r1 \
+  --working-directory=<worktree> <launcher>
+journalctl --user -u arctic-abstention-stream-r1 -f
+systemctl --user stop arctic-abstention-stream-r1
+```
+
+The launcher of the first live run is `/mnt/crdata/research-abstention/arctic-qa/abstention-eval/private/streaming-eval-r1-launcher.sh`.
+The work directory holds the sets, the derived gates, the runs, the cost journal and `watch-state.json`.
+
 ## Limits
+
+- A paid Gemini evaluation call can meet one provider quirk that halts the shared ledger.
+  gemini-3.7-flash returned a usage record without `candidatesTokenCount` on 2026-09-16, with a total that equals the prompt count plus the thinking count.
+  The broker books that as an ambiguous charge, as `docs/SHARED_MODEL_BROKER.md` requires, and the halt stops every phase of the ledger.
+  No reviewed settlement path covers an omitted answer-token count.
+  Section 7 of `data/arctic-abstention-streaming-eval-r1/report.md` holds the evidence and the two ways to settle it.
+  Read that section before the large Gemini run.
 
 - The evaluation policy raises the per-minute pace only in the dry run. A paid run keeps the pace of the policy file.
 - The rate window of the ledger is shared between phases. A construction run and an evaluation run pace each other.
