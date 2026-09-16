@@ -220,8 +220,8 @@ def test_numeric_rule_schema_describes_source_support_and_omission() -> None:
     distractor_array = generation_module.ROLE_SCHEMAS["distractor_writer"][
         "properties"
     ]["distractors"]
-    assert distractor_array["minItems"] == 4
-    assert distractor_array["maxItems"] == 6
+    assert distractor_array["minItems"] == 6
+    assert distractor_array["maxItems"] == 8
     assert "Avoid explicit negation" in generation_module.DISTRACTOR_WRITER_INSTRUCTIONS
     assert "exactly one displayed number and unit" in (
         generation_module.DISTRACTOR_WRITER_INSTRUCTIONS
@@ -1218,7 +1218,8 @@ def test_streaming_resolves_every_role_evidence_from_source_spans(
         .splitlines()
     ]
     for event in verifier_events:
-        if event["role"] == "standalone_verifier":
+        # The two source-blind judges select no evidence span by design.
+        if event["role"] in {"standalone_verifier", "option_set_verifier"}:
             continue
         response = event["response"]
         response.pop("evidence_quote", None)
@@ -1695,9 +1696,9 @@ def test_streaming_uses_one_shared_broker_for_all_eleven_calls(
         "gemini-3.1-pro-preview"
     )
     status = broker.status()
-    assert status["generation_submissions"] == 11
+    assert status["generation_submissions"] == 12
     assert status["accepted_question_count"] == 1
-    assert transport.custody_checks == 22
+    assert transport.custody_checks == 24
     access_item = json.loads(next((access / "items").glob("*.json")).read_text())
     family_id = stable_id("family", access_item["candidate_key"])
     assert set(status["papers"]) == {family_id}
@@ -1716,7 +1717,7 @@ def test_streaming_uses_one_shared_broker_for_all_eleven_calls(
         "blinded_reconstruction": 1,
         "answer_verification": 1,
         "distractor_generation": 1,
-        "option_verification": 4,
+        "option_verification": 5,
     }
 
     assert (
@@ -1750,7 +1751,7 @@ def test_streaming_uses_one_shared_broker_for_all_eleven_calls(
         "page_id": None,
         "section_id": "extracted-text",
     }
-    assert transport.methods.count("generateContent") == 11
+    assert transport.methods.count("generateContent") == 12
     prompts = dict(transport.role_prompts)
     assert (
         "Select one atomic claim from a complete prose finding sentence"
@@ -1811,8 +1812,8 @@ def test_streaming_uses_one_shared_broker_for_all_eleven_calls(
 
     assert resumed["resumed_papers"] == 1
     assert resumed["counts"]["accepted_base_questions"] == 1
-    assert broker.status()["generation_submissions"] == 11
-    assert transport.methods.count("generateContent") == 11
+    assert broker.status()["generation_submissions"] == 12
+    assert transport.methods.count("generateContent") == 12
     jobs = [
         json.loads(path.read_text()) for path in (eligibility / "jobs").glob("*.json")
     ]
@@ -1940,13 +1941,13 @@ def test_new_campaign_regenerates_a_paper_with_historical_accepted_output(
     assert production["counts"]["accepted_base_questions"] == 1
     assert production["resumed_papers"] == 0
     assert production_item != historical_item
-    assert broker.status()["generation_submissions"] == 11
-    assert transport.methods.count("generateContent") == 11
+    assert broker.status()["generation_submissions"] == 12
+    assert transport.methods.count("generateContent") == 12
     assert (
         database.one(
             "SELECT COUNT(*) AS count FROM calls WHERE run_id='new-production-campaign'"
         )["count"]
-        == 11
+        == 12
     )
     jobs = list((production_eligibility / "jobs").glob("*.json"))
     assert len(jobs) == 1
@@ -2072,7 +2073,7 @@ def test_streaming_live_gate_binds_reviewed_access_input_before_transport(
     result = run_stream(**arguments, access_run_dir=reviewed_access)
 
     assert result["counts"]["accepted_base_questions"] == 1
-    assert transport.methods.count("generateContent") == 11
+    assert transport.methods.count("generateContent") == 12
 
 
 def test_streaming_resumes_reconciled_eligibility_after_process_restart(
@@ -2162,9 +2163,9 @@ def test_streaming_resumes_reconciled_eligibility_after_process_restart(
     )
 
     assert result["counts"]["accepted_base_questions"] == 1
-    assert transport.methods.count("generateContent") == 11
+    assert transport.methods.count("generateContent") == 12
     status = restarted_broker.status()
-    assert status["generation_submissions"] == 11
+    assert status["generation_submissions"] == 12
     assert status["stages"]["eligibility"]["submissions"] == 1
     assert database.one(
         "SELECT status,error_code,error_text FROM calls WHERE role='eligibility'"
@@ -2200,7 +2201,7 @@ def test_low_thinking_counterfactual_completes_the_structured_stream(
     )
 
     assert result["counts"]["accepted_base_questions"] == 1
-    assert len(transport.generation_configs) == 11
+    assert len(transport.generation_configs) == 12
     assert all(
         config["thinkingConfig"] == {"thinkingLevel": "low"}
         for config in transport.generation_configs
@@ -2253,8 +2254,8 @@ def test_live_stream_cli_runs_inline_eligibility_and_qa(
     assert exit_code == 0
     result = json.loads(capsys.readouterr().out)
     assert result["counts"]["accepted_base_questions"] == 1
-    assert broker.status()["generation_submissions"] == 11
-    assert transport.methods.count("generateContent") == 11
+    assert broker.status()["generation_submissions"] == 12
+    assert transport.methods.count("generateContent") == 12
 
 
 def test_streaming_live_cli_obeys_disabled_broker_gate_before_credentials(
@@ -2425,8 +2426,26 @@ def test_true_distractor_is_removed_before_streaming_export(tmp_path: Path) -> N
         .read_text(encoding="utf-8")
         .splitlines()
     ]
+    # A rejection needs its reading (ch2 yield audit 4.8): the flag alone would
+    # be malformed and re-asked. With 2.5 m rejected, rank-order verification
+    # continues to the fifth proposal, so the script carries its event and the
+    # whole-set verdict covers the four verified options.
     verifier_events[3]["response"]["contradiction_established"] = False
     verifier_events[3]["response"]["question_admits_option_as_correct"] = True
+    verifier_events[3]["response"]["admitting_interpretation"] = (
+        "Read 'reported water depth' as the depth reported at the second site."
+    )
+    fifth = json.loads(json.dumps(verifier_events[6]))
+    fifth["require_prompt_contains"] = [
+        "1.5 m" if marker == "5.0 m" else marker
+        for marker in fifth["require_prompt_contains"]
+    ]
+    verifier_events.insert(7, fifth)
+    verifier_events[8]["require_prompt_contains"] = [
+        "1.5 m" if marker == "2.5 m" else marker
+        for marker in verifier_events[8]["require_prompt_contains"]
+    ]
+    verifier_events[8]["forbid_prompt_contains"].append("2.5 m")
     verifier_script = tmp_path / "true-option-verifier.jsonl"
     verifier_script.write_text(
         "\n".join(json.dumps(event) for event in verifier_events) + "\n",
@@ -2458,11 +2477,14 @@ def test_true_distractor_is_removed_before_streaming_export(tmp_path: Path) -> N
     )
 
     assert result["counts"]["accepted_base_questions"] == 1
-    assert result["export"]["mcq_count"] == 1
+    assert result["export"]["mcq_count"] == 2
     mcq_path = paths.namespace / result["export"]["files"]["mcq"]
     records = [json.loads(line) for line in mcq_path.read_text().splitlines()]
     assert all(
         option["text"] != "2.5 m" for record in records for option in record["options"]
+    )
+    assert any(
+        option["text"] == "1.5 m" for record in records for option in record["options"]
     )
 
 
@@ -2507,19 +2529,28 @@ def test_short_answer_without_three_distractors_is_not_counted_as_accepted(
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    verifier_events[3]["response"]["question_admits_option_as_correct"] = True
-    verifier_events[4]["response"]["question_admits_option_as_correct"] = True
+    # Every round proposes six options and verifies them in rank order. Four
+    # rejected contradictions leave two verified, under the floor, so no
+    # whole-set verdict is bought and the candidate is incomplete_non_mcq.
+    option_events = verifier_events[3:7]
+    for text in ("1.5 m", "6.0 m"):
+        event = json.loads(json.dumps(option_events[3]))
+        event["require_prompt_contains"] = [
+            text if marker == "5.0 m" else marker
+            for marker in event["require_prompt_contains"]
+        ]
+        option_events.append(event)
+    for event in option_events[:4]:
+        event["response"]["contradiction_established"] = False
     verifier_script = tmp_path / "two-accepted-distractor-verifier.jsonl"
     verifier_script.write_text(
         "\n".join(
             json.dumps(event)
             for event in [
-                *verifier_events,
-                *json.loads(json.dumps(verifier_events[3:])),
-                *json.loads(json.dumps(verifier_events[3:])),
-                *json.loads(json.dumps(verifier_events[3:])),
-                *json.loads(json.dumps(verifier_events[3:])),
-                *json.loads(json.dumps(verifier_events[3:])),
+                *verifier_events[:3],
+                *json.loads(json.dumps(option_events)),
+                *json.loads(json.dumps(option_events)),
+                *json.loads(json.dumps(option_events)),
             ]
         )
         + "\n",
@@ -2935,9 +2966,9 @@ def test_live_stream_records_schema_invalid_reconstruction_and_advances(
     assert result["paper_results"][0]["reason_codes"] == [
         "reconstructor_response_invalid"
     ]
-    assert transport.methods.count("generateContent") == 16
+    assert transport.methods.count("generateContent") == 17
     status = broker.status()
-    assert status["generation_submissions"] == 16
+    assert status["generation_submissions"] == 17
     assert Decimal(status["reserved_usd"]) == 0
     assert Decimal(status["ambiguous_reserved_usd"]) == 0
     invalid_receipts = [
@@ -2967,8 +2998,8 @@ def test_live_stream_records_schema_invalid_reconstruction_and_advances(
     assert resumed["counts"]["processed"] == 2
     assert resumed["counts"]["generation_rejected"] == 1
     assert resumed["counts"]["accepted_base_questions"] == 1
-    assert transport.methods.count("generateContent") == 16
-    assert broker.status()["generation_submissions"] == 16
+    assert transport.methods.count("generateContent") == 17
+    assert broker.status()["generation_submissions"] == 17
 
 
 @pytest.mark.parametrize(
@@ -3158,7 +3189,7 @@ def test_streaming_cli_resumes_without_a_duplicate_model_call(tmp_path: Path) ->
     assert second["counts"]["accepted_base_questions"] == 1
     assert second["resumed_papers"] == 1
     status = run_cli(tmp_path, "status", "--run-id", "stream-resume")
-    assert status["calls"] == [{"count": 10, "status": "completed"}]
+    assert status["calls"] == [{"count": 11, "status": "completed"}]
 
 
 def test_streaming_cli_fails_closed_on_an_unbound_selection(tmp_path: Path) -> None:
@@ -3301,7 +3332,7 @@ def test_streaming_family_freeze_spans_test_and_production_phases(
     assert second["campaign_id"] == "streaming-commission"
     assert second["resumed_papers"] == 1
     status = run_cli(tmp_path, "status", "--run-id", "streaming-commission")
-    assert status["calls"] == [{"count": 10, "status": "completed"}]
+    assert status["calls"] == [{"count": 11, "status": "completed"}]
 
 
 def test_streaming_export_discloses_same_model_correlated_error(

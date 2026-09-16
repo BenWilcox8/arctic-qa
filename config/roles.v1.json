@@ -42,6 +42,11 @@
         "model": "gemini-3.1-pro-preview",
         "lifecycle": "preview"
       },
+      "option_set_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
       "reconstructor": {
         "provider": "gemini",
         "model": "gemini-3.1-pro-preview",
@@ -89,6 +94,11 @@
         "model": "gemini-3.1-pro-preview",
         "lifecycle": "preview"
       },
+      "option_set_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
       "reconstructor": {
         "provider": "gemini",
         "model": "gemini-3.8-flash",
@@ -132,6 +142,11 @@
         "lifecycle": "preview"
       },
       "option_verifier": {
+        "provider": "gemini",
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
+      },
+      "option_set_verifier": {
         "provider": "gemini",
         "model": "gemini-3.1-pro-preview",
         "lifecycle": "preview"

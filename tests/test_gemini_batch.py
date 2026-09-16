@@ -839,11 +839,26 @@ def scripted_payload(record: dict[str, Any]) -> dict[str, Any]:
             for line in (FIXTURES / fixture).read_text(encoding="utf-8").splitlines()
             if line.strip()
         )
+
+    def _markers(item: dict[str, Any]) -> list[str]:
+        # The scripted fixture carries one positional event per displayed
+        # option. Batch capture prepares every one of the six proposals at
+        # once, so the option verdict is matched by role and instruction
+        # markers, not by the displayed value.
+        return [
+            marker
+            for marker in item.get("require_prompt_contains", [])
+            if not (
+                record["role"] == "option_verifier"
+                and re.fullmatch(r"\d\.\d m", marker)
+            )
+        ]
+
     event = next(
         item
         for item in events
         if item["role"] == record["role"]
-        and all(marker in prompt for marker in item.get("require_prompt_contains", []))
+        and all(marker in prompt for marker in _markers(item))
         and all(
             marker not in prompt for marker in item.get("forbid_prompt_contains", [])
         )
@@ -947,7 +962,7 @@ def test_staged_batch_pipeline_uses_real_prompts_and_exports_accepted_output(
         "blinded_reconstruction": 1,
         "answer_verification": 1,
         "distractor_generation": 1,
-        "option_verification": 4,
+        "option_verification": 7,
     }
     assert sha256_file(ledger) == original_ledger_hash
     option_requests = [
@@ -955,10 +970,12 @@ def test_staged_batch_pipeline_uses_real_prompts_and_exports_accepted_output(
         for key, row in store.read()["requests"].items()
         if row["stage"] == "option_verification"
     ]
-    assert len(option_requests) == 4
+    assert len(option_requests) == 7
     assert all(
-        "VERIFICATION_BINDING" in row["request"]["contents"][0]["parts"][0]["text"]
-        for row in option_requests
+        "VERIFICATION_BINDING" in text or "OPTION_SET_BINDING" in text
+        for text in (
+            row["request"]["contents"][0]["parts"][0]["text"] for row in option_requests
+        )
     )
     candidate = database.one("SELECT candidate_json FROM candidates")
     value = json.loads(candidate["candidate_json"])
@@ -986,6 +1003,7 @@ def test_batch_pipeline_reuses_bounded_question_revision_contract(
                 "answer_leakage_absent": False,
                 "unresolved_phrases": [],
                 "missing_detail_types": [],
+                "competing_readings": [],
                 "reasons": ["answer_leakage"],
                 "review_rationale": "The displayed question contains its answer.",
             }
@@ -1061,7 +1079,7 @@ def test_batch_pipeline_reuses_bounded_question_revision_contract(
         "blinded_reconstruction": 2,
         "answer_verification": 2,
         "distractor_generation": 1,
-        "option_verification": 4,
+        "option_verification": 7,
     }
     assert (
         database.one(

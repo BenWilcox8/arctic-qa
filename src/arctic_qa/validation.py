@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Sequence
@@ -29,7 +30,15 @@ LEGACY_STANDALONE_VERIFICATION_CONTRACT_VERSION = "source-blind-standalone-gate-
 PREDECESSOR_STANDALONE_VERIFICATION_CONTRACT_VERSION = (
     "source-blind-scientific-referent-v2"
 )
-STANDALONE_VERIFICATION_CONTRACT_VERSION = "source-blind-scientific-referent-v3"
+# Chapter 2 shipped v3. Its recorded candidates keep it, so schema 2.7.0 pins
+# the literal. v4 is the ch2 yield audit section 4.2 correction: the
+# answer-guessability step is deleted, every undefined_* and
+# multiple_interpretations code is bound to displayed evidence, and the free
+# deterministic screen moves to its own standalone_det_ namespace.
+CHAPTER2_STANDALONE_VERIFICATION_CONTRACT_VERSION = (
+    "source-blind-scientific-referent-v3"
+)
+STANDALONE_VERIFICATION_CONTRACT_VERSION = "source-blind-scientific-referent-v4"
 STANDALONE_CALIBRATION_SET_VERSION = "standalone-calibration-v1"
 STANDALONE_CALIBRATION_MUST_PASS_RATE = Decimal("0.8")
 ANSWER_AGREEMENT_CONTRACT_VERSION = "deterministic-first-answer-agreement-v1"
@@ -45,6 +54,10 @@ QUESTION_VERIFICATION_CONTRACT_VERSION = "question-verification-v2"
 PREDECESSOR_NUMERIC_RULE_CONTRACT_VERSION = "numeric-rule-source-support-v2"
 NUMERIC_RULE_CONTRACT_VERSION = "numeric-rule-source-support-v3"
 OPTION_DISPLAY_CONTRACT_VERSION = "displayed-option-structure-v1"
+# ch2 yield audit section 4.8. The option verdict key set changed, and
+# _option_response_schema_valid compares key sets exactly, so the response
+# contract carries its own version.
+OPTION_VERIFICATION_CONTRACT_VERSION = "option-admitting-interpretation-v1"
 DIRECT_SOURCE_VALUE_CONTRACT_VERSION = "direct-source-value-v1"
 MULTI_VALUE_NUMERIC_CONTRACT_VERSION = "numeric-rule-multiple-values-v1"
 SCOPE_CONTRACT_VERSION = "selected-evidence-literal-scope-v4"
@@ -312,7 +325,37 @@ CANDIDATE_CONTRACTS = {
             EVIDENCE_COMBINATION_CONTRACT_VERSION
         ),
     },
+    # Schema 2.7.0 is the chapter 2 contract. It stays pinned to the literals
+    # chapter 2 recorded so its stored candidates keep validating.
     "2.7.0": {
+        "prompt_version": GENERATION_PROMPT_VERSION,
+        "generation_attempt_contract_version": ROUTING_CONTRACT_VERSION,
+        "answer_agreement_contract_version": ANSWER_AGREEMENT_CONTRACT_VERSION,
+        "standalone_verification_contract_version": (
+            CHAPTER2_STANDALONE_VERIFICATION_CONTRACT_VERSION
+        ),
+        "question_verification_contract_version": (
+            QUESTION_VERIFICATION_CONTRACT_VERSION
+        ),
+        "numeric_rule_contract_version": NUMERIC_RULE_CONTRACT_VERSION,
+        "direct_value_contract_version": DIRECT_SOURCE_VALUE_CONTRACT_VERSION,
+        "scope_contract_version": SCOPE_CONTRACT_VERSION,
+        "scope_role_semantics_version": "scope-role-semantics-v2",
+        "scope_role_binding_contract_version": (
+            "scope-role-question-context-binding-v1"
+        ),
+        "evidence_combination_contract_version": (
+            EVIDENCE_COMBINATION_CONTRACT_VERSION
+        ),
+        "context_only_evidence_contract_version": (
+            CONTEXT_ONLY_EVIDENCE_CONTRACT_VERSION
+        ),
+        "referent_slot_contract_version": REFERENT_SLOT_CONTRACT_VERSION,
+        "finding_admission_contract_version": FINDING_ADMISSION_CONTRACT_VERSION,
+        "option_display_contract_version": OPTION_DISPLAY_CONTRACT_VERSION,
+    },
+    # Schema 2.8.0 carries the chapter 3 gate corrections.
+    "2.8.0": {
         "prompt_version": GENERATION_PROMPT_VERSION,
         "generation_attempt_contract_version": ROUTING_CONTRACT_VERSION,
         "answer_agreement_contract_version": ANSWER_AGREEMENT_CONTRACT_VERSION,
@@ -338,9 +381,13 @@ CANDIDATE_CONTRACTS = {
         "referent_slot_contract_version": REFERENT_SLOT_CONTRACT_VERSION,
         "finding_admission_contract_version": FINDING_ADMISSION_CONTRACT_VERSION,
         "option_display_contract_version": OPTION_DISPLAY_CONTRACT_VERSION,
+        "option_verification_contract_version": (OPTION_VERIFICATION_CONTRACT_VERSION),
     },
 }
-CONTEXT_ONLY_EVIDENCE_SCHEMA_VERSIONS = frozenset({"2.7.0"})
+CONTEXT_ONLY_EVIDENCE_SCHEMA_VERSIONS = frozenset({"2.7.0", "2.8.0"})
+# The whole-set option call and the evidence-bound standalone verdict ship
+# together with schema 2.8.0. Stored chapter 2 candidates carry neither.
+OPTION_SET_VERDICT_SCHEMA_VERSIONS = frozenset({"2.8.0"})
 
 
 def expected_standalone_contract(schema_version: object) -> str | None:
@@ -453,6 +500,46 @@ SPAN_OPTION_VERDICT_RESPONSE_KEYS = frozenset(
         "question_admits_option_as_correct",
         "source_span_id",
         "rationale",
+    }
+)
+# ch2 yield audit section 4.8 (D1, D6). The verdict states its admitting
+# interpretation before any boolean, the per-option source-blind test carries
+# its own name, and the unread ``true_in_different_context`` key is gone.
+ADMITTING_OPTION_VERDICT_RESPONSE_KEYS = frozenset(
+    {
+        "rationale",
+        "admitting_interpretation",
+        "contradiction_established",
+        "option_standalone_interpretable",
+        "question_admits_option_as_correct",
+        "source_span_id",
+    }
+)
+OPTION_VERDICT_BOOLEAN_KEYS = {
+    LEGACY_OPTION_VERDICT_RESPONSE_KEYS: (
+        "contradiction_established",
+        "alternative_answer_search_passed",
+        "true_in_different_context",
+        "question_admits_option_as_correct",
+    ),
+    SPAN_OPTION_VERDICT_RESPONSE_KEYS: (
+        "contradiction_established",
+        "alternative_answer_search_passed",
+        "true_in_different_context",
+        "question_admits_option_as_correct",
+    ),
+    ADMITTING_OPTION_VERDICT_RESPONSE_KEYS: (
+        "contradiction_established",
+        "option_standalone_interpretable",
+        "question_admits_option_as_correct",
+    ),
+}
+OPTION_SET_VERDICT_RESPONSE_KEYS = frozenset(
+    {
+        "rationale",
+        "overlapping_option_pairs",
+        "options_mutually_exclusive",
+        "answer_choosable_from_displayed_text",
     }
 )
 SPAN_DERIVED_KEYS = frozenset(
@@ -716,7 +803,16 @@ def _eligible_arctic_scope_error(
         eligibility_ids = (candidate.get("answer") or {}).get("eligibility_span_ids")
         if (
             candidate.get("schema_version")
-            not in {"2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0", "2.6.0", "2.7.0"}
+            not in {
+                "2.1.0",
+                "2.2.0",
+                "2.3.0",
+                "2.4.0",
+                "2.5.0",
+                "2.6.0",
+                "2.7.0",
+                "2.8.0",
+            }
             or not isinstance(components, list)
             or not isinstance(eligibility_ids, list)
             or not eligibility_ids
@@ -1012,7 +1108,7 @@ def validate_candidate(
         reasons.append("reconstruction_alternative_answer_present")
         return _finish(db, candidate, labels, reasons, [], "rejected")
     agreement = candidate.get("answer_agreement")
-    if schema_version in {"2.4.0", "2.5.0", "2.6.0", "2.7.0"}:
+    if schema_version in {"2.4.0", "2.5.0", "2.6.0", "2.7.0", "2.8.0"}:
         if not answer_agreement_resolves(db, candidate, agreement):
             reasons.append("answer_agreement_unresolved")
             labels["unresolved"] = True
@@ -1076,6 +1172,28 @@ def validate_candidate(
     )
     if len(accepted) < 3:
         reasons.append("insufficient_verified_distractors")
+    elif str(candidate.get("schema_version")) in OPTION_SET_VERDICT_SCHEMA_VERSIONS:
+        # The whole-set verdict binds to the answer and the verified options in
+        # verification order (ch2 yield audit section 4.8). Every accepted
+        # option must be inside the judged set.
+        set_reasons = option_set_verdict_reasons(
+            db,
+            candidate,
+            candidate.get("option_set_verdict"),
+            qa_hash,
+            [
+                stable_id("option", qa_hash, result["text"], result["type"])
+                for result in accepted
+            ],
+            [
+                stable_id("option", qa_hash, row.get("text"), row.get("type"))
+                for row in candidate.get("distractors", [])
+            ],
+        )
+        if set_reasons:
+            reasons.extend(set_reasons)
+        else:
+            labels["mcq_eligible"] = True
     else:
         labels["mcq_eligible"] = True
     labels["machine_accepted_unverified"] = True
@@ -1263,9 +1381,9 @@ def question_context_verification_reason(
         return "question_answer_leakage"
     if question_context_leaks_answer(question_context, answer):
         return "question_context_answer_leakage"
-    standalone_reason = benchmark_context_verification_reason(
-        question, question_context
-    )
+    # One code, one producer: this is the source-blind screen speaking, not the
+    # answer verifier's semantic verdict below (ch2 yield audit 4.2, F7 part 2).
+    standalone_reason = standalone_deterministic_reason(question, question_context)
     if standalone_reason:
         return standalone_reason
     if "question_verification_contract_version" not in verification:
@@ -1495,6 +1613,90 @@ def benchmark_context_verification_reason(
     return None
 
 
+STANDALONE_DETERMINISTIC_REASON_PREFIX = "standalone_det_"
+
+
+def standalone_deterministic_reason(
+    benchmark_text: str, question_context: str
+) -> str | None:
+    """Return the free source-blind screen's verdict in its own namespace.
+
+    ch2 yield audit section 4.2 (F7 part 2). ``question_context_referent_unresolved``
+    had two producers: this deterministic acronym screen raised 46 of its 52
+    chapter 2 occurrences and the answer verifier's semantic verdict raised 6, so
+    six lost items were attributed to the wrong stage. One code now has one
+    producer.
+    """
+    reason = benchmark_context_verification_reason(benchmark_text, question_context)
+    if reason is None:
+        return None
+    return STANDALONE_DETERMINISTIC_REASON_PREFIX + reason
+
+
+def standalone_verdict_is_unevidenced(verification: Any) -> bool:
+    """Say whether a failing source-blind verdict cites no displayed evidence.
+
+    ch2 yield audit section 4.2 (SG-3 as amended), scoped to the ``undefined_*``
+    and ``multiple_interpretations`` codes only. A genuine referent defect always
+    has a phrase of the displayed text to quote, and a genuine ambiguity always
+    has two readings to write out. A verdict that carries neither is a contract
+    violation, not a question defect, so routing must move to another finding
+    rather than spend a revision repairing nothing.
+    """
+    if not isinstance(verification, dict) or verification.get("pass") is not False:
+        return False
+    reasons = [
+        reason
+        for reason in verification.get("reasons") or []
+        if isinstance(reason, str)
+    ]
+    phrases = [
+        phrase
+        for phrase in verification.get("unresolved_phrases") or []
+        if isinstance(phrase, str) and phrase.strip()
+    ]
+    readings = [
+        reading
+        for reading in verification.get("competing_readings") or []
+        if isinstance(reading, str) and reading.strip()
+    ]
+    if any(reason.startswith("undefined_") for reason in reasons) and not phrases:
+        return True
+    return "multiple_interpretations" in reasons and len(readings) < 2
+
+
+def standalone_verdict_fingerprint(verification: Any) -> str:
+    """Fingerprint one source-blind verdict over its reason codes alone.
+
+    ch2 yield audit section 4.2 (F7 part 1). The 15 byte-identical repeat
+    attempts of chapter 2 share their reason codes, but their
+    ``unresolved_phrases`` differ from attempt to attempt, so a fingerprint that
+    included the phrases would catch 1 of the 15. ``missing_detail_types`` is
+    part of the demand a repair answers, so it stays.
+    """
+    if not isinstance(verification, dict):
+        return ""
+    reasons = sorted(
+        {
+            reason
+            for reason in verification.get("reasons") or []
+            if isinstance(reason, str)
+        }
+    )
+    details = sorted(
+        {
+            detail
+            for detail in verification.get("missing_detail_types") or []
+            if isinstance(detail, str)
+        }
+    )
+    return hashlib.sha256(
+        canonical_json({"missing_detail_types": details, "reasons": reasons}).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
 def standalone_gate_decision(
     question: str,
     question_context: str,
@@ -1516,7 +1718,7 @@ def standalone_gate_decision(
         reasons.append("question_answer_leakage")
     if answer is not None and question_context_leaks_answer(question_context, answer):
         reasons.append("question_context_answer_leakage")
-    deterministic = benchmark_context_verification_reason(question, question_context)
+    deterministic = standalone_deterministic_reason(question, question_context)
     if deterministic:
         reasons.append(deterministic)
     if model_answer_leakage_absent is False:
@@ -2129,71 +2331,20 @@ def validate_distractor(
         "locator": verdict.get("locator") if verdict else None,
     }
     answer = candidate["answer"]
-    if duplicate_text:
-        result["reasons"].append("duplicate_or_equivalent_distractor")
-        return result
-    answers = [answer.get("text", ""), *answer.get("variants", [])]
-    if any(
-        normalize_text(str(distractor.get("text", ""))) == normalize_text(str(value))
-        for value in answers
-    ):
-        result["reasons"].append("distractor_matches_answer")
-        return result
-    answer_rule = answer.get("deterministic_rule") or {}
-    option_rule = distractor.get("deterministic") or {}
-    if (
-        answer_rule.get("kind") == "closed_set"
-        and option_rule.get("kind") == "closed_set"
-        and not _is_single_member_closed_set(answer_rule)
-    ):
-        closed_set = _closed_set_contract(answer, distractor)
-        if closed_set is None:
-            result["reasons"].append("closed_set_contract_invalid")
-            return result
-        answer_values, option_values, ordering = closed_set
-        if _closed_set_values_equal(answer_values, option_values, ordering):
-            result["reasons"].append("distractor_matches_answer")
-            return result
-    normalized_option = normalize_text(str(distractor.get("text", "")))
-    if normalized_option in {"all of the above", "none of the above"}:
-        result["reasons"].append("forbidden_meta_option")
-        return result
-    option_context_reason = option_context_verification_reason(
-        str(distractor.get("text", "")),
-        str(candidate.get("question_context", "")),
-    )
-    if option_context_reason:
-        result["reasons"].append(option_context_reason)
-        return result
     numeric = distractor.get("numeric")
-    # The display rule runs on every option, with or without numeric metadata.
-    # The predecessor duplicated the negation and conjunction ban inside
-    # _numeric_display_issue, which left a numeric-bearing compound option
-    # checked by a different rule than an atomic one.
-    display_issue = _text_display_issue(
-        str(distractor.get("text", "")),
-        answer=answer,
-        distractor=distractor,
+    free_reason = option_free_rejection_reason(
+        answer,
+        distractor,
+        str(candidate.get("question_context", "")),
+        duplicate_text=duplicate_text,
     )
-    if display_issue:
-        result["reasons"].append(display_issue)
+    if free_reason:
+        result["reasons"].append(free_reason)
+        if free_reason == "closed_set_contract_invalid":
+            result["shadow_labels"] = _closed_set_shadow_labels(answer)
         return result
-    if numeric:
-        numeric_display_issue = _numeric_display_issue(
-            str(distractor.get("text", "")), numeric
-        )
-        if numeric_display_issue:
-            result["reasons"].append(numeric_display_issue)
-            return result
     if not source_span_evidence_resolves(distractor, chunks):
         result["reasons"].append("distractor_proposal_evidence_span_invalid")
-        return result
-    if (
-        numeric
-        and answer.get("numeric_rule")
-        and numeric_equal(answer["numeric_rule"], numeric)
-    ):
-        result["reasons"].append("distractor_is_equivalent_numeric_answer")
         return result
     if not verdict:
         result["reasons"].append("option_verdict_missing_or_stale")
@@ -2225,14 +2376,9 @@ def validate_distractor(
     ):
         result["reasons"].append("option_verdict_call_receipt_missing")
         return result
-    if not verdict.get("contradiction_established"):
-        result["reasons"].append("option_contradiction_unresolved")
-        return result
-    if not verdict.get("alternative_answer_search_passed"):
-        result["reasons"].append("distractor_alternative_answer_possible")
-        return result
-    if verdict.get("question_admits_option_as_correct"):
-        result["reasons"].append("option_correct_under_question_interpretation")
+    verdict_reason = option_verdict_rejection_reason(verdict)
+    if verdict_reason:
+        result["reasons"].append(verdict_reason)
         return result
     if not evidence_resolves(verdict, chunks):
         result["reasons"].append("distractor_evidence_not_located")
@@ -2273,6 +2419,322 @@ def validate_distractor(
     result.update({"accepted": True, "deterministic": False, "label": "model-verified"})
     result["reasons"].append("residual_model_error_possible")
     return result
+
+
+def option_free_rejection_reason(
+    answer: dict[str, Any],
+    distractor: dict[str, Any],
+    question_context: str,
+    *,
+    duplicate_text: bool = False,
+) -> str | None:
+    """Return the model-free rejection of one proposed option, or None.
+
+    This is the free prefix of ``validate_distractor``, in the gate's own
+    order. ``_generate_distractors`` runs it before the paid option verifier so
+    a doomed option buys no verdict and holds no verified slot (ch2 yield audit
+    section 4.8). It admits nothing: every surviving option still runs the full
+    option gate.
+    """
+    if duplicate_text:
+        return "duplicate_or_equivalent_distractor"
+    answers = [answer.get("text", ""), *(answer.get("variants") or [])]
+    if any(
+        normalize_text(str(distractor.get("text", ""))) == normalize_text(str(value))
+        for value in answers
+    ):
+        return "distractor_matches_answer"
+    answer_rule = answer.get("deterministic_rule") or {}
+    option_rule = distractor.get("deterministic") or {}
+    if (
+        answer_rule.get("kind") == "closed_set"
+        and option_rule.get("kind") == "closed_set"
+        and not _is_single_member_closed_set(answer_rule)
+    ):
+        closed_set = _closed_set_contract(answer, distractor)
+        if closed_set is None:
+            return "closed_set_contract_invalid"
+        answer_values, option_values, ordering = closed_set
+        if _closed_set_values_equal(answer_values, option_values, ordering):
+            return "distractor_matches_answer"
+    normalized_option = normalize_text(str(distractor.get("text", "")))
+    if normalized_option in {"all of the above", "none of the above"}:
+        return "forbidden_meta_option"
+    option_context_reason = option_context_verification_reason(
+        str(distractor.get("text", "")), question_context
+    )
+    if option_context_reason:
+        return option_context_reason
+    numeric = distractor.get("numeric")
+    # The display rule runs on every option, with or without numeric metadata.
+    # The predecessor duplicated the negation and conjunction ban inside
+    # _numeric_display_issue, which left a numeric-bearing compound option
+    # checked by a different rule than an atomic one.
+    display_issue = _text_display_issue(
+        str(distractor.get("text", "")), answer=answer, distractor=distractor
+    )
+    if display_issue:
+        return display_issue
+    if numeric:
+        numeric_display_issue = _numeric_display_issue(
+            str(distractor.get("text", "")), numeric
+        )
+        if numeric_display_issue:
+            return numeric_display_issue
+    if (
+        numeric
+        and answer.get("numeric_rule")
+        and numeric_equal(answer["numeric_rule"], numeric)
+    ):
+        return "distractor_is_equivalent_numeric_answer"
+    return None
+
+
+def option_verdict_rejection_reason(verdict: dict[str, Any]) -> str | None:
+    """Return why one bound option verdict rejects its option, or None.
+
+    The admitting-interpretation contract (ch2 yield audit section 4.8, D1)
+    decides two separate things. A rejection needs a stated reason: a true
+    ``question_admits_option_as_correct`` with an empty
+    ``admitting_interpretation`` is a malformed verdict, and the rejection
+    stands as ``option_admission_unexplained`` because the generation stage
+    already re-asked once. The legacy key sets keep their legacy codes so the
+    stored chapter 2 candidates still validate.
+    """
+    if not verdict.get("contradiction_established"):
+        return "option_contradiction_unresolved"
+    if "option_standalone_interpretable" in verdict:
+        if verdict.get("option_standalone_interpretable") is not True:
+            return "option_standalone_uninterpretable"
+        if verdict.get("question_admits_option_as_correct"):
+            interpretation = verdict.get("admitting_interpretation")
+            if not isinstance(interpretation, str) or not interpretation.strip():
+                return "option_admission_unexplained"
+            return "option_correct_under_question_interpretation"
+        return None
+    if not verdict.get("alternative_answer_search_passed"):
+        return "distractor_alternative_answer_possible"
+    if verdict.get("question_admits_option_as_correct"):
+        return "option_correct_under_question_interpretation"
+    return None
+
+
+def option_verdict_is_malformed(verdict: dict[str, Any]) -> bool:
+    """Say whether an admitting-contract verdict flags without a reading."""
+    return bool(
+        verdict.get("question_admits_option_as_correct")
+        and "admitting_interpretation" in verdict
+        and not str(verdict.get("admitting_interpretation") or "").strip()
+    )
+
+
+def _closed_set_shadow_labels(answer: dict[str, Any]) -> list[str]:
+    """Measure the narrowed superlative closure without applying it.
+
+    ch2 yield audit section 4.8 (D4 change 1, held). The label records that the
+    narrowed closure would have established the set. It changes no verdict.
+    """
+    rule = answer.get("deterministic_rule") or {}
+    values = rule.get("source_values")
+    if not isinstance(values, list) or len(values) < 2:
+        return []
+    evidence = str(answer.get("evidence_quote", ""))
+    if _source_establishes_complete_set(evidence, [str(value) for value in values]):
+        return []
+    if definite_superlative_closure(evidence, [str(value) for value in values]):
+        return ["superlative_closure_would_establish_set"]
+    return []
+
+
+_DEFINITE_SUPERLATIVE_PATTERN = re.compile(
+    r"\bthe\s+(?P<count>\w+)\s+(?:most\s+\w+|\w+est|dominant|main|principal|"
+    r"major|primary|leading)\b"
+)
+
+
+def definite_superlative_closure(source_text: str, source_values: list[str]) -> bool:
+    """Say whether one sentence closes the set with a counted definite superlative.
+
+    Shadow only (ch2 yield audit section 4.8, D4 change 1 as amended). The
+    closure is accepted only when the sentence predicates a definite,
+    cardinality-bearing superlative ("the two dominant compounds") whose count
+    equals the number of source values, and every member occurs in that one
+    sentence. An enumeration lead such as "including" or "such as" still fails,
+    and a bare superlative with no count still fails.
+    """
+    normalized_values = [normalize_text(value) for value in source_values]
+    if len(normalized_values) < 2 or any(not value for value in normalized_values):
+        return False
+    text = normalize_text(source_text)
+    for sentence in re.split(r"(?<=[.!?;])\s+", text):
+        if any(value not in sentence for value in normalized_values):
+            continue
+        if re.search(r"\b(?:examples?|including|included|such as|among)\b", sentence):
+            continue
+        for match in _DEFINITE_SUPERLATIVE_PATTERN.finditer(sentence):
+            count = match.group("count")
+            cardinality = len(source_values)
+            if count == str(cardinality) or count == _CARDINALITY_WORDS.get(
+                cardinality
+            ):
+                return True
+    return False
+
+
+def closed_set_closure_reason(answer: dict[str, Any]) -> str | None:
+    """Reject a multi-member closed set whose source never closes it.
+
+    ch2 yield audit section 4.8 (D4 change 3). Without source closure no
+    closed-set option can pass ``_closed_set_contract`` and every compound
+    option is a display defect, so the option stage has no legal move. The
+    rejection runs before any paid option call. A one-member set takes the
+    ``unique_categorical`` path and is not affected.
+    """
+    rule = answer.get("deterministic_rule")
+    if not isinstance(rule, dict) or rule.get("kind") != "closed_set":
+        return None
+    if _is_single_member_closed_set(rule):
+        return None
+    values = rule.get("source_values")
+    if not isinstance(values, list) or len(values) < 2:
+        return "closed_set_closure_not_source_established"
+    if rule.get("member_type") == "quantity":
+        return None
+    evidence = str(answer.get("evidence_quote", ""))
+    if _source_establishes_complete_set(evidence, [str(value) for value in values]):
+        return None
+    return "closed_set_closure_not_source_established"
+
+
+def option_set_hash(qa_hash: str, option_hashes: list[str]) -> str:
+    """Bind one whole-set verdict to the question and its ordered options."""
+    return stable_id("option-set", qa_hash, *option_hashes)
+
+
+def option_set_verdict_reasons(
+    db: Database,
+    candidate: dict[str, Any],
+    verdict: Any,
+    qa_hash: str,
+    accepted_hashes: list[str],
+    candidate_hashes: list[str],
+) -> list[str]:
+    """Return the candidate-level reasons of the whole-set option verdict.
+
+    ch2 yield audit section 4.8 (D2 as amended) and 4.2. One call, bound to
+    the question hash and the ordered option hashes, tests mutual exclusion and
+    carries the question-level "can a reader choose" test that the standalone
+    judge no longer applies. It is source-blind: the call sees the question,
+    the context and the options only. The judged set must hold every accepted
+    option and nothing outside this candidate: a subset of a mutually exclusive
+    set stays mutually exclusive, so a later per-option rejection does not
+    stale the verdict.
+    """
+    if not isinstance(verdict, dict):
+        return ["option_set_verdict_missing"]
+    option_hashes = verdict.get("option_hashes")
+    if (
+        verdict.get("source_hash") != candidate["source"].get("content_hash")
+        or verdict.get("qa_hash") != qa_hash
+        or not isinstance(option_hashes, list)
+        or not option_hashes
+        or any(
+            not isinstance(value, str) or value not in candidate_hashes
+            for value in option_hashes
+        )
+        or len(set(option_hashes)) != len(option_hashes)
+        or any(value not in option_hashes for value in accepted_hashes)
+        or verdict.get("set_hash") != option_set_hash(qa_hash, option_hashes)
+    ):
+        return ["option_set_verdict_stale"]
+    provenance = verdict.get("provenance") or {}
+    if (
+        provenance.get("role") != "option_set_verifier"
+        or not provenance.get("provider")
+        or not provenance.get("requested_model")
+        or not provenance.get("prompt_version")
+        or not provenance.get("prompt_hash")
+    ):
+        return ["option_set_verdict_provenance_missing"]
+    if not _option_set_receipt_matches(db, candidate, verdict, provenance):
+        return ["option_set_verdict_call_receipt_missing"]
+    reasons: list[str] = []
+    if verdict.get("options_mutually_exclusive") is not True:
+        reasons.append("option_set_not_mutually_exclusive")
+    if verdict.get("answer_choosable_from_displayed_text") is not True:
+        reasons.append("option_set_answer_not_choosable")
+    return reasons
+
+
+def _option_set_response_schema_valid(response: Any) -> bool:
+    if not isinstance(response, dict) or set(response) != (
+        OPTION_SET_VERDICT_RESPONSE_KEYS
+    ):
+        return False
+    if not isinstance(response["rationale"], str) or not response["rationale"]:
+        return False
+    pairs = response["overlapping_option_pairs"]
+    if not isinstance(pairs, list) or any(
+        not isinstance(pair, str) or not pair for pair in pairs
+    ):
+        return False
+    return all(
+        type(response[field]) is bool
+        for field in (
+            "options_mutually_exclusive",
+            "answer_choosable_from_displayed_text",
+        )
+    )
+
+
+def _option_set_receipt_matches(
+    db: Database,
+    candidate: dict[str, Any],
+    verdict: dict[str, Any],
+    provenance: dict[str, Any],
+) -> bool:
+    candidate_provenance = candidate.get("provenance") or {}
+    run_id = candidate_provenance.get("run_id")
+    arm = candidate_provenance.get("generation_arm")
+    finding_id = candidate.get("finding_id")
+    if not all(isinstance(value, str) and value for value in (run_id, arm, finding_id)):
+        return False
+    generation_attempt = candidate_provenance.get("generation_attempt")
+    unit_entity_id = (
+        stable_id("unit", finding_id, arm, generation_attempt.get("attempt_id"))
+        if isinstance(generation_attempt, dict)
+        else stable_id("unit", finding_id, arm)
+    )
+    entity_id = stable_id("option-set-verdict", unit_entity_id, verdict["set_hash"])
+    receipt = db.one(
+        """SELECT * FROM calls
+        WHERE run_id=? AND entity_id=? AND role='option_set_verifier'
+          AND provider=? AND requested_model=? AND prompt_version=?
+          AND prompt_hash=? AND status='completed'
+        ORDER BY attempt DESC LIMIT 1""",
+        (
+            run_id,
+            entity_id,
+            provenance.get("provider"),
+            provenance.get("requested_model"),
+            provenance.get("prompt_version"),
+            provenance.get("prompt_hash"),
+        ),
+    )
+    if not receipt or not receipt.get("response_json"):
+        return False
+    if provenance.get("returned_model") != receipt.get("returned_model"):
+        return False
+    if provenance.get("request_id") != receipt.get("request_id"):
+        return False
+    try:
+        response = json.loads(receipt["response_json"])
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not _option_set_response_schema_valid(response):
+        return False
+    recorded = {key: verdict.get(key) for key in response}
+    return _response_matches_resolved_record(response, recorded)
 
 
 def _option_needs_independent_support(distractor: dict[str, Any]) -> bool:
@@ -2352,29 +2814,28 @@ def _option_verdict_receipt_matches(
     if not _option_response_schema_valid(response):
         return False
     recorded_keys = set(response)
-    if set(response) == SPAN_OPTION_VERDICT_RESPONSE_KEYS:
+    if "source_span_id" in recorded_keys:
         recorded_keys.update(SPAN_DERIVED_KEYS)
     recorded_response = {key: verdict.get(key) for key in recorded_keys}
     return _response_matches_resolved_record(response, recorded_response)
 
 
 def _option_response_schema_valid(response: Any) -> bool:
-    if not isinstance(response, dict) or set(response) not in {
-        LEGACY_OPTION_VERDICT_RESPONSE_KEYS,
-        SPAN_OPTION_VERDICT_RESPONSE_KEYS,
-    }:
+    if not isinstance(response, dict):
         return False
-    boolean_fields = (
-        "contradiction_established",
-        "alternative_answer_search_passed",
-        "true_in_different_context",
-        "question_admits_option_as_correct",
-    )
+    keys = frozenset(response)
+    boolean_fields = OPTION_VERDICT_BOOLEAN_KEYS.get(keys)
+    if boolean_fields is None:
+        return False
     if not all(type(response[field]) is bool for field in boolean_fields):
         return False
     if not isinstance(response["rationale"], str) or not response["rationale"]:
         return False
-    if set(response) == SPAN_OPTION_VERDICT_RESPONSE_KEYS:
+    if keys == ADMITTING_OPTION_VERDICT_RESPONSE_KEYS and not isinstance(
+        response["admitting_interpretation"], str
+    ):
+        return False
+    if "source_span_id" in keys:
         return bool(
             isinstance(response["source_span_id"], str) and response["source_span_id"]
         )
@@ -2403,6 +2864,7 @@ def answer_agreement_resolves(
         "2.5.0",
         "2.6.0",
         "2.7.0",
+        "2.8.0",
     } or not isinstance(agreement, dict):
         return False
     deterministic_match = reconstruction_matches(
@@ -2588,6 +3050,8 @@ def _qa_verification_receipts_match(db: Database, candidate: dict[str, Any]) -> 
 
 
 def _standalone_reason_codes(verification: dict[str, Any]) -> list[str]:
+    if standalone_verdict_is_unevidenced(verification):
+        return ["standalone_verdict_unevidenced"]
     reasons = [f"standalone_{reason}" for reason in verification.get("reasons", [])]
     if verification.get("answer_leakage_absent") is not True:
         reasons.append("standalone_answer_leakage")
@@ -2598,7 +3062,12 @@ def standalone_verification_resolves(
     candidate: dict[str, Any], verification: Any
 ) -> bool:
     """Validate one source-blind decision and its retained model receipt."""
-    if not isinstance(verification, dict) or set(verification) != {
+    contract = CANDIDATE_CONTRACTS.get(str(candidate.get("schema_version")), {}).get(
+        "standalone_verification_contract_version"
+    )
+    if not isinstance(verification, dict) or not contract:
+        return False
+    expected_keys = {
         "contract_version",
         "pass",
         "answer_leakage_absent",
@@ -2606,13 +3075,25 @@ def standalone_verification_resolves(
         "missing_detail_types",
         "reasons",
         "review_rationale",
-    }:
+    }
+    evidence_bound = contract == STANDALONE_VERIFICATION_CONTRACT_VERSION
+    if evidence_bound:
+        # v4 adds the competing readings and the controller-owned fingerprint.
+        expected_keys |= {"competing_readings", "verdict_fingerprint"}
+    if set(verification) != expected_keys:
         return False
-    contract = CANDIDATE_CONTRACTS.get(str(candidate.get("schema_version")), {}).get(
-        "standalone_verification_contract_version"
-    )
-    if not contract or verification.get("contract_version") != contract:
+    if verification.get("contract_version") != contract:
         return False
+    if evidence_bound:
+        readings = verification.get("competing_readings")
+        if not isinstance(readings, list) or any(
+            not isinstance(value, str) or not value for value in readings
+        ):
+            return False
+        if verification.get("verdict_fingerprint") != standalone_verdict_fingerprint(
+            verification
+        ):
+            return False
     if (
         type(verification.get("pass")) is not bool
         or type(verification.get("answer_leakage_absent")) is not bool
@@ -2650,14 +3131,18 @@ def _standalone_response_matches_resolved_record(response: Any, record: Any) -> 
     """Match every verdict field while allowing controller-owned version metadata."""
     if not isinstance(response, dict) or not isinstance(record, dict):
         return False
-    substantive_fields = set(record) - {"contract_version"}
+    # The fingerprint is controller-owned like the contract version: the judge
+    # never emits it, so it is not part of the provider receipt.
+    controller_fields = {"contract_version", "verdict_fingerprint"}
+    substantive_fields = set(record) - controller_fields
     if (
         record.get("contract_version")
         not in {
             LEGACY_STANDALONE_VERIFICATION_CONTRACT_VERSION,
+            CHAPTER2_STANDALONE_VERIFICATION_CONTRACT_VERSION,
             STANDALONE_VERIFICATION_CONTRACT_VERSION,
         }
-        or set(response) - {"contract_version"} != substantive_fields
+        or set(response) - controller_fields != substantive_fields
         or any(response.get(field) != record.get(field) for field in substantive_fields)
     ):
         return False
@@ -3119,6 +3604,13 @@ def _closed_set_values_equal(
     if ordering == "ordered":
         return answer_values == option_values
     return set(answer_values) == set(option_values)
+
+
+def option_equivalence_key(
+    answer: dict[str, Any], distractor: dict[str, Any]
+) -> tuple[object, ...]:
+    """Return the key under which two displayed options are the same option."""
+    return _option_equivalence_key(answer, distractor)
 
 
 def _option_equivalence_key(

@@ -29,6 +29,9 @@ ROLE_STAGES = {
     "answer_verifier": "answer_verification",
     "distractor_writer": "distractor_generation",
     "option_verifier": "option_verification",
+    # The whole-set verdict is metered on the option verification stage, so
+    # the bound price config needs no transition (ch2 yield audit 4.8).
+    "option_set_verifier": "option_verification",
     "correction": "repair",
 }
 

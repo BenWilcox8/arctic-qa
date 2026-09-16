@@ -1433,7 +1433,11 @@ def test_a_leakage_root_does_not_collapse_an_independent_scope_defect() -> None:
 def test_the_six_path_bound_and_the_option_repair_set_do_not_move() -> None:
     assert streaming_module.MAX_CANDIDATE_PATHS == 6
     assert streaming_module.OPTION_REPAIR_REASONS == frozenset(
-        {"insufficient_verified_distractors"}
+        {
+            "insufficient_verified_distractors",
+            "option_set_not_mutually_exclusive",
+            "option_set_answer_not_choosable",
+        }
     )
 
 

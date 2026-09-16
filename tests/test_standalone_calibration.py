@@ -128,11 +128,12 @@ def test_the_two_predecessor_false_passes_are_closed_deterministically() -> None
     )
 
 
-def test_the_v3_prompt_states_every_rule_the_calibration_set_exercises() -> None:
+def test_the_v4_prompt_states_every_rule_the_calibration_set_exercises() -> None:
     system = generation.STANDALONE_SYSTEM
     for clause in (
         "NECESSITY TEST",
-        "Two readers who both understand the task can defend different answers",
+        "two readers who both understand the task can defend answers about "
+        "different things",
         "A named campaign, cruise, core, or project code does not resolve a referent",
         "A period fixed only by the publication date",
         "A pointer to source material",

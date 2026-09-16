@@ -846,14 +846,19 @@ class BatchProvider:
             span_match = re.search(r'"span_id":"([^"]+)"', prompt)
             if span_match is None:
                 raise ValueError("the option request has no source span")
+            # The capture placeholder rejects the option, so rank-order
+            # verification continues and every option request of the round
+            # is prepared at once. The whole-set request is prepared in the
+            # round after the option receipts are read, because its prompt
+            # depends on which options verified.
             return ProviderResult(
                 payload={
+                    "rationale": "Temporary offline request capture record.",
+                    "admitting_interpretation": "",
                     "contradiction_established": False,
-                    "alternative_answer_search_passed": False,
-                    "true_in_different_context": False,
+                    "option_standalone_interpretable": False,
                     "question_admits_option_as_correct": False,
                     "source_span_id": span_match.group(1),
-                    "rationale": "Temporary offline request capture record.",
                 },
                 returned_model=model,
                 request_id=f"capture-{key}",

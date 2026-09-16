@@ -778,7 +778,7 @@ def test_eligibility_prompt_v7_states_the_component_rule() -> None:
 
 
 def test_phase_one_contract_versions_are_recorded() -> None:
-    assert generation.CANDIDATE_SCHEMA_VERSION == "2.7.0"
+    assert generation.CANDIDATE_SCHEMA_VERSION == "2.8.0"
     assert generation.PROMPT_VERSION == "arctic-qa-generation-v22"
     assert (
         generation.SCOPE_ROLE_FINDING_POLICY_VERSION
@@ -795,7 +795,7 @@ def test_phase_one_contract_versions_are_recorded() -> None:
     )
     # The scope contract keeps selected-evidence-literal-scope-v4 semantics.
     assert validation.SCOPE_CONTRACT_VERSION == "selected-evidence-literal-scope-v4"
-    contract = validation.CANDIDATE_CONTRACTS["2.7.0"]
+    contract = validation.CANDIDATE_CONTRACTS["2.8.0"]
     assert contract["prompt_version"] == "arctic-qa-generation-v22"
     assert contract["scope_contract_version"] == "selected-evidence-literal-scope-v4"
     assert (
