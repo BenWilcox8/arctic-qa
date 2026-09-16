@@ -97,7 +97,9 @@ def now() -> str:
 
 def write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def read_json(path: Path) -> dict:
@@ -127,7 +129,9 @@ class Activation:
         self.runtime = DATA / "runtime" / f"app-{self.short}-{TASK}"
         self.review = DATA / f"implementation-review-{self.short}-ch3c.md"
         self.gate = DATA / f"live-execution-gate-{self.short}-ch3c.json"
-        self.ledger_transition = DATA / f"ledger-config-transition-{self.short}-ch3c.json"
+        self.ledger_transition = (
+            DATA / f"ledger-config-transition-{self.short}-ch3c.json"
+        )
         self.launcher = DATA / f"launcher-{self.short}-ch3c.sh"
         self.log = DATA / f"launcher-{self.short}-ch3c.log"
         self.state = DATA / f"activation-state-{self.short}.json"
@@ -202,7 +206,9 @@ class Activation:
         )
         result = self.runtime_python("-c", script, check=False)
         if result.returncode != 0:
-            raise SystemExit("the runtime refuses the ledger:\n" + result.stderr[-6000:])
+            raise SystemExit(
+                "the runtime refuses the ledger:\n" + result.stderr[-6000:]
+            )
         return json.loads(result.stdout.strip().splitlines()[-1])
 
     # ---- prepare ----------------------------------------------------------
@@ -212,21 +218,30 @@ class Activation:
         assert live is not None, "no producer runs; name the live gate by hand"
         _, arguments = live
         live_gate = Path(self.live_argument(arguments, "--execution-gate-file"))
-        live_policy = Path(self.live_argument(arguments, "--streaming-budget-policy-file"))
+        live_policy = Path(
+            self.live_argument(arguments, "--streaming-budget-policy-file")
+        )
         live_transition = Path(
             self.live_argument(arguments, "--ledger-config-transition-file")
         )
         assert live_policy == POLICY_V10, live_policy
         prior_gate = read_json(live_gate)
-        assert sha256_file(Path(prior_gate["review_record"])) == prior_gate[
-            "review_record_sha256"
-        ], "the live gate's review record changed"
+        assert (
+            sha256_file(Path(prior_gate["review_record"]))
+            == prior_gate["review_record_sha256"]
+        ), "the live gate's review record changed"
 
         if not self.archive.exists():
             run(
                 [
-                    "git", "-C", str(WORKTREE), "archive", "--format=tar",
-                    "-o", str(self.archive), self.commit,
+                    "git",
+                    "-C",
+                    str(WORKTREE),
+                    "archive",
+                    "--format=tar",
+                    "-o",
+                    str(self.archive),
+                    self.commit,
                 ]
             )
             os.chmod(self.archive, 0o444)
@@ -236,7 +251,8 @@ class Activation:
             run(["tar", "-xf", str(self.archive), "-C", str(self.runtime)])
         runtime_hash = run(
             [
-                "bash", "-c",
+                "bash",
+                "-c",
                 f"cd '{self.runtime}' && find . -type f -print0 | sort -z "
                 "| xargs -0 sha256sum | sha256sum | cut -d' ' -f1",
             ]
@@ -339,6 +355,17 @@ class Activation:
                 "runtime_snapshot": str(self.runtime),
                 "prior_activation_gate": str(live_gate),
                 "prior_activation_gate_sha256": sha256_file(live_gate),
+                # The gate records the policy this activation authorizes. The
+                # broker reads the policy file itself, so these fields are the
+                # record, not the control.
+                "budget_policy_file": str(POLICY_V11),
+                "budget_policy_sha256": sha256_file(POLICY_V11),
+                "prior_budget_policy_file": str(POLICY_V10),
+                "prior_budget_policy_sha256": sha256_file(POLICY_V10),
+                "policy_changed_fields": CHANGED_FIELDS,
+                "ledger_config_transition_file": str(self.ledger_transition),
+                "paper_workers": PAPER_WORKERS,
+                "option_workers": OPTION_WORKERS,
                 # This gate authorizes the concurrency transition itself, and
                 # names the gate the active expansion event was validated under.
                 "supersedes_config_transition_review": {
@@ -381,7 +408,12 @@ class Activation:
             "prepared_at_utc": now(),
         }
         write_json(self.state, state)
-        print(json.dumps({k: state[k] for k in ("commit", "gate_sha256", "runtime_sha256")}, indent=2))
+        print(
+            json.dumps(
+                {k: state[k] for k in ("commit", "gate_sha256", "runtime_sha256")},
+                indent=2,
+            )
+        )
 
     # ---- transition -------------------------------------------------------
 
@@ -539,8 +571,13 @@ class Activation:
         assert after_gate["integrity_valid"] is True, after_gate
         run(
             [
-                "tmux", "new-session", "-d", "-s", TMUX_SESSION,
-                "-c", str(self.runtime),
+                "tmux",
+                "new-session",
+                "-d",
+                "-s",
+                TMUX_SESSION,
+                "-c",
+                str(self.runtime),
                 f"bash {self.launcher} >> {self.log} 2>&1",
             ]
         )
@@ -596,7 +633,8 @@ class Activation:
         ).total_seconds() / 60
         observation = {
             "window_minutes": round(minutes, 2),
-            "requests": last["generation_submissions"] - first["generation_submissions"],
+            "requests": last["generation_submissions"]
+            - first["generation_submissions"],
             "requests_per_minute": round(
                 (last["generation_submissions"] - first["generation_submissions"])
                 / max(minutes, 1e-9),
@@ -606,9 +644,7 @@ class Activation:
             "papers_per_hour": round(
                 (last["processed"] - first["processed"]) * 60 / max(minutes, 1e-9), 2
             ),
-            "spend_usd": str(
-                Decimal(last["spent_usd"]) - Decimal(first["spent_usd"])
-            ),
+            "spend_usd": str(Decimal(last["spent_usd"]) - Decimal(first["spent_usd"])),
             "accepted": last["accepted"] - first["accepted"],
             "peak_inflight": max(sample["inflight"] for sample in samples),
             "halted": last["halted"],
