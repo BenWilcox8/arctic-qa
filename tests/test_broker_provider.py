@@ -714,3 +714,95 @@ def test_a_capped_family_is_not_retried_on_relaunch(tmp_path: Path) -> None:
     assert second_error.stage == first_error.stage == "question_generation"
     assert transport.methods == methods_after_first
     assert broker.family_cost_state("family-1")["committed_usd"] == spend_after_first
+
+
+def test_a_capped_family_refusal_is_never_resumed_and_never_settled(
+    tmp_path: Path,
+) -> None:
+    """The per-paper cap refusal is final for its family.
+
+    The refused request made no call and holds no reservation, so it must
+    never be resumed under a later transition and never be settled. `execute`
+    replays the stored refusal free, even when it is reached directly, so the
+    producer records the capped family and continues with the next paper.
+    """
+    transport = ExpensivePaperTransport()
+    broker = broker_fixture(tmp_path, transport)
+    provider = BrokerProvider(
+        broker=broker,
+        phase="live_test",
+        invocation_run_id="paper-cap-r1",
+    ).bind(
+        paper_id="paper-1",
+        family_id="family-1",
+        source_version_id=SOURCE_VERSION,
+    )
+    parameters = {
+        "temperature": 0,
+        "max_tokens": 1000,
+        "json_schema": {
+            "type": "object",
+            "required": ["question"],
+            "properties": {"question": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    }
+    refused_prompt = None
+    for index in range(8):
+        try:
+            provider.invoke(
+                "question_writer", "System", f"Prompt {index}", parameters, timeout=30
+            )
+        except PaperCostCapError:
+            refused_prompt = f"Prompt {index}"
+            break
+    assert refused_prompt is not None
+
+    payload = _request_payload(
+        "System",
+        refused_prompt,
+        parameters,
+        broker.config_for_stage("question_generation"),
+    )
+    request_key = broker_request_key(
+        model=str(broker.config_for_stage("question_generation")["model"]),
+        run_id="paper-cap-r1",
+        phase="live_test",
+        stage="question_generation",
+        paper_id="paper-1",
+        family_id="family-1",
+        source_version_id=SOURCE_VERSION,
+        payload=payload,
+    )
+    ledger = json.loads((tmp_path / "shared-ledger.json").read_text(encoding="utf-8"))
+    assert ledger["requests"][request_key]["state"] == "not_submitted"
+    assert ledger["requests"][request_key]["reason"] == PAPER_COST_CAP_REASON
+    spend_before = broker.family_cost_state("family-1")["committed_usd"]
+    methods_before = list(transport.methods)
+
+    # The broker itself replays the stored refusal: no resume, no settlement,
+    # no provider call and no ledger movement.
+    replayed = broker.execute(
+        phase="live_test",
+        run_id="paper-cap-r1",
+        stage="question_generation",
+        paper_id="paper-1",
+        family_id="family-1",
+        source_version_id=SOURCE_VERSION,
+        request_key=request_key,
+        payload=payload,
+    )
+    assert replayed["state"] == "not_submitted"
+    assert replayed["reason"] == PAPER_COST_CAP_REASON
+    assert replayed["live_call_made"] is False
+    assert transport.methods == methods_before
+    assert broker.family_cost_state("family-1")["committed_usd"] == spend_before
+    assert not broker.status()["halted"]
+
+    # The resume path refuses the same receipt on its own, under any
+    # transition, and the settlement path never moves the row.
+    with pytest.raises(ValueError, match="never resumed"):
+        broker._resume_not_submitted(request_key, dict(ledger["requests"][request_key]))
+    before = (tmp_path / "shared-ledger.json").read_bytes()
+    assert broker._settle(request_key, actual=None, usage=None) is False
+    assert (tmp_path / "shared-ledger.json").read_bytes() == before

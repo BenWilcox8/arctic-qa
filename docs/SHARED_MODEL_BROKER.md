@@ -216,6 +216,10 @@ The receipt is immutable, and the reason is not resumable.
 
 Thus, a relaunch replays the same refusal at no cost and never re-tries the capped family.
 
+The broker itself replays the refusal: `execute` returns the stored receipt before it paces, counts or resumes.
+
+`_resume_not_submitted` refuses that receipt under every transition, and a settlement never moves its row.
+
 The streaming producer reads that refusal as `errors.PaperCostCapError`.
 
 It settles the in-flight call record as `generation_incomplete`, writes a `rejection_ledger` row at stage `paper_cost_cap` with the reason code `paper_cost_cap_reached`, the family's committed spend and the stage that stopped, and continues with the next paper.
@@ -223,6 +227,26 @@ It settles the in-flight call record as `generation_incomplete`, writes a `rejec
 Only a whole-run stop ends the producer: the allocation ceiling, the session ceiling or a halt.
 
 To raise the cap for a family, move `maximum_paper_cost_usd` through a registered budget transition. Do not change the skip.
+
+### Orphan recovery and concurrent settlement
+
+Every paid call recovers interrupted requests before it starts.
+
+The recovery reads the ledger one time, then settles each request it found.
+
+Another worker of the same ledger can settle one of those requests inside that window.
+
+Therefore the recovery reads the row again before it writes a receipt, and it skips a row that is no longer `submitted`.
+
+A settlement never ends the run: a row that is not `submitted` holds no reservation to release.
+
+Such a settlement writes `<request_key>.settle-skipped.json` beside the receipts and returns.
+
+The note has the schema `shared-paid-call-settle-skipped-v1`, the observed state and the reason.
+
+The note is an observation, never an accounting event: the money of the request stays in the ledger row the other worker wrote.
+
+A settlement that ended the run this way stopped the chapter 3 producer at 13:53 UTC on 2026-09-16.
 
 ### Phase slots and windows
 

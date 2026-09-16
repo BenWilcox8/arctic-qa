@@ -253,6 +253,13 @@ TRANSITION_GATE_SUCCESSOR_FIELDS = {
     "review_record_sha256",
 }
 PRETRANSPORT_SETTLEMENT_SCHEMA = "shared-paid-call-pretransport-settlement-v1"
+# Orphan recovery read the ledger once and then settled each request it found.
+# Another worker of the same ledger can settle one of those requests inside
+# that window, so the row is no longer ``submitted`` when the settlement runs.
+# The recovery records the skip beside the receipts and continues; the other
+# worker's settlement is the accounting record (chapter 3 producer exit of
+# 2026-09-16 13:53 UTC).
+SETTLE_SKIPPED_SCHEMA = "shared-paid-call-settle-skipped-v1"
 COUNT_ERROR_CONTINUATION_SCHEMA = "shared-paid-call-count-error-continuation-v1"
 AMBIGUOUS_CONTINUATION_SCHEMA = "shared-paid-call-ambiguous-continuation-v1"
 AMBIGUOUS_CONTINUATION_EVIDENCE_SCHEMA = (
@@ -5771,6 +5778,28 @@ class SharedGeminiBroker:
             ledger["updated_at_utc"] = _now()
             self._commit_ledger(ledger)
 
+    def _paper_cost_cap_refusal(self, request_key: str) -> dict[str, Any] | None:
+        """Return the stored per-paper cap refusal of one request, or None."""
+        with self._lock_file.open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            ledger = self._validated_ledger()
+            request = ledger["requests"].get(request_key)
+            if (
+                request is None
+                or request.get("state") != "not_submitted"
+                or request.get("reason") != PAPER_COST_CAP_REASON
+            ):
+                return None
+            receipt = _read(self.receipts_dir / f"{request_key}.json")
+            if (
+                receipt.get("request_key") != request_key
+                or receipt.get("state") != "not_submitted"
+                or receipt.get("reason") != PAPER_COST_CAP_REASON
+                or receipt.get("live_call_made") is not False
+            ):
+                raise ValueError("the per-paper cap refusal lost its receipt")
+            return receipt
+
     def _resume_not_submitted(
         self, request_key: str, base: dict[str, Any]
     ) -> int | None:
@@ -5781,6 +5810,13 @@ class SharedGeminiBroker:
             if request is None:
                 return None
             reason = request.get("reason")
+            if (
+                request.get("state") == "not_submitted"
+                and reason == PAPER_COST_CAP_REASON
+            ):
+                # The cap refusal describes the family, not the moment. It is
+                # never resumed and never settled, under any transition.
+                raise ValueError("the per-paper cap refusal is never resumed")
             if (
                 request.get("state") != "not_submitted"
                 or reason not in RESUMABLE_NOT_SUBMITTED_REASONS
@@ -6164,87 +6200,144 @@ class SharedGeminiBroker:
         *,
         actual: Decimal | None,
         usage: dict[str, int] | None,
-    ) -> None:
+    ) -> bool:
+        """Settle one submitted request, and say whether it settled here.
+
+        A request that is not ``submitted`` holds no reservation this call can
+        release: it was never submitted, or another worker of the same ledger
+        already settled it and owns that accounting. Nothing is owed either
+        way, so the settlement records the skip and returns ``False`` instead
+        of ending the run. A settlement that ended the run this way stopped the
+        chapter 3 producer at 13:53 UTC on 2026-09-16.
+        """
         with self._lock_file.open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             ledger = self._validated_ledger()
-            request = ledger["requests"][request_key]
-            if request.get("state") != "submitted":
-                raise ValueError("the paid request is not submitted")
-            reserved = _money(request["reserved_usd"], "reservation", positive=True)
-            paper = ledger["papers"][request["family_id"]]
-            stage = ledger["stages"][request["stage"]]
-            ledger["reserved_usd"] = str(
-                _money(ledger["reserved_usd"], "reserved") - reserved
+            request = ledger["requests"].get(request_key)
+            state = None if request is None else request.get("state")
+            if state == "submitted":
+                self._apply_settlement(ledger, request, actual=actual, usage=usage)
+                self._commit_ledger(ledger)
+        if state != "submitted":
+            self._record_settle_skipped(
+                request_key,
+                state=state,
+                reason="the request was not submitted when the settlement ran",
             )
-            paper["reserved_usd"] = str(
-                _money(paper["reserved_usd"], "paper reserved") - reserved
+            return False
+        return True
+
+    def _apply_settlement(
+        self,
+        ledger: dict[str, Any],
+        request: dict[str, Any],
+        *,
+        actual: Decimal | None,
+        usage: dict[str, int] | None,
+    ) -> None:
+        """Move one submitted request's money into the open ledger."""
+        reserved = _money(request["reserved_usd"], "reservation", positive=True)
+        paper = ledger["papers"][request["family_id"]]
+        stage = ledger["stages"][request["stage"]]
+        ledger["reserved_usd"] = str(
+            _money(ledger["reserved_usd"], "reserved") - reserved
+        )
+        paper["reserved_usd"] = str(
+            _money(paper["reserved_usd"], "paper reserved") - reserved
+        )
+        stage["reserved_usd"] = str(
+            _money(stage["reserved_usd"], "stage reserved") - reserved
+        )
+        live = (
+            ledger["live_test_papers"].get(request["family_id"])
+            if request["phase"] == "live_test"
+            else None
+        )
+        if live:
+            live["reserved_usd"] = str(
+                _money(live["reserved_usd"], "live reserved") - reserved
             )
-            stage["reserved_usd"] = str(
-                _money(stage["reserved_usd"], "stage reserved") - reserved
+        if actual is None:
+            amount = reserved
+            ledger["ambiguous_reserved_usd"] = str(
+                _money(ledger["ambiguous_reserved_usd"], "ambiguous") + amount
             )
-            live = (
-                ledger["live_test_papers"].get(request["family_id"])
-                if request["phase"] == "live_test"
-                else None
+            paper["ambiguous_usd"] = str(
+                _money(paper["ambiguous_usd"], "paper ambiguous") + amount
+            )
+            stage["ambiguous_usd"] = str(
+                _money(stage["ambiguous_usd"], "stage ambiguous") + amount
             )
             if live:
-                live["reserved_usd"] = str(
-                    _money(live["reserved_usd"], "live reserved") - reserved
+                live["ambiguous_usd"] = str(
+                    _money(live["ambiguous_usd"], "live ambiguous") + amount
                 )
-            if actual is None:
-                amount = reserved
-                ledger["ambiguous_reserved_usd"] = str(
-                    _money(ledger["ambiguous_reserved_usd"], "ambiguous") + amount
-                )
-                paper["ambiguous_usd"] = str(
-                    _money(paper["ambiguous_usd"], "paper ambiguous") + amount
-                )
-                stage["ambiguous_usd"] = str(
-                    _money(stage["ambiguous_usd"], "stage ambiguous") + amount
-                )
-                if live:
-                    live["ambiguous_usd"] = str(
-                        _money(live["ambiguous_usd"], "live ambiguous") + amount
-                    )
-                request["state"] = "ambiguous_charge"
-                if request["phase"] == EVALUATION_PHASE:
-                    # Halt the evaluation phase only. The construction phase
-                    # keeps its own ceiling, slots and window.
-                    ledger["evaluation_halted"] = True
-                    ledger["evaluation_halt_reason"] = AMBIGUOUS_HALT_REASON
-                else:
-                    ledger["halted"] = True
-                    ledger["halt_reason"] = AMBIGUOUS_HALT_REASON
+            request["state"] = "ambiguous_charge"
+            if request["phase"] == EVALUATION_PHASE:
+                # Halt the evaluation phase only. The construction phase
+                # keeps its own ceiling, slots and window.
+                ledger["evaluation_halted"] = True
+                ledger["evaluation_halt_reason"] = AMBIGUOUS_HALT_REASON
             else:
-                actual = _money(actual, "actual cost")
-                if actual > reserved:
-                    raise ValueError("actual cost exceeds the paid request reservation")
-                ledger["spent_usd"] = str(_money(ledger["spent_usd"], "spent") + actual)
-                paper["spent_usd"] = str(
-                    _money(paper["spent_usd"], "paper spent") + actual
+                ledger["halted"] = True
+                ledger["halt_reason"] = AMBIGUOUS_HALT_REASON
+        else:
+            actual = _money(actual, "actual cost")
+            if actual > reserved:
+                raise ValueError("actual cost exceeds the paid request reservation")
+            ledger["spent_usd"] = str(_money(ledger["spent_usd"], "spent") + actual)
+            paper["spent_usd"] = str(_money(paper["spent_usd"], "paper spent") + actual)
+            stage["spent_usd"] = str(_money(stage["spent_usd"], "stage spent") + actual)
+            if live:
+                live["spent_usd"] = str(
+                    _money(live["spent_usd"], "live spent") + actual
                 )
-                stage["spent_usd"] = str(
-                    _money(stage["spent_usd"], "stage spent") + actual
-                )
-                if live:
-                    live["spent_usd"] = str(
-                        _money(live["spent_usd"], "live spent") + actual
-                    )
-                if usage:
-                    stage["input_tokens"] += usage["promptTokenCount"]
-                    stage["output_tokens"] += usage["candidatesTokenCount"]
-                    stage["thinking_tokens"] += usage["thoughtsTokenCount"]
-                    paper["input_tokens"] += usage["promptTokenCount"]
-                    paper["output_tokens"] += usage["candidatesTokenCount"]
-                    paper["thinking_tokens"] += usage["thoughtsTokenCount"]
-                request["state"] = "completed"
-                request["actual_cost_usd"] = str(actual)
-                request["usage"] = usage
-            ledger["inflight"] = max(int(ledger["inflight"]) - 1, 0)
-            request["completed_at_utc"] = _now()
-            ledger["updated_at_utc"] = _now()
-            self._commit_ledger(ledger)
+            if usage:
+                stage["input_tokens"] += usage["promptTokenCount"]
+                stage["output_tokens"] += usage["candidatesTokenCount"]
+                stage["thinking_tokens"] += usage["thoughtsTokenCount"]
+                paper["input_tokens"] += usage["promptTokenCount"]
+                paper["output_tokens"] += usage["candidatesTokenCount"]
+                paper["thinking_tokens"] += usage["thoughtsTokenCount"]
+            request["state"] = "completed"
+            request["actual_cost_usd"] = str(actual)
+            request["usage"] = usage
+        ledger["inflight"] = max(int(ledger["inflight"]) - 1, 0)
+        request["completed_at_utc"] = _now()
+        ledger["updated_at_utc"] = _now()
+
+    def _request_row(self, request_key: str) -> dict[str, Any] | None:
+        """Read one request row through the ledger lock, or None."""
+        with self._lock_file.open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            ledger = self._validated_ledger()
+            row = ledger["requests"].get(request_key)
+            return dict(row) if row is not None else None
+
+    def _record_settle_skipped(
+        self, request_key: str, *, state: str | None, reason: str
+    ) -> None:
+        """Record one settlement or recovery that moved nothing, and continue.
+
+        The note is an observation beside the receipts, never an accounting
+        event: a request that is not submitted holds no money, and a request
+        another worker settled has its money in the row that worker wrote. A
+        later skip of the same request rewrites the note, so it always states
+        the last observation.
+        """
+        event = {
+            "schema": SETTLE_SKIPPED_SCHEMA,
+            "request_key": request_key,
+            "observed_state": state,
+            "reason": reason,
+            "recorded_at_utc": _now(),
+        }
+        try:
+            atomic_json(self.receipts_dir / f"{request_key}.settle-skipped.json", event)
+        except Exception:
+            # The note can never become a second failure path: a recovery that
+            # correctly settles nothing must still return.
+            pass
 
     def _completed_receipt(
         self, submitted: dict[str, Any], response: Any
@@ -6356,6 +6449,18 @@ class SharedGeminiBroker:
                 # reviewed run can use the second concurrency slot without
                 # replaying or settling the old request.
                 continue
+            # The snapshot above is a read, not a hold. A worker of another run
+            # settles its own request without this process's lock, so the row
+            # can have moved past `submitted` since the snapshot. Read it again
+            # before any receipt is written.
+            current = self._request_row(request_key)
+            if current is None or current.get("state") != "submitted":
+                self._record_settle_skipped(
+                    request_key,
+                    state=None if current is None else current.get("state"),
+                    reason="the request left its submitted state during recovery",
+                )
+                continue
             if final_path.is_file():
                 receipt = _read(final_path)
                 state = receipt.get("state")
@@ -6381,7 +6486,8 @@ class SharedGeminiBroker:
                     },
                     received.get("response"),
                 )
-                atomic_json(final_path, receipt, immutable=True)
+                if not self._write_recovered_receipt(request_key, final_path, receipt):
+                    continue
             else:
                 actual = None
                 usage = None
@@ -6392,8 +6498,27 @@ class SharedGeminiBroker:
                     "live_call_made": True,
                     "completed_at_utc": _now(),
                 }
-                atomic_json(final_path, receipt, immutable=True)
+                if not self._write_recovered_receipt(request_key, final_path, receipt):
+                    continue
+            # A settlement that finds the row already moved records the skip
+            # and returns False. Its accounting belongs to the other worker,
+            # so this recovery owes nothing and the run continues.
             self._settle(request_key, actual=actual, usage=usage)
+
+    def _write_recovered_receipt(
+        self, request_key: str, final_path: Path, receipt: dict[str, Any]
+    ) -> bool:
+        """Write one recovered final receipt, or report the other writer."""
+        try:
+            atomic_json(final_path, receipt, immutable=True)
+        except FileExistsError:
+            self._record_settle_skipped(
+                request_key,
+                state=(self._request_row(request_key) or {}).get("state"),
+                reason="another worker wrote the final receipt during recovery",
+            )
+            return False
+        return True
 
     def execute(
         self,
@@ -6529,6 +6654,13 @@ class SharedGeminiBroker:
                 self._validate_stream_input_binding(
                     gate, self._stream_input_binding, request_run_id=run_id
                 )
+            refusal = self._paper_cost_cap_refusal(request_key)
+            if refusal is not None:
+                # The per-paper cost cap refusal is final for that family: it
+                # is never resumed and never settled. The stored refusal is
+                # replayed free, so the producer records the family and
+                # continues with the next paper.
+                return refusal
             self._pacing_phase = phase
             self._pace()
             client = self.transport or GeminiTransport(
