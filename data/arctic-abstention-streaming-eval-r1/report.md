@@ -18,7 +18,7 @@ It moved the prompt contract to `abstention-eval-prompt-v2`, so the live proof r
 
 A fourth instruction paused one model, in the captain's words:
 "pause the fable evaluation because I only have ~80% fable usage left today; I will run the fable benchmarking after the reset at 6:00pm today".
-Section 8.3 holds that change.
+Section 8.4 holds that change.
 Claude Fable 5.1 is paused with a resume time of 2026-09-16T23:00:00Z, and the other seven models keep running.
 
 ## 1. The plan
@@ -488,7 +488,47 @@ The item bound of the live run is 6, because both subscription quotas are shared
 Four items are evaluated, so the running service takes two more as the pipeline produces them.
 The review record holds the bound history.
 
-### 8.3 Pausing one model
+### 8.3 Raising the evaluation ceiling
+
+The evaluation ceiling is a money control, so a larger one needs a reviewed transition, chained on the applied predecessor, as a construction ceiling does.
+The baseline is USD 5.00, the ceiling of the first two evaluation policies.
+
+The captain allocated USD 200 on 2026-09-16 for benchmarking the Gemini models, and firstmate passed that allocation to this task.
+The step is applied on the production ledger:
+
+| Field | Value |
+| --- | --- |
+| Active policy | `config/benchmark-evaluation-policy-v3.json` |
+| Ceiling | USD 5.00 to USD 200.00 |
+| Event | `evaluation-policy-transition-7989c8d2...json` in the receipt directory |
+| Applied | 2026-09-16T11:13:56Z |
+| Review record | `private/evaluation-ceiling-200-review.md` |
+| Evaluation spend | USD 0.153364 of USD 200.00, USD 199.846636 remaining |
+| Ledger after | `integrity_valid true`, `halted false`, no request in flight |
+
+v3 differs from v2 in three fields only: the ceiling, the policy id and the purpose.
+Every operational control is identical, and a test proves that.
+
+The broker accepts only a registered step.
+`EVALUATION_CEILING_CHANGES` in `src/arctic_qa/model_broker.py` names exactly one: USD 5.00 to USD 200.00.
+Another amount needs its own constant and its own review before a transition file can apply.
+A policy with a ceiling at or below the authorized one needs no transition, because a smaller ceiling only tightens the control.
+
+The transition binds one gate hash, and the streaming evaluator derives one gate per item, so the evaluator cannot be the first start under the larger ceiling.
+The action `apply-evaluation-ceiling` is that first start: it builds the broker with the transition file and a gate of its own, applies the transition, writes the immutable event, and makes no paid call.
+Every later start reads the event, and each new evaluation receipt records its hash in `evaluation_policy_transition_sha256`.
+
+```bash
+--action apply-evaluation-ceiling \
+  --evaluation-policy-file config/benchmark-evaluation-policy-v3.json \
+  --evaluation-gate-file <transition gate> \
+  --evaluation-policy-transition-file <transition file> \
+  --shared-ledger-file <ledger> --model-receipts-dir <receipts> ...
+```
+
+The "The evaluation ceiling" section of `docs/ABSTENTION_EVALUATION.md` holds the full field list and every check.
+
+### 8.4 Pausing one model
 
 Captain order 2026-09-16, in his words:
 "pause the fable evaluation because I only have ~80% fable usage left today; I will run the fable benchmarking after the reset at 6:00pm today".
@@ -559,6 +599,10 @@ The new tests cover:
 - The paused model in a plan run: 42 of the 48 trials run, the six Fable trials stay pending, the invalid count stays zero, no recorded row names the paused model, and a pass after the resume time runs those six and re-calls nothing else.
 - The paused model in the streaming evaluator: the item's row names the held model and counts its trials, the item is not complete, a second pass before the resume holds the trials again, the pass after it completes the item, the totals read one row per item, and the finished item is never evaluated again.
 - The `pause-status` action: the shipped pause, the command-line pause, and `--no-pause-file`.
+- The evaluation ceiling: the shipped v3 policy differs from v2 in the ceiling and its names only, the registered step is the only one, and the construction reserve still covers it.
+- The applied ceiling transition: the larger ceiling is refused without it, the event is immutable and names its predecessor, a later start needs no file, a paid call binds the event hash, and a fork of the chain is refused.
+- Fourteen refusals of an altered transition: an unregistered change set, another ledger, a changed ledger snapshot, another gate, a changed or absent source, a changed target, another predecessor, an absent commit or reason, an invalid time, an absent or changed review record, another schema, and a policy that also moves a control field. No refused attempt writes an event.
+- The `apply-evaluation-ceiling` action: it writes the event, reports the authorized ceiling and the ledger state, makes no call, and a second run changes nothing.
 - The cost journal arithmetic: the native token split of both list-price rates, the family and campaign generation cost, the Gemini evaluation cost of one item, the cumulative block, the summary, the projection, and the per-model metrics against the scorer.
 - The live wiring of both vendor kinds in one plan run: the Gemini vendor on the shared broker and the Codex vendor on its own ledger, from one gate directory.
 - The per-call option order: two models at one preset on one trial differ, the same model at two presets differs, and the three repeats of one model differ. Every order stays a permutation of the same option set, and the seed stays deterministic and recorded.
@@ -581,10 +625,12 @@ Three instructions shaped this task. The captain's exact words:
 3. 2026-09-16, during the work: "Make sure that the options are always shuffled between every model call, even the same model with the same effort level."
 4. 2026-09-16, during the work: "pause the fable evaluation because I only have ~80% fable usage left today; I will run the fable benchmarking after the reset at 6:00pm today."
 
+Firstmate passed the captain's allocation for the Gemini benchmarking: USD 200 for the evaluation ceiling. Section 8.3 holds that change.
+
 ## 11. Deferred items
 
 1. The remaining 4 trials of the Gemini arm of `runs/concurrent-test-r2-gemini`. The ambiguous charge of section 7 is settled and the ledger is clean, so they can run.
-2. The Gemini evaluation ceiling is USD 5.00 and the captain allocated USD 200.00 for benchmarking the Gemini models. That needs a chained evaluation-policy transition and a new gate.
+2. The evaluation ceiling of USD 200.00 is the captain's whole allocation. The streaming authorization keeps its own, much smaller, Gemini USD bound per run, so a large benchmarking pass needs a new authorization with a bound the captain sets.
 3. The evaluator derives one gate per item from one reviewed authorization. A stricter design lets a reviewer sign a contract-level gate that the broker validates directly. That design needs a new gate schema and a broker change.
 4. The scripted dry run uses one latency per vendor. A per-model latency models the real schedule better, because inside one vendor the models differ by a factor of ten.
 5. `campaign_usd_per_accepted_item` divides the campaign spend by the accepted items of the whole campaign. A per-window number, over the last N items, reacts faster to a change in the pipeline yield.
