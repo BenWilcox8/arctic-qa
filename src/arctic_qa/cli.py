@@ -97,6 +97,8 @@ def parser() -> argparse.ArgumentParser:
     viewer.add_argument("--live-dataset-dir", type=Path)
     viewer.add_argument("--project-overview-file", type=Path)
     viewer.add_argument("--research-timeline-file", type=Path)
+    viewer.add_argument("--benchmark-journal-dir", type=Path)
+    viewer.add_argument("--benchmark-guard-state-file", type=Path)
     viewer.add_argument("--pipeline-namespace", type=Path)
     viewer.add_argument("--pipeline-db-file", type=Path)
     viewer.add_argument("--pipeline-receipts-dir", type=Path)
@@ -642,6 +644,8 @@ def main(argv: list[str] | None = None) -> int:
                 live_dataset_dir=args.live_dataset_dir,
                 project_overview_file=args.project_overview_file,
                 research_timeline_file=args.research_timeline_file,
+                benchmark_journal_dir=args.benchmark_journal_dir,
+                benchmark_guard_state_file=args.benchmark_guard_state_file,
                 pipeline_namespace=args.pipeline_namespace,
                 pipeline_db_file=args.pipeline_db_file,
                 pipeline_receipts_dir=args.pipeline_receipts_dir,

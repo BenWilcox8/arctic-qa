@@ -28,6 +28,8 @@ PYTHONPATH=src python -m arctic_qa corpus-view \
   --live-dataset-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/live-publication \
   --project-overview-file /private/status/project-progress-overview-v1.json \
   --research-timeline-file /private/status/research-fleet-timeline-v1.json \
+  --benchmark-journal-dir /private/arctic-qa-data/abstention-eval/streaming-r2 \
+  --benchmark-guard-state-file /private/arctic-qa-data/abstention-eval/guard-r1/guard-state.json \
   --host 127.0.0.1 \
   --port 8787 \
   --process-stale-after-seconds 300
@@ -45,6 +47,22 @@ The API permits page sizes of 10, 25, 50, and 100.
 
 The fixed live downloads are `/downloads/live-dataset/benchmark` and `/downloads/live-dataset/reviewer`.
 No route accepts a file path.
+
+## Live benchmarking
+
+The section "Live benchmarking" shows the streaming abstention evaluation.
+It uses `/api/live-benchmark`.
+The route rebuilds the whole payload from the files on each request and makes no paid call.
+
+Two options select its inputs.
+`--benchmark-journal-dir` points at the work directory of the streaming evaluator.
+The route reads `cost-journal.jsonl` and `watch-state.json` from it.
+`--benchmark-guard-state-file` points at `guard-state.json` of the cost and quota guard.
+
+The section shows the per-model table with the N1 to N5 counts and the seven paper metrics, the per-question cost rows, the Gemini spend against the USD 200 allocation with its extrapolation, the four guarded quota windows, the guard rules, and the evaluator watch state.
+Without the guard state file the section still shows the journal, and marks the budget readings as not available.
+
+`docs/BENCHMARK_GUARD.md` describes the guard, its rules, and how to operate it.
 
 ## Per-paper pipeline inspector
 

@@ -5,6 +5,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Read `docs/CORPUS_VIEWER.md` before you operate the read-only corpus-stage monitor.
 - Read `docs/PUBLICATION_EXPORT.md` before you operate the live publication snapshot service.
 - Read `docs/SOURCE_SCREENING_PASS.md` before you operate a bounded source pass.
+- Read `docs/BENCHMARK_GUARD.md` before you operate the benchmark cost and quota guard or the "Live benchmarking" section of the viewer. The guard pauses one model through the `benchmark-evaluation-model-pause-v1` file and never by stopping a process; it removes only the entries it owns.
 - Read `docs/ABSTENTION_EVALUATION.md` before you build, dry-run, or run the abstention evaluation. A paid run needs a reviewed private evaluation gate and the construction files that the production ledger already binds; the dry run needs neither.
 - A subscription evaluation run (Claude Code, Codex) needs the harness login, a reviewed gate with `--provider`, and a subscription ledger directory. Do not change the Codex config in `abstention_subscription.py` without a captured request: `tools.web_search = false` does not remove web search, only `web_search = "disabled"` does.
 - Read `docs/STANDALONE_CALIBRATION.md` before you change `STANDALONE_SYSTEM` or record a standalone calibration cassette. Recording is a paid call; replay is free.

@@ -249,6 +249,9 @@
     .trace-section-note { color: var(--muted); line-height: 1.5; margin: 0 0 .7rem; }
     .trace-empty { color: var(--muted); line-height: 1.5; padding: 1.2rem; }
     .trace-error { background: var(--red-bg); color: var(--red); padding: .8rem; }
+    .benchmark-panel h3 { margin-top: 1.2rem; }
+    .benchmark-panel table { font-size: .8rem; }
+    .benchmark-panel td .badge { font-size: .68rem; }
     .telemetry-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin-top: 1rem; }
     .telemetry-grid > div { min-width: 0; }
     .telemetry-grid h3 { margin-bottom: .5rem; }
@@ -586,6 +589,39 @@
         <span id="live-dataset-page-summary">Page 1</span>
         <div class="pager-controls"><button type="button" id="live-dataset-previous">Previous</button><button type="button" id="live-dataset-next">Next</button></div>
       </div>
+    </section>
+
+    <section class="panel benchmark-panel" id="live-benchmark" aria-labelledby="live-benchmark-title">
+      <div class="metadata-head">
+        <div>
+          <h2 id="live-benchmark-title">Live benchmarking</h2>
+          <p id="benchmark-detail">Loading the streaming abstention evaluation...</p>
+          <div class="meta" id="benchmark-meta"></div>
+        </div>
+        <span class="badge" id="benchmark-state">Loading</span>
+      </div>
+      <p class="meta" id="benchmark-scope">Every accepted question runs on the plan's models at the high reasoning preset, twice per condition and three times per repeat. Gemini calls bill the Google API credits. Claude Code and Codex calls bill the subscriptions at USD 0; their list-price equivalent is informational only.</p>
+      <div class="source-counts" id="benchmark-counts" aria-label="Live benchmarking counts"></div>
+      <h3>Gemini budget and extrapolation</h3>
+      <p class="meta" id="benchmark-budget-detail">The guard has not written a state file yet.</p>
+      <div class="source-counts" id="benchmark-budget-counts" aria-label="Gemini evaluation budget"></div>
+      <h3>Per-model results</h3>
+      <div class="table-wrap" id="benchmark-model-table"><div class="loading">Loading per-model results...</div></div>
+      <div class="telemetry-grid">
+        <div>
+          <h3>Provider quota readings</h3>
+          <div class="compact-table" id="benchmark-quota-table"><div class="loading">No guard state selected.</div></div>
+        </div>
+        <div>
+          <h3>Guard rules</h3>
+          <div class="compact-table" id="benchmark-rule-table"><div class="loading">No guard state selected.</div></div>
+        </div>
+      </div>
+      <h3>Per-question cost journal</h3>
+      <p class="meta" id="benchmark-journal-note"></p>
+      <div class="table-wrap" id="benchmark-question-table"><div class="loading">Loading the cost journal...</div></div>
+      <h3>Evaluator watch state</h3>
+      <div class="compact-table" id="benchmark-watch-table"><div class="loading">Loading the watch state...</div></div>
     </section>
 
     <div class="grid">
@@ -2304,6 +2340,136 @@
         $('process-detail').textContent = error.message;
       }
     }
+    function simpleTable(target, head, rows, emptyMessage) {
+      target.replaceChildren();
+      if (!rows.length) { target.append(text('div', emptyMessage, 'empty')); return; }
+      const table = document.createElement('table');
+      const header = document.createElement('tr');
+      head.forEach((caption) => header.append(text('th', caption)));
+      const thead = document.createElement('thead'); thead.append(header); table.append(thead);
+      const body = document.createElement('tbody');
+      rows.forEach((cells) => {
+        const row = document.createElement('tr');
+        cells.forEach((value, index) => {
+          const cell = document.createElement('td');
+          cell.dataset.label = head[index];
+          if (value instanceof Node) cell.append(value); else cell.textContent = value;
+          row.append(cell);
+        });
+        body.append(row);
+      });
+      table.append(body); target.append(table);
+    }
+    const ratio = (value) => value === null || value === undefined ? '-' : Number(value).toFixed(3);
+    const percentText = (value) => value === null || value === undefined ? 'Not available' : `${value}%`;
+    const usd = (value) => value === null || value === undefined ? '-' : `USD ${Number(value).toFixed(4)}`;
+    function countBox(name, value) {
+      const box = document.createElement('div'); box.className = 'count';
+      box.append(text('span', name), text('strong', value)); return box;
+    }
+    function renderLiveBenchmark(data) {
+      const guard = data.guard || {};
+      setBadge($('benchmark-state'), data.availability === 'available'
+        ? ((data.evaluator || {}).running ? 'running' : 'not_running')
+        : data.availability);
+      $('benchmark-detail').textContent = data.message;
+      const guardAge = guard.present
+        ? `Guard updated ${dateText(guard.generated_at_utc)}`
+        : 'The cost and quota guard has written no state file yet';
+      $('benchmark-meta').textContent = `${guardAge} | Journal ${data.journal_dir || 'not selected'} | Page rebuilt ${dateText(data.generated_at_utc)}`;
+      $('benchmark-counts').replaceChildren(
+        countBox('Questions evaluated', formatNumber(data.questions_evaluated)),
+        countBox('Complete questions', formatNumber(data.questions_complete)),
+        countBox('Trials recorded', formatNumber(data.trials_recorded)),
+        countBox('Models', formatNumber((data.models || []).length)),
+        countBox('Paused models', formatNumber(Object.keys(guard.paused_models || {}).length)),
+        countBox('Evaluator polls', formatNumber((data.evaluator || {}).polls))
+      );
+      const budget = guard.gemini_budget || {};
+      const phase = guard.evaluation_phase || {};
+      const expectation = guard.expectation || {};
+      $('benchmark-budget-detail').textContent = guard.present
+        ? `Gemini evaluation spend counts against the captain's USD ${budget.budget_usd || '200.00'} allocation and against the benchmark_evaluation ceiling of USD ${Number(phase.ceiling_usd ?? 0).toFixed(2)} that policy ${phase.policy_id || 'not selected'} sets. The extrapolation projects the spend so far at its own cost per question over the ${formatNumber(expectation.questions_still_expected)} questions the chapter 3 run is still expected to accept (${label(expectation.binding_bound)} bound).`
+        : 'The cost and quota guard has written no state file yet, so no budget reading is available.';
+      $('benchmark-budget-counts').replaceChildren(
+        countBox('Gemini spent', usd(budget.spend_so_far_usd)),
+        countBox('Per question', usd(budget.usd_per_question)),
+        countBox('Extrapolated total', usd(budget.extrapolated_total_usd)),
+        countBox('Budget', usd(budget.budget_usd)),
+        countBox('Ledger ceiling left', usd(phase.remaining_usd)),
+        countBox('Questions still expected', formatNumber(expectation.questions_still_expected))
+      );
+      const modelHead = ['Model', 'Vendor', 'State', 'Questions', 'N1', 'N2', 'N3', 'N4', 'N5', 'ACC', 'Precision_abs', 'Recall_abs', 'F1_abs', 'Abstention rate', 'R-Acc', 'SSR', 'Invalid rate', 'Cost per question'];
+      simpleTable($('benchmark-model-table'), modelHead, (data.models || []).map((model) => {
+        const metrics = model.metrics || {};
+        const badge = text('span', model.paused ? 'paused' : 'active', `badge ${model.paused ? 'paused' : 'running'}`);
+        const state = document.createElement('div');
+        state.append(badge);
+        if (model.pause_reason) state.append(text('div', model.pause_reason, 'meta'));
+        return [
+          model.model,
+          model.vendor_label + (model.in_plan ? '' : ' (not in the current plan)'),
+          state,
+          formatNumber(model.questions_evaluated),
+          formatNumber(model.counts.N1), formatNumber(model.counts.N2), formatNumber(model.counts.N3),
+          formatNumber(model.counts.N4), formatNumber(model.counts.N5),
+          ratio(metrics.acc), ratio(metrics.precision_abs), ratio(metrics.recall_abs), ratio(metrics.f1_abs),
+          ratio(metrics.abstention_rate), ratio(metrics.r_acc), ratio(metrics.ssr),
+          ratio(model.invalid_rate),
+          `${usd(model.cost_per_question_usd)} (${label(model.cost_per_question_basis)})`
+        ];
+      }), 'No model has answered a question yet.');
+      const quota = guard.quota || {};
+      const quotaRows = ['claude_session', 'claude_week', 'claude_fable', 'codex_weekly']
+        .filter((key) => quota[key])
+        .map((key) => [
+          label(key), percentText(quota[key].percent_remaining), dateText(quota[key].resets_at_utc),
+          dateText(quota[key].projected_exhausted_at_utc), label(quota[key].pace)
+        ]);
+      simpleTable($('benchmark-quota-table'), ['Window', 'Remaining', 'Resets', 'Projected exhausted', 'Pace'], quotaRows, 'No quota reading is available.');
+      simpleTable($('benchmark-rule-table'), ['Rule', 'Vendor', 'Fired', 'Detail'],
+        (guard.rules || []).map((item) => [
+          label(item.rule), label(item.vendor),
+          text('span', item.fired ? 'fired' : 'clear', `badge ${item.fired ? 'error' : 'available'}`),
+          item.detail
+        ]), 'No guard rule has been evaluated yet.');
+      $('benchmark-journal-note').textContent = data.questions_truncated
+        ? `The newest ${formatNumber((data.questions || []).length)} of ${formatNumber(data.questions_evaluated)} questions are shown.`
+        : 'Every evaluated question is shown, newest first.';
+      simpleTable($('benchmark-question-table'),
+        ['Question', 'Recorded', 'Complete', 'Generation USD', 'Gemini evaluation USD', 'Subscription tokens', 'List-price equivalent', 'Trials', 'Invalid rate', 'Wall seconds'],
+        (data.questions || []).map((question) => {
+          const tokens = question.subscription_tokens || {};
+          return [
+            question.item_id, dateText(question.recorded_at_utc),
+            question.complete ? 'yes' : 'no',
+            usd(question.generation_usd), usd(question.evaluation_gemini_usd),
+            `${formatNumber(tokens.input)} in / ${formatNumber(tokens.output)} out / ${formatNumber(tokens.thinking)} thinking`,
+            usd(question.subscription_list_price_equivalent_usd),
+            `${formatNumber(question.recorded_trials)} of ${formatNumber(question.planned_trials)}`,
+            ratio(question.invalid_rate),
+            question.wall_seconds === null || question.wall_seconds === undefined ? '-' : Number(question.wall_seconds).toFixed(1)
+          ];
+        }), 'The evaluator has journalled no question yet.');
+      const watch = data.evaluator || {};
+      simpleTable($('benchmark-watch-table'), ['Reading', 'Value'], [
+        ['Polling', watch.running ? 'yes' : 'no'],
+        ['Updated', dateText(watch.updated_at_utc)],
+        ['Age (seconds)', watch.age_seconds === null || watch.age_seconds === undefined ? 'Not available' : formatNumber(watch.age_seconds)],
+        ['Active vendors', (watch.active_vendors || []).map(label).join(', ') || 'none'],
+        ['Vendors paused by the evaluator', Object.keys(watch.paused_vendors || {}).map(label).join(', ') || 'none'],
+        ['Items evaluated', formatNumber(watch.evaluated_items)],
+        ['Guard errors', (guard.errors || []).join('; ') || 'none']
+      ], 'The evaluator has written no watch state yet.');
+    }
+    async function loadLiveBenchmark() {
+      try {
+        renderLiveBenchmark(await fetchJson('/api/live-benchmark'));
+      } catch (error) {
+        setBadge($('benchmark-state'), 'unavailable');
+        $('benchmark-detail').textContent = error.message;
+      }
+    }
     async function loadAccepted() {
       try {
         const data = await fetchJson('/api/candidates?eligibility=eligible&page_size=100');
@@ -2328,7 +2494,7 @@
     $('live-dataset-next').addEventListener('click', () => { state.dataset.page = Math.min(state.dataset.pages, state.dataset.page + 1); loadLiveDataset(); });
     $('previous').addEventListener('click', () => { state.page = Math.max(1, state.page - 1); loadCandidates(); });
     $('next').addEventListener('click', () => { state.page = Math.min(state.pages, state.page + 1); loadCandidates(); });
-    $('refresh').addEventListener('click', () => { loadState(true); loadTraceList(false); });
+    $('refresh').addEventListener('click', () => { loadState(true); loadTraceList(false); loadLiveBenchmark(); });
     $('trace-filters').addEventListener('submit', (event) => { event.preventDefault(); loadTraceList(true); });
     $('trace-previous').addEventListener('click', () => {
       if (state.trace.page <= 1) return;
@@ -2352,7 +2518,8 @@
     });
     loadState(true);
     loadTraceList(true);
-    setInterval(() => { loadState(false); loadTraceList(false); }, 15000);
+    loadLiveBenchmark();
+    setInterval(() => { loadState(false); loadTraceList(false); loadLiveBenchmark(); }, 15000);
   </script>
 </body>
 </html>
