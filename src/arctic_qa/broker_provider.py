@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any
@@ -9,9 +11,11 @@ from typing import Any
 from .errors import (
     AmbiguousChargeError,
     BudgetError,
+    CandidateRejectedError,
     PaperCostCapError,
     ProviderError,
     ProviderResponseError,
+    mark_run_stop,
 )
 from .model_broker import (
     PAPER_COST_CAP_REASON,
@@ -41,6 +45,34 @@ ROLE_STAGES = {
     "correction": "repair",
     "slot_lookup": "repair",
 }
+
+
+# The refusals the broker raises about one candidate or one paper family, not
+# about the run. Everything else it raises is a whole-run stop: the execution
+# gate, the ledger, a ceiling, a halt, an unsettled charge.
+_PAPER_LEVEL_BROKER_ERRORS = (
+    CandidateRejectedError,
+    PaperCostCapError,
+    ProviderResponseError,
+)
+
+
+@contextmanager
+def broker_boundary() -> Iterator[None]:
+    """Mark every whole-run refusal the shared broker raises, at the seam.
+
+    The producer contains an exception one candidate raises and continues with
+    the next paper. A refusal from the broker is not that: it describes the
+    money or the authorization of the whole run. Marking it here, at the one
+    place the producer talks to the broker, means a new refusal message needs no
+    second registration to keep ending the run.
+    """
+    try:
+        yield
+    except _PAPER_LEVEL_BROKER_ERRORS:
+        raise
+    except Exception as error:
+        raise mark_run_stop(error)
 
 
 @dataclass(frozen=True)
@@ -89,11 +121,12 @@ class BrokerProvider:
         }
 
     def record_accepted(self, *, family_id: str, item_id: str) -> dict[str, Any]:
-        return self.broker.record_accepted(
-            family_id=family_id,
-            item_id=item_id,
-            invocation_run_id=self.invocation_run_id,
-        )
+        with broker_boundary():
+            return self.broker.record_accepted(
+                family_id=family_id,
+                item_id=item_id,
+                invocation_run_id=self.invocation_run_id,
+            )
 
     def invoke(
         self,
@@ -131,29 +164,30 @@ class BrokerProvider:
             payload=payload,
         )
         receipt_path = self.broker.receipts_dir / f"{request_key}.json"
-        if receipt_path.is_file():
-            receipt = self.broker.effective_receipt(request_key)
-            if not (
-                receipt.get("state") == "not_submitted"
-                and receipt.get("reason") in RESUMABLE_NOT_SUBMITTED_REASONS
-            ):
-                _, result = self.read_receipt(
-                    request_key=request_key,
-                    role=role,
-                    request_sha256=sha256_bytes(canonical_json(payload).encode()),
-                )
-                return result
-        receipt = self.broker.execute(
-            phase=self.phase,
-            run_id=self.invocation_run_id,
-            stage=stage,
-            paper_id=self.paper_id,
-            family_id=self.family_id,
-            source_version_id=self.source_version_id,
-            request_key=request_key,
-            payload=payload,
-        )
-        return _provider_result(receipt, model, allow_enum=role == "answer_judge")
+        with broker_boundary():
+            if receipt_path.is_file():
+                receipt = self.broker.effective_receipt(request_key)
+                if not (
+                    receipt.get("state") == "not_submitted"
+                    and receipt.get("reason") in RESUMABLE_NOT_SUBMITTED_REASONS
+                ):
+                    _, result = self.read_receipt(
+                        request_key=request_key,
+                        role=role,
+                        request_sha256=sha256_bytes(canonical_json(payload).encode()),
+                    )
+                    return result
+            receipt = self.broker.execute(
+                phase=self.phase,
+                run_id=self.invocation_run_id,
+                stage=stage,
+                paper_id=self.paper_id,
+                family_id=self.family_id,
+                source_version_id=self.source_version_id,
+                request_key=request_key,
+                payload=payload,
+            )
+            return _provider_result(receipt, model, allow_enum=role == "answer_judge")
 
     def read_receipt(
         self,

@@ -177,6 +177,19 @@ ATTEMPT_KINDS = frozenset(
     }
 )
 REPAIR_KINDS = ATTEMPT_KINDS - {"primary", "alternative_finding"}
+# ch2 yield audit 4.8: the closed set of reason codes that route to the option
+# repair rung. The contract owns it and the routing layer reads it, so the two
+# layers can never name different sets again. They did: 4.8 gave the whole-set
+# verdict codes their own repair guidance and added them to the routing set, the
+# check below still named one code, and the live chapter 3 producer ended on
+# "option repair trigger is invalid" at 16:28 UTC on 2026-09-16.
+OPTION_REPAIR_TRIGGER_REASONS = frozenset(
+    {
+        "insufficient_verified_distractors",
+        "option_set_not_mutually_exclusive",
+        "option_set_answer_not_choosable",
+    }
+)
 FINDING_SPAN_CONTRACT_VERSION = "finding-evidence-span-v3"
 MODEL_JUSTIFICATION_CONTRACT_VERSION = "model-justification-v1"
 ARCTIC_SCOPE_CONTRACT_VERSION = "eligible-arctic-finding-scope-v1"
@@ -1939,7 +1952,7 @@ def _validated_generation_attempt(
     if value["attempt_kind"] == "option_repair":
         if revision_index not in {1, 2} or not isinstance(value["parent_item_id"], str):
             raise ValueError("option repair parent state is invalid")
-        if value["trigger_reason_code"] != "insufficient_verified_distractors":
+        if value["trigger_reason_code"] not in OPTION_REPAIR_TRIGGER_REASONS:
             raise ValueError("option repair trigger is invalid")
         if exclusions:
             raise ValueError("option repair cannot exclude a finding")

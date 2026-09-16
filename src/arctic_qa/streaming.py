@@ -13,10 +13,13 @@ from . import validation as validation_contract
 from .db import Database, now
 from .discovery import manual_record
 from .errors import (
+    AmbiguousChargeError,
     BudgetError,
     CandidateRejectedError,
     PaperCostCapError,
     ProviderResponseError,
+    is_run_stop,
+    mark_run_stop,
 )
 from .exporting import export_run
 from .extraction import extract_source
@@ -193,15 +196,11 @@ IMMEDIATE_ALTERNATIVE_FINDING_REASONS = frozenset(
         "finding_scope_value_unsourced",
     }
 )
-OPTION_REPAIR_REASONS = frozenset(
-    {
-        "insufficient_verified_distractors",
-        # ch2 yield audit 4.8: a failed whole-set verdict regenerates the
-        # option set on the verified question.
-        "option_set_not_mutually_exclusive",
-        "option_set_answer_not_choosable",
-    }
-)
+# ch2 yield audit 4.8: a failed whole-set verdict regenerates the option set on
+# the verified question, so it earns the same rung as a distractor shortfall.
+# The generation contract owns the closed set and routing reads it, because a
+# trigger this layer accepts and the contract refuses ends the producer.
+OPTION_REPAIR_REASONS = generation_contract.OPTION_REPAIR_TRIGGER_REASONS
 # Eligibility contract codes. They end a screening attempt before any candidate
 # exists, so no candidate-level rung can repair them; the eligibility stage has
 # its own bounded re-ask. They are registered here so the routing layer owns one
@@ -256,6 +255,22 @@ MAX_SLOT_LOOKUPS_PER_PAPER = 1
 # One paper family reached ``maximum_paper_cost_usd``. The family is recorded
 # and skipped; the run continues with the next paper.
 PAPER_COST_CAP_REASON_CODE = "paper_cost_cap_reached"
+# One paper family raised an exception while its candidate was being built,
+# routed, given options or persisted. The family is settled and skipped; the run
+# continues with the next paper. Three such faults ended three whole chapter 3
+# runs on 2026-09-16 (a per-paper cap refusal, a settlement another worker owned,
+# and an option repair trigger the contract refused).
+CANDIDATE_PROCESSING_FAULT_REASON_CODE = "candidate_processing_fault"
+CANDIDATE_PROCESSING_FAULT_CONTRACT_VERSION = "candidate-processing-fault-v1"
+# A ledger message the producer can meet outside the broker seam, on a direct
+# read of the shared ledger. Every other whole-run refusal carries the marker
+# ``broker_provider.broker_boundary`` puts on it, so a new refusal message needs
+# no registration here.
+RUN_ENDING_LEDGER_STOPS = (
+    "the paid-call broker is halted",
+    "the shared paid-call ledger has an integrity halt",
+    "the ledger is halted",
+)
 # Candidate rows that record a generation call rather than a benchmark item.
 # They keep the 26 dead chapter 2 calls visible without entering path
 # reconstruction, acceptance, or the run counts (audit 4.6 e and 4.9 C8).
@@ -507,6 +522,7 @@ def run_stream(
     progress.write("running", "eligibility", "Streaming pipeline started.")
     counts = {
         "accepted_base_questions": 0,
+        CANDIDATE_PROCESSING_FAULT_REASON_CODE: 0,
         "eligibility_rejected": 0,
         "eligibility_unresolved": 0,
         "generation_rejected": 0,
@@ -529,343 +545,387 @@ def run_stream(
             access.get("paper_family_id")
             or stable_id("family", access.get("doi") or candidate_key)
         )
-        source_version_id = str(access["source_content_hash"])
-        operational_unresolved = (
-            verifier_broker.operational_unresolved_families()
-            if verifier_broker is not None
-            else {}
-        )
-        if family_id in operational_unresolved:
-            unresolved = operational_unresolved[family_id]
-            request_key = unresolved["request_key"]
-            reason_code = unresolved["reason_code"]
-            _record_operational_unresolved(
-                db,
-                campaign_id=campaign_id,
-                candidate_key=str(candidate_key),
-                selected=selected,
-                family_id=family_id,
-                request_key=request_key,
-                reason_code=reason_code,
-            )
-            # audit 4.9 C8: the family keeps its in-flight call records, so the
-            # completed calls of an ambiguous charge stay visible for diagnosis
-            # instead of vanishing with the attempt.
-            counts.setdefault("incomplete_infra", 0)
-            counts["incomplete_infra"] += len(
-                _incomplete_infra_records(db, campaign_id, family_id)
-            )
-            counts.setdefault("operational_unresolved", 0)
-            counts["operational_unresolved"] += 1
-            counts["processed"] += 1
-            progress.increment("unresolved")
-            paper_results.append(
-                {
-                    "candidate_key": candidate_key,
-                    "disposition": "operational_unresolved",
-                    "reason_codes": [reason_code],
-                    "source_id": None,
-                    "broker_request_key": request_key,
-                }
-            )
-            progress.paper(
-                paper_id=candidate_key,
-                title=access.get("title"),
-                current_stage="completed",
-                final_state="unresolved",
-                final_reason=reason_code,
-            )
-            continue
-        paper_author = _bind_provider(
-            author,
-            paper_id=paper_id,
-            family_id=family_id,
-            source_version_id=source_version_id,
-        )
-        paper_verifier = _bind_provider(
-            verifier,
-            paper_id=paper_id,
-            family_id=family_id,
-            source_version_id=source_version_id,
-        )
-        if verifier_broker is not None and (
-            eligibility is None
-            or eligibility.get("execution_authority") != "shared_gemini_broker"
-        ):
-            eligibility = None
-        if eligibility is None:
-            if not all(
-                (
-                    eligibility_prompt_file,
-                    eligibility_schema_file,
-                    eligibility_policy_file,
-                )
-            ):
-                raise ValueError(
-                    "streaming eligibility inputs are required for a newly ready paper"
-                )
-            try:
-                eligibility = _run_eligibility(
-                    db,
-                    access,
-                    eligibility_run_dir,
-                    run_id=campaign_id,
-                    provider=paper_verifier,
-                    prompt_file=eligibility_prompt_file,
-                    schema_file=eligibility_schema_file,
-                    policy_file=eligibility_policy_file,
-                    rescreen_prompt_file=eligibility_rescreen_prompt_file,
-                )
-            except PaperCostCapError as error:
-                # The family reached the per-paper cost cap before it was
-                # screened. Nothing is charged past the cap, so the family is
-                # recorded and the run continues with the next paper.
-                _record_paper_cost_cap(
+        # Containment (chapter 3 candidate fault slice): one paper family is one
+        # unit of work. An exception its candidate, routing, option or persistence
+        # code raises settles the family and the producer moves to the next paper.
+        # Three faults of one family ended three whole runs on 2026-09-16.
+        source_id: str | None = None
+        progress.last_error_stage = None
+        processed_before = counts["processed"]
+        results_before = len(paper_results)
+        try:
+            source_version_id = str(access["source_content_hash"])
+            operational_unresolved = _operational_unresolved_families(verifier_broker)
+            if family_id in operational_unresolved:
+                unresolved = operational_unresolved[family_id]
+                request_key = unresolved["request_key"]
+                reason_code = unresolved["reason_code"]
+                _record_operational_unresolved(
                     db,
                     campaign_id=campaign_id,
                     candidate_key=str(candidate_key),
-                    source_id=None,
-                    family_id=family_id,
                     selected=selected,
-                    error=error,
-                    cost_state=_family_cost_state(paper_verifier, family_id),
+                    family_id=family_id,
+                    request_key=request_key,
+                    reason_code=reason_code,
                 )
-                counts["paper_cost_cap_reached"] += 1
+                # audit 4.9 C8: the family keeps its in-flight call records, so the
+                # completed calls of an ambiguous charge stay visible for diagnosis
+                # instead of vanishing with the attempt.
+                counts.setdefault("incomplete_infra", 0)
+                counts["incomplete_infra"] += len(
+                    _incomplete_infra_records(db, campaign_id, family_id)
+                )
+                counts.setdefault("operational_unresolved", 0)
+                counts["operational_unresolved"] += 1
                 counts["processed"] += 1
-                progress.increment("paper_cost_cap_reached")
+                progress.increment("unresolved")
                 paper_results.append(
                     {
                         "candidate_key": candidate_key,
-                        "disposition": "paper_cost_cap_reached",
-                        "reason_codes": [PAPER_COST_CAP_REASON_CODE],
+                        "disposition": "operational_unresolved",
+                        "reason_codes": [reason_code],
                         "source_id": None,
+                        "broker_request_key": request_key,
                     }
                 )
                 progress.paper(
                     paper_id=candidate_key,
                     title=access.get("title"),
                     current_stage="completed",
-                    final_state="paper_cost_cap_reached",
-                    final_reason=PAPER_COST_CAP_REASON_CODE,
+                    final_state="unresolved",
+                    final_reason=reason_code,
                 )
                 continue
+            paper_author = _bind_provider(
+                author,
+                paper_id=paper_id,
+                family_id=family_id,
+                source_version_id=source_version_id,
+            )
+            paper_verifier = _bind_provider(
+                verifier,
+                paper_id=paper_id,
+                family_id=family_id,
+                source_version_id=source_version_id,
+            )
+            if verifier_broker is not None and (
+                eligibility is None
+                or eligibility.get("execution_authority") != "shared_gemini_broker"
+            ):
+                eligibility = None
+            if eligibility is None:
+                if not all(
+                    (
+                        eligibility_prompt_file,
+                        eligibility_schema_file,
+                        eligibility_policy_file,
+                    )
+                ):
+                    raise ValueError(
+                        "streaming eligibility inputs are required for a newly ready paper"
+                    )
+                try:
+                    eligibility = _run_eligibility(
+                        db,
+                        access,
+                        eligibility_run_dir,
+                        run_id=campaign_id,
+                        provider=paper_verifier,
+                        prompt_file=eligibility_prompt_file,
+                        schema_file=eligibility_schema_file,
+                        policy_file=eligibility_policy_file,
+                        rescreen_prompt_file=eligibility_rescreen_prompt_file,
+                    )
+                except PaperCostCapError as error:
+                    # The family reached the per-paper cost cap before it was
+                    # screened. Nothing is charged past the cap, so the family is
+                    # recorded and the run continues with the next paper.
+                    _record_paper_cost_cap(
+                        db,
+                        campaign_id=campaign_id,
+                        candidate_key=str(candidate_key),
+                        source_id=None,
+                        family_id=family_id,
+                        selected=selected,
+                        error=error,
+                        cost_state=_family_cost_state(paper_verifier, family_id),
+                    )
+                    counts["paper_cost_cap_reached"] += 1
+                    counts["processed"] += 1
+                    progress.increment("paper_cost_cap_reached")
+                    paper_results.append(
+                        {
+                            "candidate_key": candidate_key,
+                            "disposition": "paper_cost_cap_reached",
+                            "reason_codes": [PAPER_COST_CAP_REASON_CODE],
+                            "source_id": None,
+                        }
+                    )
+                    progress.paper(
+                        paper_id=candidate_key,
+                        title=access.get("title"),
+                        current_stage="completed",
+                        final_state="paper_cost_cap_reached",
+                        final_reason=PAPER_COST_CAP_REASON_CODE,
+                    )
+                    continue
+                except Exception as error:
+                    progress.error(
+                        candidate_key, access.get("title"), "eligibility", error
+                    )
+                    raise
+                eligibility_jobs[candidate_key] = eligibility
+                if verifier_broker is None:
+                    progress.set_count(
+                        "eligible",
+                        sum(
+                            (item.get("validation") or {}).get("decision") == "eligible"
+                            for item in eligibility_jobs.values()
+                        ),
+                    )
+                    progress.set_count(
+                        "eligibility_completed",
+                        sum(
+                            (item.get("validation") or {}).get("decision")
+                            in {"eligible", "excluded", "uncertain"}
+                            for item in eligibility_jobs.values()
+                        ),
+                    )
+                    progress.set_count(
+                        "excluded",
+                        sum(
+                            (item.get("validation") or {}).get("decision") == "excluded"
+                            for item in eligibility_jobs.values()
+                        ),
+                    )
+                    progress.set_count(
+                        "unresolved",
+                        sum(
+                            (item.get("validation") or {}).get("decision")
+                            == "uncertain"
+                            for item in eligibility_jobs.values()
+                        ),
+                    )
+            progress.write("running", "eligibility", f"Checking {candidate_key}.")
+            try:
+                deterministic_unresolved = False
+                if verifier_broker is not None:
+                    _validate_access_integrity(access, eligibility)
+                    validation = _validate_brokered_eligibility(
+                        eligibility,
+                        paper_verifier,
+                        access=access,
+                        prompt_file=eligibility_prompt_file,
+                        schema_file=eligibility_schema_file,
+                        policy_file=eligibility_policy_file,
+                        rescreen_prompt_file=eligibility_rescreen_prompt_file,
+                    )
+                    eligibility = {
+                        **eligibility,
+                        "state": _brokered_eligibility_state(eligibility, validation),
+                        "validation": validation,
+                    }
+                    deterministic_unresolved = validation["valid"] is not True
+                if deterministic_unresolved:
+                    if validation.get("decision") != "uncertain":
+                        raise ValueError(
+                            "invalid deterministic eligibility must remain uncertain"
+                        )
+                else:
+                    _validate_pair(access, eligibility)
             except Exception as error:
                 progress.error(candidate_key, access.get("title"), "eligibility", error)
                 raise
-            eligibility_jobs[candidate_key] = eligibility
-            if verifier_broker is None:
+            decision = eligibility["validation"]["decision"]
+            if verifier_broker is not None:
+                trusted_eligibility_decisions[candidate_key] = decision
+                progress.set_count(
+                    "eligibility_completed", len(trusted_eligibility_decisions)
+                )
                 progress.set_count(
                     "eligible",
                     sum(
-                        (item.get("validation") or {}).get("decision") == "eligible"
-                        for item in eligibility_jobs.values()
-                    ),
-                )
-                progress.set_count(
-                    "eligibility_completed",
-                    sum(
-                        (item.get("validation") or {}).get("decision")
-                        in {"eligible", "excluded", "uncertain"}
-                        for item in eligibility_jobs.values()
+                        value == "eligible"
+                        for value in trusted_eligibility_decisions.values()
                     ),
                 )
                 progress.set_count(
                     "excluded",
                     sum(
-                        (item.get("validation") or {}).get("decision") == "excluded"
-                        for item in eligibility_jobs.values()
+                        value == "excluded"
+                        for value in trusted_eligibility_decisions.values()
                     ),
                 )
                 progress.set_count(
                     "unresolved",
                     sum(
-                        (item.get("validation") or {}).get("decision") == "uncertain"
-                        for item in eligibility_jobs.values()
+                        value == "uncertain"
+                        for value in trusted_eligibility_decisions.values()
                     ),
                 )
-        progress.write("running", "eligibility", f"Checking {candidate_key}.")
-        try:
-            deterministic_unresolved = False
-            if verifier_broker is not None:
-                _validate_access_integrity(access, eligibility)
-                validation = _validate_brokered_eligibility(
-                    eligibility,
-                    paper_verifier,
-                    access=access,
-                    prompt_file=eligibility_prompt_file,
-                    schema_file=eligibility_schema_file,
-                    policy_file=eligibility_policy_file,
-                    rescreen_prompt_file=eligibility_rescreen_prompt_file,
-                )
-                eligibility = {
-                    **eligibility,
-                    "state": _brokered_eligibility_state(eligibility, validation),
-                    "validation": validation,
-                }
-                deterministic_unresolved = validation["valid"] is not True
-            if deterministic_unresolved:
-                if validation.get("decision") != "uncertain":
-                    raise ValueError(
-                        "invalid deterministic eligibility must remain uncertain"
-                    )
-            else:
-                _validate_pair(access, eligibility)
-        except Exception as error:
-            progress.error(candidate_key, access.get("title"), "eligibility", error)
-            raise
-        decision = eligibility["validation"]["decision"]
-        if verifier_broker is not None:
-            trusted_eligibility_decisions[candidate_key] = decision
-            progress.set_count(
-                "eligibility_completed", len(trusted_eligibility_decisions)
-            )
-            progress.set_count(
-                "eligible",
-                sum(
-                    value == "eligible"
-                    for value in trusted_eligibility_decisions.values()
-                ),
-            )
-            progress.set_count(
-                "excluded",
-                sum(
-                    value == "excluded"
-                    for value in trusted_eligibility_decisions.values()
-                ),
-            )
-            progress.set_count(
-                "unresolved",
-                sum(
-                    value == "uncertain"
-                    for value in trusted_eligibility_decisions.values()
-                ),
-            )
-        if decision != "eligible":
-            validation = eligibility["validation"]
-            unresolved = validation["valid"] is not True or decision == "uncertain"
-            reason_codes = (
-                validation.get("errors") or ["eligibility_validation_unresolved"]
-                if validation["valid"] is not True
-                else validation.get(
-                    "overall_reason_codes",
-                    eligibility["parsed_response"].get(
-                        "overall_reason_codes", ["eligibility_unresolved"]
-                    ),
-                )
-            )
-            disposition = (
-                "eligibility_unresolved" if unresolved else "eligibility_rejected"
-            )
-            for reason_code in reason_codes:
-                with db.transaction():
-                    db.connection.execute(
-                        """INSERT OR IGNORE INTO rejection_ledger
-                        (rejection_id,item_id,source_id,stage,reason_code,detail_json,created_at)
-                        VALUES (?,NULL,NULL,'scientific_eligibility',?,?,?)""",
-                        (
-                            stable_id(
-                                "rejection",
-                                campaign_id,
-                                candidate_key,
-                                "scientific_eligibility",
-                                reason_code,
-                            ),
-                            reason_code,
-                            canonical_json(
-                                {
-                                    "candidate_key": candidate_key,
-                                    "eligibility_job_key": eligibility["job_key"],
-                                    "decision": decision,
-                                    "validation_valid": validation["valid"],
-                                    "validation_errors": validation.get("errors", []),
-                                    "selection": selected,
-                                }
-                            ),
-                            now(),
+            if decision != "eligible":
+                validation = eligibility["validation"]
+                unresolved = validation["valid"] is not True or decision == "uncertain"
+                reason_codes = (
+                    validation.get("errors") or ["eligibility_validation_unresolved"]
+                    if validation["valid"] is not True
+                    else validation.get(
+                        "overall_reason_codes",
+                        eligibility["parsed_response"].get(
+                            "overall_reason_codes", ["eligibility_unresolved"]
                         ),
                     )
+                )
+                disposition = (
+                    "eligibility_unresolved" if unresolved else "eligibility_rejected"
+                )
+                for reason_code in reason_codes:
+                    with db.transaction():
+                        db.connection.execute(
+                            """INSERT OR IGNORE INTO rejection_ledger
+                            (rejection_id,item_id,source_id,stage,reason_code,detail_json,created_at)
+                            VALUES (?,NULL,NULL,'scientific_eligibility',?,?,?)""",
+                            (
+                                stable_id(
+                                    "rejection",
+                                    campaign_id,
+                                    candidate_key,
+                                    "scientific_eligibility",
+                                    reason_code,
+                                ),
+                                reason_code,
+                                canonical_json(
+                                    {
+                                        "candidate_key": candidate_key,
+                                        "eligibility_job_key": eligibility["job_key"],
+                                        "decision": decision,
+                                        "validation_valid": validation["valid"],
+                                        "validation_errors": validation.get(
+                                            "errors", []
+                                        ),
+                                        "selection": selected,
+                                    }
+                                ),
+                                now(),
+                            ),
+                        )
+                paper_results.append(
+                    {
+                        "candidate_key": candidate_key,
+                        "disposition": disposition,
+                        "reason_codes": reason_codes,
+                        "source_id": None,
+                    }
+                )
+                counts[disposition] += 1
+                counts["processed"] += 1
+                progress.paper(
+                    paper_id=candidate_key,
+                    title=access.get("title"),
+                    current_stage="completed",
+                    final_state="unresolved" if unresolved else "rejected",
+                    final_reason=reason_codes[0],
+                )
+                continue
+            try:
+                source_id = _import_source(
+                    db,
+                    namespace,
+                    access,
+                    selected,
+                    eligibility,
+                    family_id=family_id,
+                )
+            except Exception as error:
+                progress.error(
+                    candidate_key, access.get("title"), "source_import", error
+                )
+                raise
+            generation_result = _progress_generation(
+                db,
+                namespace,
+                progress,
+                campaign_id=campaign_id,
+                candidate_key=str(candidate_key),
+                source_id=source_id,
+                family_id=family_id,
+                selected=selected,
+                source_version_id=source_version_id,
+                title=access.get("title"),
+                author=paper_author,
+                verifier=paper_verifier,
+            )
+            if generation_result["resumed"]:
+                resumed_papers += 1
+            disposition = generation_result["disposition"]
+            reason_codes = generation_result["reason_codes"]
+            counts[
+                {
+                    "generation_rejected": "generation_rejected",
+                    "accepted": "accepted_base_questions",
+                    "incomplete_non_mcq": "incomplete_non_mcq",
+                    "paper_cost_cap_reached": "paper_cost_cap_reached",
+                }[disposition]
+            ] += 1
+            counts["processed"] += 1
+            if disposition == "generation_rejected":
+                progress.increment("generation_rejected")
+            elif disposition == "paper_cost_cap_reached":
+                progress.increment("paper_cost_cap_reached")
+            elif disposition == "accepted":
+                progress.set_count("accepted_qa", _accepted_count(db, campaign_id))
             paper_results.append(
                 {
                     "candidate_key": candidate_key,
                     "disposition": disposition,
                     "reason_codes": reason_codes,
-                    "source_id": None,
+                    "source_id": source_id,
                 }
             )
-            counts[disposition] += 1
-            counts["processed"] += 1
             progress.paper(
-                paper_id=candidate_key,
+                paper_id=source_id,
                 title=access.get("title"),
                 current_stage="completed",
-                final_state="unresolved" if unresolved else "rejected",
-                final_reason=reason_codes[0],
-            )
-            continue
-        try:
-            source_id = _import_source(
-                db,
-                namespace,
-                access,
-                selected,
-                eligibility,
-                family_id=family_id,
+                final_state=disposition,
+                final_reason=(
+                    "machine_accepted_unverified"
+                    if disposition == "accepted"
+                    else (reason_codes or [disposition])[0]
+                ),
             )
         except Exception as error:
-            progress.error(candidate_key, access.get("title"), "source_import", error)
-            raise
-        generation_result = _progress_generation(
-            db,
-            namespace,
-            progress,
-            campaign_id=campaign_id,
-            candidate_key=str(candidate_key),
-            source_id=source_id,
-            family_id=family_id,
-            selected=selected,
-            source_version_id=source_version_id,
-            title=access.get("title"),
-            author=paper_author,
-            verifier=paper_verifier,
-        )
-        if generation_result["resumed"]:
-            resumed_papers += 1
-        disposition = generation_result["disposition"]
-        reason_codes = generation_result["reason_codes"]
-        counts[
-            {
-                "generation_rejected": "generation_rejected",
-                "accepted": "accepted_base_questions",
-                "incomplete_non_mcq": "incomplete_non_mcq",
-                "paper_cost_cap_reached": "paper_cost_cap_reached",
-            }[disposition]
-        ] += 1
-        counts["processed"] += 1
-        if disposition == "generation_rejected":
-            progress.increment("generation_rejected")
-        elif disposition == "paper_cost_cap_reached":
-            progress.increment("paper_cost_cap_reached")
-        elif disposition == "accepted":
-            progress.set_count("accepted_qa", _accepted_count(db, campaign_id))
-        paper_results.append(
-            {
-                "candidate_key": candidate_key,
-                "disposition": disposition,
-                "reason_codes": reason_codes,
-                "source_id": source_id,
-            }
-        )
-        progress.paper(
-            paper_id=source_id,
-            title=access.get("title"),
-            current_stage="completed",
-            final_state=disposition,
-            final_reason=(
-                "machine_accepted_unverified"
-                if disposition == "accepted"
-                else (reason_codes or [disposition])[0]
-            ),
-        )
+            if _ends_the_run(error):
+                raise
+            fault = _contain_candidate_processing_fault(
+                db,
+                progress,
+                campaign_id=campaign_id,
+                candidate_key=str(candidate_key),
+                source_id=source_id,
+                family_id=family_id,
+                selected=selected,
+                title=access.get("title"),
+                provider=verifier,
+                error=error,
+            )
+            counts[CANDIDATE_PROCESSING_FAULT_REASON_CODE] += 1
+            progress.increment(CANDIDATE_PROCESSING_FAULT_REASON_CODE)
+            # The paper is counted one time. A fault after its own disposition
+            # was already recorded keeps that record and adds no second row.
+            if counts["processed"] == processed_before:
+                counts["processed"] += 1
+            if len(paper_results) == results_before:
+                paper_results.append(
+                    {
+                        "candidate_key": candidate_key,
+                        "disposition": CANDIDATE_PROCESSING_FAULT_REASON_CODE,
+                        "reason_codes": [CANDIDATE_PROCESSING_FAULT_REASON_CODE],
+                        "source_id": source_id,
+                        "candidate_processing_fault": fault,
+                    }
+                )
+            continue
     progress.write("running", "export", "Writing validated dataset exports.")
     try:
         exported = export_run(
@@ -3030,6 +3090,213 @@ def _family_cost_state(provider: Provider, family_id: str) -> dict[str, str] | N
         return None
 
 
+def _operational_unresolved_families(broker: Any) -> dict[str, dict[str, str]]:
+    """Read the reviewed no-replay families, through the broker's own accessor.
+
+    The read validates the shared ledger, so it can refuse. That refusal is the
+    ledger's, never one paper's, and it does not cross the provider seam, so it
+    is marked here.
+    """
+    if broker is None:
+        return {}
+    try:
+        return broker.operational_unresolved_families()
+    except Exception as error:
+        raise mark_run_stop(error)
+
+
+def _ends_the_run(error: BaseException) -> bool:
+    """Say whether this exception is a run stop rather than one paper's fault.
+
+    Only a run stop ends the producer. Everything a single candidate or a single
+    paper family raises - a ``ValueError`` from the generation contract, a
+    ``KeyError`` from a routing or option record, a persistence failure - is
+    contained, settled against that family and skipped.
+
+    A run stop arrives in one of three ways. The money stops carry their own
+    class: ``BudgetError`` for the allocation ceiling, the session ceiling, the
+    construction checkpoint, the submission cap and the accepted-question
+    target, and ``AmbiguousChargeError`` for an unsettled charge. Every other
+    refusal the shared broker raises, the execution gate and the ledger
+    included, carries the marker that ``broker_provider.broker_boundary`` puts
+    on it at the seam. A direct read of the shared ledger, which does not cross
+    that seam, is matched by its own message. The per-paper cost cap bounds one
+    family, so it is never a run stop.
+    """
+    if isinstance(error, PaperCostCapError):
+        return False
+    if isinstance(error, (BudgetError, AmbiguousChargeError)) or is_run_stop(error):
+        return True
+    return isinstance(error, ValueError) and str(error).startswith(
+        RUN_ENDING_LEDGER_STOPS
+    )
+
+
+def _released_family_reservation(
+    provider: Provider, family_id: str
+) -> dict[str, str] | None:
+    """Confirm the broker holds no reservation for a family a fault stopped.
+
+    ``execute`` is the broker's only reservation path and it settles every
+    request it opens, an ambiguous charge included, so a contained fault has
+    nothing left to release. This reads the family's own cost row through the
+    broker's supported accessor and refuses to contain the fault while that row
+    still shows a reservation: stranded money is settled through the reviewed
+    settlement path, never by the producer skipping past it.
+    """
+    broker = getattr(provider, "broker", None)
+    if broker is None:
+        return None
+    state = broker.family_cost_state(family_id)
+    if Decimal(str(state["reserved_usd"])) != 0:
+        raise ValueError(
+            "the paper family still holds a broker reservation after a fault"
+        )
+    return state
+
+
+def _settle_candidate_processing_fault(
+    db: Database,
+    *,
+    run_id: str,
+    family_id: str,
+    error: BaseException,
+    stage: str,
+) -> list[str]:
+    """Record the fault on every in-flight call record of one family.
+
+    The row stays ``incomplete_infra``: a call was opened and its outcome is
+    unknown. It now also names the exception class, the message and the stage,
+    so the skipped family is answerable without the launcher log.
+    """
+    settled: list[str] = []
+    for row in _incomplete_infra_records(db, run_id, family_id):
+        try:
+            record = json.loads(row["candidate_json"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        record["reason_code"] = CANDIDATE_PROCESSING_FAULT_REASON_CODE
+        record["candidate_processing_fault"] = {
+            "contract_version": CANDIDATE_PROCESSING_FAULT_CONTRACT_VERSION,
+            "error_class": type(error).__name__,
+            "error_message": str(error),
+            "stage": stage,
+        }
+        with db.transaction():
+            db.connection.execute(
+                """UPDATE candidates SET candidate_json=?,updated_at=?
+                WHERE item_id=?""",
+                (canonical_json(record), now(), row["item_id"]),
+            )
+        settled.append(str(row["item_id"]))
+    return settled
+
+
+def _record_candidate_processing_fault(
+    db: Database,
+    *,
+    campaign_id: str,
+    candidate_key: str,
+    source_id: str | None,
+    family_id: str,
+    selected: dict[str, Any],
+    detail: dict[str, Any],
+) -> None:
+    """Record one contained paper fault as a generation routing row."""
+    with db.transaction():
+        db.connection.execute(
+            """INSERT OR IGNORE INTO rejection_ledger
+            (rejection_id,item_id,source_id,stage,reason_code,detail_json,created_at)
+            VALUES (?,NULL,?,'generation_routing',?,?,?)""",
+            (
+                stable_id(
+                    "rejection",
+                    campaign_id,
+                    candidate_key,
+                    "generation_routing",
+                    family_id,
+                    CANDIDATE_PROCESSING_FAULT_REASON_CODE,
+                    detail["error_class"],
+                    detail["error_message"],
+                    detail["stage"],
+                ),
+                source_id,
+                CANDIDATE_PROCESSING_FAULT_REASON_CODE,
+                canonical_json(
+                    {
+                        "campaign_id": campaign_id,
+                        "candidate_key": candidate_key,
+                        "family_id": family_id,
+                        "selection": selected,
+                        **detail,
+                    }
+                ),
+                now(),
+            ),
+        )
+
+
+def _contain_candidate_processing_fault(
+    db: Database,
+    progress: _Progress,
+    *,
+    campaign_id: str,
+    candidate_key: str,
+    source_id: str | None,
+    family_id: str,
+    selected: dict[str, Any],
+    title: str | None,
+    provider: Provider,
+    error: Exception,
+) -> dict[str, Any]:
+    """Settle one paper family a fault stopped and let the producer continue.
+
+    The reservation check runs first: a fault that left money in flight is not
+    contained, and the original exception ends the producer as before.
+    """
+    stage = progress.last_error_stage or progress.stage
+    try:
+        cost_state = _released_family_reservation(provider, family_id)
+    except Exception as reservation_error:
+        raise reservation_error from error
+    settled = _settle_candidate_processing_fault(
+        db,
+        run_id=campaign_id,
+        family_id=family_id,
+        error=error,
+        stage=stage,
+    )
+    detail = {
+        "contract_version": CANDIDATE_PROCESSING_FAULT_CONTRACT_VERSION,
+        "error_class": type(error).__name__,
+        "error_message": str(error),
+        "stage": stage,
+        "source_id": source_id,
+        "settled_call_records": settled,
+        "family_cost_state": cost_state,
+    }
+    _record_candidate_processing_fault(
+        db,
+        campaign_id=campaign_id,
+        candidate_key=candidate_key,
+        source_id=source_id,
+        family_id=family_id,
+        selected=selected,
+        detail=detail,
+    )
+    # ``progress.error`` wrote the run state as "error" on its way out. The
+    # family is settled, so the producer is running again.
+    progress.paper(
+        paper_id=source_id or candidate_key,
+        title=title,
+        current_stage="completed",
+        final_state=CANDIDATE_PROCESSING_FAULT_REASON_CODE,
+        final_reason=type(error).__name__,
+    )
+    progress.last_error_stage = None
+    return detail
+
+
 def _record_paper_cost_cap(
     db: Database,
     *,
@@ -3505,6 +3772,9 @@ class _Progress:
         self.broker_status_file: Path | None = None
         self.budget_policy_file: Path | None = None
         self.dataset_metadata_file: Path | None = None
+        # The stage the last recorded error landed on. The containment path
+        # reads it to name the stage on a settled paper fault.
+        self.last_error_stage: str | None = None
 
     def write(self, state: str, stage: str, message: str) -> None:
         self.state = state
@@ -3587,6 +3857,7 @@ class _Progress:
         stage: str,
         error: Exception,
     ) -> None:
+        self.last_error_stage = stage
         self.paper(
             paper_id=paper_id,
             title=title,
