@@ -192,6 +192,21 @@ CEILING_CHANGES = (
 CEILING_EXTENSION_CHANGE: dict[str, Any] = {}
 AUTHORIZED_CAP_REASON = "the paid request exceeds the authorized live-test cap"
 PER_REQUEST_CAP_REASON = "the paid request exceeds USD 0.25"
+# Two scheduling refusals describe the moment, not the request: another request
+# of the same phase holds a slot or the window. ``execute`` waits a bounded time
+# for room before it records one. A request that one of them stopped resumes
+# under the next reviewed transition, like a request the live-test cap stopped
+# (the chapter 3 run of 2026-09-16 10:00 UTC lost a request this way when two
+# evaluation requests held the shared slots).
+CONCURRENCY_LIMIT_REASON = "the paid-call concurrency limit is complete"
+MINUTE_LIMIT_REASON = "the paid-call minute limit is complete"
+TRANSIENT_RESERVATION_REASONS = (CONCURRENCY_LIMIT_REASON, MINUTE_LIMIT_REASON)
+RESUMABLE_NOT_SUBMITTED_REASONS = (
+    AUTHORIZED_CAP_REASON,
+    *TRANSIENT_RESERVATION_REASONS,
+)
+TRANSIENT_RESERVATION_RETRY_SECONDS = 90.0
+TRANSIENT_RESERVATION_RETRY_INTERVAL_SECONDS = 3.0
 ALLOWED_LIVE_TEST_LIMITS = {(20, 100), (40, 100), (41, 101), (None, None)}
 STREAM_INPUT_BINDING_VERSION = "stream-input-binding-v1"
 TRANSITION_GATE_SUCCESSOR_FIELDS = {
@@ -2211,7 +2226,13 @@ class SharedGeminiBroker:
                 stable_fields = tuple(
                     name
                     for name in base_fields
-                    if name not in {"gate_sha256", "config_transition_sha256"}
+                    if name
+                    not in {
+                        "gate_sha256",
+                        "config_transition_sha256",
+                        "price_config_sha256",
+                        "policy_sha256",
+                    }
                 )
                 if (
                     any(
@@ -2219,7 +2240,7 @@ class SharedGeminiBroker:
                         for name in stable_fields
                     )
                     or original.get("state") != "not_submitted"
-                    or original.get("reason") != AUTHORIZED_CAP_REASON
+                    or original.get("reason") not in RESUMABLE_NOT_SUBMITTED_REASONS
                     or original.get("live_call_made") is not False
                     or original.get("config_transition_sha256")
                     != request.get("resumed_from_config_transition_sha256")
@@ -3521,6 +3542,21 @@ class SharedGeminiBroker:
                 ledger["evaluation_halted"] = False
                 ledger["evaluation_halt_reason"] = None
 
+    @classmethod
+    def _phase_inflight(cls, ledger: dict[str, Any], phase: str) -> int:
+        """Count the in-flight requests of one phase.
+
+        The ledger counter covers every phase. The evaluation phase and the
+        construction phases each keep their own slots, so an evaluation request
+        in flight never takes a construction slot, and the reverse. The
+        per-minute window stays shared: a collision there is transient, and
+        ``execute`` waits for it.
+        """
+        evaluation_inflight = int(cls._evaluation_totals(ledger)["inflight"])
+        if phase == EVALUATION_PHASE:
+            return evaluation_inflight
+        return max(int(ledger["inflight"]) - evaluation_inflight, 0)
+
     @staticmethod
     def _evaluation_totals(ledger: dict[str, Any]) -> dict[str, Any]:
         """Sum the evaluation-phase liabilities recorded in the ledger requests."""
@@ -3657,7 +3693,9 @@ class SharedGeminiBroker:
             "live_test_papers": len(ledger["live_test_papers"]),
             "live_test_generation_submissions": live_submissions,
             "away_generation_submissions": construction_submissions,
-            "concurrent_generation_requests": int(ledger["inflight"]),
+            "concurrent_generation_requests": self._phase_inflight(
+                ledger, "away_production"
+            ),
             "generation_requests_in_current_minute": recent_count,
         }
         remaining = {
@@ -3709,7 +3747,7 @@ class SharedGeminiBroker:
             "concurrent_generation_requests": int(
                 self.policy["maximum_concurrent_generation_requests"]
             )
-            - int(ledger["inflight"]),
+            - self._phase_inflight(ledger, "away_production"),
             "generation_requests_in_current_minute": int(
                 self.policy["maximum_generation_requests_per_minute"]
             )
@@ -5327,24 +5365,45 @@ class SharedGeminiBroker:
             request = ledger["requests"].get(request_key)
             if request is None:
                 return None
+            reason = request.get("reason")
             if (
                 request.get("state") != "not_submitted"
-                or request.get("reason") != AUTHORIZED_CAP_REASON
+                or reason not in RESUMABLE_NOT_SUBMITTED_REASONS
                 or request.get("resumed_from_not_submitted_sha256") is not None
             ):
                 raise ValueError("the paid request key already exists")
             event_path = self._config_transition_event_path
             if event_path is None or not event_path.is_file():
-                raise ValueError("the paid request lacks a ceiling extension")
+                if reason == AUTHORIZED_CAP_REASON:
+                    raise ValueError("the paid request lacks a ceiling extension")
+                raise ValueError(
+                    "the paid request lacks a reviewed transition to resume under"
+                )
             authorization = self._read_transition_event(event_path)["authorization"]
-            if (
-                not self._is_ceiling_extension(authorization)
-                or authorization["from_config_transition_sha256"]
+            # The active transition must be the direct successor of the one the
+            # request was refused under. The live-test cap needs the ceiling
+            # extension; a transient scheduling refusal needs any reviewed
+            # transition, because the refusal described the moment, not the
+            # request or its budget.
+            advanced = (
+                request.get("config_transition_sha256") is not None
+                and authorization["from_config_transition_sha256"]
+                == request.get("config_transition_sha256")
+                and base.get("config_transition_sha256")
+                == self._config_transition_sha256
+                and self._config_transition_sha256
                 != request.get("config_transition_sha256")
-                or base.get("config_transition_sha256")
-                != self._config_transition_sha256
-            ):
-                raise ValueError("the paid request lacks a ceiling extension")
+            )
+            if reason == AUTHORIZED_CAP_REASON:
+                if not self._is_ceiling_extension(authorization) or not advanced:
+                    raise ValueError("the paid request lacks a ceiling extension")
+            elif not advanced:
+                raise ValueError(
+                    "the paid request lacks a reviewed transition to resume under"
+                )
+            # The request identity is stable. The price and policy hashes are
+            # the configuration the resumed request runs under; the transition
+            # lineage recorded on the request binds them to the refused one.
             stable_fields = {
                 "request_key",
                 "request_sha256",
@@ -5354,8 +5413,6 @@ class SharedGeminiBroker:
                 "family_id",
                 "source_version_id",
                 "model",
-                "price_config_sha256",
-                "policy_sha256",
             }
             if any(request.get(name) != base.get(name) for name in stable_fields):
                 raise ValueError("the paid request resume identity changed")
@@ -5364,7 +5421,7 @@ class SharedGeminiBroker:
             exact_input = original.get("input_tokens")
             if (
                 original.get("state") != "not_submitted"
-                or original.get("reason") != AUTHORIZED_CAP_REASON
+                or original.get("reason") != reason
                 or original.get("live_call_made") is not False
                 or isinstance(exact_input, bool)
                 or not isinstance(exact_input, int)
@@ -5565,8 +5622,8 @@ class SharedGeminiBroker:
                     submission_limit
                 ):
                     raise ValueError("the live-test submission limit is complete")
-            if ledger["inflight"] >= self._concurrency_limit(phase):
-                raise ValueError("the paid-call concurrency limit is complete")
+            if self._phase_inflight(ledger, phase) >= self._concurrency_limit(phase):
+                raise ValueError(CONCURRENCY_LIMIT_REASON)
             cutoff = datetime.now(UTC) - timedelta(minutes=1)
             recent = [
                 value
@@ -5574,7 +5631,7 @@ class SharedGeminiBroker:
                 if datetime.fromisoformat(value.replace("Z", "+00:00")) > cutoff
             ]
             if len(recent) >= self._minute_limit(phase):
-                raise ValueError("the paid-call minute limit is complete")
+                raise ValueError(MINUTE_LIMIT_REASON)
             ledger["recent_submission_times_utc"] = recent + [_now()]
             ledger["reserved_usd"] = str(
                 _money(ledger["reserved_usd"], "reserved") + reserved
@@ -6074,31 +6131,42 @@ class SharedGeminiBroker:
                 return receipt
             output_limit = int(payload["generationConfig"]["maxOutputTokens"])
             reserved = _cost(request_config, exact_input, output_limit)
-            try:
-                self._reserve(
-                    request_key=request_key,
-                    phase=phase,
-                    paper_id=paper_id,
-                    family_id=family_id,
-                    stage=stage,
-                    reserved=reserved,
-                )
-            except ValueError as error:
-                receipt = {
-                    **base,
-                    "state": "not_submitted",
-                    "input_tokens": exact_input,
-                    "reason": str(error),
-                    "live_call_made": False,
-                    "completed_at_utc": _now(),
-                }
-                atomic_json(
-                    self.receipts_dir / f"{event_stem}.json",
-                    receipt,
-                    immutable=True,
-                )
-                self._mark_not_submitted(request_key, "not_submitted", str(error))
-                return receipt
+            deadline = time.monotonic() + TRANSIENT_RESERVATION_RETRY_SECONDS
+            while True:
+                try:
+                    self._reserve(
+                        request_key=request_key,
+                        phase=phase,
+                        paper_id=paper_id,
+                        family_id=family_id,
+                        stage=stage,
+                        reserved=reserved,
+                    )
+                    break
+                except ValueError as error:
+                    if (
+                        str(error) in TRANSIENT_RESERVATION_REASONS
+                        and time.monotonic() < deadline
+                    ):
+                        # Another request of this phase holds the slot or the
+                        # window; the request is counted and waits for room.
+                        time.sleep(TRANSIENT_RESERVATION_RETRY_INTERVAL_SECONDS)
+                        continue
+                    receipt = {
+                        **base,
+                        "state": "not_submitted",
+                        "input_tokens": exact_input,
+                        "reason": str(error),
+                        "live_call_made": False,
+                        "completed_at_utc": _now(),
+                    }
+                    atomic_json(
+                        self.receipts_dir / f"{event_stem}.json",
+                        receipt,
+                        immutable=True,
+                    )
+                    self._mark_not_submitted(request_key, "not_submitted", str(error))
+                    return receipt
             submitted = {
                 **base,
                 "state": "submitted",

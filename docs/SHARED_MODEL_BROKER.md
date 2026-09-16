@@ -202,6 +202,24 @@ The chapter 3 expansion change set (`CHAPTER3_EXPANSION_CHANGE`) moves four fiel
 
 The broker refuses each of these four fields alone, and it accepts the expanded counts only under the expansion ceiling.
 
+### Phase slots and windows
+
+Each phase counts its own in-flight requests against its own concurrency limit.
+
+An evaluation request in flight never takes a construction slot, and the reverse.
+
+The ledger `inflight` counter still covers every phase, and the per-minute window stays shared.
+
+When another request of the same phase holds the slot or the window, `execute` waits up to 90 seconds for room.
+
+After that wait it records the refusal as a `not_submitted` receipt with the concurrency or minute reason.
+
+A request that such a refusal stopped resumes under the next reviewed transition, like a request the live-test cap stopped.
+
+The resume needs the refused request to carry a transition hash, and the active transition must name that hash as its predecessor.
+
+The resumed request keeps its identity and runs under the active price and policy hashes.
+
 Create the request key from the exact request identity.
 
 The request identity does not use the run ID.

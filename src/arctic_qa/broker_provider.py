@@ -12,7 +12,11 @@ from .errors import (
     ProviderError,
     ProviderResponseError,
 )
-from .model_broker import AUTHORIZED_CAP_REASON, SharedGeminiBroker, broker_request_key
+from .model_broker import (
+    RESUMABLE_NOT_SUBMITTED_REASONS,
+    SharedGeminiBroker,
+    broker_request_key,
+)
 from .providers import ProviderResult
 from .gemini_eligibility import model_config_for_stage
 from .util import canonical_json, sha256_bytes, sha256_file
@@ -129,7 +133,7 @@ class BrokerProvider:
             receipt = self.broker.effective_receipt(request_key)
             if not (
                 receipt.get("state") == "not_submitted"
-                and receipt.get("reason") == AUTHORIZED_CAP_REASON
+                and receipt.get("reason") in RESUMABLE_NOT_SUBMITTED_REASONS
             ):
                 _, result = self.read_receipt(
                     request_key=request_key,
