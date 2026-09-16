@@ -108,6 +108,21 @@ CHAPTER2_BUDGET_EXTENSION_CHANGE = {
     "away_session_total_ceiling_usd": {"from": "61.614496", "to": "108.994972"}
 }
 CHAPTER2_CUMULATIVE_CEILING_USD = Decimal("108.994972")
+# Chapter 3 (captain order 2026-09-16): one USD 20.00 allocation on top of the
+# USD 53.990121 of construction spend settled when chapter 2 was paused. The
+# unspent chapter 2 headroom is retired, so the ceiling moves down to the new
+# baseline plus the allocation. Halt at exhaustion, no reset, no replay.
+CHAPTER3_CONSTRUCTION_SPEND_BEFORE_USD = Decimal("53.990121")
+CHAPTER3_ALLOCATION_USD = Decimal("20.00")
+CHAPTER3_CUMULATIVE_CEILING_USD = (
+    CHAPTER3_CONSTRUCTION_SPEND_BEFORE_USD + CHAPTER3_ALLOCATION_USD
+)
+CHAPTER3_BUDGET_CHANGE = {
+    "away_session_total_ceiling_usd": {
+        "from": str(CHAPTER2_CUMULATIVE_CEILING_USD),
+        "to": str(CHAPTER3_CUMULATIVE_CEILING_USD),
+    }
+}
 POLICY_TRANSITION_CHANGES = (
     {"live_test_maximum_papers": {"from": 20, "to": 40}},
     {
@@ -118,6 +133,14 @@ POLICY_TRANSITION_CHANGES = (
     LIVE_TEST_BUDGET_EXTENSION_CHANGE,
     PRODUCTION_BUDGET_EXTENSION_CHANGE,
     CHAPTER2_BUDGET_EXTENSION_CHANGE,
+    CHAPTER3_BUDGET_CHANGE,
+)
+# The policy transitions that move the construction ceiling. Each one binds a
+# complete stream-input gate and names its own cumulative ceiling as the tranche.
+CEILING_CHANGES = (
+    PRODUCTION_BUDGET_EXTENSION_CHANGE,
+    CHAPTER2_BUDGET_EXTENSION_CHANGE,
+    CHAPTER3_BUDGET_CHANGE,
 )
 CEILING_EXTENSION_CHANGE: dict[str, Any] = {}
 AUTHORIZED_CAP_REASON = "the paid request exceeds the authorized live-test cap"
@@ -484,7 +507,9 @@ def _money(value: Any, name: str, *, positive: bool = False) -> Decimal:
 
 def is_evaluation_stage(stage: Any) -> bool:
     """Return whether a stage belongs to the evaluation stage family."""
-    return isinstance(stage, str) and EVALUATION_STAGE_PATTERN.fullmatch(stage) is not None
+    return (
+        isinstance(stage, str) and EVALUATION_STAGE_PATTERN.fullmatch(stage) is not None
+    )
 
 
 def stage_supported(stage: Any) -> bool:
@@ -564,7 +589,9 @@ def _validate_evaluation_price_config(
     if value.get("api_base") != construction_config["api_base"]:
         raise ValueError("the benchmark evaluation API base differs from the broker")
     if value.get("provider") != "google_gemini":
-        raise ValueError("the benchmark evaluation price config provider is unsupported")
+        raise ValueError(
+            "the benchmark evaluation price config provider is unsupported"
+        )
     models = value.get("models")
     if not isinstance(models, dict) or not models:
         raise ValueError("the benchmark evaluation price config lists no model")
@@ -675,6 +702,7 @@ def _validate_policy(path: Path) -> dict[str, Any]:
         Decimal("25"),
         Decimal("61.614496"),
         CHAPTER2_CUMULATIVE_CEILING_USD,
+        CHAPTER3_CUMULATIVE_CEILING_USD,
     }:
         raise ValueError(
             "streaming budget value changed: away_session_total_ceiling_usd"
@@ -942,7 +970,8 @@ class SharedGeminiBroker:
                 self.evaluation_policy_file, self.policy
             )
             self.evaluation_config = _validate_evaluation_price_config(
-                self.evaluation_price_config_file, self.config  # type: ignore[arg-type]
+                self.evaluation_price_config_file,
+                self.config,  # type: ignore[arg-type]
             )
             self.active_evaluation_price_config_sha256 = sha256_file(
                 self.evaluation_price_config_file  # type: ignore[arg-type]
@@ -1023,8 +1052,9 @@ class SharedGeminiBroker:
         if binding is None:
             raise ValueError("the benchmark evaluation run is not bound")
         manifest = binding["eval_set_manifest_file"]
-        if not manifest.is_file() or sha256_file(manifest) != (
-            gate["eval_set_manifest_sha256"]
+        if (
+            not manifest.is_file()
+            or sha256_file(manifest) != (gate["eval_set_manifest_sha256"])
         ):
             raise ValueError("the reviewed evaluation set manifest changed")
         if binding["eval_set_id"] != gate["eval_set_id"]:
@@ -1193,11 +1223,10 @@ class SharedGeminiBroker:
         )
 
     def _apply_transition_controls(self, authorization: dict[str, Any]) -> None:
-        if authorization.get(
-            "schema"
-        ) == "shared-paid-call-config-transition-v2" and authorization.get(
-            "changed_policy_fields"
-        ) not in (PRODUCTION_BUDGET_EXTENSION_CHANGE, CHAPTER2_BUDGET_EXTENSION_CHANGE):
+        if (
+            authorization.get("schema") == "shared-paid-call-config-transition-v2"
+            and authorization.get("changed_policy_fields") not in CEILING_CHANGES
+        ):
             self._authorized_live_test_ceiling_usd = _money(
                 authorization["maximum_authorized_cumulative_tranche_usd"],
                 "transition tranche",
@@ -1260,8 +1289,7 @@ class SharedGeminiBroker:
         if authorization.get("changed_policy_fields") in (
             UNBOUNDED_COUNT_CHANGE,
             LIVE_TEST_BUDGET_EXTENSION_CHANGE,
-            PRODUCTION_BUDGET_EXTENSION_CHANGE,
-            CHAPTER2_BUDGET_EXTENSION_CHANGE,
+            *CEILING_CHANGES,
         ) or self._is_ceiling_extension(authorization):
             self._validate_stream_input_gate(gate)
         direct_gate_binding = (
@@ -1396,6 +1424,8 @@ class SharedGeminiBroker:
                     expected_tranche = Decimal("61.614496")
                 elif changed_policy_fields == CHAPTER2_BUDGET_EXTENSION_CHANGE:
                     expected_tranche = CHAPTER2_CUMULATIVE_CEILING_USD
+                elif changed_policy_fields == CHAPTER3_BUDGET_CHANGE:
+                    expected_tranche = CHAPTER3_CUMULATIVE_CEILING_USD
                 else:
                     expected_tranche = Decimal("5")
                 if from_pair[1] == to_pair[1] or tranche != expected_tranche:

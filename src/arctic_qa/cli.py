@@ -313,8 +313,28 @@ def parser() -> argparse.ArgumentParser:
     )
     calibrate.add_argument("--provider-script", type=Path)
     calibrate.add_argument("--run-id", default="standalone-calibration")
-    calibrate.add_argument("--phase", default="calibration")
+    calibrate.add_argument(
+        "--phase",
+        choices=("live_test", "away_production"),
+        default="away_production",
+        help="record only: the construction phase the execution gate allows.",
+    )
     calibrate.add_argument("--timeout", type=float, default=300.0)
+    calibrate.add_argument(
+        "--campaign-id",
+        help="record only: the campaign the execution gate authorizes.",
+    )
+    calibrate.add_argument(
+        "--access-run-dir",
+        type=Path,
+        help=(
+            "record only: the reviewed streaming input the execution gate binds; "
+            "required when the gate carries a stream-input binding."
+        ),
+    )
+    calibrate.add_argument("--eligibility-prompt-file", type=Path)
+    calibrate.add_argument("--eligibility-schema-file", type=Path)
+    calibrate.add_argument("--eligibility-policy-file", type=Path)
     calibrate.add_argument("--streaming-budget-policy-file", type=Path)
     calibrate.add_argument("--price-config-file", type=Path)
     calibrate.add_argument("--execution-gate-file", type=Path)
@@ -754,6 +774,7 @@ def _calibrate_standalone(args) -> dict[str, Any]:
     """Record or replay the standalone calibration cassette."""
     from .standalone_calibration import (
         DEFAULT_CALIBRATION_SET,
+        calibration_paper_identity,
         evaluate_cassette,
         load_calibration_set,
         record_cassette,
@@ -802,16 +823,38 @@ def _calibrate_standalone(args) -> dict[str, Any]:
                 else None
             ),
         )
+        if broker.stream_input_binding_required():
+            binding_arguments = (
+                "campaign_id",
+                "access_run_dir",
+                "eligibility_prompt_file",
+                "eligibility_schema_file",
+                "eligibility_policy_file",
+            )
+            missing = [
+                name for name in binding_arguments if getattr(args, name) is None
+            ]
+            if missing:
+                raise ValueError(
+                    "the execution gate binds a streaming input; recording requires: "
+                    + ", ".join("--" + name.replace("_", "-") for name in missing)
+                )
+            broker.bind_stream_input(
+                args.access_run_dir.resolve(),
+                phase=args.phase,
+                run_id=args.run_id,
+                campaign_id=args.campaign_id,
+                eligibility_prompt_file=args.eligibility_prompt_file.resolve(),
+                eligibility_schema_file=args.eligibility_schema_file.resolve(),
+                eligibility_policy_file=args.eligibility_policy_file.resolve(),
+            )
         provider = BrokerProvider(
             broker=broker, phase=args.phase, invocation_run_id=args.run_id
         )
+        identity = calibration_paper_identity(calibration)
 
         def bind_row(unbound, row):
-            return unbound.bind(
-                paper_id="standalone-calibration",
-                family_id=str(row.get("family_id") or "standalone-calibration"),
-                source_version_id=str(calibration.header["calibration_set_version"]),
-            )
+            return unbound.bind(**identity)
 
     report = record_cassette(
         calibration, provider, cassette, timeout=args.timeout, bind_row=bind_row

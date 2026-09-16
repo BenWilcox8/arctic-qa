@@ -73,6 +73,31 @@ def standalone_system_sha256() -> str:
     return sha256_bytes(STANDALONE_SYSTEM.encode("utf-8"))
 
 
+CALIBRATION_PAPER_PREFIX = "standalone-calibration"
+
+
+def calibration_paper_identity(calibration: CalibrationSet) -> dict[str, str]:
+    """The one paper family that a recording binds in the shared broker.
+
+    The broker binds each family to one paper and one source version, and
+    each source version to one family. The calibration rows carry the family
+    ids of the chapter 2 candidates they came from, and the ledger already
+    binds those families to their papers, so a recording must not reuse them.
+    One recording is one synthetic paper whose identity is the calibration set
+    version and the exact judge prompt: a changed prompt or set records under a
+    new paper, and a repeated recording of the same pair resumes its receipts
+    by request key without a new call.
+    """
+    set_version = str(calibration.header["calibration_set_version"])
+    prompt_sha256 = standalone_system_sha256()
+    paper_id = f"{CALIBRATION_PAPER_PREFIX}:{set_version}:{prompt_sha256[:12]}"
+    return {
+        "paper_id": paper_id,
+        "family_id": paper_id,
+        "source_version_id": f"{set_version}:{prompt_sha256}",
+    }
+
+
 def calibration_prompt(row: dict[str, Any]) -> str:
     """The exact DISPLAYED_TASK prompt generate_candidate sends to the judge."""
     return "DISPLAYED_TASK\n" + canonical_json(

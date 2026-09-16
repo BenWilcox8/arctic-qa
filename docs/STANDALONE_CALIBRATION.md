@@ -39,13 +39,23 @@ Do not record from a test and do not record without an authorized spend.
 nix develop -c bash -c 'PYTHONPATH=src python -m arctic_qa --data-root <root> --json \
   calibrate-standalone --mode record --provider broker \
   --cassette data/<task>/standalone-calibration-v2.cassette.jsonl \
-  --run-id <run-id> --phase calibration \
+  --run-id <run-id> --phase away_production --campaign-id <campaign-id> \
+  --access-run-dir <the streaming input the gate binds> \
+  --eligibility-prompt-file <prompt> --eligibility-schema-file <schema> \
+  --eligibility-policy-file <policy> \
   --streaming-budget-policy-file <policy> --price-config-file config/gemini-eligibility-v1.json \
   --execution-gate-file <gate> --shared-ledger-file <ledger> --model-receipts-dir <receipts> \
+  --ledger-config-transition-file <the newest applied transition> \
   --credential-file <credential> --prior-construction-spend-usd <usd>'
 ```
 
-The broker binds every request to the paper identity `standalone-calibration` and to the row's family id, so each call leaves a receipt.
+The recording runs through the production execution gate, so `--phase` is the phase that gate allows and `--run-id` and `--campaign-id` are the run and campaign it authorizes.
+When the gate carries a stream-input binding, the five input options are required and the broker binds the streaming input before the first call, as the producer does.
+The broker binds every request of one recording to one synthetic paper family, `standalone-calibration:<set version>:<prompt hash prefix>`, with the set version and the full prompt hash as its source version.
+The calibration rows carry the family ids of the chapter 2 candidates they came from, and the ledger binds those families to their real papers, so a recording never reuses them.
+A changed prompt or set records under a new paper.
+A repeated recording of the same pair resumes its completed receipts by request key and makes no new call.
+Each call leaves a receipt.
 The cassette is written only after every call succeeded.
 Its header binds the SHA-256 of `STANDALONE_SYSTEM`, the calibration set version, the requested model and the call parameters.
 The command prints the recording summary and the release-rule report, and exits with code 1 when the rule fails.
