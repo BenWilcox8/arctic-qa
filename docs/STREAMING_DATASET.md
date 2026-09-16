@@ -361,6 +361,89 @@ It does not increase the 500-item target or headline `accepted_qa` count.
 It exports an answer-present MCQ only with three accepted distractors.
 It exports an absent-answer form only with four accepted distractors and the `invalid_option_set` label.
 
+## Paper completion labels
+
+The producer keeps no bookmark.
+At every start it walks the frozen paper order from the first paper.
+For every call it would make, it looks for a completed receipt in the shared ledger and validates that receipt and the run authorization before it reuses it.
+At about 5,000 receipts that walk took about 22 minutes before the first paid call (2026-09-16, three relaunches).
+
+A paper the run finished takes a durable completion label instead (captain order 2026-09-16 22:20 UTC).
+The label is one row of the `paper_completions` table of the state database, next to the run's other rows.
+Its schema is `streaming-paper-completion-v1`.
+The row keys the invocation run id and the candidate key, and records the campaign, the paper family, the source id, the outcome class, the eligibility decision, the first reason code, the label time and the commit that labelled it.
+The table joins the schema under the current version, like the finding bank, because the live state database is shared with the benchmark evaluator and its pinned snapshot refuses any other schema version.
+
+### The rule
+
+A paper is analyzed when the run reached a terminal outcome for it.
+The terminal outcomes and their outcome classes are:
+
+| Outcome | Outcome class |
+|---|---|
+| Eligibility decision `excluded` | `eligibility_excluded` |
+| Eligibility decision `uncertain`, or an invalid answer, which stays uncertain | `eligibility_unresolved` |
+| Generation accepted (`machine_accepted_unverified`) | `generation_accepted` |
+| Generation rejected with routing exhausted | `generation_rejected` |
+| A valid short answer whose distractors failed, final | `incomplete_non_mcq` |
+| The per-paper cost cap reached, before or after screening | `paper_cost_cap_reached` |
+
+A paper mid-family takes no label and keeps today's walk:
+
+- a family with an open call record (`incomplete_infra`), an unsettled request or an ambiguous charge;
+- a family with a reviewed no-replay row (`operational_unresolved`);
+- a family whose stored generation paths route to another attempt, or to a slot lookup;
+- a stored candidate that still needs its validation;
+- a paper screened under another prompt, schema or policy version, or not screened at all;
+- a paper whose access is not `full_text_ready`;
+- a paper the free token count refused (`count_tokens_unavailable`), which submitted nothing;
+- a paper a candidate processing fault settled.
+
+One function owns the rule, `paper_completion.classify_paper`.
+The generation half of it is the producer's own ladder, `streaming._stored_generation_outcome`, which `_progress_generation` walks to find its next paid call.
+The label rule reads that ladder with no slot lookup, so a family whose routing wants one is not complete.
+`paper_completion.DISPOSITION_OUTCOME_CLASSES` is the one map from the producer's disposition to the outcome class; a disposition outside it takes no label.
+
+### The label and the ledger
+
+The label is a note about finished work.
+No receipt is altered or deleted, and the label has no acceptance authority.
+The run's own rows in the state database and the receipts in the shared ledger stay the record of what the run did.
+A label can be removed with one `DELETE` of its row; the paper then keeps today's walk at the next start.
+
+### The startup skip
+
+At every start the producer reads the labels of its run id.
+A labelled paper is counted and skipped before any of its receipts is read.
+Its recorded eligibility decision keeps the run counts true.
+The run result lists the paper with its disposition and a `completion_label` field, and the run counts carry `completion_labelled_skipped`.
+A paper without a label keeps today's behaviour.
+
+### The self-labelling
+
+The producer writes the label the moment a paper reaches a terminal outcome, in the same pass that records the outcome.
+The label carries the commit the launcher names with `--code-commit`.
+A runtime snapshot is a `git archive`, not a working tree, so the commit is named, never read from `git`.
+
+### The batch catch-up
+
+`label-completed-papers` labels every analyzed paper of one run in one transaction, from stored state alone.
+It makes no provider call, validates no receipt and takes no ledger lock.
+Without `--apply` it prints the counts per outcome class and per incomplete reason and writes nothing.
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json label-completed-papers \
+  --run-id RUN_ID --campaign-id CAMPAIGN_ID \
+  --access-run-dir ACCESS_RUN_DIR --eligibility-run-dir ELIGIBILITY_RUN_DIR \
+  --eligibility-prompt-file PROMPT --eligibility-schema-file SCHEMA \
+  --eligibility-policy-file POLICY --eligibility-rescreen-prompt-file RESCREEN \
+  --code-commit COMMIT --output-file REPORT.json [--apply]
+```
+
+Run the apply while the producer is stopped.
+The batch is a one-time catch-up: after it, the producer labels each paper itself.
+`research/arctic-ch3-paper-completion-r1/report.md` holds the first batch and the measured startup times.
+
 ## Chapter 2 launch contract
 
 Chapter 2 (captain order of 2026-09-15) runs campaign `arctic-qa-production-campaign-002` on the column-aware chapter 2 corpus.

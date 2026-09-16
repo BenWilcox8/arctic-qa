@@ -288,13 +288,12 @@ def classify_paper(
         "shared_gemini_broker"
     ):
         return incomplete("not_screened")
+    # The stored job's own validation is the decision the producer records:
+    # an invalid answer stays ``uncertain`` and is final for this prompt
+    # version, whatever the job's ``state`` says about a later re-screen.
     validation = eligibility.get("validation") or {}
     decision = validation.get("decision")
-    if eligibility.get("state") != "completed" or decision not in {
-        "eligible",
-        "excluded",
-        "uncertain",
-    }:
+    if decision not in {"eligible", "excluded", "uncertain"}:
         return incomplete("eligibility_incomplete")
     if decision != "eligible":
         reason_codes = (
