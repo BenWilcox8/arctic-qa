@@ -6,6 +6,9 @@ It reuses the metrics of the previous abstention paper.
 It does not build a separate abstention dataset.
 Abstention is part of the evaluation of every item.
 
+The commands of this document write path variables such as `$ARCTIC_QA_DATA_ROOT`.
+The "Environment variables" section of `docs/REPRODUCTION.md` gives their values.
+
 ## Decisions
 
 The captain locked these decisions on 2026-09-16.
@@ -219,10 +222,11 @@ Fairness caveats against the Gemini path:
 
 Setup:
 
-- Claude: `claude auth status` must report `loggedIn: true` and `authMethod: claude.ai`. The binary is `/home/ben/.npm-global/bin/claude`.
-- ChatGPT: `codex login status` must report "Logged in using ChatGPT". The binary is `/home/ben/.npm-global/bin/codex` and the login is `/home/ben/.codex/auth.json`.
+- Claude: `claude auth status` must report `loggedIn: true` and `authMethod: claude.ai`. The registry holds the absolute path of the binary, `~/.npm-global/bin/claude` by default.
+- ChatGPT: `codex login status` must report "Logged in using ChatGPT". The registry holds the absolute path of the binary, `~/.npm-global/bin/codex` by default, and the login is `~/.codex/auth.json`.
 - No `ANTHROPIC_API_KEY` and no `OPENAI_API_KEY` is read. The provider removes them from the child environment.
 - The nix devshell has neither binary on PATH. The registry holds the paths. `--binary-path` overrides them.
+- The registry holds the absolute binary paths of the machine that produced the runs. The evaluation gate binds the registry by hash in the price-config slot, so an edit invalidates a gate of a live run. On another machine, pass `--binary-path`, or copy the registry to a new file with a new `config_id` and pass `--subscription-models-file`.
 
 ### Scoring
 
@@ -245,7 +249,7 @@ Prefix each command with `PYTHONPATH=src python -m arctic_qa --json abstention-e
 1. Build the evaluation set.
 
    ```bash
-   --action build-set --state-db /mnt/crdata/research-abstention/arctic-qa/state.sqlite3 \
+   --action build-set --state-db $ARCTIC_QA_DATA_ROOT/arctic-qa/state.sqlite3 \
      --output-dir <sets-dir> --population current \
      --contract-file config/abstention-eval-chapter2-contract-v1.json
    ```
@@ -353,7 +357,7 @@ Prefix each command with `PYTHONPATH=src python -m arctic_qa --json abstention-e
    A rerun resumes from both.
 5. Score the run with `--action score`.
 
-The launcher of the first live test is `/mnt/crdata/research-abstention/arctic-qa/abstention-eval/private/subscription-test-r1-launcher.sh`.
+The launcher of the first live test is `$ARCTIC_QA_DATA_ROOT/arctic-qa/abstention-eval/private/subscription-test-r1-launcher.sh`.
 
 ## Concurrent plan
 
@@ -579,7 +583,7 @@ journalctl --user -u arctic-abstention-stream-r1 -f
 systemctl --user stop arctic-abstention-stream-r1
 ```
 
-The launcher of the first live run is `/mnt/crdata/research-abstention/arctic-qa/abstention-eval/private/streaming-eval-r1-launcher.sh`.
+The launcher of the first live run is `$ARCTIC_QA_DATA_ROOT/arctic-qa/abstention-eval/private/streaming-eval-r1-launcher.sh`.
 The work directory holds the sets, the derived gates, the runs, the cost journal and `watch-state.json`.
 The evaluator writes `watch-state.json` after every poll, so its poll count and its item list rise while the unit runs.
 

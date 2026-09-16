@@ -4,6 +4,9 @@ The corpus stage viewer shows the selected discovery run and its latest screenin
 It is read-only.
 It does not start, stop, or advance corpus processing.
 
+The commands of this document write path variables such as `$ARCTIC_QA_DATA_ROOT`.
+The "Environment variables" section of `docs/REPRODUCTION.md` gives their values.
+
 The viewer builds a disposable SQLite query cache in the runtime directory.
 The immutable discovery ledger and the explicit screening overlay remain authoritative.
 The viewer rebuilds the cache only when an input file changes.
@@ -14,7 +17,7 @@ Run the viewer with explicit artifact and runtime paths:
 
 ```bash
 PYTHONPATH=src python -m arctic_qa corpus-view \
-  --corpus-root /mnt/crdata/research-abstention/arctic-qa/corpus-search-r1 \
+  --corpus-root $ARCTIC_QA_DATA_ROOT/arctic-qa/corpus-search-r1 \
   --run-id 20260911T232247Z \
   --runtime-dir /private/runtime/path \
   --progress-file /private/runtime/path/corpus-progress-v1.json \
@@ -25,7 +28,7 @@ PYTHONPATH=src python -m arctic_qa corpus-view \
   --pipeline-db-file /private/arctic-qa-data/state.sqlite3 \
   --pipeline-receipts-dir /private/arctic-qa-data/streaming-dataset-r1/model-receipts \
   --pipeline-eligibility-root /private/arctic-qa-data/gemini-eligibility-r1/run-RUN_ID \
-  --live-dataset-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/live-publication \
+  --live-dataset-dir $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/live-publication \
   --project-overview-file /private/status/project-progress-overview-v1.json \
   --research-timeline-file /private/status/research-fleet-timeline-v1.json \
   --benchmark-journal-dir /private/arctic-qa-data/abstention-eval/streaming-r2 \

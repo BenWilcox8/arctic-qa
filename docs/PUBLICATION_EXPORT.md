@@ -4,6 +4,9 @@ The publication exporter writes reviewer, benchmark, and scoring companion files
 The selected export manifest is the source of the final MCQ rows.
 The exporter copies each selected option text and label without reconstruction.
 
+The commands of this document write path variables such as `$ARCTIC_QA_DATA_ROOT`.
+The "Environment variables" section of `docs/REPRODUCTION.md` gives their values.
+
 Run the exporter with a selected export manifest.
 
 ```sh
@@ -54,8 +57,8 @@ Run one refresh with the current contract selection:
 
 ```sh
 PYTHONPATH=src python -m arctic_qa.publication_export \
-  --state-db /mnt/crdata/research-abstention/arctic-qa/state.sqlite3 \
-  --output-dir /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/live-publication \
+  --state-db $ARCTIC_QA_DATA_ROOT/arctic-qa/state.sqlite3 \
+  --output-dir $ARCTIC_QA_DATA_ROOT/arctic-qa/streaming-dataset-r1/live-publication \
   --live-selection-file config/live-dataset-current-contract-v1.json \
   --live-prompt-file src/arctic_qa/generation.py \
   --live-prompt-file src/arctic_qa/validation.py

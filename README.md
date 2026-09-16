@@ -10,7 +10,7 @@ The strongest automated output label is `machine_accepted_unverified`.
 
 ## Safety boundary
 
-The default data root is `/mnt/crdata/research-abstention`.
+The default data root is `$ARCTIC_QA_DATA_ROOT`.
 The CLI writes project data only under its `arctic-qa` namespace.
 It refuses the default root when the expected mounted drive is absent or read-only.
 It never uses a root-disk fallback.
@@ -98,7 +98,7 @@ An optional Zotero custody bridge reads `library-originals/catalog.tsv`:
 ```bash
 PYTHONPATH=src python -m arctic_qa --json discover \
   --adapter catalog \
-  --input /mnt/crdata/research-abstention/library-originals/catalog.tsv
+  --input $ARCTIC_QA_DATA_ROOT/library-originals/catalog.tsv
 ```
 
 The command reads public rows only.
@@ -461,7 +461,7 @@ Smoke output is infrastructure evidence, not a research result.
 
 ## Data layout
 
-The CLI creates these paths under `/mnt/crdata/research-abstention/arctic-qa`:
+The CLI creates these paths under `$ARCTIC_QA_DATA_ROOT/arctic-qa`:
 
 - `state.sqlite3` contains resumable state and small records.
 - `originals/` contains immutable original objects and retrieval manifests.
