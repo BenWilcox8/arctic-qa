@@ -1,7 +1,7 @@
 {
-  "schema_version": "1.2.0",
+  "schema_version": "1.3.0",
   "contract_version": "generation-model-roles-v1",
-  "effective_date": "2026-09-15",
+  "effective_date": "2026-09-16",
   "qualification": "Starting configuration. No Arctic QA comparison has validated these assignments. Role separation removes a correlated-error source; it does not establish independent error evidence.",
   "model_strength_rank": {
     "claude-opus-5": 4,
@@ -54,8 +54,8 @@
       },
       "answer_judge": {
         "provider": "gemini",
-        "model": "gemini-3.1-flash-lite",
-        "lifecycle": "stable"
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
       }
     },
     "cost_aware": {
@@ -101,8 +101,8 @@
       },
       "answer_judge": {
         "provider": "gemini",
-        "model": "gemini-3.1-flash-lite",
-        "lifecycle": "stable"
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
       }
     },
     "gemini_separated": {
@@ -148,12 +148,13 @@
       },
       "answer_judge": {
         "provider": "gemini",
-        "model": "gemini-3.1-flash-lite",
-        "lifecycle": "stable"
+        "model": "gemini-3.1-pro-preview",
+        "lifecycle": "preview"
       }
     }
   },
   "profile_notes": {
-    "gemini_separated": "Chapter 2 launch profile. The shared paid-call broker meters one provider, so every role runs on Gemini. The writer is gemini-3.8-flash; every judge is a different model, and the source-blind and option gates carry the strongest ranked judge model, as the r15 audit requires."
+    "gemini_separated": "Chapter 2 launch profile. The shared paid-call broker meters one provider, so every role runs on Gemini. The writer is gemini-3.8-flash; every judge is a different model, and the source-blind and option gates carry the strongest ranked judge model, as the r15 audit requires.",
+    "answer_judge": "Chapter 3 (yield audit 4.5 R5): the answer-agreement fallback judge sees only the cases determinism could not settle, so it runs on the same Pro model as the other judges. The broker price configuration must register the answer_agreement stage on this model before a live run."
   }
 }

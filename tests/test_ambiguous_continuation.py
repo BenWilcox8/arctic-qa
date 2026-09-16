@@ -123,7 +123,9 @@ class EmptyMaxTokensThenSuccess(Http500ThenSuccess):
         }
 
 
-def fixture(tmp_path: Path, transport: object) -> dict[str, object]:
+def fixture(
+    tmp_path: Path, transport: object, price_config_file: Path | None = None
+) -> dict[str, object]:
     review = tmp_path / "review.md"
     review.write_text("The bounded continuation passed independent review.\n")
     gate = tmp_path / "gate.json"
@@ -146,7 +148,7 @@ def fixture(tmp_path: Path, transport: object) -> dict[str, object]:
     credential.chmod(0o600)
     broker = SharedGeminiBroker(
         policy_file=ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
-        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        price_config_file=price_config_file or ROOT / "config" / "gemini-eligibility-v1.json",
         execution_gate_file=gate,
         ledger_file=tmp_path / "shared-ledger.json",
         receipts_dir=tmp_path / "receipts",
@@ -161,6 +163,38 @@ def fixture(tmp_path: Path, transport: object) -> dict[str, object]:
         "receipts": tmp_path / "receipts",
         "review": review,
     }
+
+
+def chapter2_price_config(tmp_path: Path) -> Path:
+    """The v7 price configuration: the fallback judge on flash-lite."""
+    value = json.loads(
+        (ROOT / "config" / "gemini-eligibility-v1.json").read_text(encoding="utf-8")
+    )
+    value["config_id"] = "arctic-gemini-eligibility-r1-config-v7"
+    value["stage_models"]["answer_agreement"] = {
+        "model": "gemini-3.1-flash-lite",
+        "maximum_input_tokens": 1048576,
+        "model_output_token_limit": 65536,
+        "maximum_output_tokens": 128,
+        "thinking_level": "minimal",
+        "input_usd_per_million_tokens": "0.25",
+        "output_usd_per_million_tokens_including_thinking": "1.50",
+        "price_valid_from": "2026-09-14",
+        "price_valid_through": "2026-12-31",
+        "price_source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "model_source": "https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite",
+        "thinking_source": "https://ai.google.dev/gemini-api/docs/generate-content/thinking",
+        "structured_output_source": "https://ai.google.dev/api/generate-content",
+        "documented_availability_checked_at_utc": "2026-09-14T00:00:00Z",
+        "documented_supported_methods": [
+            "generateContent",
+            "countTokens",
+            "batchGenerateContent",
+        ],
+    }
+    path = tmp_path / "gemini-eligibility-v7.json"
+    write_json(path, value)
+    return path
 
 
 def execute(broker: SharedGeminiBroker, *, paper: str, run_id: str) -> dict:
@@ -426,7 +460,10 @@ def test_received_max_tokens_continuation_preserves_response_and_never_replays(
     tmp_path: Path,
 ) -> None:
     transport = EmptyMaxTokensThenSuccess()
-    values = fixture(tmp_path, transport)
+    # The received-max-tokens case is the chapter 2 flash-lite incident, bound
+    # to the v7 price configuration that ran it. v8 moves the fallback judge to
+    # the Pro model, so the case is replayed under a v7-shaped configuration.
+    values = fixture(tmp_path, transport, price_config_file=chapter2_price_config(tmp_path))
     broker = values["broker"]
     first = execute_answer_judge(
         broker, paper="affected-max-tokens", run_id="run-current"
@@ -704,7 +741,7 @@ def test_stage_call_timeout_comes_from_the_price_config(tmp_path: Path) -> None:
     assert call_timeout_seconds(broker.config, "option_verification") == 300
     assert call_timeout_seconds(broker.config, "blinded_reconstruction") == 300
     assert call_timeout_seconds(broker.config, "question_generation") == 120
-    assert call_timeout_seconds(broker.config, "answer_agreement") == 120
+    assert call_timeout_seconds(broker.config, "answer_agreement") == 300
     assert maximum_call_timeout_seconds(broker.config) == 300
 
     writer = execute(broker, paper="writer", run_id="run-current")

@@ -1873,7 +1873,8 @@ def test_failed_qa_gate_stops_before_distractor_generation(tmp_path: Path) -> No
     assert generated["provenance"]["prompt_version"] == "arctic-qa-generation-v22"
     assert (
         generated["provenance"]["numeric_rule_contract_version"]
-        == "numeric-rule-source-support-v3"
+        == validation_module.NUMERIC_RULE_CONTRACT_VERSION
+        == "numeric-rule-source-support-v4"
     )
     assert (
         generated["provenance"]["scope_contract_version"]
