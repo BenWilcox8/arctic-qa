@@ -49,6 +49,15 @@ def _second_candidate() -> dict:
                 "uncertainty": None,
             },
             "required_question_phrases": ["reported substrate category"],
+            # freeze-time-finding-admission-v2 (writer-context slice): every
+            # non-null scope value cites the supplied span it was copied from.
+            "scope_evidence": [
+                {
+                    "dimension": "method",
+                    "span_id": "{{span_id}}",
+                    "quote": "reported substrate category",
+                }
+            ],
         },
         "ranking_rationale": "A categorical result from a second sentence.",
     }
@@ -298,6 +307,13 @@ def _candidate(rank: int, span_id: str, basis: str, **extra: object) -> dict:
             "text": "15 percent",
             "source_span_id": span_id,
             "scope": {"method": "sulfate aerosol mass"},
+            "scope_evidence": [
+                {
+                    "dimension": "method",
+                    "span_id": span_id,
+                    "quote": "sulfate aerosol mass",
+                }
+            ],
             "required_question_phrases": ["sulfate aerosol mass"],
             "claim_type": "observation",
             "selection_rationale": "prose sentence",

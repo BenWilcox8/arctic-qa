@@ -69,6 +69,9 @@ def test_a_clean_candidate_runs_the_full_suite(tmp_path: Path) -> None:
         "answer_verifier",
         "distractor_writer",
         *["option_verifier"] * 4,
+        # ch2 yield audit 4.8: one source-blind whole-set verdict after the
+        # fourth verified option (judge-options slice).
+        "option_set_verifier",
     ]
     plan = candidate["provenance"]["judge_call_plan"]
     assert plan["contract_version"] == "judge-call-plan-v1"
@@ -396,7 +399,14 @@ def test_the_cost_aware_profile_is_refused_for_a_production_run() -> None:
 # Option verifier call plan.
 
 
-def _distractor_events(count: int) -> tuple[list[dict], list[dict]]:
+def _distractor_events(
+    count: int, *, set_after: int = 4
+) -> tuple[list[dict], list[dict]]:
+    """Script ``count`` proposals; the whole-set event follows ``set_after`` verdicts.
+
+    The fake provider is positional, so the set event sits exactly where the
+    rank-order stop makes the call.
+    """
     author = fixture_events("fake-author.jsonl")
     template = author[2]["response"]["distractors"][0]
     author[2]["response"]["distractors"] = [
@@ -409,7 +419,21 @@ def _distractor_events(count: int) -> tuple[list[dict], list[dict]]:
     ]
     verifier = fixture_events("fake-verifier.jsonl")
     option_template = verifier[3]
-    verifier = verifier[:3] + [
+    # The whole-set verdict (judge-options slice) follows the fourth verified
+    # option; its value markers depend on which options survive, so the event
+    # keeps the structural markers only.
+    set_event = json.loads(json.dumps(verifier[7]))
+    set_event["require_prompt_contains"] = [
+        marker
+        for marker in set_event["require_prompt_contains"]
+        if not marker.endswith(" m")
+    ]
+    set_event["forbid_prompt_contains"] = [
+        marker
+        for marker in set_event["forbid_prompt_contains"]
+        if not marker.endswith(" m")
+    ]
+    option_events = [
         {
             **json.loads(json.dumps(option_template)),
             "require_prompt_contains": [
@@ -421,6 +445,12 @@ def _distractor_events(count: int) -> tuple[list[dict], list[dict]]:
         }
         for value in ("2.5", "3.0", "4.0", "5.0", "6.0", "7.0", "8.0")[:count]
     ]
+    verifier = (
+        verifier[:3]
+        + option_events[:set_after]
+        + [set_event]
+        + option_events[set_after:]
+    )
     return author, verifier
 
 
@@ -447,7 +477,7 @@ def test_option_verification_stops_at_the_export_need_and_keeps_a_reserve(
 
 
 def test_a_failed_verdict_does_not_count_toward_the_target(tmp_path: Path) -> None:
-    author, verifier = _distractor_events(6)
+    author, verifier = _distractor_events(6, set_after=5)
     verifier[3]["response"]["contradiction_established"] = False
     seeded = Seeded(tmp_path)
     candidate = seeded.generate("options-fail", author, verifier)
@@ -460,10 +490,12 @@ def test_a_failed_verdict_does_not_count_toward_the_target(tmp_path: Path) -> No
 
 
 def test_free_option_checks_run_before_any_paid_call(tmp_path: Path) -> None:
-    author, verifier = _distractor_events(5)
+    # Six proposals are the chapter 3 minimum (judge-options slice, audit 4.8).
+    author, verifier = _distractor_events(6, set_after=5)
     author[2]["response"]["distractors"][1]["text"] = "None of the above"
     author[2]["response"]["distractors"][1].pop("numeric", None)
     seeded = Seeded(tmp_path)
+    # The 3.0 m proposal is prefiltered, so its verdict event is never consumed.
     candidate = seeded.generate("options-free", author, verifier[:4] + verifier[5:])
 
     assert seeded.call_roles("options-free").count("option_verifier") == 4
@@ -476,9 +508,11 @@ def test_free_option_checks_run_before_any_paid_call(tmp_path: Path) -> None:
 
 
 def test_the_verified_predicate_mirrors_the_validator_preconditions() -> None:
+    # The chapter 3 option verdict contract (judge-options slice).
     verdict = {
         "contradiction_established": True,
-        "alternative_answer_search_passed": True,
+        "option_standalone_interpretable": True,
+        "admitting_interpretation": "",
         "question_admits_option_as_correct": False,
     }
     atomic = {"text": "5.0 m"}
@@ -486,6 +520,15 @@ def test_the_verified_predicate_mirrors_the_validator_preconditions() -> None:
     assert generation._option_verdict_verified(atomic, verdict, independent=False)
     assert not generation._option_verdict_verified(compound, verdict, independent=False)
     assert generation._option_verdict_verified(compound, verdict, independent=True)
+    assert not generation._option_verdict_verified(
+        atomic,
+        {
+            **verdict,
+            "question_admits_option_as_correct": True,
+            "admitting_interpretation": "the reader could read the depth as a mean",
+        },
+        independent=True,
+    )
     assert not generation._option_verdict_verified(
         atomic, {**verdict, "question_admits_option_as_correct": True}, independent=True
     )

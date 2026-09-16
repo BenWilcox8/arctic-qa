@@ -2935,7 +2935,12 @@ def generate_candidate(
     distractors: list[dict[str, Any]] = []
     option_verdicts: list[dict[str, Any]] = []
     prefiltered_options: list[dict[str, Any]] = []
-    option_stage: dict[str, Any] = {"deferred": [], "reasks": [], "set_verdict": None}
+    option_stage: dict[str, Any] = {
+        "deferred": [],
+        "reasks": [],
+        "set_verdict": None,
+        "verified_option_hashes": [],
+    }
     qa_hash = stable_id("qa", question, question_context, canonical_json(answer))
     if not qa_gate_reasons:
         (
@@ -3021,13 +3026,21 @@ def generate_candidate(
         "answer_verification": answer_verification,
         "standalone_verification": standalone_verification,
         "answer_agreement": answer_agreement,
-        "claim_type_note": claim_type_note(answer, reconstruction, answer_verification),
+        # The two judge notes exist only when the judges ran (judge-call-plan-v1
+        # skips them after a free-check or standalone failure).
+        "claim_type_note": (
+            claim_type_note(answer, reconstruction, answer_verification)
+            if reconstruction is not None and answer_verification is not None
+            else None
+        ),
         "reconstruction_scope_representation_note": (
             reconstruction_scope_representation_note(
                 answer,
                 reconstruction,
                 [str(span.get("text", "")) for span in forwarded_interpretation_spans],
             )
+            if reconstruction is not None
+            else None
         ),
         "decision_evidence": decision_evidence,
         "qa_gate_reasons": qa_gate_reasons,
@@ -3830,7 +3843,12 @@ def _generate_distractors(
             retries=retries,
             rate_limit_seconds=rate_limit_seconds,
         )
-    stage = {"deferred": deferred, "reasks": reasks, "set_verdict": set_verdict}
+    stage = {
+        "deferred": deferred,
+        "reasks": reasks,
+        "set_verdict": set_verdict,
+        "verified_option_hashes": [option_hash for _, option_hash in verified],
+    }
     return attempted, verdicts, prefiltered, stage
 
 
@@ -3932,6 +3950,9 @@ def _option_verification_call_plan(
         "proposed": len(attempted) + len(deferred) + len(prefiltered),
         "prefiltered": len(prefiltered),
         "verified": len(attempted),
+        "verified_option_hashes": list(
+            option_stage.get("verified_option_hashes") or []
+        ),
         "reserve": [
             {
                 "option_text": str(row.get("option_text", "")),

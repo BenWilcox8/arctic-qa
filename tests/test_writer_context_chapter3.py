@@ -881,26 +881,34 @@ def test_chapter_three_contract_versions_are_recorded() -> None:
     assert row["finding_admission_contract_version"] == (
         "freeze-time-finding-admission-v2"
     )
-    # Sibling-owned literals pinned at bd2fb22; integration re-pins them.
-    assert row["generation_attempt_contract_version"] == "bounded-failure-routing-v4"
+    # Sibling-owned versions, re-pinned at integration to what each slice landed.
+    assert row["generation_attempt_contract_version"] == "bounded-failure-routing-v5"
     assert row["standalone_verification_contract_version"] == (
-        "source-blind-scientific-referent-v3"
+        "source-blind-scientific-referent-v4"
     )
     assert row["question_verification_contract_version"] == "question-verification-v2"
-    assert row["numeric_rule_contract_version"] == "numeric-rule-source-support-v3"
+    assert row["numeric_rule_contract_version"] == "numeric-rule-source-support-v4"
     assert row["option_display_contract_version"] == "displayed-option-structure-v1"
-    assert set(row) == set(validation.CANDIDATE_CONTRACTS["2.7.0"])
+    # The option verification contract exists only from 2.8.0 (judge-options).
+    assert set(row) == set(validation.CANDIDATE_CONTRACTS["2.7.0"]) | {
+        "option_verification_contract_version"
+    }
 
 
 def test_the_chapter_two_row_and_new_row_disagree_only_on_owned_versions() -> None:
     old = validation.CANDIDATE_CONTRACTS["2.7.0"]
     new = validation.CANDIDATE_CONTRACTS["2.8.0"]
 
+    # The four writer-context versions, plus the three a sibling slice moved
+    # (standalone v4, numeric-rule v4, routing v5), reconciled at integration.
     assert {key for key in old if old[key] != new[key]} == {
         "prompt_version",
         "context_only_evidence_contract_version",
         "referent_slot_contract_version",
         "finding_admission_contract_version",
+        "standalone_verification_contract_version",
+        "numeric_rule_contract_version",
+        "generation_attempt_contract_version",
     }
 
 
