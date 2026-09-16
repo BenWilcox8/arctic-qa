@@ -124,6 +124,14 @@ Two cheap ways to shorten it, in the order they are worth trying:
    a read. It changes no paid call and no decision.
 
 Neither is built here; the captain asked for the concurrency first.
+`arctic-ch3-paper-completion-r1` takes the startup skip and a per-paper
+completion label on top of this branch, so item 2 is that task's, not a second
+owner of the same idea.
+
+A quiet moment for a relaunch is any moment the shared ledger reports
+`inflight` 0: the producer is then between paid calls, and a paper boundary
+follows within one call. `build-concurrency.py launch` waits for that boundary
+itself before it stops anything.
 
 ## Tests
 
