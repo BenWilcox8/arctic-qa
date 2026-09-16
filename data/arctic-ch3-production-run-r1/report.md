@@ -7,7 +7,7 @@ Activation artifacts: `/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/ar
 Chapter 3 data root: `/mnt/crdata/research-abstention/arctic-qa/chapter3/`.
 Nothing under `chapter2/` or `streaming-dataset-r1/` changed except the shared ledger, the receipts and the progress file that the run writes by design.
 
-## 1. Result in nine lines
+## 1. Result in ten lines
 
 1. The producer runs as `chapter3-7dc6485-r3` on campaign `arctic-qa-production-campaign-003`, in tmux session `arctic-ch3-production-r1`, PID 3185994, pane `%32`, since 09:38 UTC on the `8445117` runtime. Section 6d.
 1b. Three runs came before it. `r1` died on an HTTP 400. `r2` ran 22 papers for USD 1.584992 and the eligibility watch stopped it at 08:37:49 UTC under rule 5 of the brief, at a zero-in-flight boundary. Sections 6, 6b, 6c and 7.
@@ -17,7 +17,8 @@ Nothing under `chapter2/` or `streaming-dataset-r1/` changed except the shared l
 5. Six code changes were necessary on top of `7dc6485` (section 2). The deployed runtime is `8445117`, which carries all of them and the merge of local `main` at `76eba30`.
 6. Rule 5 fired on `r2`: 9 of the first 19 screened papers ended in `screening_error`, above the limit of 5. Two causes, both new chapter 3 code paths and neither a model regression: a span-label test that refused correct spans, and a geography re-screen that had never produced a valid answer. Sections 7, 7a and 7b.
 7. The captain chose the span filter and the re-screen fix (2026-09-16 08:49 UTC). Replaying the answers `r2` already paid for gives 5 screening errors of 22 instead of 11, and 3 of the first 20 instead of 9. Section 7c.
-8. Phase E on the `r2` artifacts: measures 1, 2 and 6 beat their target and chapter 2 by a wide margin; measure 3, the screening error share, is the one that regressed. Section 8.
+8. `r3` passed the same rule 5 watch: 1 flagged paper of 19, against 9 in `r2`. Section 7d.
+9. Phase E on `r3` at the first-20 boundary: the screening error share is 0.0455 against its 0.05 target, `r2`'s 0.50 and chapter 2's 0.19, and the cost is USD 0.1585 per accepted item against chapter 2's USD 3.3325. Measure 1 is above its target on six families. Section 8.
 
 ## 2. Deviations from the fixed decisions, and why
 
@@ -400,23 +401,47 @@ Of the first 20 papers, 3 would be flagged, against the rule 5 limit of 5.
 The five remaining errors are other format defects, each of which still has its bounded re-ask in a live run: `criterion_evidence_missing` on a first screening (paper 5), `eligible_arctic_scope_invalid` (papers 12, 22, 23) and `eligible_arctic_scope_activity_unbound` (paper 18).
 This is a projection from recorded answers, not a promise about new calls.
 
-## 8. The first phase E readout
+### 7d. The r3 watch, under the same rule
 
-`phase_e_measures.py` ran once on the r2 artifacts.
-The output is in `phase-e-r2.txt` in the activation directory.
-Three of the four measures beat their target and chapter 2 by a wide margin.
-Measure 3 is the exception, and section 7 gives its cause.
+The watch ran again on `r3` with the same limit, and the run passed it.
 
-| Measure | Chapter 2 | Chapter 3 r2 | Target | Verdict |
-|---|---|---|---|---|
-| 1. Writer families with zero context spans | 23 of 56 (0.41) | 0 of 5 (0.00) | under 0.10 | met |
-| 2. Writer families with no date | 42 of 56 (0.75) | 0 of 5 (0.00) | under 0.30 | met |
-| 3. Papers whose last eligibility row is an error | 38 of 200 (0.19) | 11 of 22 (0.50) | under 0.05 | not met |
-| 6. USD per accepted item | USD 3.3325 (6 items) | USD 0.3962 (4 items) | under USD 1.00 | met |
+| | r2 | r3 |
+|---|---|---|
+| papers in the window | 20 | 20 |
+| papers with rows | 19 | 19 |
+| completed | 10 | 18 |
+| eligible | 7 | 11 |
+| excluded | 3 | 4 |
+| `screening_error` | 9 | 1 |
+| format re-ask rows | 7 | 1 |
+| geography re-screen rows | 3 | 4 |
 
-The run spent USD 1.584992 over 22 papers and produced 4 accepted items.
-Eligibility is the largest stage at USD 0.656986, then finding answer extraction at USD 0.354595 and option verification at USD 0.250864.
-Measure 3 counts 22 papers, because the producer passed paper 20 before the watch stopped it; the watch itself reads the first 20.
+The one flagged paper is `10.1017/s0950268820003003`, with `criterion_evidence_missing:study_geography` after its re-screen.
+That is the criterion the re-screen decides, so the validator is right to refuse an answer that states a status for it and cites no span.
+It is not the family B defect: the four frozen criteria no longer produce a code.
+
+The four re-screens of `r3` are the first ones this project has run that returned a usable answer.
+`eligibility-watch-8445117-ch3.json` holds the rows, and the activation receipt carries the summary.
+
+## 8. The phase E readout
+
+`phase_e_measures.py` ran on the `r2` artifacts after the interrupt and on the `r3` artifacts at the first-20 boundary.
+The outputs are `phase-e-r2.txt` and `phase-e-r3.txt` in the activation directory.
+Both readouts cover 22 papers. The `r3` run continues, so its numbers are a snapshot and not a final value.
+
+| Measure | Chapter 2 | r2 | r3 | Target | r3 verdict |
+|---|---|---|---|---|---|
+| 1. Writer families with zero context spans | 23 of 56 (0.41) | 0 of 5 (0.00) | 1 of 6 (0.17) | under 0.10 | not met |
+| 2. Writer families with no date | 42 of 56 (0.75) | 0 of 5 (0.00) | 1 of 6 (0.17) | under 0.30 | met |
+| 3. Papers whose last eligibility row is an error | 38 of 200 (0.19) | 11 of 22 (0.50) | 1 of 22 (0.05) | under 0.05 | met |
+| 6. USD per accepted item | USD 3.3325 (6 items) | USD 0.3962 (4 items) | USD 0.1585 (5 items) | under USD 1.00 | met |
+
+Measure 3 is the one the rule 5 correction was for, and it moved from 0.50 to 0.0455.
+Measures 1 and 2 read six families, so one family moves each share by 0.17; neither number carries weight yet.
+Measure 1 is above its target on that sample and needs a later reading on more families.
+
+`r3` spent USD 0.792682 over 22 papers and produced 5 accepted items.
+Eligibility is the largest stage at USD 0.513109, then finding answer extraction at USD 0.185293.
 Measures 4 and 5 need reader labels and are outside this task.
 
 The command was:
@@ -425,11 +450,11 @@ The command was:
 PYTHONPATH=src python data/arctic-ch3-production-run-r1/phase_e_measures.py \
   --ledger /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
   --state-db /mnt/crdata/research-abstention/arctic-qa/state.sqlite3 \
-  --eligibility-run-dir /mnt/crdata/research-abstention/arctic-qa/chapter3/gemini-eligibility/chapter3-7dc6485-r2 \
+  --eligibility-run-dir /mnt/crdata/research-abstention/arctic-qa/chapter3/gemini-eligibility/chapter3-7dc6485-r3 \
   --stream-input-dir /mnt/crdata/research-abstention/arctic-qa/chapter3/streaming-input/chapter3-7dc6485-r1-input \
   --eligibility-prompt-file config/gemini-eligibility-prompt-v8.txt \
   --rescreen-prompt-file config/gemini-eligibility-geography-rescreen-v2.txt \
-  --run-id chapter3-7dc6485-r2 --campaign-id arctic-qa-production-campaign-003
+  --run-id chapter3-7dc6485-r3 --campaign-id arctic-qa-production-campaign-003
 ```
 
 ## 9. Test results
@@ -444,7 +469,11 @@ Command: `nix develop -c bash -c 'PYTHONPATH=src pytest <files> -p no:cacheprovi
 | `tests/test_model_broker.py` | 86 passed | 86 passed | 86 passed |
 | `ruff check`, `ruff format --check` | clean | clean | clean |
 
-On the merge commit `5f41f2d` the four abstention test files pass: 36 passed.
+On the merge commit `5f41f2d` the four abstention test files pass: 36 passed, and again on `e466b7d`: 36 passed.
+
+On the deployed commit `8445117` the suite is green in four bounded parts: 1022 passed without the three slow files, 98 in `tests/test_cli_integration.py`, 56 in `tests/test_streaming.py`, 86 in `tests/test_model_broker.py`. That is 1262 passed. `ruff check` and `ruff format --check` are clean. The log is `suite-r3-correction.log`.
+
+`tests/test_eligibility_span_filter.py` holds 13 tests for the rule 5 correction. They replay every span the run refused, pin the three filter outcomes, pin the recorded custody note, and replay all three recorded geography re-screens from `fixtures/eligibility-rescreen-recorded-r2.json`, first as the failure the run recorded and then as the answer the corrected validator accepts.
 
 The five new tests in `tests/test_chapter3_production_run.py` are in the first part.
 They pin the ceiling constant, replay the chain (chapter 2 price, chapter 2 ceiling, chapter 3 price, chapter 3 ceiling) on a fixture ledger, refuse a wrong tranche, record a cassette through a bound broker with a fake transport, and refuse a recording without the gate's streaming input.
@@ -454,8 +483,9 @@ The offline calibration tests pin the v5 clauses and the `seen` slice.
 
 | Item | Owner |
 |---|---|
-| The rule 5 interrupt of section 7. The run is stopped at 22 papers and waits for a decision. Options this report sees: (a) widen `_DIMENSION_MARKERS` to cover the degree sign as the extractor writes it, the missing English words and a non-English paper, then re-snapshot and start a new run id; (b) make `eligible_arctic_scope_dimension_unsupported` a recorded note instead of an error, so a mislabelled auxiliary span never ends a paper; (c) drop the refused span instead of the paper, and keep the test as a span filter; (d) continue as is and accept a screening error share near 0.50. Each of (a), (b) and (c) also needs the re-screen defect of section 7b corrected, because the re-screen currently fails every time. Every option is a scope decision above this task. | firstmate and captain |
-| The geography re-screen path (section 7b). It first ran live in chapter 3 and has never produced a valid answer. | with the decision above |
+| The rule 5 interrupt of section 7 is closed. The captain chose the span filter and the re-screen fix on 2026-09-16 08:49 UTC; `r3` passed the same watch with 1 flagged paper of 19. | closed |
+| Measure 1 (writer families with zero context spans) is 1 of 6 on the `r3` sample, above its 0.10 target. Six families carry no weight; the measure needs a later reading. | phase E, a later reading |
+| The one flagged `r3` paper, `10.1017/s0950268820003003`: its re-screen answered `study_geography` with a status and no span. That is the criterion the re-screen decides, so it is a model error, not a contract defect. | a later eligibility slice |
 | The five errors that remain in the replay of section 7c: `criterion_evidence_missing` on a first screening (paper 5), `eligible_arctic_scope_invalid` (papers 12, 22, 23) and `eligible_arctic_scope_activity_unbound` (paper 18). Each still has its bounded re-ask in a live run. | a later eligibility slice |
 | The run id is `chapter3-7dc6485-r3`, not the `-r1` the brief fixed. The invocation manifest of a run id is immutable and binds the eligibility prompt and schema hashes, so the corrected schema needed a new run id (section 6b). | recorded, no action |
 | Four diagnostic `generateContent` calls (2026-09-16, about USD 0.05) ran outside the ledger under the firstmate authorization of inbox message 004, to read the 400 message. They are recorded in `diagnostic-400-call.json` and `diagnostic-hypothesis-calls.json`. | recorded, no action |
