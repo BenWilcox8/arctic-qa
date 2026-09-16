@@ -746,6 +746,7 @@ The new tests cover:
 | Commit `598c34b`, the branch on main `ec0ba98` | 1344 passed in 17 minutes 42 seconds |
 | Commit `f64d289`, the branch on main `3f7de6e` | 1355 passed in 17 minutes 47 seconds |
 | Commit `353ae0c`, the branch tip | 1355 passed in 17 minutes 43 seconds |
+| Commit `ed174cf`, after the merge of main `9bda270` | the abstention, broker, phase-slot and continuation suites: 187 passed in 3 minutes 18 seconds |
 
 The one failure of the second run was the reviewed chapter 2 MAX_TOKENS continuation, whose case matches its receipt by the exact usage message.
 The widened usage rule of `183779b` changed that message for a record that omits both token counts.
