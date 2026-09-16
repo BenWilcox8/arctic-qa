@@ -171,6 +171,8 @@ def chapter2_price_config(tmp_path: Path) -> Path:
         (ROOT / "config" / "gemini-eligibility-v1.json").read_text(encoding="utf-8")
     )
     value["config_id"] = "arctic-gemini-eligibility-r1-config-v7"
+    # v7 registered no writer-stage timeout (that entry is v8, audit 4.9 C8).
+    value["stage_models"].pop("question_generation", None)
     value["stage_models"]["answer_agreement"] = {
         "model": "gemini-3.1-flash-lite",
         "maximum_input_tokens": 1048576,

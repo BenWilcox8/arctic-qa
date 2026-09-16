@@ -84,6 +84,9 @@ REPAIRABLE_QUESTION_REASONS = frozenset(
         "answer_scope_not_source_bound",
         "answer_verifier_scope_not_source_bound",
         "reconstruction_scope_not_source_bound",
+        # reconstruction-record-v2 sibling (gates slice, yield audit 4.3 f): a
+        # rewrite can restate the displayed scope, so it earns the same rung.
+        "reconstruction_scope_contradicts_answer",
         "revision_unchanged_payload",
         "question_claim_type_disagreement",
         "reconstruction_disagreement",
