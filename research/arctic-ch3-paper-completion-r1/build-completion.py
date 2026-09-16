@@ -119,7 +119,13 @@ class Activation:
 
     @staticmethod
     def live_producer() -> tuple[int, list[str]] | None:
-        """Return the running producer's pid and its argument vector."""
+        """Return the running producer's pid and its argument vector.
+
+        The run id alone does not name the producer: ``label-completed-papers``
+        takes the same ``--run-id``, so a match on the run id finds this
+        script's own label subprocess and would stop it as if it were the
+        producer. The subcommand is what tells them apart.
+        """
         marker = f"--run-id\0{RUN_ID}\0"
         for proc in Path("/proc").iterdir():
             if not proc.name.isdigit():
@@ -128,7 +134,7 @@ class Activation:
                 raw = (proc / "cmdline").read_bytes().decode()
             except OSError:
                 continue
-            if "arctic_qa" in raw and marker in raw:
+            if "arctic_qa" in raw and marker in raw and "\0stream\0" in raw:
                 return int(proc.name), raw.split("\0")[:-1]
         return None
 
@@ -160,8 +166,37 @@ class Activation:
             )
         return result
 
+    @staticmethod
+    def wait_for_settled_ledger(timeout: float = 600.0) -> dict:
+        """Wait for a moment with nothing in flight, and return the ledger.
+
+        An applied policy transition is validated again on every broker
+        construction, and that validation refuses a ledger with a request in
+        flight ("a configuration transition requires a settled ledger"). The
+        benchmark evaluator shares this ledger and keeps calling, so the
+        producer can only start inside one of its gaps. Measured on
+        2026-09-16: the ledger was settled about half the time, in windows of
+        about thirty seconds.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            ledger = read_json(LEDGER)
+            if int(ledger["inflight"]) == 0 and not ledger["halted"]:
+                return ledger
+            if time.monotonic() >= deadline:
+                raise SystemExit(
+                    f"the ledger stayed busy for {timeout:.0f}s; "
+                    f"inflight {ledger['inflight']}, halted {ledger['halted']}"
+                )
+            time.sleep(1)
+
     def validate_ledger(self, policy: Path, gate: Path, transition: Path) -> dict:
-        """Construct the runtime's broker once: it validates every event."""
+        """Construct the runtime's broker once: it validates every event.
+
+        The construction is attempted inside a settled window, and a refusal
+        that names the unsettled ledger is retried rather than reported: it is
+        the evaluator's call in flight, never this activation.
+        """
         price_config = self.runtime / "config" / "gemini-eligibility-v1.json"
         script = (
             "import json\n"
@@ -185,12 +220,16 @@ class Activation:
             "'limits','usage','remaining','count_requests','inflight',"
             "'generation_submissions')}))\n"
         )
-        result = self.runtime_python("-c", script, check=False)
-        if result.returncode != 0:
-            raise SystemExit(
-                "the runtime refuses the ledger:\n" + result.stderr[-6000:]
-            )
-        return json.loads(result.stdout.strip().splitlines()[-1])
+        for _ in range(30):
+            self.wait_for_settled_ledger()
+            result = self.runtime_python("-c", script, check=False)
+            if result.returncode == 0:
+                return json.loads(result.stdout.strip().splitlines()[-1])
+            if "requires a settled ledger" not in result.stderr:
+                raise SystemExit(
+                    "the runtime refuses the ledger:\n" + result.stderr[-6000:]
+                )
+        raise SystemExit("every settled window was lost to a concurrent call")
 
     # ---- the run this succeeds ------------------------------------------
 
@@ -239,6 +278,11 @@ class Activation:
     def prepare(self) -> None:
         inputs = self.live_inputs()
         prior_gate = read_json(inputs["gate"])
+        transition_authorization = read_json(inputs["transition"])
+        assert (
+            sha256_file(Path(transition_authorization["review_record"]))
+            == transition_authorization["review_record_sha256"]
+        ), "the active transition's review record changed"
         assert (
             sha256_file(Path(prior_gate["review_record"]))
             == prior_gate["review_record_sha256"]
@@ -388,6 +432,19 @@ class Activation:
                 "prior_activation_gate": str(inputs["gate"]),
                 "prior_activation_gate_sha256": sha256_file(inputs["gate"]),
                 "paper_completion_schema": constants["completion_schema"],
+                # The active policy transition binds the gate that authorized
+                # it. This gate succeeds that one and names its review, so the
+                # transition receipt stays exactly as it was written
+                # (``model_broker._gate_succeeds_transition_review``).
+                "supersedes_config_transition_review": {
+                    field: transition_authorization[field]
+                    for field in (
+                        "execution_gate_sha256",
+                        "integrated_code_commit",
+                        "review_record",
+                        "review_record_sha256",
+                    )
+                },
                 "activation_state": "authorized_not_started",
             }
         )
@@ -578,25 +635,55 @@ class Activation:
             Path(state["policy"]), self.gate, Path(state["transition"])
         )
         assert after_gate["integrity_valid"] is True, after_gate
-        launched_at = now()
-        launch_clock = time.monotonic()
-        run(
-            [
-                "tmux",
-                "new-session",
-                "-d",
-                "-s",
-                TMUX_SESSION,
-                "-c",
-                str(self.runtime),
-                f"bash {self.launcher} >> {self.log} 2>&1",
-            ]
-        )
-        for _ in range(60):
-            live = self.live_producer()
+        # The producer validates the applied transition when it constructs its
+        # broker, and that refuses a ledger with a request in flight. The
+        # evaluator shares the ledger, so the start is aimed at a settled
+        # window and retried when it loses the race.
+        launched_at = None
+        launch_clock = None
+        for attempt in range(1, 21):
+            self.wait_for_settled_ledger()
+            launched_at = now()
+            launch_clock = time.monotonic()
+            log_before = self.log.stat().st_size if self.log.exists() else 0
+            run(
+                [
+                    "tmux",
+                    "new-session",
+                    "-d",
+                    "-s",
+                    TMUX_SESSION,
+                    "-c",
+                    str(self.runtime),
+                    f"bash {self.launcher} >> {self.log} 2>&1",
+                ]
+            )
+            live = None
+            for _ in range(45):
+                live = self.live_producer()
+                if live is not None:
+                    break
+                time.sleep(1)
             if live is not None:
+                # Past construction: the process is up and the broker accepted
+                # the ledger. Give it a moment to prove it stays up.
+                time.sleep(20)
+                live = self.live_producer()
+            if live is not None:
+                print(f"the producer started on attempt {attempt}", file=sys.stderr)
                 break
-            time.sleep(1)
+            tail = ""
+            if self.log.exists():
+                with self.log.open("rb") as handle:
+                    handle.seek(log_before)
+                    tail = handle.read().decode(errors="replace")
+            subprocess.run(["tmux", "kill-session", "-t", TMUX_SESSION], check=False)
+            if "requires a settled ledger" not in tail:
+                raise SystemExit(f"the producer did not start:\n{tail[-4000:]}")
+            print(
+                f"attempt {attempt} lost the settled window; retrying",
+                file=sys.stderr,
+            )
         assert live is not None, f"the producer did not start; see {self.log}"
         pid, _ = live
         state["launch"] = {
