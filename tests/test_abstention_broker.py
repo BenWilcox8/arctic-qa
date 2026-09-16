@@ -27,6 +27,7 @@ from arctic_qa.model_broker import (
     is_evaluation_stage,
     stage_supported,
 )
+from arctic_qa.cli import main as cli_main
 from arctic_qa.util import canonical_json, sha256_bytes, sha256_file
 from test_abstention_render import item
 from test_model_broker import Transport, payload, write_json
@@ -1053,3 +1054,66 @@ def test_an_unauthorized_evaluation_ceiling_transition_is_refused(
         )
     # No event was written by any refused attempt.
     assert list(values["broker"].receipts_dir.glob("evaluation-policy-*.json")) == []
+
+
+def test_cli_apply_evaluation_ceiling_writes_the_event_and_calls_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The first start under a larger ceiling is its own action.
+
+    The streaming evaluator derives one gate per item, so it cannot be that
+    first start: the transition binds one gate hash. This action applies the
+    transition with a gate of its own and makes no paid call. Every later
+    start reads the immutable event.
+    """
+    values = evaluation_fixture(tmp_path, transport=LetterTransport())
+    bind(values)
+    raised, gate, _, transition = _raised_ceiling(tmp_path, values)
+    argv = [
+        "--json",
+        "--test-mode",
+        "--data-root",
+        str(tmp_path / "data"),
+        "abstention-eval",
+        "--action",
+        "apply-evaluation-ceiling",
+        "--streaming-budget-policy-file",
+        str(ROOT / "config" / "streaming-dataset-budget-policy-v1.json"),
+        "--price-config-file",
+        str(ROOT / "config" / "gemini-eligibility-v1.json"),
+        "--execution-gate-file",
+        str(values["construction_gate"]),
+        "--evaluation-policy-file",
+        str(raised),
+        "--evaluation-price-config-file",
+        str(values["prices"]),
+        "--evaluation-gate-file",
+        str(gate),
+        "--evaluation-policy-transition-file",
+        str(transition),
+        "--shared-ledger-file",
+        str(values["ledger"]),
+        "--model-receipts-dir",
+        str(values["broker"].receipts_dir),
+        "--credential-file",
+        str(values["broker"].credential_file),
+        "--prior-construction-spend-usd",
+        "0",
+    ]
+    assert cli_main(argv) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["authorized_ceiling_usd"] == "200.00"
+    assert Decimal(result["evaluation"]["ceiling_usd"]) == Decimal("200.00")
+    assert result["ledger"]["integrity_valid"] is True
+    assert result["ledger"]["halted"] is False
+    assert Decimal(result["evaluation"]["used_usd"]) == 0
+    events = list(values["broker"].receipts_dir.glob("evaluation-policy-*.json"))
+    assert len(events) == 1
+    assert result["transition_event_sha256"] in events[0].name
+    # A second run of the same action changes nothing.
+    assert cli_main(argv) == 0
+    again = json.loads(capsys.readouterr().out)
+    assert again["transition_event_sha256"] == result["transition_event_sha256"]
+    assert (
+        len(list(values["broker"].receipts_dir.glob("evaluation-policy-*.json"))) == 1
+    )

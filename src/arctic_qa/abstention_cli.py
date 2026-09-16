@@ -108,6 +108,7 @@ ACTIONS = (
     "watch",
     "cost-summary",
     "pause-status",
+    "apply-evaluation-ceiling",
 )
 CANARY_CEILING_USD = Decimal("5.00")
 CANARY_ARM = "medium"
@@ -529,6 +530,8 @@ def handle(args: argparse.Namespace) -> Any:
         return summarize_journal(args.work_dir, project_items=args.project_items)
     if action == "pause-status":
         return _pause_status(args)
+    if action == "apply-evaluation-ceiling":
+        return _apply_evaluation_ceiling(args)
     if action == "plan-gates":
         return _plan_gates(args)
     if action == "dry-run-plan":
@@ -656,6 +659,33 @@ def _watch(args: argparse.Namespace) -> dict[str, Any]:
         log=_watch_log,
         deadline_seconds=args.deadline_seconds,
     )
+
+
+def _apply_evaluation_ceiling(args: argparse.Namespace) -> dict[str, Any]:
+    """Apply one reviewed evaluation-ceiling transition, and call nothing.
+
+    The streaming evaluator derives one gate per item, so it cannot be the
+    first start under a larger ceiling: the transition binds one gate hash.
+    This action is that first start. It constructs the broker with the
+    transition file and a gate of its own, which applies the transition and
+    writes its immutable event. Every later start, the evaluator included,
+    reads that event. The action makes no paid call.
+    """
+    _require(args, "evaluation_gate_file", "evaluation_policy_transition_file")
+    broker = _broker(args, evaluation_gate_file=args.evaluation_gate_file)
+    status = broker.status()
+    return {
+        "schema": "abstention-eval-ceiling-transition-result-v1",
+        "authorized_ceiling_usd": str(broker.authorized_evaluation_ceiling_usd()),
+        "active_policy_file": str(args.evaluation_policy_file),
+        "transition_event_sha256": broker.evaluation_transition_sha256,
+        "evaluation": status["evaluation"],
+        "ledger": {
+            "integrity_valid": status["integrity_valid"],
+            "halted": status["halted"],
+            "inflight": status["usage"]["concurrent_generation_requests"],
+        },
+    }
 
 
 def _pause_status(args: argparse.Namespace) -> dict[str, Any]:

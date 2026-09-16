@@ -1309,6 +1309,11 @@ class SharedGeminiBroker:
             )
         return chain
 
+    @property
+    def evaluation_transition_sha256(self) -> str | None:
+        """The applied evaluation-policy transition this broker runs under."""
+        return self._evaluation_transition_sha256
+
     def authorized_evaluation_ceiling_usd(self) -> Decimal:
         """The evaluation ceiling the reviewed transition chain authorizes."""
         chain = self._evaluation_transition_chain()
