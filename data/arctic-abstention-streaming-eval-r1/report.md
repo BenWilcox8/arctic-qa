@@ -234,7 +234,7 @@ Four items are not a paper result. Three observations are worth the large run:
 The superseded v1 run of the evaluator (`streaming-r1-smoke`, three chapter 3 items, 108 calls) measured USD 0.207816 of generation per item, 0.675692 of subscription list-price equivalent per item, and 121.5 s per item.
 Those items ran with one shared option order per trial, so their outcome counts belong to v1 and not to the paper.
 
-### 5.3 The service is running
+### 5.3 The bounded passes
 
 The unit `arctic-abstention-stream-r2` ran at commit `ffecccc` and idled between items:
 
@@ -242,13 +242,11 @@ The unit `arctic-abstention-stream-r2` ran at commit `ffecccc` and idled between
 {"at":"2026-09-16T09:39:20Z","evaluated":0,"event":"idle","poll":1}
 ```
 
-It polls the state database every 30 seconds.
-The next accepted chapter 3 item starts a run inside one poll interval.
-Section 8.2 holds the commands to watch it, to read its cost summary and to stop it.
+It polls the state database every 30 seconds, so the next accepted chapter 3 item starts a run inside one poll interval.
 
-That unit is stopped now, and its journal at `streaming-r2` holds five items.
-The cost guard of task `arctic-benchmark-guard-site-r1` reads that journal, so the directory stays where it is.
-The all-vendor run of section 5.4 keeps its own journal at `streaming-r3`.
+That unit is stopped, and its journal at `streaming-r2` holds five items.
+Section 8.2 holds the running service, its unit name, its snapshot and its commands.
+The cost guard of task `arctic-benchmark-guard-site-r1` still reads `streaming-r2`, so that directory stays where it is until the guard is repointed.
 
 ### 5.4 Deliverable 2 on all three vendors, live
 
@@ -345,6 +343,32 @@ still held 4. No evaluation submission entered it.
 The journal row reads `complete: false` with `pending_paused_trials: 6`, so the
 item stays open. After 23:00 UTC the next pass runs those six Fable trials and
 calls no other model again.
+
+### 5.7 What the running service found
+
+The service was started three times, and the first two starts each found a
+defect that no bounded pass had reached. Both are corrected and both have a
+test that fails on the old code.
+
+1. **An item-scoped stop paused a vendor for the whole watch.** The first
+   start re-evaluated a question whose Gemini repeat budget was already spent,
+   so the broker refused the call with "the evaluation repeat limit for this
+   item is complete". The evaluator read that as a vendor stop and paused the
+   Gemini vendor, so the next two questions were evaluated with no Gemini arm
+   at all. The repeat limit counts one item, condition, model and arm, so it
+   says nothing about the next item. The evaluator now records the stop on
+   that item and takes the next one with every vendor active, and the journal
+   of the third start shows the Gemini arm running on the following questions.
+2. **A running unit never published its progress.** The state file was written
+   only after the loop ended, and a service loop does not end, so
+   `watch-state.json` stood at the values of the first pass. It is written
+   after every poll now.
+
+The starts also showed two operational rules that the report had not stated.
+A per-item plan manifest binds the run id and the code commit and is
+immutable, so a restart from a new commit needs a new run id prefix and a new
+work directory, not only a new snapshot. And `nix develop` needs its `path:`
+prefix for a snapshot inside a git repository that does not track it.
 
 ## 6. The cost row
 
@@ -570,19 +594,40 @@ Then:
 `--action score-plan --run-dir <run-dir>` scores every vendor of the run together.
 `--action dry-run-plan` runs the whole plan offline with the scripted transports and `--latency-seconds` for a wall-time measurement.
 
-### 8.2 The streaming evaluator
+### 8.2 The streaming evaluator, the running service
 
-A run is configured by three files under `/mnt/crdata/research-abstention/arctic-qa/abstention-eval/private/`: a review record, a reviewed authorization and a launcher.
-The set of the last run is `streaming-eval-r5-*`, at commit `f64d289` on all three vendors.
-The earlier sets `streaming-eval-r2-*` and `streaming-eval-r3-*` are superseded evidence, and `r4` never ran.
+The service runs as the systemd user unit `arctic-abstention-stream-r3`, from a read-only runtime snapshot of the landed code, not from a worktree.
+The snapshot pattern is the one the producer activations use.
 
-A new service start needs a new authorization, because the authorization binds the code commit and holds the item and Gemini USD bounds.
-Write it with `--action watch-authorization`, at the bounds the captain sets, and have it reviewed.
-The launcher carries no `--concurrency` override, so each vendor runs at the concurrency of the plan file: Gemini 4 calls in flight, Claude Code 3, Codex 3.
-Give the launcher both pause files, the committed one and the cost guard's own.
+| Part | Value |
+| --- | --- |
+| Unit | `arctic-abstention-stream-r3` |
+| Snapshot | `/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-abstention-streaming-eval-r1/runtime/app-1b6fffa-arctic-abstention-streaming-eval-r1` |
+| Review record | `private/streaming-eval-r6-review.md` |
+| Authorization | `private/streaming-eval-r6-authorization.json` |
+| Launcher | `private/streaming-eval-r6-launcher.sh` |
+| Run id prefix | `abstention-stream-r8` |
+| Work directory | `abstention-eval/streaming-r8` |
+| Bounds | 12 items, USD 3.00 of Gemini spend |
 
-The commands below name the `r2` unit, the first one this task started.
-Use the unit name of the run you start.
+```sh
+APP=<runtime root>/app-<short sha>-arctic-abstention-streaming-eval-r1
+mkdir -p $APP && git archive <short sha> | tar -x -C $APP && chmod -R a-w $APP
+systemd-run --user --unit=arctic-abstention-stream-r3 --working-directory=$APP \
+  /mnt/crdata/research-abstention/arctic-qa/abstention-eval/private/streaming-eval-r6-launcher.sh
+```
+
+The launcher uses `nix develop "path:$APP"`, with the `path:` prefix, because the snapshot lives inside a git repository that does not track it.
+It carries no `--concurrency` override, so each vendor runs at the concurrency of the plan file: Gemini 4 calls in flight, Claude Code 3, Codex 3.
+It gives the evaluator both pause files, the committed one and the cost guard's own.
+
+CAUTION: a restart from a new commit needs three new things together, because a per-item plan manifest binds the run id and the code commit and is immutable: a new snapshot, a new run id prefix, and a new work directory.
+It also needs a new authorization, because the authorization binds the code commit and holds the bounds.
+Write it with `--action watch-authorization` at the bounds the captain sets, and have it reviewed.
+
+The earlier authorization sets `streaming-eval-r2-*` through `r5` are superseded evidence.
+The work directories `streaming-r2`, `r3`, `r5`, `r6` and `r7` hold the evidence of the bounded passes.
+The cost guard of task `arctic-benchmark-guard-site-r1` reads `streaming-r2` today; repoint its `--journal-dir` at `streaming-r8` to read the running service.
 
 Start it as a systemd user unit, the pattern the live publication snapshot service already uses:
 
@@ -594,12 +639,13 @@ systemd-run --user --unit=arctic-abstention-stream-r2 \
 
 | Action | Command |
 | --- | --- |
-| Watch the log | `journalctl --user -u arctic-abstention-stream-r2 -f` |
-| Read the state | `systemctl --user status arctic-abstention-stream-r2` |
-| Stop it | `systemctl --user stop arctic-abstention-stream-r2` |
+| Watch the log | `journalctl --user -u arctic-abstention-stream-r3 -f` |
+| Read the unit | `systemctl --user status arctic-abstention-stream-r3` |
+| Read the progress | `cat <work dir>/watch-state.json`, written after every poll |
+| Stop it | `systemctl --user stop arctic-abstention-stream-r3` |
 | Read the cost summary | `--action cost-summary --work-dir <work-dir> --project-items 500` |
 
-The unit logs one JSON line per event to the journal: `idle`, `item_started`, `item_done`, `item_skipped`, `vendor_paused`, `item_bound_reached`, `deadline_reached`.
+The unit logs one JSON line per event to the journal: `idle`, `item_started`, `item_done`, `item_skipped`, `models_paused`, `vendor_stopped_on_this_item`, `vendor_paused`, `every_vendor_paused`, `item_bound_reached`, `deadline_reached`.
 A stop signal ends the loop after the current question, so no receipt is left open.
 A restart re-reads the cost journal and never repeats a finished question.
 
