@@ -7,14 +7,15 @@ Activation artifacts: `/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/ar
 Chapter 3 data root: `/mnt/crdata/research-abstention/arctic-qa/chapter3/`.
 Nothing under `chapter2/` or `streaming-dataset-r1/` changed except the shared ledger, the receipts and the progress file that the run writes by design.
 
-## 1. Result in six lines
+## 1. Result in seven lines
 
-1. The producer runs as `chapter3-7dc6485-r2` on campaign `arctic-qa-production-campaign-003`, in tmux session `arctic-ch3-production-r1`, PID 2229516, since 08:09:09 UTC, on the `c545cf8` runtime. Sections 6, 6b and 6c give every launch, stop and relaunch.
+1. The producer ran as `chapter3-7dc6485-r2` on campaign `arctic-qa-production-campaign-003`, in tmux session `arctic-ch3-production-r1`, PID 2229516, from 08:09:09 UTC on the `c545cf8` runtime. The eligibility watch stopped it at 08:37:49 UTC under rule 5 of the brief, at a zero-in-flight boundary, after 22 papers and USD 1.584992. Sections 6, 6b and 6c give every launch, stop and relaunch; section 7 gives the interrupt.
 2. The shared ledger carries two chained transitions: price config v8, then the construction ceiling of USD 73.990121 (USD 53.990121 of construction spend at the chapter 2 pause plus USD 20.00). Section 3.
 3. Three calibration cassettes were recorded through the gate: v4 and v5 failed the release rule, v6 met it (21 of 21 controls failed, 19 of 20 must-pass rows passed). USD 0.744912 in total. Section 5.
 4. The first launch died on HTTP 400 (an `enum` inside array items in eligibility schema v4, never sent live before); the rejection was diagnosed, fixed, settled at zero cost and the halt lifted. The second launch died on a missing `finding_bank` table (the migration skipped a table added under an unchanged schema version); fixed and migrated. Sections 6, 6b, 6c.
 5. Five code changes were necessary on top of `7dc6485` (section 2). The branch tip is `ea3568a` merged with local `main` at `76eba30`; the deployed runtime is `c545cf8`, which differs from the tip only by the migration fix that the migrated database no longer needs.
-6. The eligibility watch of the first 20 papers and the first phase E readout are in sections 7 and 8.
+6. Rule 5 fired: 9 of the first 19 screened papers end in `screening_error`, above the limit of 5. Two causes, both new in chapter 3 and neither a model regression: a span-label test that refuses correct spans, and a geography re-screen that has never produced a valid answer. Sections 7, 7a and 7b. The run needs a decision before it continues.
+7. Phase E measures 1, 2 and 6 beat their target and chapter 2 by a wide margin; measure 3, the screening error share, is the one that regressed. Section 8.
 
 ## 2. Deviations from the fixed decisions, and why
 
@@ -241,25 +242,118 @@ The relaunch at 08:09:09 UTC runs as PID 2229516 in tmux session `arctic-ch3-pro
 
 ## 7. The eligibility watch
 
-Not reached: no paper was screened.
-`build-activation.py e2a8cba watch-eligibility` implements rule 5 (after the producer passes paper 20, read the last row of each of the first 20 papers; more than 5 `screening_error` or `unresolved_rescreenable` rows interrupt at a zero-in-flight boundary).
-The watch ran once after the halt and recorded 0 papers with rows in `eligibility-watch-e2a8cba-ch3.json`.
+The watch ran and rule 5 fired.
+`build-activation.py c545cf8 watch-eligibility` read the last eligibility row of each of the first 20 papers of the frozen order, after the producer passed paper 20.
+It counted 9 papers in `screening_error`, above the limit of 5.
+It then sent SIGINT at 08:37:49 UTC at a zero-in-flight boundary, and the producer exited.
+The ledger is not halted, `inflight` is 0, and the only ambiguous funds are the USD 0.092648 that chapter 2 carried in.
+The result is in `eligibility-watch-c545cf8-ch3.json` and in the activation receipt.
+
+Of the 20 papers, 19 have rows.
+Paper 2 is the chapter 2 ambiguous-503 family that the producer skips by design.
+The 19 screened papers end as 10 completed (7 eligible, 3 excluded) and 9 `screening_error`.
+No paper reached `unresolved_rescreenable`: each format failure used its one re-ask inside the same paper turn and then ended as `screening_error`.
+
+| # | Paper | Chapter 3 | Last attempt | Error codes | Chapter 2 |
+|---|---|---|---|---|---|
+| 1 | `10.37482/issn2221-2698.2025.59.44` | screening_error | format_repair | `dimension_unsupported` | eligible |
+| 2 | `10.48550/arxiv.2406.18417` | skipped by design | - | - | eligible |
+| 3 | `10.1038/s41467-018-03756-1` | eligible | initial | - | screening_error |
+| 4 | `10.1007/s00484-018-1648-6` | eligible | format_repair | - | eligible |
+| 5 | `10.2481/dsj.ifoda-13` | screening_error | initial | `evidence_missing:published_primary_findings` | excluded |
+| 6 | `10.47148/1609-364x-2024-4-29-38` | screening_error | geography_rescreen | 3 x `evidence_missing`, `dimension_unsupported` | uncertain |
+| 7 | `10.1038/s41522-017-0024-3` | eligible | initial | - | eligible |
+| 8 | `10.1038/s41467-026-69584-w` | excluded | initial | - | eligible |
+| 9 | `10.22328/2413-5747-2024-10-1-119-122` | screening_error | geography_rescreen | 3 x `evidence_missing` | screening_error |
+| 10 | `10.1038/s41598-024-66124-8` | screening_error | format_repair | `dimension_unsupported` | eligible |
+| 11 | `10.1038/s43247-024-01902-w` | eligible | format_repair | - | eligible |
+| 12 | `10.1038/s41467-023-38806-w` | screening_error | initial | `eligible_arctic_scope_invalid` | eligible |
+| 13 | `10.1038/s41467-023-37387-y` | eligible | initial | - | eligible |
+| 14 | `10.17073/2500-0632-2023-12-188` | screening_error | geography_rescreen | 3 x `evidence_missing` | uncertain |
+| 15 | `10.1007/s10661-021-09090-2` | eligible | format_repair | - | eligible |
+| 16 | `10.5194/tc-19-1757-2025` | excluded | initial | - | excluded |
+| 17 | `10.1038/s41467-024-54990-9` | eligible | initial | - | eligible |
+| 18 | `10.25283/2223-4594-2024-3-350-359` | screening_error | format_repair | `activity_unbound`, `dimension_unsupported` | screening_error |
+| 19 | `10.1017/s0950268820003003` | excluded | initial | - | excluded |
+| 20 | `10.1038/nature10283` | screening_error | format_repair | `dimension_unsupported` | eligible |
+
+Every code in the table is an `eligible_arctic_scope_` code or a `criterion_evidence_missing:` code; the table shortens both prefixes.
+Four papers that chapter 2 screened eligible now end in `screening_error`: 1, 10, 12 and 20.
+One paper that chapter 2 could not screen is now eligible: 3.
+The other five failures (5, 6, 9, 14, 18) were excluded, uncertain or `screening_error` in chapter 2 as well, so they cost calls and lose no item.
+`compare-ch2-outcomes.py` in the activation directory rebuilds the table, and `watch-ch2-comparison.json` holds its output.
+
+### 7a. Family A: the dimension label test refuses correct spans
+
+Five papers carry `eligible_arctic_scope_dimension_unsupported` (1, 6, 10, 18, 20).
+The code is `_dimension_supported` in `gemini_eligibility.py`.
+It runs only under response version v4, so chapter 3 is the first run that has it.
+For each activity span the model labels, it searches the span's own text for a marker pattern of that dimension.
+A span whose text holds no marker refuses the label, the paper takes one re-ask, and a second refusal ends the paper.
+
+The refused spans are mostly correct science. Three causes, read from the span text of every refused span:
+
+1. The marker vocabulary is English only.
+   Two Russian papers (18 and 6) fail every dimension, because no Russian word is in any pattern.
+   Under this test no Russian-language paper can pass, whatever it says.
+2. The geography pattern does not accept the degree sign as the extractor writes it.
+   The text extractor writes `69.4273 o N` and `70 -78 N`, with the letter `o` or with nothing where the degree sign was.
+   The pattern accepts only `°`, `º`, `∘` or `deg`, so a span that states a latitude is refused as a geography span.
+3. The word lists are too narrow for correct English spans.
+   `river` and `parallel` are not in the geography list, so "the Itkillik River" and "Bounded from the north by the parallels of the Vilkitsky" are refused.
+   `survey`, `unit` and `species` are not in the sample list, so "airborne surveys show that the mean ice thickness" is refused.
+   `technique`, `medium` and `device` are not in the method list, so "the eddy-covariance technique" is refused.
+   The definition pattern wants an acronym alone inside the parentheses, so "moist acidic tundra (MAT; soil pH <5.5)" is refused.
+
+A small number of refusals are real model mistakes, for example a bioinformatics version string labelled `definition`.
+The test therefore does find label errors, but it refuses many more correct labels than wrong ones.
+The papers behind this family are scientifically eligible: their criteria are satisfied and their evidence binds.
+One auxiliary span label ends the paper.
+
+### 7b. Family B: the geography re-screen has never produced a valid answer
+
+Three papers carry `criterion_evidence_missing:` codes after a geography re-screen (6, 9, 14).
+Paper 5 carries one on its first screening.
+
+Chapter 2 recorded zero geography re-screen rows in 200 papers, so this path first ran live in chapter 3.
+All three of its chapter 3 invocations failed, and each cost one paid call.
+
+The re-screen prompt says "Every other criterion keeps the status of the first screening. Do not restate it and do not revise it."
+The model restates them anyway, with the frozen status and an empty `evidence` list.
+The validator then reads a `satisfied` criterion with no evidence and writes `criterion_evidence_missing:<criterion>`.
+That code is not in `FORMAT_ERROR_CODES`, so the paper ends at once with no re-ask.
+The three papers each produced the same three codes: `access_rights_evidence`, `published_primary_findings` and `stable_identity_version`.
 
 ## 8. The first phase E readout
 
-`phase_e_measures.py` is in this directory and in the deployed runtime.
-On the chapter 2 artifacts it reproduces the yield audit's values: 38 of 200 screening errors, USD 19.995149 over 6 items, USD 3.3325 per item, and the stage costs of the audit cost summary.
-On the chapter 3 artifacts it has nothing to read: the run halted before its first eligibility row.
-The command for the run is:
+`phase_e_measures.py` ran once on the r2 artifacts.
+The output is in `phase-e-r2.txt` in the activation directory.
+Three of the four measures beat their target and chapter 2 by a wide margin.
+Measure 3 is the exception, and section 7 gives its cause.
+
+| Measure | Chapter 2 | Chapter 3 r2 | Target | Verdict |
+|---|---|---|---|---|
+| 1. Writer families with zero context spans | 23 of 56 (0.41) | 0 of 5 (0.00) | under 0.10 | met |
+| 2. Writer families with no date | 42 of 56 (0.75) | 0 of 5 (0.00) | under 0.30 | met |
+| 3. Papers whose last eligibility row is an error | 38 of 200 (0.19) | 11 of 22 (0.50) | under 0.05 | not met |
+| 6. USD per accepted item | USD 3.3325 (6 items) | USD 0.3962 (4 items) | under USD 1.00 | met |
+
+The run spent USD 1.584992 over 22 papers and produced 4 accepted items.
+Eligibility is the largest stage at USD 0.656986, then finding answer extraction at USD 0.354595 and option verification at USD 0.250864.
+Measure 3 counts 22 papers, because the producer passed paper 20 before the watch stopped it; the watch itself reads the first 20.
+Measures 4 and 5 need reader labels and are outside this task.
+
+The command was:
 
 ```
 PYTHONPATH=src python data/arctic-ch3-production-run-r1/phase_e_measures.py \
   --ledger /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
   --state-db /mnt/crdata/research-abstention/arctic-qa/state.sqlite3 \
-  --eligibility-run-dir /mnt/crdata/research-abstention/arctic-qa/chapter3/gemini-eligibility/chapter3-7dc6485-r1 \
+  --eligibility-run-dir /mnt/crdata/research-abstention/arctic-qa/chapter3/gemini-eligibility/chapter3-7dc6485-r2 \
   --stream-input-dir /mnt/crdata/research-abstention/arctic-qa/chapter3/streaming-input/chapter3-7dc6485-r1-input \
   --eligibility-prompt-file config/gemini-eligibility-prompt-v8.txt \
-  --rescreen-prompt-file config/gemini-eligibility-geography-rescreen-v2.txt
+  --rescreen-prompt-file config/gemini-eligibility-geography-rescreen-v2.txt \
+  --run-id chapter3-7dc6485-r2 --campaign-id arctic-qa-production-campaign-003
 ```
 
 ## 9. Test results
@@ -268,10 +362,10 @@ Command: `nix develop -c bash -c 'PYTHONPATH=src pytest <files> -p no:cacheprovi
 
 | Part | `9f4cb18`, `61d2ea6`, `e2a8cba` | `c545cf8` | `ea3568a` |
 |---|---|---|---|
-| `tests/` without the three slow files | 984 passed | 994 passed | see below |
-| `tests/test_cli_integration.py` | 98 passed | 98 passed | see below |
-| `tests/test_streaming.py` | 56 passed | 56 passed | see below |
-| `tests/test_model_broker.py` | 86 passed | 86 passed | see below |
+| `tests/` without the three slow files | 984 passed | 994 passed | 1009 passed (with `main`'s abstention subscription tests) |
+| `tests/test_cli_integration.py` | 98 passed | 98 passed | 98 passed |
+| `tests/test_streaming.py` | 56 passed | 56 passed | 56 passed |
+| `tests/test_model_broker.py` | 86 passed | 86 passed | 86 passed |
 | `ruff check`, `ruff format --check` | clean | clean | clean |
 
 On the merge commit `5f41f2d` the four abstention test files pass: 36 passed.
@@ -284,9 +378,11 @@ The offline calibration tests pin the v5 clauses and the `seen` slice.
 
 | Item | Owner |
 |---|---|
-| The 400 halt. Options this report sees: (a) a broker change that keeps the HTTP error body in the ambiguous receipt, plus a reviewed release path for a 4xx `known_http_response_unknown_charge` (a documented request rejection), then a reviewed continuation of `585436686ba8...` and a relaunch that captures the message; (b) one authorized diagnostic `generateContent` call with the exact traced payload, outside the producer, to read the 400 message before any code change; (c) revert the eligibility request to prompt v7 and schema v3 for chapter 3, which chapter 2 sent live 202 times, and record that the v8 re-screen is untested. Every option is a rule or scope decision above this task. | firstmate and captain |
-| Merge local `main` (`76eba30`) into the branch with a merge commit and rerun the abstention tests, before "ready in branch" (inbox message 002). Not done: the task is blocked before that point. | this task |
-| The exporter rebind to the chapter 3 runtime (step 7 of the pattern) waits for a running producer, so the dataset page keeps showing the chapter 2 snapshot. | this task, after the halt clears |
+| The rule 5 interrupt of section 7. The run is stopped at 22 papers and waits for a decision. Options this report sees: (a) widen `_DIMENSION_MARKERS` to cover the degree sign as the extractor writes it, the missing English words and a non-English paper, then re-snapshot and start a new run id; (b) make `eligible_arctic_scope_dimension_unsupported` a recorded note instead of an error, so a mislabelled auxiliary span never ends a paper; (c) drop the refused span instead of the paper, and keep the test as a span filter; (d) continue as is and accept a screening error share near 0.50. Each of (a), (b) and (c) also needs the re-screen defect of section 7b corrected, because the re-screen currently fails every time. Every option is a scope decision above this task. | firstmate and captain |
+| The geography re-screen path (section 7b). It first ran live in chapter 3 and has never produced a valid answer. | with the decision above |
+| The deployed runtime is `c545cf8` and the branch tip is `ea3568a` plus the merge. The tip adds only the migration fix, which the migrated production database no longer needs. A later run should deploy the tip. | the next run |
+| The run id is `chapter3-7dc6485-r2`, not the `-r1` the brief fixed. The invocation manifest of a run id is immutable and binds the eligibility prompt and schema hashes, so the corrected schema needed a new run id (section 6b). | recorded, no action |
+| Four diagnostic `generateContent` calls (2026-09-16, about USD 0.05) ran outside the ledger under the firstmate authorization of inbox message 004, to read the 400 message. They are recorded in `diagnostic-400-call.json` and `diagnostic-hypothesis-calls.json`. | recorded, no action |
 | Measures 4 and 5 (reader labels) are outside this task. | phase E |
 | The v6 judge's one must-pass miss ("RMS error") and the v5 evidence are input for a later prompt slice. | a later judge slice |
 | Three `standalone-calibration` paper families exist in the shared ledger, one per recorded prompt hash. | whoever revises the prompt |
