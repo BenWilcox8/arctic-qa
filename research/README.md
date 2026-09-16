@@ -12,6 +12,9 @@ Do not read a command in a report as a command to run today.
 The code of this repository is under `src/`, `tests/`, `schemas/` and `config/`.
 Nothing in this tree is imported by the package, and the linter does not read it.
 The one-off analysis scripts stay exactly as they ran.
+Two readers still use files here.
+`tests/test_ch3_routing.py` reads the recorded chapter 2 routing replay.
+`docs/REPRODUCTION.md` replays a recorded calibration cassette.
 
 ## Chapter 2: the first production chapter
 
