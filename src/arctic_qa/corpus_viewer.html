@@ -2536,7 +2536,7 @@
       ]);
       simpleTable($('live-papers-table'), head, rows, ['Calls', 'Cost'], running
         ? 'No paper has moved a paid call inside the window.'
-        : (producer.message || 'No producer is running, so no paper is in analysis.'));
+        : 'No producer is running, so no paper is in analysis.');
       const finishedHead = ['Paper', 'Outcome', 'Reason', 'Questions', 'Calls', 'Cost', 'Finished'];
       const finishedRows = (data.finished || []).map((row) => [
         livePaperCell(row),
