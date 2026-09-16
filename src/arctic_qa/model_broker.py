@@ -136,6 +136,38 @@ CHAPTER3_BUDGET_CHANGE = {
         "to": str(CHAPTER3_CUMULATIVE_CEILING_USD),
     }
 }
+# Chapter 3 expansion (captain order 2026-09-16 10:27 UTC): the chapter 3
+# allocation becomes USD 200.00 in total, so the ceiling is the baseline plus
+# USD 200.00. The order names the allocation as the one stop, so the three
+# project design limits that would end the run first move with it in one
+# change set: the away submission count, the accepted-question target and the
+# construction review checkpoint, which becomes equal to the ceiling (the
+# captain's order is the review). The evaluation phase keeps its own ceiling.
+# Halt at exhaustion, no reset, no replay.
+CHAPTER3_EXPANSION_ALLOCATION_USD = Decimal("200.00")
+CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD = (
+    CHAPTER3_CONSTRUCTION_SPEND_BEFORE_USD + CHAPTER3_EXPANSION_ALLOCATION_USD
+)
+CHAPTER3_EXPANSION_MAXIMUM_SUBMISSIONS = 20000
+CHAPTER3_EXPANSION_ACCEPTED_TARGET = 2000
+CHAPTER3_EXPANSION_CHANGE = {
+    "away_session_total_ceiling_usd": {
+        "from": str(CHAPTER3_CUMULATIVE_CEILING_USD),
+        "to": str(CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD),
+    },
+    "away_maximum_generation_submissions": {
+        "from": 5000,
+        "to": CHAPTER3_EXPANSION_MAXIMUM_SUBMISSIONS,
+    },
+    "accepted_question_target": {
+        "from": 500,
+        "to": CHAPTER3_EXPANSION_ACCEPTED_TARGET,
+    },
+    "construction_review_checkpoint_usd": {
+        "from": "250.00",
+        "to": str(CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD),
+    },
+}
 POLICY_TRANSITION_CHANGES = (
     {"live_test_maximum_papers": {"from": 20, "to": 40}},
     {
@@ -147,6 +179,7 @@ POLICY_TRANSITION_CHANGES = (
     PRODUCTION_BUDGET_EXTENSION_CHANGE,
     CHAPTER2_BUDGET_EXTENSION_CHANGE,
     CHAPTER3_BUDGET_CHANGE,
+    CHAPTER3_EXPANSION_CHANGE,
 )
 # The policy transitions that move the construction ceiling. Each one binds a
 # complete stream-input gate and names its own cumulative ceiling as the tranche.
@@ -154,6 +187,7 @@ CEILING_CHANGES = (
     PRODUCTION_BUDGET_EXTENSION_CHANGE,
     CHAPTER2_BUDGET_EXTENSION_CHANGE,
     CHAPTER3_BUDGET_CHANGE,
+    CHAPTER3_EXPANSION_CHANGE,
 )
 CEILING_EXTENSION_CHANGE: dict[str, Any] = {}
 AUTHORIZED_CAP_REASON = "the paid request exceeds the authorized live-test cap"
@@ -777,13 +811,24 @@ def _validate_policy(path: Path) -> dict[str, Any]:
         "project_lifetime_ceiling_usd": Decimal("1000"),
         "reserved_for_benchmark_evaluation_usd": Decimal("500"),
         "dataset_construction_allocation_usd": Decimal("500"),
-        "construction_review_checkpoint_usd": Decimal("250"),
         "maximum_request_reserved_cost_usd": Decimal("0.25"),
         "maximum_paper_cost_usd": Decimal("1"),
     }
     for field, expected in exact_money.items():
         if _money(value.get(field), field, positive=True) != expected:
             raise ValueError(f"streaming budget value changed: {field}")
+    checkpoint = _money(
+        value.get("construction_review_checkpoint_usd"),
+        "construction_review_checkpoint_usd",
+        positive=True,
+    )
+    if checkpoint not in {
+        Decimal("250"),
+        CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD,
+    }:
+        raise ValueError(
+            "streaming budget value changed: construction_review_checkpoint_usd"
+        )
     away_ceiling = _money(
         value.get("away_session_total_ceiling_usd"),
         "away_session_total_ceiling_usd",
@@ -794,9 +839,16 @@ def _validate_policy(path: Path) -> dict[str, Any]:
         Decimal("61.614496"),
         CHAPTER2_CUMULATIVE_CEILING_USD,
         CHAPTER3_CUMULATIVE_CEILING_USD,
+        CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD,
     }:
         raise ValueError(
             "streaming budget value changed: away_session_total_ceiling_usd"
+        )
+    if checkpoint == CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD and away_ceiling != (
+        CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD
+    ):
+        raise ValueError(
+            "streaming budget value changed: construction_review_checkpoint_usd"
         )
     live_test_suballocation = _money(
         value.get("live_test_suballocation_usd"),
@@ -808,14 +860,26 @@ def _validate_policy(path: Path) -> dict[str, Any]:
     if live_test_suballocation > _money(away_ceiling, "away_session_total_ceiling_usd"):
         raise ValueError("the live-test budget exceeds the away-session budget")
     exact_int = {
-        "accepted_question_target": 500,
-        "away_maximum_generation_submissions": 5000,
         "maximum_concurrent_generation_requests": 2,
         "maximum_generation_requests_per_minute": 10,
         "maximum_output_tokens_including_thinking": 8192,
         "automatic_transport_generation_retries": 0,
     }
     for field, expected in exact_int.items():
+        if value.get(field) != expected:
+            raise ValueError(f"streaming budget value changed: {field}")
+    # The two project design counts have one registered expansion each, and
+    # both move only together with the chapter 3 expansion ceiling.
+    expanded = away_ceiling == CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD
+    registered_counts = {
+        "accepted_question_target": (
+            CHAPTER3_EXPANSION_ACCEPTED_TARGET if expanded else 500
+        ),
+        "away_maximum_generation_submissions": (
+            CHAPTER3_EXPANSION_MAXIMUM_SUBMISSIONS if expanded else 5000
+        ),
+    }
+    for field, expected in registered_counts.items():
         if value.get(field) != expected:
             raise ValueError(f"streaming budget value changed: {field}")
     live_test_limits = (
@@ -1545,6 +1609,8 @@ class SharedGeminiBroker:
                     expected_tranche = CHAPTER2_CUMULATIVE_CEILING_USD
                 elif changed_policy_fields == CHAPTER3_BUDGET_CHANGE:
                     expected_tranche = CHAPTER3_CUMULATIVE_CEILING_USD
+                elif changed_policy_fields == CHAPTER3_EXPANSION_CHANGE:
+                    expected_tranche = CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD
                 else:
                     expected_tranche = Decimal("5")
                 if from_pair[1] == to_pair[1] or tranche != expected_tranche:

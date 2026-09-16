@@ -31,6 +31,11 @@ from arctic_qa.model_broker import (  # noqa: E402
     CHAPTER3_BUDGET_CHANGE,
     CHAPTER3_CONSTRUCTION_SPEND_BEFORE_USD,
     CHAPTER3_CUMULATIVE_CEILING_USD,
+    CHAPTER3_EXPANSION_ACCEPTED_TARGET,
+    CHAPTER3_EXPANSION_ALLOCATION_USD,
+    CHAPTER3_EXPANSION_CHANGE,
+    CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD,
+    CHAPTER3_EXPANSION_MAXIMUM_SUBMISSIONS,
     POLICY_TRANSITION_CHANGES,
     SharedGeminiBroker,
     _validate_policy,
@@ -158,10 +163,8 @@ def _chapter2_state(tmp_path: Path) -> dict:
     }
 
 
-def test_the_chapter_three_chain_reprices_then_moves_the_ceiling_down(
-    tmp_path: Path,
-) -> None:
-    """The deployment chain: a v3 price transition to v8, then the v2 ceiling."""
+def _chapter3_state(tmp_path: Path) -> dict:
+    """Replay the deployment chain: a v3 price transition to v8, then the v2 ceiling."""
     values = _chapter2_state(tmp_path)
 
     # Step 1: the price config moves to the chapter 3 revision (a distinct hash).
@@ -223,6 +226,26 @@ def test_the_chapter_three_chain_reprices_then_moves_the_ceiling_down(
         config_transition_file=chapter3_transition,
     )
     chapter3.bind_stream_input(**values["stream_binding"])
+    return {
+        **values,
+        "chapter3_config": chapter3_config,
+        "chapter3_policy": chapter3_policy,
+        "chapter3_value": chapter3_value,
+        "chapter3_predecessor": predecessor,
+        "priced": priced,
+        "chapter3": chapter3,
+    }
+
+
+def test_the_chapter_three_chain_reprices_then_moves_the_ceiling_down(
+    tmp_path: Path,
+) -> None:
+    values = _chapter3_state(tmp_path)
+    chapter3 = values["chapter3"]
+    priced = values["priced"]
+    chapter3_policy = values["chapter3_policy"]
+    chapter3_config = values["chapter3_config"]
+    predecessor = values["chapter3_predecessor"]
     status = chapter3.status()
     assert status["integrity_valid"] is True
     assert status["limits"]["away_session_total_ceiling_usd"] == "73.990121"
@@ -258,6 +281,194 @@ def test_the_chapter_three_chain_reprices_then_moves_the_ceiling_down(
             transport=HighCostTransport(),
             config_transition_file=wrong,
         ).status()
+
+
+# The chapter 3 expansion: the allocation becomes USD 200.00 in total.
+
+
+def test_the_chapter_three_expansion_moves_four_limits_together(
+    tmp_path: Path,
+) -> None:
+    assert CHAPTER3_EXPANSION_ALLOCATION_USD == Decimal("200.00")
+    assert CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD == Decimal("253.990121")
+    assert CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD == (
+        CHAPTER3_CONSTRUCTION_SPEND_BEFORE_USD + Decimal("200.00")
+    )
+    # The USD 20.00 already inside the chapter 3 ceiling is not added on top.
+    assert (
+        CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD - CHAPTER3_CUMULATIVE_CEILING_USD
+        == (Decimal("180.00"))
+    )
+    assert CHAPTER3_EXPANSION_CHANGE == {
+        "away_session_total_ceiling_usd": {"from": "73.990121", "to": "253.990121"},
+        "away_maximum_generation_submissions": {"from": 5000, "to": 20000},
+        "accepted_question_target": {"from": 500, "to": 2000},
+        "construction_review_checkpoint_usd": {"from": "250.00", "to": "253.990121"},
+    }
+    assert CHAPTER3_EXPANSION_MAXIMUM_SUBMISSIONS == 20000
+    assert CHAPTER3_EXPANSION_ACCEPTED_TARGET == 2000
+    assert CHAPTER3_EXPANSION_CHANGE in POLICY_TRANSITION_CHANGES
+    assert CHAPTER3_EXPANSION_CHANGE in CEILING_CHANGES
+
+    policy = json.loads(POLICY_V1.read_text(encoding="utf-8"))
+    path = tmp_path / "policy.json"
+
+    def write(**fields: object) -> None:
+        write_json(path, {**policy, **fields})
+
+    expanded = {
+        "away_session_total_ceiling_usd": "253.990121",
+        "away_maximum_generation_submissions": 20000,
+        "accepted_question_target": 2000,
+        "construction_review_checkpoint_usd": "253.990121",
+    }
+    write(**expanded)
+    value = _validate_policy(path)
+    assert value["away_session_total_ceiling_usd"] == "253.990121"
+    assert value["construction_review_checkpoint_usd"] == "253.990121"
+    assert value["away_maximum_generation_submissions"] == 20000
+    assert value["accepted_question_target"] == 2000
+
+    # The checkpoint never exceeds the ceiling, and no field moves alone.
+    write(**{**expanded, "away_session_total_ceiling_usd": "73.990121"})
+    with pytest.raises(ValueError, match="checkpoint"):
+        _validate_policy(path)
+    write(**{**expanded, "construction_review_checkpoint_usd": "250.00"})
+    _validate_policy(path)  # a lower checkpoint under the new ceiling is a valid value
+    write(**{**expanded, "away_maximum_generation_submissions": 5000})
+    with pytest.raises(ValueError, match="away_maximum_generation_submissions"):
+        _validate_policy(path)
+    write(**{**expanded, "accepted_question_target": 500})
+    with pytest.raises(ValueError, match="accepted_question_target"):
+        _validate_policy(path)
+    write(away_maximum_generation_submissions=20000)
+    with pytest.raises(ValueError, match="away_maximum_generation_submissions"):
+        _validate_policy(path)
+    write(accepted_question_target=2000)
+    with pytest.raises(ValueError, match="accepted_question_target"):
+        _validate_policy(path)
+    write(construction_review_checkpoint_usd="300.00")
+    with pytest.raises(ValueError, match="construction_review_checkpoint_usd"):
+        _validate_policy(path)
+    # The chapter 3 policy stays valid as it is.
+    write(away_session_total_ceiling_usd="73.990121")
+    assert _validate_policy(path)["accepted_question_target"] == 500
+
+
+def _expansion_policy(values: dict, tmp_path: Path) -> Path:
+    expansion_value = dict(values["chapter3_value"])
+    for field, limits in CHAPTER3_EXPANSION_CHANGE.items():
+        assert expansion_value[field] == limits["from"]
+        expansion_value[field] = limits["to"]
+    path = tmp_path / "streaming-dataset-budget-policy-chapter3-expansion.json"
+    write_json(path, expansion_value)
+    return path
+
+
+def _expansion_transition(
+    values: dict, tmp_path: Path, policy: Path, **changes
+) -> Path:
+    fields = {
+        "changed_policy_fields": CHAPTER3_EXPANSION_CHANGE,
+        "maximum_authorized_cumulative_tranche_usd": "253.990121",
+        "reason": "Chapter 3 expansion: the allocation becomes USD 200.00 in total.",
+        **changes,
+    }
+    return reviewed_policy_transition(
+        tmp_path,
+        values,
+        policy,
+        active_config=values["chapter3_config"],
+        from_config_transition_sha256=values["chapter3"].status()[
+            "config_transition_sha256"
+        ],
+        from_policy=values["chapter3_policy"],
+        **fields,
+    )
+
+
+def _expansion_broker(values: dict, tmp_path: Path, policy: Path, transition: Path):
+    return SharedGeminiBroker(
+        policy_file=policy,
+        price_config_file=values["chapter3_config"],
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=HighCostTransport(),
+        config_transition_file=transition,
+    )
+
+
+def test_the_chapter_three_expansion_chains_onto_the_chapter_three_ceiling(
+    tmp_path: Path,
+) -> None:
+    """The expansion is a v2 transition whose predecessor is the chapter 3 event."""
+    values = _chapter3_state(tmp_path)
+    before = values["chapter3"].status()
+    policy = _expansion_policy(values, tmp_path)
+    transition = _expansion_transition(values, tmp_path, policy)
+    expanded = _expansion_broker(values, tmp_path, policy, transition)
+    expanded.bind_stream_input(**values["stream_binding"])
+    status = expanded.status()
+    assert status["integrity_valid"] is True
+    assert status["halted"] is False
+    limits = status["limits"]
+    assert limits["away_session_total_ceiling_usd"] == "253.990121"
+    assert limits["construction_review_checkpoint_usd"] == "253.990121"
+    assert limits["away_maximum_generation_submissions"] == 20000
+    assert limits["accepted_question_target"] == 2000
+    assert Decimal(status["remaining"]["away_session_usd"]) == (
+        Decimal("253.990121") - Decimal(status["usage"]["away_session_usd"])
+    )
+    assert Decimal(status["remaining"]["construction_checkpoint_usd"]) == (
+        Decimal("253.990121") - Decimal(status["usage"]["construction_checkpoint_usd"])
+    )
+    # Spend, requests, the price config and the evaluation reserve are untouched.
+    assert status["spent_usd"] == before["spent_usd"]
+    assert status["count_requests"] == before["count_requests"]
+    assert status["price_config_sha256"] == before["price_config_sha256"]
+    assert limits["reserved_for_benchmark_evaluation_usd"] == "500.00"
+    assert limits["project_lifetime_ceiling_usd"] == "1000.00"
+    assert status["config_transition_sha256"] != before["config_transition_sha256"]
+    # A restart with the same transition file reuses the event.
+    again = _expansion_broker(values, tmp_path, policy, transition).status()
+    assert again["config_transition_sha256"] == status["config_transition_sha256"]
+    assert again["integrity_valid"] is True
+
+
+def test_the_chapter_three_expansion_refuses_a_partial_move_or_another_tranche(
+    tmp_path: Path,
+) -> None:
+    values = _chapter3_state(tmp_path)
+    policy = _expansion_policy(values, tmp_path)
+    # The tranche must be the expansion ceiling, not the allocation.
+    wrong_tranche = _expansion_transition(
+        values, tmp_path, policy, maximum_authorized_cumulative_tranche_usd="200.00"
+    )
+    with pytest.raises(ValueError, match="transition"):
+        _expansion_broker(values, tmp_path, policy, wrong_tranche).status()
+    # The ceiling alone is not a registered change any more than the counts alone.
+    ceiling_only = _expansion_transition(
+        values,
+        tmp_path,
+        policy,
+        changed_policy_fields={
+            "away_session_total_ceiling_usd": {"from": "73.990121", "to": "253.990121"}
+        },
+    )
+    with pytest.raises(ValueError, match="transition"):
+        _expansion_broker(values, tmp_path, policy, ceiling_only).status()
+    # A target policy that moves one field further than registered is refused.
+    drifted_value = json.loads(policy.read_text(encoding="utf-8"))
+    drifted_value["accepted_question_target"] = 2000
+    drifted_value["maximum_generation_requests_per_minute"] = 11
+    drifted = tmp_path / "drifted-policy.json"
+    write_json(drifted, drifted_value)
+    drifted_transition = _expansion_transition(values, tmp_path, drifted)
+    with pytest.raises(ValueError):
+        _expansion_broker(values, tmp_path, drifted, drifted_transition).status()
 
 
 # The live calibration recording through the shared broker.

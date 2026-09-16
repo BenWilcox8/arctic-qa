@@ -186,6 +186,22 @@ The status record shows the initial and active policy hashes.
 
 It also shows the authorized cumulative live-test ceiling.
 
+### Registered construction ceiling transitions
+
+Schema v2 also moves the construction ceiling, `away_session_total_ceiling_usd`.
+
+Each allowed move is one constant in `CEILING_CHANGES` in `model_broker.py`, and `_validate_policy` lists each allowed ceiling value.
+
+The tranche of a ceiling transition must equal the new cumulative ceiling.
+
+A ceiling transition needs a complete `stream-input-binding-v1` gate.
+
+A new budget needs its constant and a chain test before any transition file can apply (`tests/test_chapter3_production_run.py`).
+
+The chapter 3 expansion change set (`CHAPTER3_EXPANSION_CHANGE`) moves four fields together: the ceiling, `away_maximum_generation_submissions`, `accepted_question_target` and `construction_review_checkpoint_usd`.
+
+The broker refuses each of these four fields alone, and it accepts the expanded counts only under the expansion ceiling.
+
 Create the request key from the exact request identity.
 
 The request identity does not use the run ID.
