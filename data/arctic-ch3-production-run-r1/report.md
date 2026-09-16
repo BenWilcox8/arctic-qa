@@ -19,8 +19,8 @@ Nothing under `chapter2/` or `streaming-dataset-r1/` changed except the shared l
 ## 2. Deviations from the fixed decisions, and why
 
 The brief fixed the deployed commit as local `main` at `7dc6485`.
-The deployed runtime is `e2a8cba` instead.
-That commit is `7dc6485` plus seven commits of this task, and no other change:
+The deployed runtime is `c545cf8` instead.
+That commit is `7dc6485` plus nine commits of this task, and no other change:
 
 | Commit | Change | Reason |
 |---|---|---|
@@ -31,6 +31,8 @@ That commit is `7dc6485` plus seven commits of this task, and no other change:
 | `61d2ea6` | `STANDALONE_SYSTEM` revised to contract v5 (three fail clauses, no pass rule changed); the three v4 misses moved to a `seen` slice; every test that pinned the live literal moved to v5. | Firstmate decision of 2026-09-16 05:52 UTC, option (a). |
 | `089a016` | The report and the v5 cassette. | Evidence for the second decision. |
 | `e2a8cba` | `STANDALONE_SYSTEM` revised to contract v6: the unit clause excludes a unit implied by a named metric, the sample clause covers only an absent sample type, a comparison-basis clause is added; the two held-out rows v6 was written on moved to `seen`. | Captain decision of 2026-09-16 06:56 UTC. |
+| `0badc1f` | The report, the v6 cassette, the halt. | Evidence for the third decision. |
+| `c545cf8` | Eligibility schema v4: the reason-code vocabulary moves from an `enum` inside the array items to the item description; prompt v8 names it there; `tests/test_eligibility_request_constraints.py`. Broker: the provider error body and status of every non-2xx answer go into the ambiguous receipt; `settle-http-rejection` settles a rejection before generation at zero cost; `tests/test_http_rejection_settlement.py`. | Firstmate decision of 2026-09-16 07:30 UTC, steps 2 and 3. |
 
 **The ceiling.** The broker accepts only registered policy transitions.
 `POLICY_TRANSITION_CHANGES` lists every allowed change set, and `_validate_policy` lists every allowed value of `away_session_total_ceiling_usd`.
@@ -179,14 +181,42 @@ No paper was screened, no eligibility row was written, and no other request of t
 | Ledger after | halted, reason `ambiguous_generation_charge`, inflight 0, ambiguous reserved USD 0.140842 (0.092648 chapter 2 plus this 0.048194), spent 54.795709, `integrity_valid` true |
 | Provider error body | not on record: the broker keeps the status code and `Retry-After` only |
 
-What is known and what is not:
+**Diagnosis** (firstmate decision of 2026-09-16 07:30 UTC, step 1; every call is recorded in `diagnostic-400-call.json` and `diagnostic-hypothesis-calls.json` in this directory):
 
-- Schema v4 and prompt v8 had never been sent live (integration report, section 12: "The eligibility re-screen and prompt v8 have no live calibration").
-- Compared with schema v3, which chapter 2 sent 202 times without a 400, schema v4 adds only one JSON-schema keyword (`description`), one nested object type in `activity_spans`, and an 18-value enum for the reason codes. None of these is documented as unsupported, so the cause is not settled from the artifacts.
-- A 400 is a request rejection, so a charge is unlikely, but the broker's rule books every known HTTP response without usage as an unknown charge, and this report does not relax it.
-- The reviewed ambiguous-continuation release in the broker accepts `known_http_response_unknown_charge` only for a 5xx status (`_is_server_error_status`). A 400 halt has no release path in the deployed code.
+| Call | Payload | Result |
+|---|---|---|
+| Diagnostic | the exact traced payload, request sha256 `f8e078e8...` | 400 `INVALID_ARGUMENT`, "Request contains an invalid argument." |
+| A | the same, every `description` keyword removed from the schema | 400 |
+| B | A plus `reason_codes.items` as a plain string | 200 |
+| C | the traced payload, `reason_codes.items` given `type: string` beside its enum | 400 |
+| D | the traced payload, `reason_codes.items` as a plain string, descriptions kept | 200 |
 
-A relaunch without a diagnosis would repeat the same call and the same halt on paper 1.
+The provider rejects an `enum` inside the `items` of an array (18 values here).
+The `description` keywords are accepted.
+Schema v3, which chapter 2 sent 202 times, has no enum inside items.
+The two 200 calls (B, D) generated one screening each outside the ledger, about 24,700 tokens each on `gemini-3.8-flash`, about USD 0.02 each by the registered rates; the three 400 calls are not billed.
+
+**The fix** (`c545cf8`, step 2): the vocabulary moves into the item description of `reason_codes` in schema v4, prompt v8 says "the reason codes that the schema lists", and `tests/test_eligibility_request_constraints.py` keeps every live eligibility schema inside the keyword set the provider accepted and refuses an enum inside array items.
+The validator already ignored the enum (`_measurement_relaxed_schema`), so the contract semantics are unchanged: the codes are a measurement vocabulary and take no part in the eligibility decision.
+
+**The broker change** (step 3): every non-2xx answer now records `error_body` (at most 4000 characters) and `provider_error_status` in the ambiguous receipt.
+`settle-http-rejection` settles one ambiguous charge whose recorded body, or a reproduction of the exact same request, proves a rejection before generation (HTTP 400, `INVALID_ARGUMENT`): the reservation leaves the ambiguous funds, the request becomes a zero-cost settled record with `http_rejection_settlement_sha256`, the halt lifts when every other ambiguous request has its continuation, and the key is never replayed.
+`docs/SHARED_MODEL_BROKER.md` documents it.
+
+**The settlement** of `585436686ba8...` at 08:02:33 UTC, under the `e2a8cba` gate the request ran under, with the fix commit's code:
+
+| Quantity | Value |
+|---|---|
+| Evidence, review | `http-rejection-evidence-58543668-ch3.json`, `http-rejection-review-58543668-ch3.md` (copied into this directory) |
+| Evidence source | reproduction: the diagnostic call, same request sha256, same 400 `INVALID_ARGUMENT` |
+| Settlement event | `model-receipts/<key>.http-rejection-settlement.json`, sha256 `3d806f22...` |
+| Released | USD 0.048194; ambiguous reserved USD 0.140842 to 0.092648 (the chapter 2 level) |
+| Ledger after | not halted, inflight 0, `integrity_valid` true, spent unchanged at 54.795709 |
+
+**The relaunch.** The stream's immutable invocation manifest for run id `chapter3-7dc6485-r1` binds the uncorrected prompt and schema hashes, so a relaunch under that id fails before any call ("the immutable streaming run inputs changed"), and the manifest is never deleted.
+The corrected run is `chapter3-7dc6485-r2`: the same campaign `arctic-qa-production-campaign-003`, the same streaming input, the same frozen order from paper 1, the same gate chain (the `c545cf8` gate names the `9f4cb18` gate in `supersedes_config_transition_review`), the carried v6 calibration (the judge prompt hash is unchanged), and its own eligibility run directory `chapter3/gemini-eligibility/chapter3-7dc6485-r2`.
+Paper 1 is screened again by the corrected request, which has a new request key; nothing is replayed.
+The decision named "the same run id"; the immutable manifest makes that impossible without deleting a run artifact, so the run id moved to r2. Section 6b gives the launch evidence.
 
 ## 7. The eligibility watch
 

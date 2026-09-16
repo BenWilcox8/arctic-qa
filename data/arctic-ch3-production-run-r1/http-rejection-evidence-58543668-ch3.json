@@ -1,0 +1,23 @@
+{
+  "actual_cost_known": true,
+  "actual_cost_usd": "0",
+  "affected_family_id": "family-4a182d987f95fb00f5ed",
+  "authorized_run_id": "chapter3-7dc6485-r1",
+  "error_body_source": "reproduction",
+  "error_class": "known_http_response_unknown_charge",
+  "generation_started": false,
+  "http_status": 400,
+  "live_call_made": true,
+  "provider_error_status": "INVALID_ARGUMENT",
+  "received_receipt_absent": true,
+  "replay_prohibited": true,
+  "reproduction": {
+    "http_status": 400,
+    "provider_error_status": "INVALID_ARGUMENT",
+    "record_file": "/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-ch3-production-run-r1/diagnostic-400-call.json",
+    "record_file_sha256": "96eecb5290e721300f23df754db97ea9ec109e516f7aeb090d2b0032f4805915",
+    "request_sha256": "f8e078e8ad6951cc982528cf26f6878137cd20e19c27116242b3183c6fa21ecd"
+  },
+  "request_key": "585436686ba860d2a789530888a8a8d15d11045d7489df09d62f53344190d680",
+  "schema": "shared-paid-call-http-rejection-evidence-v1"
+}
