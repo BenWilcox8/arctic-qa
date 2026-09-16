@@ -657,8 +657,14 @@ def _normalized_usage(response: Any) -> dict[str, Any]:
         for name in ("thoughtsTokenCount", "candidatesTokenCount")
         if name not in normalized
     ]
-    if len(absent) == 1:
-        omitted = _omitted_zero_usage_field(normalized)
+    if absent:
+        # The broker fills one omitted count that the recorded total proves is
+        # zero. Two omitted counts prove nothing, so the record stays
+        # unusable. The message is keyed on the first absent name, which puts
+        # the thinking count first: the reviewed chapter 2 continuation of the
+        # `answer_agreement` MAX_TOKENS incident binds that exact string, and
+        # that receipt carries neither count.
+        omitted = _omitted_zero_usage_field(normalized) if len(absent) == 1 else None
         if omitted is None:
             raise ValueError(OMITTED_ZERO_REASON[absent[0]])
         normalized[omitted] = 0

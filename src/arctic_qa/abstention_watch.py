@@ -672,30 +672,32 @@ def watch(
                     }
                 )
             if PROVIDER_GOOGLE_GEMINI in vendors and broker_factory is not None:
-                pause = _ceiling_precheck(
+                # `ceiling_pause` is the vendor pause of a budget bound. It is
+                # not the model pause above, and it must never overwrite it.
+                ceiling_pause = _ceiling_precheck(
                     authorization=authorization,
                     plan=plan,
                     price_config=price_config,
                     journal=journal,
                     shared_ledger_file=shared_ledger_file,
                 )
-                if pause is not None:
+                if ceiling_pause is not None:
                     vendors = [v for v in vendors if v != PROVIDER_GOOGLE_GEMINI]
-                    state["paused_vendors"][PROVIDER_GOOGLE_GEMINI] = pause
+                    state["paused_vendors"][PROVIDER_GOOGLE_GEMINI] = ceiling_pause
                     atomic_json(state_path, {**state, "updated_at_utc": _utc_now()})
                     journal.append(
                         pause_row(
                             run_id=str(authorization["run_id_prefix"]),
                             vendor=PROVIDER_GOOGLE_GEMINI,
-                            reason=pause["reason"],
-                            remaining_usd=pause.get("remaining_usd"),
+                            reason=ceiling_pause["reason"],
+                            remaining_usd=ceiling_pause.get("remaining_usd"),
                         )
                     )
                     emit(
                         {
                             "event": "vendor_paused",
                             "vendor": PROVIDER_GOOGLE_GEMINI,
-                            **pause,
+                            **ceiling_pause,
                         }
                     )
             emit(

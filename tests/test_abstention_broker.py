@@ -660,11 +660,16 @@ def test_omitted_answer_token_count_normalizes_from_the_recorded_response() -> N
     ):
         with pytest.raises(ValueError, match=message):
             _normalized_usage({"usageMetadata": usage_record})
-    # Two absent counts are never proved by one total.
-    with pytest.raises(ValueError, match="inconsistent"):
-        _normalized_usage(
-            {"usageMetadata": {"promptTokenCount": 174, "totalTokenCount": 174}}
-        )
+    # Two absent counts are never proved by one total, whatever the total
+    # says. The message names the thinking count, because the reviewed
+    # chapter 2 continuation of the `answer_agreement` MAX_TOKENS incident
+    # binds that exact string and its receipt carries neither count
+    # (tests/test_ambiguous_continuation.py).
+    for total in (174, 999):
+        with pytest.raises(ValueError, match="cannot prove zero thinking tokens"):
+            _normalized_usage(
+                {"usageMetadata": {"promptTokenCount": 174, "totalTokenCount": total}}
+            )
 
 
 class OmittedCandidatesTransport(Transport):

@@ -1168,3 +1168,70 @@ def test_cli_pause_status_shows_the_shipped_pause_and_the_options(
     assert cli_main([*base, "--no-pause-file", "--pause-model", "gpt-5.6-sol"]) == 0
     only = json.loads(capsys.readouterr().out)
     assert only["pause_file"] is None and only["paused_now"] == ["gpt-5.6-sol"]
+
+
+def test_the_model_pause_survives_the_gemini_ceiling_check(tmp_path: Path) -> None:
+    """The ceiling precheck must not drop the model pause.
+
+    The live run of 2026-09-16 found this: the precheck of the Gemini ceiling
+    assigned its vendor-pause record to the same name as the model-pause
+    record, so with the Gemini broker active the evaluator called every model,
+    the paused one included. The precheck runs only when a broker factory
+    exists, which is why the scripted watcher never met it.
+    """
+    db = state_db(tmp_path, chapter3=["aqa-a"])
+    ledger_file = construction_ledger(tmp_path, {"family-aqa-a": ["0.01"]})
+    # A Gemini USD bound with room, so the precheck returns no pause.
+    auth = authorization(tmp_path, db, maximum_gemini_usd="5.00")
+    work = tmp_path / "work"
+
+    import arctic_qa.abstention_watch as module
+
+    def fake_build(*, plan, set_dir, run_id, gate_dir, vendors, **_: object):
+        assert PROVIDER_GOOGLE_GEMINI in vendors
+        return {
+            vendor: VendorRun(
+                vendor=vendor,
+                provider=ScriptedEvaluationProvider(policy="gold", seed=run_id),
+                decoding={"scripted": True, "vendor": vendor},
+                models=plan["vendors"][vendor]["models"],
+                concurrency=2,
+            )
+            for vendor in vendors
+        }
+
+    original = module.build_vendor_runs
+    module.build_vendor_runs = fake_build  # type: ignore[assignment]
+    try:
+        result = watch(
+            authorization_file=auth,
+            plan_file=PLAN_FILE,
+            contract_file=CH3_CONTRACT,
+            evaluation_policy_file=POLICY_V2,
+            evaluation_price_config_file=PRICES,
+            subscription_models_file=MODELS_FILE,
+            state_db=db,
+            work_dir=work,
+            shared_ledger_file=ledger_file,
+            broker_factory=lambda gate: None,  # type: ignore[arg-type,return-value]
+            subscription_ledger_root=work / "subscription",
+            list_price_file=LIST_PRICES,
+            poll_seconds=5,
+            once=True,
+            code_commit="test-commit",
+            ledger_run_prefixes=("chapter3-",),
+            pause_models=parse_pause_models(["claude-fable-5-1=2026-09-16T23:00:00Z"]),
+        )
+    finally:
+        module.build_vendor_runs = original  # type: ignore[assignment]
+    assert result["errors"] == []
+    # Gemini kept its slot: the ceiling had room, so no vendor was paused.
+    assert result["paused_vendors"] == {}
+    assert PROVIDER_GOOGLE_GEMINI in result["active_vendors"]
+    # And the paused model was still held.
+    row = CostJournal(work).item_rows()[0]
+    assert row["evaluation"]["models_paused"] == ["claude-fable-5-1"]
+    assert row["evaluation"]["pending_paused_trials"] == 6
+    assert row["evaluation"]["recorded_trials"] == 42
+    assert "claude-fable-5-1" not in row["outcomes_by_model"]
+    assert row["complete"] is False
