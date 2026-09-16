@@ -329,6 +329,10 @@ commit `3cd57a8`. One evaluation call in flight leaves the producer a free slot
 even under the older global counting, so this pass could not repeat the outage
 of the morning. The cost is wall time only: 391 s against 167 s.
 
+Firstmate confirmed that caution on 2026-09-16: the Gemini arm stays at one
+call in flight until the producer is redeployed from a commit that carries
+`3cd57a8`. After that redeployment the arm runs at the plan's four.
+
 The two phases stayed apart, which is the point of section 3.1. Before the run
 the construction minute window held 4 entries. After 12 evaluation calls it
 still held 4. No evaluation submission entered it.
@@ -730,6 +734,7 @@ The new tests cover:
 | Commit `82ff5cc`, the restored branch | 1298 passed, 1 failed in 18 minutes 13 seconds |
 | Commit `598c34b`, the branch on main `ec0ba98` | 1344 passed in 17 minutes 42 seconds |
 | Commit `f64d289`, the branch on main `3f7de6e` | 1355 passed in 17 minutes 47 seconds |
+| Commit `353ae0c`, the branch tip | 1355 passed in 17 minutes 43 seconds |
 
 The one failure of the second run was the reviewed chapter 2 MAX_TOKENS continuation, whose case matches its receipt by the exact usage message.
 The widened usage rule of `183779b` changed that message for a record that omits both token counts.
