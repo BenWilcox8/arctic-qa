@@ -434,11 +434,17 @@ def test_the_live_export_selects_the_chapter_two_contract() -> None:
             encoding="utf-8"
         )
     )
+    # The live export still selects the chapter 2 contract. Chapter 3 bumps the
+    # generation prompt to v23 and schema 2.8.0; the export moves only with a
+    # new captain instruction, after a chapter 3 run has items to show.
     assert selection["candidate_schema_version"] == "2.7.0"
     assert (
-        selection["generation_prompt_version"] == validation.GENERATION_PROMPT_VERSION
+        selection["generation_prompt_version"]
+        == validation.PREDECESSOR_GENERATION_PROMPT_VERSION
     )
-    assert validation.GENERATION_PROMPT_VERSION == "arctic-qa-generation-v22"
+    assert validation.PREDECESSOR_GENERATION_PROMPT_VERSION == (
+        "arctic-qa-generation-v22"
+    )
     assert validation.CANDIDATE_CONTRACTS["2.7.0"]["prompt_version"] == (
         "arctic-qa-generation-v22"
     )

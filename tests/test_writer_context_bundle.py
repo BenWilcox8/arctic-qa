@@ -38,6 +38,14 @@ def _scope(**values: str) -> dict[str, str | None]:
     return {key: values.get(key) for key in SCOPE_KEYS}
 
 
+def _scope_evidence(span_id: str, **values: str) -> list[dict[str, str]]:
+    """Cite the given span for every scope value, quoting the value itself."""
+    return [
+        {"dimension": key, "span_id": span_id, "quote": value}
+        for key, value in values.items()
+    ]
+
+
 def _span_record(quote: str, span_id: str) -> dict[str, object]:
     return {
         "span_id": span_id,
@@ -257,11 +265,14 @@ def test_context_only_block_is_absent_when_no_setting_span_survives() -> None:
 @pytest.mark.parametrize(
     "quote",
     [
+        # A residual figure or table pointer still kills the sentence
+        # (chapter 2 yield audit 4.1 a keeps _RESIDUAL_LOCATOR_PATTERN).
         "Sample locations are shown in Figure 3 of the same study.",
-        "The site is described elsewhere (Petersen et al., 2014) for this record.",
         "Sampling used the method of Table 2 across the whole campaign.",
         "The site was Ny-Alesund          a second column line intruded here.",
         "Short.",
+        # A fragment without a finite verb or terminal punctuation.
+        "Villum Research Station at Station Nord in northeastern Greenland",
     ],
 )
 def test_unusable_setting_spans_never_reach_a_model(quote: str) -> None:
@@ -276,7 +287,8 @@ def test_unusable_setting_spans_never_reach_a_model(quote: str) -> None:
 def test_separable_component_forwards_only_its_own_setting_spans() -> None:
     arctic = "At the Arctic station nitrate declined by 15 percent."
     arctic_setting = "Sampling at the Arctic station ran through the 2016 season."
-    southern_setting = "Sampling at the southern site ran through the 2016 season."
+    # An unlabelled span that names another place keeps the phrase test.
+    southern_setting = "Sampling at the Bothnian Bay site ran through the 2016 season."
     text = "\n".join([arctic, arctic_setting, southern_setting])
     _, _, interpretation = generation._eligible_generation_scope(
         _source(
@@ -533,8 +545,11 @@ def test_ranking_freezes_the_best_admissible_candidate_without_a_new_call() -> N
             "answer": {
                 "text": "48",
                 "source_span_id": chunk_span_id,
-                "scope": _scope(method="flux"),
-                "required_question_phrases": ["flux"],
+                "scope": _scope(method="East-Siberian Sea"),
+                "scope_evidence": _scope_evidence(
+                    chunk_span_id, method="East-Siberian Sea"
+                ),
+                "required_question_phrases": ["East-Siberian Sea"],
                 "claim_type": "observation",
                 "selection_rationale": "table row",
             },
@@ -546,6 +561,9 @@ def test_ranking_freezes_the_best_admissible_candidate_without_a_new_call() -> N
                 "text": "15 percent",
                 "source_span_id": chunk_span_id,
                 "scope": _scope(method="sulfate aerosol mass"),
+                "scope_evidence": _scope_evidence(
+                    chunk_span_id, method="sulfate aerosol mass"
+                ),
                 "required_question_phrases": ["sulfate aerosol mass"],
                 "claim_type": "observation",
                 "selection_rationale": "prose sentence",
@@ -588,6 +606,9 @@ def test_admission_advances_to_the_next_rank_and_records_the_rejection() -> None
                 "text": "15 percent",
                 "source_span_id": span_id,
                 "scope": _scope(method="sulfate aerosol mass"),
+                "scope_evidence": _scope_evidence(
+                    span_id, method="sulfate aerosol mass"
+                ),
                 "required_question_phrases": ["sulfate aerosol mass"],
                 "claim_type": "observation",
                 "selection_rationale": "prose sentence",
@@ -621,6 +642,9 @@ def test_the_extractor_cannot_cite_an_interpretation_span_it_was_not_given() -> 
                 "text": "15 percent",
                 "source_span_id": next(iter(spans)),
                 "scope": _scope(method="sulfate aerosol mass"),
+                "scope_evidence": _scope_evidence(
+                    next(iter(spans)), method="sulfate aerosol mass"
+                ),
                 "required_question_phrases": ["sulfate aerosol mass"],
                 "claim_type": "observation",
                 "selection_rationale": "prose sentence",
@@ -700,9 +724,12 @@ def test_question_context_instructions_replace_the_default_to_empty_rule() -> No
         "For each referent slot, decide whether the question alone fixes it"
         in instructions
     )
+    # Chapter 3 (chapter 2 yield audit 4.1 g): the opening asks for one
+    # supported setting sentence instead of granting a permission to omit.
+    assert "Write question_context for every question." in instructions
     assert (
         "Set question_context to an empty string only when every applicable slot "
-        "is fixed by the question alone." in instructions
+        "is fixed by the question alone." not in instructions
     )
     assert "taken from SOURCE_DATA or from CONTEXT_ONLY_SOURCE" in instructions
     assert "cite, for each context statement, the span id" in instructions.lower()
@@ -778,25 +805,22 @@ def test_eligibility_prompt_v7_states_the_component_rule() -> None:
 
 
 def test_phase_one_contract_versions_are_recorded() -> None:
-    assert generation.CANDIDATE_SCHEMA_VERSION == "2.7.0"
-    assert generation.PROMPT_VERSION == "arctic-qa-generation-v22"
+    """The chapter 2 contract row keeps its historical literals under chapter 3."""
     assert (
         generation.SCOPE_ROLE_FINDING_POLICY_VERSION
         == "one-finding-per-paper-ranked-context-v8"
-    )
-    assert (
-        validation.CONTEXT_ONLY_EVIDENCE_CONTRACT_VERSION
-        == "question-context-evidence-v1"
-    )
-    assert validation.REFERENT_SLOT_CONTRACT_VERSION == "referent-slot-checklist-v1"
-    assert (
-        validation.FINDING_ADMISSION_CONTRACT_VERSION
-        == "freeze-time-finding-admission-v1"
     )
     # The scope contract keeps selected-evidence-literal-scope-v4 semantics.
     assert validation.SCOPE_CONTRACT_VERSION == "selected-evidence-literal-scope-v4"
     contract = validation.CANDIDATE_CONTRACTS["2.7.0"]
     assert contract["prompt_version"] == "arctic-qa-generation-v22"
+    assert contract["context_only_evidence_contract_version"] == (
+        "question-context-evidence-v1"
+    )
+    assert contract["referent_slot_contract_version"] == "referent-slot-checklist-v1"
+    assert contract["finding_admission_contract_version"] == (
+        "freeze-time-finding-admission-v1"
+    )
     assert contract["scope_contract_version"] == "selected-evidence-literal-scope-v4"
     assert (
         contract["standalone_verification_contract_version"]

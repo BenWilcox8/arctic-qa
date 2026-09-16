@@ -816,6 +816,14 @@ def _hydrate_source_span_ids(value: Any, prompt: str) -> Any:
                 )
                 if selected is not None:
                     item["source_span_id"] = selected["span_id"]
+                    # A fixture cites the same selected span for its scope
+                    # values (candidate schema 2.8.0 scope_evidence).
+                    for entry in item.get("scope_evidence") or []:
+                        if (
+                            isinstance(entry, dict)
+                            and entry.get("span_id") == "{{span_id}}"
+                        ):
+                            entry["span_id"] = selected["span_id"]
             for child in item.values():
                 walk(child)
         elif isinstance(item, list):

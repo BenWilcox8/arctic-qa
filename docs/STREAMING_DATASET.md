@@ -338,7 +338,10 @@ A context-only span supports a `question_context` statement only. No role can se
 Version 22 replaces the empty-context default with a checklist of ten referent slots.
 The writer sets `question_context` to an empty string only when the question alone fixes every applicable slot.
 Candidate schema 2.7.0 records the forwarded context-only spans and the writer's `referent_slots` diagnostic.
-See [the benchmark input contract](BENCHMARK_INPUT_CONTRACT.md) for external evaluation custody.
+Generation prompt version 23 and candidate schema 2.8.0 show each model a locator-redacted projection of every context-only span.
+The extractor cites a supplied span for every non-null scope value in `scope_evidence`.
+The writer records `resolver_text` for every stated referent slot.
+See [the benchmark input contract](BENCHMARK_INPUT_CONTRACT.md) for the chapter 3 writer-context rules and for external evaluation custody.
 See [the shared model broker guide](SHARED_MODEL_BROKER.md) for the exact command and rules.
 An immutable-event failure republishes broker status with `halted` set to `true` and `integrity_valid` set to `false`.
 The broker observer updates streaming progress to bind that halted status.
