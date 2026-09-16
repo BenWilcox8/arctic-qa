@@ -150,7 +150,63 @@ A runtime snapshot is a `git archive` extraction with no `.git`, so `git rev-par
 
 ## 8. Result of the live cut
 
-PENDING.
+### The batch label
+
+Applied to the live state database at 23:38 UTC on 2026-09-16, in one
+transaction, while the producer was stopped.
+
+| Outcome class | Papers |
+| --- | --- |
+| `generation_rejected` | 102 |
+| `eligibility_unresolved` | 43 |
+| `eligibility_excluded` | 42 |
+| `generation_accepted` | 16 |
+| `incomplete_non_mcq` | 4 |
+| `paper_cost_cap_reached` | 1 |
+| **Total** | **208** |
+
+`label-apply-2026-09-16T233707Z.json` in the activation directory holds the
+report, and the table read back holds the same 208 rows.
+A second apply writes none, so a relaunch of the activation never disturbs it.
+
+### Three faults of the activation script, and what they teach
+
+The launch needed four attempts. Every fault was in the activation script, not
+in the label or the producer, and each one is the same mistake: reading a
+shared resource as if it belonged to this run.
+
+1. **The producer was found by its run id alone.** `label-completed-papers`
+   takes the same `--run-id`, so the launch saw its own label subprocess as the
+   live producer and would have stopped the batch it had just started. The
+   match now needs the `stream` subcommand. Caught before anything was written.
+2. **`inflight` was read as this run's.** The counter covers every caller of the
+   shared ledger, and the benchmark evaluator keeps calling. The launch refused
+   to proceed on the evaluator's traffic. The producer-stop boundary now counts
+   only requests whose `run_id` is this run's; the batch label needs no ledger
+   at all.
+3. **`generation_submissions` was read as this run's.** The first launch
+   reported a first paid call 23.2 seconds after start. That was the
+   evaluator's next call on the shared counter: the producer had already exited
+   at broker construction, and this run had submitted nothing since 21:10 UTC.
+   A live pid proves nothing, because the broker is constructed seconds after
+   exec and a refusal there exits at once. A start now counts only when the
+   producer's own progress record moves while the process is up, and the first
+   paid call counts only requests this run submitted.
+
+### The settled-ledger window
+
+An applied policy transition is validated again on every broker construction,
+and that validation refuses a ledger with any request in flight
+(`a configuration transition requires a settled ledger`).
+The benchmark evaluator shares the ledger and calls continuously: sampled over
+one minute on 2026-09-16, the ledger was settled about half the time, in
+windows of about thirty seconds.
+A producer therefore starts only inside one of those windows, and `nix develop`
+plus the Python import can spend that window before the broker is built.
+The launch waits for a settled window before every broker construction and
+retries a start that loses it.
+This is the same wall the concurrency activation met at 22:59 UTC.
+
 
 ## 9. Tests
 
