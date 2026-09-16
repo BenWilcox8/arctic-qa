@@ -3176,3 +3176,124 @@ def test_expanded_policy_stops_new_forty_first_family_but_allows_downstream(
     )
     assert downstream["state"] == "completed"
     assert transport.methods == ["countTokens", "generateContent"]
+
+
+def sibling_broker(
+    tmp_path: Path, values: dict, transport: Transport
+) -> SharedGeminiBroker:
+    """Return a second broker of the same ledger, as a second process has."""
+    return SharedGeminiBroker(
+        policy_file=ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
+        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=tmp_path / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=transport,
+    )
+
+
+def interrupted_request(tmp_path: Path, values: dict, monkeypatch) -> str:
+    """Leave one request submitted with a durable response, as a crash does."""
+    original = SharedGeminiBroker._completed_receipt
+    stopped = {"once": False}
+
+    def stop(self, submitted, response):
+        if stopped["once"]:
+            return original(self, submitted, response)
+        stopped["once"] = True
+        raise KeyboardInterrupt("the producer stopped before its settlement")
+
+    monkeypatch.setattr(SharedGeminiBroker, "_completed_receipt", stop)
+    with pytest.raises(KeyboardInterrupt):
+        execute(values["broker"])
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    key = next(
+        name
+        for name, row in ledger["requests"].items()
+        if row.get("state") == "submitted"
+    )
+    assert (tmp_path / "receipts" / f"{key}.received.json").is_file()
+    assert not (tmp_path / "receipts" / f"{key}.json").is_file()
+    return key
+
+
+def test_a_request_another_worker_settles_during_recovery_does_not_end_the_run(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The exact chapter 3 producer exit of 2026-09-16 13:53 UTC.
+
+    Orphan recovery reads the ledger once and then settles every interrupted
+    request it found. A concurrent evaluation worker of the same ledger settled
+    one of those requests inside that window and released its in-flight lock,
+    so the recovery reached a row that was already `completed` and raised "the
+    paid request is not submitted". The producer exited on its next paid call.
+    The recovery must record the skip and let that call continue.
+    """
+    values = fixture(tmp_path, transport=Transport())
+    key = interrupted_request(tmp_path, values, monkeypatch)
+    sibling = sibling_broker(tmp_path, values, Transport())
+    fired = {"once": False}
+
+    def probe(self, request_key: str) -> bool:
+        # The other worker settles and releases its lock exactly here: after
+        # this recovery took its ledger snapshot and before it settles.
+        if not fired["once"] and request_key == key:
+            fired["once"] = True
+            sibling._recover_orphans(active_run_id=None)
+        return False
+
+    monkeypatch.setattr(SharedGeminiBroker, "_inflight_held", probe)
+
+    receipt = execute(values["broker"], paper="p2")
+
+    assert fired["once"] is True
+    assert receipt["state"] == "completed"
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    assert ledger["requests"][key]["state"] == "completed"
+    assert ledger["halted"] is False
+    skipped = json.loads(
+        (tmp_path / "receipts" / f"{key}.settle-skipped.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert skipped["schema"] == "shared-paid-call-settle-skipped-v1"
+    assert skipped["observed_state"] == "completed"
+    assert skipped["reason"] == ("the request left its submitted state during recovery")
+    # The money of that request is settled once, by the worker that owned it.
+    spent = Decimal(ledger["requests"][key]["actual_cost_usd"])
+    assert spent > 0
+    assert Decimal(ledger["papers"]["family-p1"]["spent_usd"]) == spent
+    assert Decimal(ledger["papers"]["family-p1"]["reserved_usd"]) == Decimal("0")
+
+
+def test_settlement_of_a_never_submitted_request_records_and_continues(
+    tmp_path: Path,
+) -> None:
+    """A row that is not submitted holds no reservation to settle.
+
+    Every settlement acts on a ledger that another worker of the same ledger
+    can have moved. A row that is not `submitted` therefore records the skip
+    and returns False. No settlement can end the run.
+    """
+    values = fixture(tmp_path, transport=Transport())
+    assert execute(values["broker"])["state"] == "completed"
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    key = next(iter(ledger["requests"]))
+    before = values["ledger"].read_bytes()
+
+    assert values["broker"]._settle(key, actual=None, usage=None) is False
+    assert values["ledger"].read_bytes() == before
+    skipped = json.loads(
+        (tmp_path / "receipts" / f"{key}.settle-skipped.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert skipped["observed_state"] == "completed"
+    assert skipped["reason"] == (
+        "the request was not submitted when the settlement ran"
+    )
+    # A request key the ledger never held settles nothing and raises nothing.
+    assert values["broker"]._settle("d" * 64, actual=None, usage=None) is False
+    assert values["ledger"].read_bytes() == before
