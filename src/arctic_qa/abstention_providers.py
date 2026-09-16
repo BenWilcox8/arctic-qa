@@ -77,6 +77,10 @@ class EvaluationResponse:
     response_id: str | None
     error: str | None
     resumed: bool = False
+    # Subscription providers record the vendor, the exact model id, the
+    # preset, the harness invocation and the raw final text here. The Gemini
+    # provider leaves it None.
+    harness: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -94,6 +98,7 @@ class EvaluationResponse:
             "response_id": self.response_id,
             "error": self.error,
             "resumed": self.resumed,
+            "harness": self.harness,
         }
 
 

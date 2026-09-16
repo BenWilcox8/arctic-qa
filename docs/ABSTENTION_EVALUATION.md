@@ -131,7 +131,53 @@ A changed manifest, prompt, model list, arm, decoding record, or run id stops be
 The module `src/arctic_qa/abstention_providers.py` defines the provider interface.
 The Google Gemini implementation sends every call through the shared broker.
 The scripted transport answers by model and payload hash with no paid call.
-Another provider implements the same interface and registers its price entries.
+The module `src/arctic_qa/abstention_subscription.py` adds two subscription providers.
+See "Subscription providers" below.
+
+### Subscription providers
+
+Two providers bill a subscription instead of an API key: `anthropic_claude_code` and `openai_codex`.
+The design record is `data/arctic-abstention-subscription-providers-r1/report.md`.
+Each trial is one subprocess call of the installed harness binary from an empty scratch directory.
+The system text and the user text are the bytes that the Gemini provider sends.
+
+Claude runs through `claude -p` with `--model`, `--effort <arm>`, `--system-prompt <system text>`, `--tools ""`, `--setting-sources ""`, `--no-session-persistence`, `--disable-slash-commands`, `--strict-mcp-config`, `--permission-mode dontAsk`, `--permission-prompts none` and `--output-format json`.
+The user text goes in on stdin.
+Every `CLAUDE*`, `ANTHROPIC_*`, `OPENAI_*` and `CODEX_*` variable is removed from the child environment, and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` removes the session-title side call.
+The output is plain text.
+`--json-schema` is not used because it adds a StructuredOutput tool.
+
+ChatGPT runs through `codex exec` with `-m <model>`, `--ephemeral`, `--strict-config`, `--skip-git-repo-check`, `--ignore-rules`, `--json`, `--output-schema <file>`, `-c model_reasoning_effort=<arm>` and `-c model_instructions_file=<system text file>`.
+The user text goes in on stdin.
+The provider writes a private `CODEX_HOME` under the ledger directory with one strict `config.toml` and a symlink to the real `auth.json`.
+That config disables web search, the shell tools, the subagent tools and the project documents, and shrinks the skills catalog to a stub.
+`HOME` points to an empty directory so that no host skill is listed.
+The schema is one object with one enum field `letter`.
+The provider reads that field as the raw answer and stores the JSON message in the harness record.
+
+The registry `config/benchmark-evaluation-subscription-models-v1.json` lists each vendor, its binary, the checked version, the models and their presets.
+The gate binds this file by hash in the price-config slot and carries the provider name.
+The decoding record binds the vendor, the harness version, the presets, the output constraint and the isolation flags.
+
+Subscription calls do not enter the shared paid-call ledger.
+They enter one subscription ledger per vendor (`--subscription-ledger-dir`).
+That ledger applies the evaluation policy file: the per-item cap, the per-minute pace, one request at a time, no retry and stop on the first error.
+It writes one immutable receipt per request key with `cost_usd: "0"`, the token counts, the invocation, the stdout and the stderr tail.
+The response row carries a `harness` record with the vendor, the exact model id, the preset, the argv, the raw final text and the harness error lines.
+
+Fairness caveats against the Gemini path:
+
+1. Neither harness exposes temperature. Gemini runs at the API maximum. Claude and ChatGPT run at the provider default.
+2. Each harness adds a residual prompt. Claude adds one SDK sentence, a billing header, a user-email reminder and an environment block (about 500 tokens). Codex adds tool descriptions, a permissions block, a skills stub and an environment block (about 1900 tokens). The evaluation prompt bytes are identical for all three.
+3. The presets do not map one to one. Gemini has `low`, `medium`, `high`. Claude has `low`, `medium`, `high`, `xhigh`, `max`. Codex has `low` to `ultra` by model.
+4. Gemini and Codex constrain the letter at the decoder. Claude has no decoder constraint, so its N0 rate includes prompt-compliance errors.
+
+Setup:
+
+- Claude: `claude auth status` must report `loggedIn: true` and `authMethod: claude.ai`. The binary is `/home/ben/.npm-global/bin/claude`.
+- ChatGPT: `codex login status` must report "Logged in using ChatGPT". The binary is `/home/ben/.npm-global/bin/codex` and the login is `/home/ben/.codex/auth.json`.
+- No `ANTHROPIC_API_KEY` and no `OPENAI_API_KEY` is read. The provider removes them from the child environment.
+- The nix devshell has neither binary on PATH. The registry holds the paths. `--binary-path` overrides them.
 
 ### Scoring
 
@@ -221,10 +267,54 @@ The canary runs only after the captain's price-gauge authorization.
 The action `list-models` calls the free `models.list` endpoint.
 It marks the Pro variants and joins each model with its local price entry and presets.
 Pass `--models-file` with a saved response to run it offline.
+With `--provider openai_codex` it reads the model catalog of the binary (`codex debug models`) and joins it with the registry.
+With `--provider anthropic_claude_code` it lists the registry and the binary version.
+The Claude binary validates no model id locally, so the API decides.
+
+### Subscription run
+
+Run every command from the repository root inside `nix develop`.
+Prefix each command with `PYTHONPATH=src python -m arctic_qa --json abstention-eval`.
+
+1. Make sure that the logins are present (see "Subscription providers").
+2. Run the dry run of the vendor.
+
+   ```bash
+   --action dry-run --provider openai_codex --eval-set-dir <set-dir> --run-dir <dry-dir> \
+     --run-id <id> --models gpt-5.6-terra --arms medium --repeats 1 --scripted-policy random
+   ```
+
+3. Write the gate template of the vendor.
+
+   ```bash
+   --action gate-template --provider anthropic_claude_code --eval-set-dir <set-dir> \
+     --run-id <id> --models claude-opus-5 --arms medium --repeats <n> \
+     --review-record <review-file> --output-file <private-gate>
+   ```
+
+   An independent reviewer sets `independent_review_verdict` to `pass` and `evaluation_enabled` to `true`.
+   The gate binds the code commit, the harness version and the registry hash.
+4. Run the evaluation.
+
+   ```bash
+   --action run --provider anthropic_claude_code --eval-set-dir <set-dir> --run-dir <run-dir> \
+     --run-id <id> --models claude-opus-5 --arms medium --repeats <n> \
+     --evaluation-policy-file config/benchmark-evaluation-policy-v1.json \
+     --subscription-models-file config/benchmark-evaluation-subscription-models-v1.json \
+     --evaluation-gate-file <private-gate> --subscription-ledger-dir <ledger-dir>
+   ```
+
+   The run appends one row per trial to `responses.jsonl` and one receipt per call to `<ledger-dir>/receipts`.
+   A rerun resumes from both.
+5. Score the run with `--action score`.
+
+The launcher of the first live test is `/mnt/crdata/research-abstention/arctic-qa/abstention-eval/private/subscription-test-r1-launcher.sh`.
 
 ## Limits
 
 - The evaluation policy raises the per-minute pace only in the dry run. A paid run keeps the pace of the policy file.
 - The rate window of the ledger is shared between phases. A construction run and an evaluation run pace each other.
 - Only Gemini 3 models with `thinkingLevel` presets have price entries. A `thinkingBudget` model such as `gemini-2.5-pro` needs a new entry type before it can run.
+- A subscription provider run needs a live harness login. An expired login fails the first call, the run stops, and the receipt holds the stderr tail.
+- The Claude and Codex quotas are shared with every agent session on this machine.
 - Every current item was written by `gemini-3.8-flash` and judged by `gemini-3.1-pro-preview`. The contamination table makes this visible. It does not remove the effect.
