@@ -3548,12 +3548,12 @@ def test_phase_settlement_records_the_phase_of_a_free_refusal_and_lifts_the_halt
     row = _phaseless_refusal_row(request_key, template)
     _bind_phaseless_refusal(ledger, request_key, row, tmp_path / "receipts")
     write_json(ledger_file, ledger)
-    # This is the fault: the refusal has no phase, so the transition check
-    # reads it as a construction request and refuses the applied transition.
+    # This was the fault: the refusal has no phase, and the transition check
+    # read a row without one as a construction request. The reader now falls
+    # back to the stage family, and the settlement below repairs the row
+    # itself, so the two halves agree.
     applied_at = "2026-09-16T22:58:25Z"
-    assert not model_broker.SharedGeminiBroker._only_evaluation_activity_since(
-        {"requests": {request_key: row}}, applied_at
-    )
+    assert row.get("phase") is None
 
     reviewed = {
         key: row[key]
