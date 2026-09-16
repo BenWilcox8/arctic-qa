@@ -7,21 +7,23 @@ Activation artifacts: `/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/ar
 Chapter 3 data root: `/mnt/crdata/research-abstention/arctic-qa/chapter3/`.
 Nothing under `chapter2/` or `streaming-dataset-r1/` changed except the shared ledger, the receipts and the progress file that the run writes by design.
 
-## 1. Result in seven lines
+## 1. Result in nine lines
 
-1. The producer ran as `chapter3-7dc6485-r2` on campaign `arctic-qa-production-campaign-003`, in tmux session `arctic-ch3-production-r1`, PID 2229516, from 08:09:09 UTC on the `c545cf8` runtime. The eligibility watch stopped it at 08:37:49 UTC under rule 5 of the brief, at a zero-in-flight boundary, after 22 papers and USD 1.584992. Sections 6, 6b and 6c give every launch, stop and relaunch; section 7 gives the interrupt.
+1. The producer runs as `chapter3-7dc6485-r3` on campaign `arctic-qa-production-campaign-003`, in tmux session `arctic-ch3-production-r1`, PID 3185994, pane `%32`, since 09:38 UTC on the `8445117` runtime. Section 6d.
+1b. Three runs came before it. `r1` died on an HTTP 400. `r2` ran 22 papers for USD 1.584992 and the eligibility watch stopped it at 08:37:49 UTC under rule 5 of the brief, at a zero-in-flight boundary. Sections 6, 6b, 6c and 7.
 2. The shared ledger carries two chained transitions: price config v8, then the construction ceiling of USD 73.990121 (USD 53.990121 of construction spend at the chapter 2 pause plus USD 20.00). Section 3.
 3. Three calibration cassettes were recorded through the gate: v4 and v5 failed the release rule, v6 met it (21 of 21 controls failed, 19 of 20 must-pass rows passed). USD 0.744912 in total. Section 5.
 4. The first launch died on HTTP 400 (an `enum` inside array items in eligibility schema v4, never sent live before); the rejection was diagnosed, fixed, settled at zero cost and the halt lifted. The second launch died on a missing `finding_bank` table (the migration skipped a table added under an unchanged schema version); fixed and migrated. Sections 6, 6b, 6c.
-5. Five code changes were necessary on top of `7dc6485` (section 2). The branch tip is `ea3568a` merged with local `main` at `76eba30`; the deployed runtime is `c545cf8`, which differs from the tip only by the migration fix that the migrated database no longer needs.
-6. Rule 5 fired: 9 of the first 19 screened papers end in `screening_error`, above the limit of 5. Two causes, both new in chapter 3 and neither a model regression: a span-label test that refuses correct spans, and a geography re-screen that has never produced a valid answer. Sections 7, 7a and 7b. The run needs a decision before it continues.
-7. Phase E measures 1, 2 and 6 beat their target and chapter 2 by a wide margin; measure 3, the screening error share, is the one that regressed. Section 8.
+5. Six code changes were necessary on top of `7dc6485` (section 2). The deployed runtime is `8445117`, which carries all of them and the merge of local `main` at `76eba30`.
+6. Rule 5 fired on `r2`: 9 of the first 19 screened papers ended in `screening_error`, above the limit of 5. Two causes, both new chapter 3 code paths and neither a model regression: a span-label test that refused correct spans, and a geography re-screen that had never produced a valid answer. Sections 7, 7a and 7b.
+7. The captain chose the span filter and the re-screen fix (2026-09-16 08:49 UTC). Replaying the answers `r2` already paid for gives 5 screening errors of 22 instead of 11, and 3 of the first 20 instead of 9. Section 7c.
+8. Phase E on the `r2` artifacts: measures 1, 2 and 6 beat their target and chapter 2 by a wide margin; measure 3, the screening error share, is the one that regressed. Section 8.
 
 ## 2. Deviations from the fixed decisions, and why
 
 The brief fixed the deployed commit as local `main` at `7dc6485`.
-The deployed runtime is `c545cf8` instead.
-That commit is `7dc6485` plus nine commits of this task, and no other change:
+The deployed runtime is `8445117` instead.
+That commit is `7dc6485` plus the commits of this task, and no other change:
 
 | Commit | Change | Reason |
 |---|---|---|
@@ -35,6 +37,7 @@ That commit is `7dc6485` plus nine commits of this task, and no other change:
 | `0badc1f` | The report, the v6 cassette, the halt. | Evidence for the third decision. |
 | `ea3568a` | `Database.migrate` runs the `CREATE TABLE IF NOT EXISTS` script on a database whose schema version already matches; `tests/test_db_migrate_idempotent.py`. | The second r2 stop (section 6c). Applied to the production database once; the deployed `c545cf8` runtime does not need it any more. |
 | `5f41f2d` (merge) | Local `main` at `76eba30` (the abstention subscription providers) merged into the branch with a merge commit; the one conflict, `abstention_cli.py`, took `main`'s content and a `ruff format` pass. | Inbox message 002. The abstention tests pass on the merge: 36 passed. |
+| `8445117` | The activity-span dimension label becomes a span filter (`dimension_span_filter`, `_dimension_verifiable`, widened `_DIMENSION_MARKERS`); the geography re-screen prompt asks for the five criteria rows the schema needs and `validate_response` reads only `study_geography` from a re-screen (`frozen_criterion_statuses`, `_frozen_rescreen_statuses`); `tests/test_eligibility_span_filter.py` and the recorded fixture `fixtures/eligibility-rescreen-recorded-r2.json`. | Captain decision of 2026-09-16 08:49 UTC, after the rule 5 interrupt. Section 7c. |
 | `c545cf8` | Eligibility schema v4: the reason-code vocabulary moves from an `enum` inside the array items to the item description; prompt v8 names it there; `tests/test_eligibility_request_constraints.py`. Broker: the provider error body and status of every non-2xx answer go into the ambiguous receipt; `settle-http-rejection` settles a rejection before generation at zero cost; `tests/test_http_rejection_settlement.py`. | Firstmate decision of 2026-09-16 07:30 UTC, steps 2 and 3. |
 
 **The ceiling.** The broker accepts only registered policy transitions.
@@ -240,6 +243,21 @@ The `c545cf8` runtime then runs correctly on it, so the producer was relaunched 
 The first r2 receipt is kept as `activation-receipt-c545cf8-ch3.first-launch.json`.
 The relaunch at 08:09:09 UTC runs as PID 2229516 in tmux session `arctic-ch3-production-r1`; the receipt `activation-receipt-c545cf8-ch3.json` records it with a fresh progress observation at 08:09:20 UTC.
 
+### 6d. The r3 launch
+
+The rule 5 correction of section 7c needed a new run id, because the invocation manifest of a run id binds the eligibility prompt and schema hashes and the re-screen prompt changed.
+The gate `live-execution-gate-8445117-ch3.json` (sha256 `318c7173...`) re-snapshots the runtime onto commit `8445117`, names `chapter3-7dc6485-r3` and keeps the campaign, the streaming input, the policy v9, the price config v8 and both applied ledger transitions.
+The one changed eligibility input it records is the re-screen prompt.
+`STANDALONE_SYSTEM` did not change, so the v6 cassette carried over and no calibration call was paid for again.
+
+The producer runs as PID 3185994 in tmux session `arctic-ch3-production-r1`, pane `%32`, since 09:38 UTC.
+The exporter is rebound to the `8445117` runtime; the prior snapshot is preserved.
+
+Two small corrections to `build-activation.py` came out of this launch:
+
+1. `nix develop` on a fresh runtime copy took longer than the six minutes the launch waited, so the first call reported "producer did not start" while the producer was starting. The wait is now 30 minutes, and a launch that finds its own producer already running finishes its receipt instead of starting a second one.
+2. The review record of a re-snapshot states what its own commit changed. It repeated the v6 judge revision of three snapshots earlier; the body is now an input.
+
 ## 7. The eligibility watch
 
 The watch ran and rule 5 fired.
@@ -438,8 +456,8 @@ The offline calibration tests pin the v5 clauses and the `seen` slice.
 |---|---|
 | The rule 5 interrupt of section 7. The run is stopped at 22 papers and waits for a decision. Options this report sees: (a) widen `_DIMENSION_MARKERS` to cover the degree sign as the extractor writes it, the missing English words and a non-English paper, then re-snapshot and start a new run id; (b) make `eligible_arctic_scope_dimension_unsupported` a recorded note instead of an error, so a mislabelled auxiliary span never ends a paper; (c) drop the refused span instead of the paper, and keep the test as a span filter; (d) continue as is and accept a screening error share near 0.50. Each of (a), (b) and (c) also needs the re-screen defect of section 7b corrected, because the re-screen currently fails every time. Every option is a scope decision above this task. | firstmate and captain |
 | The geography re-screen path (section 7b). It first ran live in chapter 3 and has never produced a valid answer. | with the decision above |
-| The deployed runtime is `c545cf8` and the branch tip is `ea3568a` plus the merge. The tip adds only the migration fix, which the migrated production database no longer needs. A later run should deploy the tip. | the next run |
-| The run id is `chapter3-7dc6485-r2`, not the `-r1` the brief fixed. The invocation manifest of a run id is immutable and binds the eligibility prompt and schema hashes, so the corrected schema needed a new run id (section 6b). | recorded, no action |
+| The five errors that remain in the replay of section 7c: `criterion_evidence_missing` on a first screening (paper 5), `eligible_arctic_scope_invalid` (papers 12, 22, 23) and `eligible_arctic_scope_activity_unbound` (paper 18). Each still has its bounded re-ask in a live run. | a later eligibility slice |
+| The run id is `chapter3-7dc6485-r3`, not the `-r1` the brief fixed. The invocation manifest of a run id is immutable and binds the eligibility prompt and schema hashes, so the corrected schema needed a new run id (section 6b). | recorded, no action |
 | Four diagnostic `generateContent` calls (2026-09-16, about USD 0.05) ran outside the ledger under the firstmate authorization of inbox message 004, to read the 400 message. They are recorded in `diagnostic-400-call.json` and `diagnostic-hypothesis-calls.json`. | recorded, no action |
 | Measures 4 and 5 (reader labels) are outside this task. | phase E |
 | The v6 judge's one must-pass miss ("RMS error") and the v5 evidence are input for a later prompt slice. | a later judge slice |
