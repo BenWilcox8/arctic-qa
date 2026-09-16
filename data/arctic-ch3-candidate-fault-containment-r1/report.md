@@ -8,7 +8,14 @@ Predecessor activation: `/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/
 
 ## 1. Result in eight lines
 
-PLACEHOLDER_SUMMARY
+1. Both faults are repaired. Commit `fdf5ea8` on branch `fm/arctic-ch3-candidate-fault-containment-r1`. Sections 3.1 and 3.2.
+2. The 16:28 UTC exit was a split enum, not a rogue producer: routing and the generation contract validated one attempt against two different sets of option repair triggers. The contract now owns the one closed set. Section 2.
+3. An exception raised while one candidate or one paper family is built, routed, given options or persisted settles that family and the producer continues with the next paper. Section 3.2.
+4. Only a run stop ends the producer, and the broker seam marks them rather than a list of messages. The suite found the hole in the list at once: a disabled execution gate. Section 3.3.
+5. The producer runs again as `chapter3-7dc6485-r3` on campaign `arctic-qa-production-campaign-003`, PID 3148023, pane `%39`, tmux session `arctic-ch3-production-r1`, over the whole frozen corpus of 4420 papers. Section 6.
+6. The fifteen-minute observation is healthy: 13 paid requests, USD 0.108665, no halt, `integrity_valid` true, and no `candidate_processing_fault` row. Section 6.
+7. No new money and no new ledger transition. The applied USD 200 expansion transition stands, and the successor gate names the gate that authorized it. Section 5.
+8. The suite is green on the deployed commit: 1398 passed in four parts, ruff clean. `suite-result.json` in the activation directory.
 
 ## 2. The fault
 
@@ -168,16 +175,106 @@ New file `tests/test_ch3_candidate_fault_containment.py`, 29 tests.
 On the unfixed code 13 of the first 20 fail, including every recorded-data test and every containment test.
 The seven that pass on the unfixed code are the routing-contract test, which is the half of the disagreement that was already green, and the six money stops, which already ended the producer.
 
-PLACEHOLDER_SUITE
+The whole suite on the deployed commit `fdf5ea8`, in four bounded parts run in parallel:
+
+| Part | Result |
+|---|---|
+| `tests/` without the three slow files | 1151 passed in 361s |
+| `tests/test_cli_integration.py` | 98 passed in 110s |
+| `tests/test_streaming.py` | 61 passed in 505s |
+| `tests/test_model_broker.py` | 88 passed in 136s |
+| `ruff check` and `ruff format --check` on `src` and `tests` | clean |
+
+Total: 1398 passed.
+The record is `suite-result.json` and `suite-fdf5ea8.log` in the activation directory.
+
+One existing test changed: three exact `result["counts"]` dictionaries in `tests/test_streaming.py` now carry `candidate_processing_fault: 0`, beside `paper_cost_cap_reached`.
+The counter is always present, so a run with no fault says so.
 
 ## 5. The release
 
-PLACEHOLDER_RELEASE
+No new money and no new ledger transition.
+The applied USD 200 expansion transition of `09fd733` stands.
+The successor gate names the gate that authorized it.
+
+| Artifact | Path and hash |
+|---|---|
+| Source archive (immutable, mode 444) | `source-fdf5ea8-arctic-ch3-candidate-fault-containment-r1.tar`, SHA-256 `34a61dcf0e7e8d87c690cf66ac202339fe318b7f2eb9b3d774fc45e8a1966df8` |
+| Runtime snapshot | `runtime/app-fdf5ea8-arctic-ch3-candidate-fault-containment-r1`, tree SHA-256 `d1d7ef714ce5ba952fe9f3bd381f96be2e2d5364540f7868bb752f672f4bf2e6` |
+| Implementation review | `implementation-review-fdf5ea8-ch3fault.md`, SHA-256 `78ed6f00f6246c13def5474b5820ad905f36bc03e46811cc9c81ec273d8f70f3` |
+| Execution gate (immutable, mode 444) | `live-execution-gate-fdf5ea8-ch3fault.json`, SHA-256 `fd8b471481f88b3599a1051e59239305f82e37b154d413daf5d8ba6778b4eb3c` |
+| Launcher (mode 555) | `launcher-fdf5ea8-ch3fault.sh`, SHA-256 `d44f89d765f38d6e86c8014b6483360102a8a95e720c73e6d57aeb79b3e27085` |
+| Activation receipt | `activation-receipt-fdf5ea8-ch3fault.json` |
+| Activation state | `activation-state-fdf5ea8.json` |
+| Build script | `build-candidate-fault-containment.py`, with the modes `resnapshot`, `launch`, `observe` and `phase-e` |
+| Read-only monitors | `status.sh`, `candidate-faults.py`, `skipped-families.py` and `settle-skipped.py` |
+
+The predecessor of this activation is the settlement-skip activation `14783d7` (`arctic-ch3-settle-not-submitted-r1`), gate SHA-256 `d22ae01700d5924c9156f6425b0a7eb6748a5005b740322bdb7765f60e50f50d`.
+The gate is that predecessor gate with these fields moved: the commit, the review record and its hash, the source archive hash, the runtime snapshot hash and path, and the prior gate binding.
+`supersedes_config_transition_review` is inherited unchanged and still names the `09fd733` gate that authorized the expansion event, so that immutable event stays valid under the active gate.
+
+The broker of the new runtime validated the shared ledger under policy v10, the new gate and the applied transition.
+The result: `integrity_valid` true, `halted` false, `status_state` `valid`, `config_transition_sha256` `b489a0d3...` equal to the applied expansion event, and `away_session_total_ceiling_usd` USD 253.990121.
+This validation makes no paid call.
+
+The producer of the previous launch stopped at 16:28 UTC at a zero-in-flight boundary.
+The tmux session `arctic-ch3-production-r1` was absent and no process held the run id.
+The ledger held no unsettled construction request of `chapter3-7dc6485-r3`: `inflight` 0, `spent_usd` USD 68.136671, 4724 requests, 36 accepted.
+
+`candidate-faults.py` is new in this activation.
+It lists every `generation_routing` row with reason code `candidate_processing_fault`, with the family, the stage, the exception and the family's cost state at the fault.
+It reads the state database read-only and makes no paid call.
 
 ## 6. The relaunch and the health observation
 
-PLACEHOLDER_OBSERVATION
+The producer started at 17:31 UTC on the `fdf5ea8` runtime, in tmux session `arctic-ch3-production-r1`, pane `%39`, PID 3148023.
+It covers the whole frozen corpus of 4420 papers, under run id `chapter3-7dc6485-r3` and campaign `arctic-qa-production-campaign-003`.
+
+The fifteen-minute observation, taken every 30 seconds from the ledger, the ledger status file and the progress file:
+
+| Measure | Value |
+|---|---|
+| Window | 17:32:21 to 17:46:54 UTC, 902 seconds, 30 samples |
+| Producer alive at the end | yes |
+| Halted at the end | no |
+| `integrity_valid` at the end | true |
+| Paid requests completed in the window | 13 |
+| Spend in the window | USD 0.108665 |
+| Accepted questions, start to end | 36 to 36 |
+| Families the replay recorded in the window | 66 generation rejections and 1 cap skip, all free |
+| Allocation left at the end | USD 189.247372 |
+| `candidate_processing_fault` rows | 0 |
+| Verdict | healthy |
+
+A relaunch walks the frozen order from the first paper, so the first minutes replay the stored receipts of the papers the run already finished.
+That replay is free, which is why the window shows 66 recorded rejections beside only 13 paid requests.
+
+The state of the cap-refused request `107a46f1` is unchanged at both ends of the window: `not_submitted`, reason "the paid request exceeds the paper cost limit", receipt SHA-256 `cfe1cf8517e4494ece564ba618fdbbdcdb9b2253f8af6e66abf3ddbd746a9265`, `live_call_made` false, not resumed, no settlement note.
+`settle_skipped_notes` is empty.
+
+### Every `candidate_processing_fault` row the run has recorded
+
+None.
+
+```
+$ python candidate-faults.py
+candidate_processing_fault rows: 0
+```
+
+The run has met no candidate fault since the relaunch.
+`candidate-faults.py` in the activation directory prints the list at any time, and `--json` gives the whole record of each row.
+
+### The captain's dead-streak rule
+
+The rule is USD 10 of construction spend with no machine accepted question.
+The last acceptance of this campaign is `aqa-26f384109591547bc96a` of `family-12e129e4958ff41ac4cc`, at 16:06:14 UTC.
+Construction spend since then is USD 1.118157 over 73 requests.
+That is far below USD 10, so the rule does not apply and the run continues.
 
 ## 7. Open points
 
-PLACEHOLDER_OPEN
+1. **The option repair carries no set-level feedback.** `_rejected_option_feedback` builds `REJECTED_OPTIONS` from the parent's `option_display_prefilter` record and the `option_validation` rows of the rejection ledger. A whole-set verdict is recorded at stage `automated_acceptance`, so neither source holds it. `OPTION_REPAIR_GUIDANCE` already explains both set codes to the writer, but a repair triggered by one of them is sent no naming of the overlapping pair. The writer runs at temperature zero, which is the condition the r15 audit fix 5 was written for. This is a yield question, not a stop, and it changes the option repair prompt, so it is not in this release.
+2. **The containment unit is the paper family, which is wider than the brief's list.** The brief names generation, routing, option and persistence code. The producer's own unit of work is the paper, and "skip to the next paper" is the only thing it can do, so the whole paper loop body is contained: eligibility validation and source import included. Only the money and authorization stops of section 3.2 pass through. The frozen corpus's own custody checks are unaffected, because `_trusted_brokered_eligibility_decisions` runs them for every paper before the loop begins.
+3. **A fault that leaves a reservation is still a stop.** `_released_family_reservation` refuses to contain a fault while the family's broker cost row shows a reservation. There is no producer-callable release path in the broker, and there should not be: `settle_pretransport_reservation` is a reviewed, request-pinned operation. If the producer ever stops with "the paper family still holds a broker reservation after a fault", the chained cause names the fault and the reviewed path settles the money.
+4. **The evaluator crew shares this ledger and runs an older snapshot.** It does not reach the producer's paper loop, so this containment does not touch it. The predecessor's open point stands: it should re-snapshot onto this commit or later at its next release.
+5. **`candidate_processing_fault` is a counter that should stay at zero.** Any row it records is a defect worth reading. The first two runs of the day would each have recorded exactly one row, for the per-paper cap refusal and the double settlement, and both were real defects that are now repaired at their source. Containment buys the overnight run; it does not replace the repair.
