@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import random
 import re
 import stat
 import threading
@@ -274,6 +275,30 @@ PRETRANSPORT_SETTLEMENT_SCHEMA = "shared-paid-call-pretransport-settlement-v1"
 # 2026-09-16 13:53 UTC).
 SETTLE_SKIPPED_SCHEMA = "shared-paid-call-settle-skipped-v1"
 COUNT_ERROR_CONTINUATION_SCHEMA = "shared-paid-call-count-error-continuation-v1"
+COUNT_ERROR_CONTINUATION_EVIDENCE_SCHEMA = (
+    "shared-paid-call-count-error-continuation-evidence-v1"
+)
+# ``countTokens`` is free: it reserves nothing, submits nothing and charges
+# nothing, so a failure of it can never make the money uncertain. A provider
+# fault there is therefore retried in place before it becomes a count error.
+# The retry is bounded: five attempts with a jittered exponential backoff of
+# about two minutes in total, which is the same order as the wait an ordinary
+# request already gives the exclusive operation lock.
+TRANSIENT_COUNT_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
+PERMANENT_COUNT_HTTP_STATUSES = frozenset({400, 401, 403, 404})
+COUNT_RETRY_ATTEMPTS = 5
+COUNT_RETRY_BASE_SECONDS = 8.0
+COUNT_RETRY_MAXIMUM_SECONDS = 64.0
+COUNT_RETRY_JITTER = 0.2
+# A count failure that is transient describes the provider at that moment, not
+# the request and not the run, so it halts nothing. The ledger row keeps the
+# ``count_error`` state and records this class beside it; the producer skips the
+# family and a later visit counts again under a new retry round. A count failure
+# that is permanent means the request or the credential is wrong, so it keeps
+# the halt it has always had.
+TRANSIENT_COUNT_FAILURE = "transient"
+PERMANENT_COUNT_FAILURE = "permanent"
+COUNT_UNAVAILABLE_REASON = "the free countTokens preflight stayed unavailable"
 AMBIGUOUS_CONTINUATION_SCHEMA = "shared-paid-call-ambiguous-continuation-v1"
 AMBIGUOUS_CONTINUATION_EVIDENCE_SCHEMA = (
     "shared-paid-call-ambiguous-continuation-evidence-v1"
@@ -1025,6 +1050,70 @@ def _is_server_error_status(value: Any) -> bool:
     )
 
 
+def _count_failure_class(error: BaseException) -> str:
+    """Say whether a countTokens failure is the moment or the request.
+
+    ``countTokens`` charges nothing, so this classification is about whether a
+    second attempt can succeed, never about money. A server status, a timeout,
+    a connection fault and a malformed count answer all describe the provider
+    at that moment, so they are transient. A rejection of the request itself -
+    a bad argument, a refused or missing credential, an absent model - is
+    permanent: it repeats for as long as the request or the credential is
+    wrong, and it keeps the halt it has always had.
+    """
+    if isinstance(error, urllib.error.HTTPError):
+        if error.code in TRANSIENT_COUNT_HTTP_STATUSES:
+            return TRANSIENT_COUNT_FAILURE
+        return PERMANENT_COUNT_FAILURE
+    if isinstance(
+        error, (urllib.error.URLError, TimeoutError, ConnectionError, OSError)
+    ):
+        return TRANSIENT_COUNT_FAILURE
+    if isinstance(error, (KeyError, TypeError, ValueError)):
+        # The provider accepted the request and answered it with something the
+        # broker cannot read as a token count. The request was never in doubt.
+        return TRANSIENT_COUNT_FAILURE
+    return PERMANENT_COUNT_FAILURE
+
+
+def _recorded_count_failure_class(receipt: dict[str, Any], reason: str) -> str:
+    """Return the failure class of a recorded count error, failing closed.
+
+    A receipt written since the bounded count retry records its own class. An
+    older receipt records only the error string, so the class is read back from
+    the HTTP status inside it. Anything this cannot read is permanent, because
+    only a proven transient status is ever counted again without a review of
+    the request itself.
+    """
+    recorded = receipt.get("count_failure_class")
+    if recorded in {TRANSIENT_COUNT_FAILURE, PERMANENT_COUNT_FAILURE}:
+        return str(recorded)
+    match = re.match(r"HTTPError: HTTP Error (\d{3}): ", reason)
+    if match and int(match.group(1)) in TRANSIENT_COUNT_HTTP_STATUSES:
+        return TRANSIENT_COUNT_FAILURE
+    return PERMANENT_COUNT_FAILURE
+
+
+def _count_http_status(error: BaseException) -> int | None:
+    """Return the HTTP status of a countTokens failure, when it has one."""
+    return error.code if isinstance(error, urllib.error.HTTPError) else None
+
+
+def _count_retry_delay(attempt: int) -> float:
+    """Return the jittered backoff before the next countTokens attempt."""
+    delay = min(
+        COUNT_RETRY_BASE_SECONDS * (2 ** (attempt - 1)), COUNT_RETRY_MAXIMUM_SECONDS
+    )
+    return delay * random.uniform(1.0 - COUNT_RETRY_JITTER, 1.0 + COUNT_RETRY_JITTER)
+
+
+def _count_event_stem(request_key: str, count_retry_round: int) -> str:
+    """Return the receipt stem of one countTokens round of a request."""
+    if count_retry_round:
+        return f"{request_key}.count-retry-{count_retry_round}"
+    return request_key
+
+
 def _http_error_body(error: urllib.error.HTTPError) -> str | None:
     """Read a bounded copy of a provider error body; never raise."""
     try:
@@ -1732,6 +1821,9 @@ class SharedGeminiBroker:
 
     @staticmethod
     def _request_event_stem(request_key: str, request: dict[str, Any]) -> str:
+        count_retry_round = request.get("count_retry_round")
+        if count_retry_round:
+            return _count_event_stem(request_key, int(count_retry_round))
         if request.get("resumed_from_not_submitted_sha256") is not None:
             return f"{request_key}.resume-{request['config_transition_sha256']}"
         return request_key
@@ -2638,7 +2730,8 @@ class SharedGeminiBroker:
             reconciliation_events[request_key] = (path, event)
         for path in self.receipts_dir.iterdir():
             match = re.fullmatch(
-                r"([a-f0-9]{64})(?:\.resume-[a-f0-9]{64})?"
+                r"([a-f0-9]{64})"
+                r"(?:\.resume-[a-f0-9]{64}|\.count-retry-[1-9][0-9]*)?"
                 r"(?:\.(?:submitted|received))?\.json",
                 path.name,
             )
@@ -2661,6 +2754,7 @@ class SharedGeminiBroker:
             "config_transition_sha256",
         )
         for request_key, request in ledger["requests"].items():
+            self._validate_count_retry_binding(request_key, request, base_fields)
             resume_receipt_sha256 = request.get("resumed_from_not_submitted_sha256")
             resumed = resume_receipt_sha256 is not None
             if resumed:
@@ -2760,16 +2854,22 @@ class SharedGeminiBroker:
                 event = _read(count_error_path) if count_error_path.is_file() else {}
                 review_path = Path(str(event.get("review_file") or ""))
                 evidence_path = Path(str(event.get("evidence_file") or ""))
+                # The event binds the count-error receipt of the request key.
+                # A reviewed continuation that authorized a retry keeps that
+                # binding while the request counts again under a later round.
+                reviewed_path = self.receipts_dir / f"{request_key}.json"
+                reviewed = _read(reviewed_path) if reviewed_path.is_file() else {}
                 if (
-                    state != "count_error"
+                    (state != "count_error" and not request.get("count_retry_round"))
                     or not re.fullmatch(r"[a-f0-9]{64}", str(count_error_sha256))
                     or not count_error_path.is_file()
                     or sha256_file(count_error_path) != count_error_sha256
                     or event.get("schema") != COUNT_ERROR_CONTINUATION_SCHEMA
                     or event.get("request_key") != request_key
+                    or not reviewed_path.is_file()
                     or event.get("count_error_receipt_sha256")
-                    != sha256_file(final_path)
-                    or event.get("gate_sha256") != request.get("gate_sha256")
+                    != sha256_file(reviewed_path)
+                    or event.get("gate_sha256") != reviewed.get("gate_sha256")
                     or event.get("live_call_made") is not False
                     or event.get("replay_prohibited") is not True
                     or not review_path.is_file()
@@ -5643,6 +5743,57 @@ class SharedGeminiBroker:
         finally:
             operation.close()
 
+    @staticmethod
+    def _validate_count_error_evidence(
+        evidence: dict[str, Any],
+        *,
+        request: dict[str, Any],
+        request_key: str,
+        reason: str,
+        failure_class: str,
+    ) -> bool:
+        """Check the reviewed evidence of one count error; say if a retry is on.
+
+        Two reviewed shapes are accepted. The answer-judge evidence of the
+        countTokens 404 of 2026-09-15 stays exact, because that review named a
+        replacement model rather than a retry. Every other count error is
+        reviewed through the general evidence, which names the exact request,
+        the exact error, the family and the run, and says whether the free
+        count may run again. Only a transient failure may: a permanent one
+        repeats until the request or the credential changes.
+        """
+        if evidence.get("schema") == "arctic-answer-judge-count-error-evidence-v1":
+            if (
+                evidence
+                != {
+                    "schema": "arctic-answer-judge-count-error-evidence-v1",
+                    "request_key": request_key,
+                    "count_tokens_http_status": 404,
+                    "live_call_made": False,
+                    "replay_prohibited": True,
+                    "replacement_model": "gemini-3.1-flash-lite",
+                }
+                or reason != "HTTPError: HTTP Error 404: Not Found"
+            ):
+                raise ValueError("the count-error evidence is not exact")
+            return False
+        retry_authorized = evidence.get("count_retry_authorized")
+        if evidence != {
+            "schema": COUNT_ERROR_CONTINUATION_EVIDENCE_SCHEMA,
+            "request_key": request_key,
+            "count_error": reason,
+            "count_failure_class": failure_class,
+            "live_call_made": False,
+            "replay_prohibited": True,
+            "count_retry_authorized": retry_authorized,
+            "affected_family_id": request.get("family_id"),
+            "authorized_run_id": request.get("run_id"),
+        } or not isinstance(retry_authorized, bool):
+            raise ValueError("the count-error evidence is not exact")
+        if retry_authorized and failure_class != TRANSIENT_COUNT_FAILURE:
+            raise ValueError("a permanent count error is never counted again")
+        return retry_authorized
+
     def authorize_count_error_continuation(
         self,
         *,
@@ -5681,16 +5832,14 @@ class SharedGeminiBroker:
                         "continuation_receipt_sha256": applied_hash,
                     }
                 final = _read(final_path)
+                reason = str(request.get("reason") or "")
                 if (
                     request.get("state") != "count_error"
                     or final.get("state") != "count_error"
                     or final.get("live_call_made") is not False
-                    or request.get("reason") != "HTTPError: HTTP Error 404: Not Found"
                     or final.get("error") != request.get("reason")
-                    or request.get("stage") != "answer_agreement"
-                    or request.get("model") != "gemini-2.5-flash-lite"
                 ):
-                    raise ValueError("the request is not the reviewed countTokens 404")
+                    raise ValueError("the request is not a reviewed count error")
                 if not review_file.is_file() or not evidence_file.is_file():
                     raise ValueError("the reviewed count-error evidence is absent")
                 gate_record = _read(self.execution_gate_file)
@@ -5699,20 +5848,21 @@ class SharedGeminiBroker:
                 )
                 if request.get("gate_sha256") != sha256_file(self.execution_gate_file):
                     raise ValueError("the reviewed count-error gate changed")
+                failure_class = _recorded_count_failure_class(final, reason)
                 evidence = _read(evidence_file)
-                if evidence != {
-                    "schema": "arctic-answer-judge-count-error-evidence-v1",
-                    "request_key": request_key,
-                    "count_tokens_http_status": 404,
-                    "live_call_made": False,
-                    "replay_prohibited": True,
-                    "replacement_model": "gemini-3.1-flash-lite",
-                }:
-                    raise ValueError("the count-error evidence is not exact")
+                retry_authorized = self._validate_count_error_evidence(
+                    evidence,
+                    request=request,
+                    request_key=request_key,
+                    reason=reason,
+                    failure_class=failure_class,
+                )
                 event = {
                     "schema": COUNT_ERROR_CONTINUATION_SCHEMA,
                     "request_key": request_key,
                     "count_error_receipt_sha256": sha256_file(final_path),
+                    "count_failure_class": failure_class,
+                    "count_retry_authorized": retry_authorized,
                     "ledger_sha256_before": expected_ledger_sha256,
                     "gate_sha256": request["gate_sha256"],
                     "integrated_code_commit": gate["integrated_code_commit"],
@@ -5727,6 +5877,11 @@ class SharedGeminiBroker:
                 atomic_json(continuation_path, event, immutable=True)
                 continuation_sha256 = sha256_file(continuation_path)
                 request["count_error_continuation_sha256"] = continuation_sha256
+                if retry_authorized:
+                    # The free count of this request may run again. Nothing was
+                    # reserved, submitted or charged, so the retry settles no
+                    # money; it counts again under its own round and receipts.
+                    request["count_failure_class"] = TRANSIENT_COUNT_FAILURE
                 unresolved = [
                     value
                     for value in ledger["requests"].values()
@@ -5764,7 +5919,14 @@ class SharedGeminiBroker:
             ledger["updated_at_utc"] = _now()
             self._commit_ledger(ledger)
 
-    def _mark_not_submitted(self, request_key: str, state: str, reason: str) -> None:
+    def _mark_not_submitted(
+        self,
+        request_key: str,
+        state: str,
+        reason: str,
+        *,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
         with self._lock_file.open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             ledger = self._validated_ledger()
@@ -5774,8 +5936,159 @@ class SharedGeminiBroker:
             request["state"] = state
             request["reason"] = reason
             request["completed_at_utc"] = _now()
+            request.update(extra or {})
             ledger["updated_at_utc"] = _now()
             self._commit_ledger(ledger)
+
+    def _validate_count_retry_binding(
+        self,
+        request_key: str,
+        request: dict[str, Any],
+        base_fields: tuple[str, ...],
+    ) -> None:
+        """Check the immutable count-error chain a retried count request keeps.
+
+        ``countTokens`` charges nothing, so a request whose free preflight
+        failed transiently counts again under a new round rather than ending
+        the run. The first count-error receipt stays immutable under the
+        request key and every later round keeps its own receipt beside it, so
+        the chain proves the retry replaced no paid call and settled no money.
+        """
+        count_retry_round = request.get("count_retry_round")
+        chain_sha256 = request.get("count_retry_from_sha256")
+        if count_retry_round is None and chain_sha256 is None:
+            return
+        original_path = self.receipts_dir / f"{request_key}.json"
+        original = _read(original_path) if original_path.is_file() else {}
+        stable_fields = tuple(
+            name
+            for name in base_fields
+            if name
+            not in {
+                "gate_sha256",
+                "config_transition_sha256",
+                "price_config_sha256",
+                "policy_sha256",
+            }
+        )
+        if (
+            isinstance(count_retry_round, bool)
+            or not isinstance(count_retry_round, int)
+            or count_retry_round < 1
+            or not isinstance(chain_sha256, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", chain_sha256)
+            or not original_path.is_file()
+            or sha256_file(original_path) != chain_sha256
+            or any(original.get(name) != request.get(name) for name in stable_fields)
+            or original.get("state") != "count_error"
+            or original.get("live_call_made") is not False
+        ):
+            raise ValueError("a count-retry request lost its count-error receipt")
+
+    def _open_count_retry(
+        self, request_key: str, base: dict[str, Any], *, phase: str
+    ) -> int:
+        """Open a new counting round for a request whose free count failed.
+
+        A new request returns 0, so ``execute`` registers it as usual. A
+        request whose count failed transiently, or whose count error a reviewed
+        continuation cleared, is reopened here instead of refusing the key:
+        nothing was reserved, nothing was submitted and countTokens charges
+        nothing, so the free count runs again under its own round and its own
+        receipts. A permanent count error still refuses the key, because the
+        request or the credential is wrong until a review says otherwise.
+        """
+        with self._lock_file.open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            ledger = self._validated_ledger()
+            request = ledger["requests"].get(request_key)
+            if request is None or request.get("state") != "count_error":
+                return 0
+            if request.get("count_failure_class") != TRANSIENT_COUNT_FAILURE:
+                raise ValueError("the paid request key already exists")
+            halt = self._phase_halted(ledger, phase)
+            if halt is not None:
+                raise ValueError(f"the paid-call broker is halted: {halt}")
+            stable_fields = (
+                "request_key",
+                "request_sha256",
+                "run_id",
+                "stage",
+                "paper_id",
+                "family_id",
+                "source_version_id",
+                "model",
+            )
+            if any(request.get(name) != base.get(name) for name in stable_fields):
+                raise ValueError("the counted request identity changed")
+            original_path = self.receipts_dir / f"{request_key}.json"
+            chain_sha256 = request.get("count_retry_from_sha256") or sha256_file(
+                original_path
+            )
+            round_number = int(request.get("count_retry_round") or 0) + 1
+            request.update(base)
+            request.update(
+                {
+                    "state": "counting",
+                    "count_retry_round": round_number,
+                    "count_retry_from_sha256": chain_sha256,
+                }
+            )
+            request.pop("reason", None)
+            request.pop("completed_at_utc", None)
+            request.pop("count_failure_class", None)
+            # ``count_requests`` counts the request keys the ledger holds, not
+            # the calls made under them, so a retry round adds none.
+            ledger["updated_at_utc"] = _now()
+            self._validate_ledger(ledger)
+            self._validate_immutable_events(ledger)
+            self._commit_ledger(ledger)
+            return round_number
+
+    def _record_count_error(
+        self,
+        request_key: str,
+        base: dict[str, Any],
+        *,
+        event_stem: str,
+        error: BaseException,
+        failure_class: str,
+        attempts: list[dict[str, Any]],
+        phase: str,
+    ) -> dict[str, Any]:
+        """Record one countTokens failure and stop only what it proves.
+
+        No live call was made, nothing was reserved and countTokens is free, so
+        the money is never uncertain here. A transient failure that outlived its
+        bounded retry therefore halts nothing: the request keeps its immutable
+        count-error receipt, the producer records that family and skips it, and
+        a later visit counts again. A permanent failure means the request or the
+        credential is wrong, so it halts the phase as it always has.
+        """
+        reason = f"{type(error).__name__}: {error}"
+        receipt = {
+            **base,
+            "state": "count_error",
+            "error": reason,
+            "count_failure_class": failure_class,
+            "count_attempts": attempts,
+            "live_call_made": False,
+            "completed_at_utc": _now(),
+        }
+        atomic_json(
+            self.receipts_dir / f"{event_stem}.json",
+            receipt,
+            immutable=True,
+        )
+        self._mark_not_submitted(
+            request_key,
+            "count_error",
+            reason,
+            extra={"count_failure_class": failure_class},
+        )
+        if failure_class == PERMANENT_COUNT_FAILURE:
+            self._halt(f"countTokens error: {type(error).__name__}", phase=phase)
+        return receipt
 
     def _count_event(
         self, request_key: str, base: dict[str, Any], *, phase: str | None = None
@@ -6714,54 +7027,92 @@ class SharedGeminiBroker:
                 _load_key(self.credential_file),
                 timeout=timeout_seconds,
             )
-            exact_input = self._resume_not_submitted(request_key, base)
+            # A request whose free count failed transiently counts again here,
+            # before the resume path, which knows only the states a reservation
+            # can reach.
+            count_retry_round = self._open_count_retry(request_key, base, phase=phase)
+            exact_input = (
+                None
+                if count_retry_round
+                else self._resume_not_submitted(request_key, base)
+            )
             resumed = exact_input is not None
+            count_attempts: list[dict[str, Any]] = []
             if exact_input is None:
-                self._count_event(request_key, base, phase=phase)
-                try:
-                    counted = client.post(
-                        request_config["model"],
-                        "countTokens",
-                        {
-                            "generateContentRequest": {
-                                "model": f"models/{request_config['model']}",
-                                **payload,
-                            }
-                        },
-                    )
-                    exact_input = counted["totalTokens"]
-                    if (
-                        isinstance(exact_input, bool)
-                        or not isinstance(exact_input, int)
-                        or exact_input < 0
-                    ):
-                        raise ValueError(
-                            "countTokens did not return a nonnegative integer"
+                if not count_retry_round:
+                    self._count_event(request_key, base, phase=phase)
+                count_stem = _count_event_stem(request_key, count_retry_round)
+                for attempt in range(1, COUNT_RETRY_ATTEMPTS + 1):
+                    started_at = _now()
+                    try:
+                        counted = client.post(
+                            request_config["model"],
+                            "countTokens",
+                            {
+                                "generateContentRequest": {
+                                    "model": f"models/{request_config['model']}",
+                                    **payload,
+                                }
+                            },
                         )
-                except Exception as error:
-                    receipt = {
-                        **base,
-                        "state": "count_error",
-                        "error": f"{type(error).__name__}: {error}",
-                        "live_call_made": False,
-                        "completed_at_utc": _now(),
-                    }
-                    atomic_json(
-                        self.receipts_dir / f"{request_key}.json",
-                        receipt,
-                        immutable=True,
+                        value = counted["totalTokens"]
+                        if (
+                            isinstance(value, bool)
+                            or not isinstance(value, int)
+                            or value < 0
+                        ):
+                            raise ValueError(
+                                "countTokens did not return a nonnegative integer"
+                            )
+                    except Exception as error:
+                        failure_class = _count_failure_class(error)
+                        count_attempts.append(
+                            {
+                                "attempt": attempt,
+                                "started_at_utc": started_at,
+                                "completed_at_utc": _now(),
+                                "error": f"{type(error).__name__}: {error}",
+                                "http_status": _count_http_status(error),
+                                "failure_class": failure_class,
+                            }
+                        )
+                        if (
+                            failure_class == PERMANENT_COUNT_FAILURE
+                            or attempt == COUNT_RETRY_ATTEMPTS
+                        ):
+                            return self._record_count_error(
+                                request_key,
+                                base,
+                                event_stem=count_stem,
+                                error=error,
+                                failure_class=failure_class,
+                                attempts=count_attempts,
+                                phase=phase,
+                            )
+                        # The free count charges nothing, so waiting for the
+                        # provider costs the run nothing but the wait.
+                        time.sleep(_count_retry_delay(attempt))
+                        continue
+                    count_attempts.append(
+                        {
+                            "attempt": attempt,
+                            "started_at_utc": started_at,
+                            "completed_at_utc": _now(),
+                            "error": None,
+                            "http_status": None,
+                            "failure_class": None,
+                        }
                     )
-                    self._mark_not_submitted(
-                        request_key, "count_error", f"{type(error).__name__}: {error}"
-                    )
-                    self._halt(
-                        f"countTokens error: {type(error).__name__}", phase=phase
-                    )
-                    return receipt
-            event_stem = (
-                f"{request_key}.resume-{self._config_transition_sha256}"
-                if resumed
-                else request_key
+                    exact_input = value
+                    break
+            if count_retry_round:
+                event_stem = _count_event_stem(request_key, count_retry_round)
+            elif resumed:
+                event_stem = f"{request_key}.resume-{self._config_transition_sha256}"
+            else:
+                event_stem = request_key
+            count_record = (
+                {"count_attempts": count_attempts} if len(count_attempts) > 1 else {}
             )
             if exact_input > int(request_config["maximum_input_tokens"]):
                 receipt = {
@@ -6823,6 +7174,7 @@ class SharedGeminiBroker:
                     return receipt
             submitted = {
                 **base,
+                **count_record,
                 "state": "submitted",
                 "input_tokens": exact_input,
                 "reserved_usd": str(reserved),
