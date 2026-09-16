@@ -2007,8 +2007,10 @@ def _resolved_scope_span(
 def _measurement_relaxed_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Drop the reason-code enum from the schema the Python validator applies.
 
-    The shipped schema keeps the enum, so the provider's structured output
-    constrains what the classifier may write. The enum is a measurement
+    Schema v4 first shipped the vocabulary as an enum inside the array items;
+    the provider rejects that shape (HTTP 400 INVALID_ARGUMENT, 2026-09-16),
+    so the shipped schema now states the vocabulary in the item description
+    and this function is a no-op on it. The enum is a measurement
     vocabulary: it takes no part in `_status_mapping_v2` and no part in the
     re-screen pool (audit 4.7, finding E8). Enforcing it here would turn a
     vocabulary slip into a lost paper, which is the defect finding E1 removed.

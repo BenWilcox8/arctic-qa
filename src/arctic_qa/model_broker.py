@@ -179,6 +179,14 @@ PROVIDER_TIMEOUT_SKIP_REASON = "operational_ambiguous_charge_provider_timeout"
 AMBIGUOUS_CONTINUATION_RESERVATION_POLICY = (
     "retain_full_reservation_in_ambiguous_reserved_and_count_against_all_caps"
 )
+# A provider rejection before generation: the request never reached the model,
+# so the provider bills nothing. The recorded error body, or a reproduction of
+# the same request with the same rejection, is the evidence that settles it.
+HTTP_REJECTION_SETTLEMENT_SCHEMA = "shared-paid-call-http-rejection-settlement-v1"
+HTTP_REJECTION_EVIDENCE_SCHEMA = "shared-paid-call-http-rejection-evidence-v1"
+HTTP_REJECTION_STATUSES = frozenset({400})
+HTTP_REJECTION_PROVIDER_STATUSES = frozenset({"INVALID_ARGUMENT"})
+HTTP_ERROR_BODY_LIMIT = 4000
 ORPHANED_CONTINUATION_SCHEMA = "shared-paid-call-orphaned-continuation-v1"
 ORPHANED_CONTINUATION_EVIDENCE_SCHEMA = (
     "shared-paid-call-orphaned-continuation-evidence-v1"
@@ -223,6 +231,37 @@ RECEIVED_MAX_TOKENS_CONTINUATION_FIELDS = AMBIGUOUS_CONTINUATION_FIELDS - {
 PROVIDER_TIMEOUT_CONTINUATION_FIELDS = AMBIGUOUS_CONTINUATION_FIELDS - {
     "http_status"
 } | {"error", "timeout_seconds"}
+HTTP_REJECTION_SETTLEMENT_FIELDS = {
+    "schema",
+    "request_key",
+    "ambiguous_receipt_sha256",
+    "request_identity",
+    "http_status",
+    "provider_error_status",
+    "error_body_source",
+    "reproduction_record",
+    "reproduction_record_sha256",
+    "reserved_usd",
+    "actual_cost_usd",
+    "live_call_made",
+    "generation_started",
+    "replay_prohibited",
+    "evidence_file",
+    "evidence_file_sha256",
+    "review_file",
+    "review_file_sha256",
+    "ledger_sha256_before",
+    "gate_sha256",
+    "integrated_code_commit",
+    "authorized_run_id",
+    "operator_id",
+    "settled_at_utc",
+}
+_ZERO_USAGE = {
+    "promptTokenCount": 0,
+    "candidatesTokenCount": 0,
+    "thoughtsTokenCount": 0,
+}
 ORPHANED_CONTINUATION_FIELDS = {
     "schema",
     "request_key",
@@ -753,6 +792,34 @@ def _is_server_error_status(value: Any) -> bool:
     return (
         isinstance(value, int) and not isinstance(value, bool) and 500 <= value <= 599
     )
+
+
+def _http_error_body(error: urllib.error.HTTPError) -> str | None:
+    """Read a bounded copy of a provider error body; never raise."""
+    try:
+        raw = error.read()
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        text = raw.decode("utf-8", errors="replace")
+    except Exception:
+        return None
+    return text[:HTTP_ERROR_BODY_LIMIT]
+
+
+def _provider_error_status(body: str | None) -> str | None:
+    """Return the provider's error status from a JSON error body, if any."""
+    if not body:
+        return None
+    try:
+        value = json.loads(body)
+    except (ValueError, TypeError):
+        return None
+    error = value.get("error") if isinstance(value, dict) else None
+    status = error.get("status") if isinstance(error, dict) else None
+    return status if isinstance(status, str) and status else None
 
 
 def _validate_gate(path: Path, phase: str) -> dict[str, Any]:
@@ -2119,6 +2186,23 @@ class SharedGeminiBroker:
                     raise ValueError("a count-error continuation event changed")
             elif count_error_path.is_file():
                 raise ValueError("an unapplied count-error continuation event exists")
+            rejection_path = (
+                self.receipts_dir / f"{request_key}.http-rejection-settlement.json"
+            )
+            rejection_sha256 = request.get("http_rejection_settlement_sha256")
+            if rejection_sha256 is not None:
+                if (
+                    state != "completed"
+                    or not re.fullmatch(r"[a-f0-9]{64}", str(rejection_sha256))
+                    or not rejection_path.is_file()
+                    or sha256_file(rejection_path) != rejection_sha256
+                    or not self._http_rejection_settlement_valid(
+                        rejection_path, request, final
+                    )
+                ):
+                    raise ValueError("an http rejection settlement event changed")
+            elif rejection_path.is_file():
+                raise ValueError("an unapplied http rejection settlement event exists")
             settlement_path = (
                 self.receipts_dir / f"{request_key}.pretransport-settlement.json"
             )
@@ -2158,6 +2242,9 @@ class SharedGeminiBroker:
                     != _money(request.get("actual_cost_usd"), "ledger actual cost")
                 ):
                     raise ValueError("a usage reconciliation event changed")
+            elif rejection_sha256 is not None:
+                if reconciliation is not None:
+                    raise ValueError("an unapplied usage reconciliation event exists")
             else:
                 if reconciliation is not None and state != "ambiguous_charge":
                     raise ValueError("an unapplied usage reconciliation event exists")
@@ -2261,6 +2348,66 @@ class SharedGeminiBroker:
             raise ValueError("an accepted-item supersession lacks its predecessor")
         if accepted_events != ledger["accepted_families"]:
             raise ValueError("the accepted-item ledger differs from immutable events")
+
+    def _http_rejection_settlement_valid(
+        self, path: Path, request: dict[str, Any], final: dict[str, Any]
+    ) -> bool:
+        """Check one settled provider rejection against its immutable events."""
+        try:
+            event = _read(path)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return False
+        identity_keys = (
+            "run_id",
+            "stage",
+            "paper_id",
+            "family_id",
+            "source_version_id",
+            "request_sha256",
+            "reserved_usd",
+            "submitted_at_utc",
+        )
+        if (
+            not isinstance(event, dict)
+            or set(event) != HTTP_REJECTION_SETTLEMENT_FIELDS
+            or event.get("schema") != HTTP_REJECTION_SETTLEMENT_SCHEMA
+            or event.get("request_key") != request.get("request_key")
+            or event.get("request_identity")
+            != {key: request.get(key) for key in identity_keys}
+            or event.get("ambiguous_receipt_sha256")
+            != sha256_file(self.receipts_dir / f"{request['request_key']}.json")
+            or final.get("state") != "ambiguous_charge"
+            or final.get("error_class") != "known_http_response_unknown_charge"
+            or final.get("http_status") not in HTTP_REJECTION_STATUSES
+            or event.get("http_status") != final.get("http_status")
+            or event.get("provider_error_status")
+            not in HTTP_REJECTION_PROVIDER_STATUSES
+            or event.get("gate_sha256") != request.get("gate_sha256")
+            or event.get("live_call_made") is not True
+            or event.get("generation_started") is not False
+            or event.get("replay_prohibited") is not True
+            or _money(event.get("actual_cost_usd"), "settled cost") != 0
+            or _money(request.get("actual_cost_usd"), "ledger cost") != 0
+            or request.get("usage") != _ZERO_USAGE
+        ):
+            return False
+        for name in ("review_file", "evidence_file"):
+            file_path = Path(str(event.get(name) or ""))
+            if not file_path.is_file() or event.get(f"{name}_sha256") != sha256_file(
+                file_path
+            ):
+                return False
+        if event.get("error_body_source") == "reproduction":
+            record = Path(str(event.get("reproduction_record") or ""))
+            if not record.is_file() or event.get(
+                "reproduction_record_sha256"
+            ) != sha256_file(record):
+                return False
+        elif event.get("error_body_source") != "receipt" or final.get(
+            "provider_error_status"
+        ) != event.get("provider_error_status"):
+            return False
+        return True
 
     def _pretransport_settlement_valid(
         self, path: Path, request: dict[str, Any], final: dict[str, Any]
@@ -3630,6 +3777,18 @@ class SharedGeminiBroker:
             event_stem = self._request_event_stem(request_key, request)
             final_path = self.receipts_dir / f"{event_stem}.json"
             final = _read(final_path)
+            rejection_sha256 = request.get("http_rejection_settlement_sha256")
+            if rejection_sha256 is not None:
+                # A settled rejection has no response. The view carries the
+                # settlement so a caller can never mistake it for a reusable
+                # completed receipt; the ledger row is the zero-cost record.
+                return {
+                    **final,
+                    "state": "rejected_settled",
+                    "actual_cost_usd": "0",
+                    "usage": dict(_ZERO_USAGE),
+                    "http_rejection_settlement_sha256": rejection_sha256,
+                }
             reconciliation_sha256 = request.get("usage_reconciliation_sha256")
             if reconciliation_sha256 is None:
                 return final
@@ -4321,6 +4480,260 @@ class SharedGeminiBroker:
                     "continuation_receipt_sha256": sha256_file(path),
                     "affected_family_id": request["family_id"],
                     "reserved_usd_retained": str(reserved),
+                    "replay_prohibited": True,
+                }
+        finally:
+            operation.close()
+
+    def settle_http_rejection(
+        self,
+        *,
+        request_key: str,
+        expected_ledger_sha256: str,
+        review_file: Path,
+        evidence_file: Path,
+        authorized_run_id: str,
+        operator_id: str,
+    ) -> dict[str, Any]:
+        """Settle one ambiguous charge that a provider rejection created.
+
+        The provider answered the generation request with a rejection status
+        before any generation ran, so it billed nothing. The evidence is the
+        error body the receipt recorded, or a reproduction of the exact same
+        request (same request sha256) that received the same rejection. The
+        reservation leaves the ambiguous funds, the request settles at zero
+        cost, and the halt lifts when every other ambiguous request has its
+        reviewed continuation. Nothing is replayed: the request key stays a
+        settled terminal record, and a corrected request has a new key.
+        """
+        if not re.fullmatch(r"[a-f0-9]{64}", request_key):
+            raise ValueError("the http rejection request key is invalid")
+        if not authorized_run_id.strip() or not operator_id.strip():
+            raise ValueError("the http rejection operator identity is missing")
+        operation = self._operation_lock_file.open("a+")
+        try:
+            fcntl.flock(operation, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            operation.close()
+            raise ValueError("another paid broker operation is active") from error
+        try:
+            with self._lock_file.open("a+") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                ledger = self._validated_ledger()
+                request = ledger["requests"].get(request_key)
+                if request is None:
+                    raise ValueError("the http rejection request does not exist")
+                settlement_path = (
+                    self.receipts_dir / f"{request_key}.http-rejection-settlement.json"
+                )
+                applied = request.get("http_rejection_settlement_sha256")
+                if applied is not None:
+                    if (
+                        not settlement_path.is_file()
+                        or sha256_file(settlement_path) != applied
+                    ):
+                        raise ValueError("the http rejection settlement changed")
+                    return {
+                        "schema": "shared-paid-call-http-rejection-settlement-result-v1",
+                        "request_key": request_key,
+                        "applied": False,
+                        "settlement_receipt": str(settlement_path),
+                        "settlement_receipt_sha256": applied,
+                        "released_usd": request.get("reserved_usd"),
+                    }
+                if sha256_file(self.ledger_file) != expected_ledger_sha256:
+                    raise ValueError("the http rejection ledger changed")
+                if request.get("state") != "ambiguous_charge":
+                    raise ValueError("the request does not have an ambiguous charge")
+                if (
+                    ledger.get("halted") is not True
+                    or ledger.get("halt_reason") != "ambiguous_generation_charge"
+                ):
+                    raise ValueError("the ambiguous-charge halt state changed")
+                if request.get("run_id") != authorized_run_id:
+                    raise ValueError("the request is outside the authorized run")
+                gate = _validate_gate(self.execution_gate_file, request["phase"])
+                gate_sha256 = sha256_file(self.execution_gate_file)
+                if (
+                    request.get("gate_sha256") != gate_sha256
+                    or gate.get("authorized_new_run_id") != authorized_run_id
+                ):
+                    raise ValueError("the http rejection gate changed")
+                event_stem = self._request_event_stem(request_key, request)
+                final_path = self.receipts_dir / f"{event_stem}.json"
+                received_path = self.receipts_dir / f"{event_stem}.received.json"
+                final = _read(final_path)
+                if settlement_path.exists():
+                    raise ValueError("an unapplied http rejection settlement exists")
+                if (
+                    final.get("state") != "ambiguous_charge"
+                    or final.get("error_class") != "known_http_response_unknown_charge"
+                    or final.get("http_status") not in HTTP_REJECTION_STATUSES
+                    or final.get("live_call_made") is not True
+                    or "response" in final
+                    or received_path.exists()
+                    or final.get("reserved_usd") != request.get("reserved_usd")
+                    or final.get("actual_cost_usd") is not None
+                ):
+                    raise ValueError("the request is not a provider rejection case")
+                if not review_file.is_file() or not evidence_file.is_file():
+                    raise ValueError("the http rejection evidence is absent")
+                evidence = _read(evidence_file)
+                recorded_status = final.get("provider_error_status")
+                reproduction = evidence.get("reproduction")
+                if recorded_status is not None:
+                    source = "receipt"
+                    provider_status = recorded_status
+                    if reproduction is not None:
+                        raise ValueError(
+                            "the receipt records the rejection; no reproduction is read"
+                        )
+                else:
+                    source = "reproduction"
+                    if not isinstance(reproduction, dict):
+                        raise ValueError("the http rejection reproduction is absent")
+                    record_path = Path(str(reproduction.get("record_file") or ""))
+                    if not record_path.is_file() or reproduction.get(
+                        "record_file_sha256"
+                    ) != sha256_file(record_path):
+                        raise ValueError("the http rejection reproduction changed")
+                    record = _read(record_path)
+                    body_status = _provider_error_status(record.get("response_body"))
+                    if (
+                        record.get("request_sha256_from_trace")
+                        != request.get("request_sha256")
+                        or record.get("model") != request.get("model")
+                        or record.get("http_status") != final.get("http_status")
+                        or body_status is None
+                        or reproduction.get("request_sha256")
+                        != request.get("request_sha256")
+                        or reproduction.get("http_status") != final.get("http_status")
+                        or reproduction.get("provider_error_status") != body_status
+                    ):
+                        raise ValueError(
+                            "the http rejection reproduction does not match the request"
+                        )
+                    provider_status = body_status
+                if provider_status not in HTTP_REJECTION_PROVIDER_STATUSES:
+                    raise ValueError("the provider status is not a rejection")
+                expected_evidence = {
+                    "schema": HTTP_REJECTION_EVIDENCE_SCHEMA,
+                    "request_key": request_key,
+                    "error_class": "known_http_response_unknown_charge",
+                    "http_status": final["http_status"],
+                    "provider_error_status": provider_status,
+                    "error_body_source": source,
+                    "reproduction": reproduction,
+                    "live_call_made": True,
+                    "received_receipt_absent": True,
+                    "generation_started": False,
+                    "actual_cost_known": True,
+                    "actual_cost_usd": "0",
+                    "replay_prohibited": True,
+                    "affected_family_id": request["family_id"],
+                    "authorized_run_id": authorized_run_id,
+                }
+                if evidence != expected_evidence:
+                    raise ValueError("the http rejection evidence is not exact")
+                continuation_events = self._ambiguous_continuation_events(ledger)
+                others_unresolved = any(
+                    other.get("state") == "ambiguous_charge"
+                    and other_key != request_key
+                    and other_key not in continuation_events
+                    for other_key, other in ledger["requests"].items()
+                )
+                reserved = _money(
+                    request.get("reserved_usd"), "rejected reservation", positive=True
+                )
+                event = {
+                    "schema": HTTP_REJECTION_SETTLEMENT_SCHEMA,
+                    "request_key": request_key,
+                    "ambiguous_receipt_sha256": sha256_file(final_path),
+                    "request_identity": {
+                        key: request[key]
+                        for key in (
+                            "run_id",
+                            "stage",
+                            "paper_id",
+                            "family_id",
+                            "source_version_id",
+                            "request_sha256",
+                            "reserved_usd",
+                            "submitted_at_utc",
+                        )
+                    },
+                    "http_status": final["http_status"],
+                    "provider_error_status": provider_status,
+                    "error_body_source": source,
+                    "reproduction_record": (
+                        str(Path(reproduction["record_file"]).resolve())
+                        if source == "reproduction"
+                        else None
+                    ),
+                    "reproduction_record_sha256": (
+                        reproduction["record_file_sha256"]
+                        if source == "reproduction"
+                        else None
+                    ),
+                    "reserved_usd": str(reserved),
+                    "actual_cost_usd": "0",
+                    "live_call_made": True,
+                    "generation_started": False,
+                    "replay_prohibited": True,
+                    "evidence_file": str(evidence_file.resolve()),
+                    "evidence_file_sha256": sha256_file(evidence_file),
+                    "review_file": str(review_file.resolve()),
+                    "review_file_sha256": sha256_file(review_file),
+                    "ledger_sha256_before": expected_ledger_sha256,
+                    "gate_sha256": gate_sha256,
+                    "integrated_code_commit": gate["integrated_code_commit"],
+                    "authorized_run_id": authorized_run_id,
+                    "operator_id": operator_id,
+                    "settled_at_utc": _now(),
+                }
+                assert set(event) == HTTP_REJECTION_SETTLEMENT_FIELDS
+                atomic_json(settlement_path, event, immutable=True)
+                settlement_sha256 = sha256_file(settlement_path)
+                ledger["ambiguous_reserved_usd"] = str(
+                    _money(ledger["ambiguous_reserved_usd"], "ambiguous") - reserved
+                )
+                for row in (
+                    ledger["stages"][request["stage"]],
+                    ledger["papers"][request["family_id"]],
+                ):
+                    row["ambiguous_usd"] = str(
+                        _money(row["ambiguous_usd"], "ambiguous") - reserved
+                    )
+                if request["phase"] == "live_test":
+                    live = ledger["live_test_papers"][request["family_id"]]
+                    live["ambiguous_usd"] = str(
+                        _money(live["ambiguous_usd"], "live ambiguous") - reserved
+                    )
+                request.update(
+                    {
+                        "state": "completed",
+                        "actual_cost_usd": "0",
+                        "usage": dict(_ZERO_USAGE),
+                        "http_rejection_settlement_sha256": settlement_sha256,
+                        "settled_at_utc": event["settled_at_utc"],
+                    }
+                )
+                if not others_unresolved and int(ledger["inflight"]) == 0:
+                    ledger["halted"] = False
+                    ledger["halt_reason"] = None
+                ledger["updated_at_utc"] = _now()
+                self._validate_ledger(ledger)
+                self._validate_immutable_events(ledger)
+                self._commit_ledger(ledger)
+                return {
+                    "schema": "shared-paid-call-http-rejection-settlement-result-v1",
+                    "request_key": request_key,
+                    "applied": True,
+                    "settlement_receipt": str(settlement_path),
+                    "settlement_receipt_sha256": settlement_sha256,
+                    "released_usd": str(reserved),
+                    "halted": ledger["halted"],
+                    "affected_family_id": request["family_id"],
                     "replay_prohibited": True,
                 }
         finally:
@@ -5470,6 +5883,7 @@ class SharedGeminiBroker:
                     request_config["model"], "generateContent", payload
                 )
             except urllib.error.HTTPError as error:
+                error_body = _http_error_body(error)
                 receipt = {
                     **submitted,
                     "state": "ambiguous_charge",
@@ -5478,6 +5892,8 @@ class SharedGeminiBroker:
                     "retry_after": error.headers.get("Retry-After")
                     if error.headers
                     else None,
+                    "error_body": error_body,
+                    "provider_error_status": _provider_error_status(error_body),
                     "live_call_made": True,
                     "completed_at_utc": _now(),
                 }

@@ -78,17 +78,24 @@ def test_v8_asks_for_the_study_setting_by_dimension() -> None:
     assert "A span with no date is not a period span" in flat
 
 
-def test_v8_binds_the_reason_codes_to_the_schema_enum() -> None:
-    """Audit 4.7 E8: 79 papers produced 60 distinct geography reason codes."""
+def test_v8_binds_the_reason_codes_to_the_schema_vocabulary() -> None:
+    """Audit 4.7 E8: 79 papers produced 60 distinct geography reason codes.
+
+    The vocabulary is stated in the item description, not as an enum: the
+    provider rejects an enum inside array items with HTTP 400 (2026-09-16).
+    """
     flat = _flat(PROMPT)
-    assert "Use only the reason codes in the schema enum for that criterion" in flat
+    assert "Use only the reason codes that the schema lists for that criterion" in (
+        flat
+    )
     assert "Use other when no listed code states your reason" in flat
     assert "Use short reason codes and missing-context values" not in flat
-    enum = set(
-        SCHEMA["$defs"]["criterion"]["properties"]["reason_codes"]["items"]["enum"]
-    )
-    assert enum == set(eligibility.ELIGIBILITY_REASON_CODES)
-    assert "other" in enum
+    items = SCHEMA["$defs"]["criterion"]["properties"]["reason_codes"]["items"]
+    assert "enum" not in items
+    assert items["type"] == "string"
+    listed = items["description"].split("One of: ", 1)[1].split(".", 1)[0]
+    assert set(listed.split(", ")) == set(eligibility.ELIGIBILITY_REASON_CODES)
+    assert "other" in listed
 
 
 def test_v8_keeps_every_rule_the_audit_ordered_kept() -> None:

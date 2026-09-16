@@ -11,7 +11,7 @@ For each satisfied or failed criterion, select one or more supplied span IDs.
 Select multiple spans when separated physical lines are needed for one finding.
 Do not copy, normalize, or generate evidence quotes.
 Do not invent or repeat a span ID.
-Use only the reason codes in the schema enum for that criterion.
+Use only the reason codes that the schema lists for that criterion.
 Use other when no listed code states your reason.
 Use uncertain when the supplied material does not support a decision.
 When a criterion status is uncertain, write at least one value in that

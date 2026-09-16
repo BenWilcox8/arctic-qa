@@ -275,6 +275,34 @@ After a crash, it uses that event to complete the ledger and final receipt.
 
 If no response event exists, it treats the interrupted request as an ambiguous charge.
 
+## Provider rejections
+
+The broker records the provider error body of every non-2xx answer in the ambiguous receipt, as `error_body` (at most 4000 characters) and `provider_error_status`.
+
+A rejection before generation (HTTP 400, provider status `INVALID_ARGUMENT`) bills nothing.
+The reviewed `settle-http-rejection` command settles that one ambiguous charge at zero cost.
+It needs the private gate the request ran under, a review record, and an evidence file with schema `shared-paid-call-http-rejection-evidence-v1`.
+When the receipt recorded the error body, the evidence names `error_body_source` `receipt`.
+When the receipt predates the body capture, the evidence names `reproduction` with a record of one call of the exact same request (same `request_sha256`) that received the same rejection.
+The broker writes `<request-key>.http-rejection-settlement.json`, moves the reservation out of the ambiguous funds, and lifts the halt when every other ambiguous request has its reviewed continuation.
+The request key stays a settled record.
+The broker never replays it, and a corrected request has a new key.
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json settle-http-rejection \
+  --request-key REQUEST_SHA256 \
+  --expected-ledger-sha256 LEDGER_SHA256 \
+  --review-file /PRIVATE/DIRECTORY/review.md \
+  --evidence-file /PRIVATE/DIRECTORY/evidence.json \
+  --authorized-run-id RUN_ID --operator-id OPERATOR \
+  --streaming-budget-policy-file POLICY --price-config-file PRICE_CONFIG \
+  --execution-gate-file /PRIVATE/DIRECTORY/gate.json \
+  --shared-ledger-file LEDGER --model-receipts-dir RECEIPTS \
+  --ledger-config-transition-file TRANSITION \
+  --credential-file /PRIVATE/DIRECTORY/gemini.key \
+  --prior-construction-spend-usd KNOWN_VALUE
+```
+
 ## Usage reconciliation
 
 Use reconciliation only for a saved response with the exact omitted-zero pattern.

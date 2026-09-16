@@ -52,27 +52,9 @@
           "minItems": 1,
           "description": "Use only these codes. Use other when no listed code states your reason. The codes are recorded for measurement and take no part in the eligibility decision.",
           "items": {
-            "enum": [
-              "lat_ge_66_56",
-              "wholly_north_region",
-              "crossing_region_with_northern_evidence",
-              "modeled_arctic_domain",
-              "all_activity_outside_boundary",
-              "incidental_arctic_reference",
-              "activity_not_located",
-              "boundary_crossing_unresolved",
-              "primary_research_reported",
-              "not_primary_research",
-              "retracted_or_corrected",
-              "no_correction_or_retraction_found",
-              "access_open",
-              "access_restricted",
-              "identifier_present",
-              "identifier_absent",
-              "coverage_unknown",
-              "other"
-            ]
-          }
+              "description": "One of: lat_ge_66_56, wholly_north_region, crossing_region_with_northern_evidence, modeled_arctic_domain, all_activity_outside_boundary, incidental_arctic_reference, activity_not_located, boundary_crossing_unresolved, primary_research_reported, not_primary_research, retracted_or_corrected, no_correction_or_retraction_found, access_open, access_restricted, identifier_present, identifier_absent, coverage_unknown, other. Use other when no listed code states your reason. The provider rejects an enum inside array items (HTTP 400, observed 2026-09-16), so the vocabulary is stated here and the validator records an out-of-vocabulary code as a contract note.",
+              "type": "string"
+            }
         },
         "missing_context": {
           "type": "array",

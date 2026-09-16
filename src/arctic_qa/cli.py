@@ -536,6 +536,30 @@ def parser() -> argparse.ArgumentParser:
         "--prior-construction-spend-usd", type=Decimal, required=True
     )
 
+    rejection = commands.add_parser(
+        "settle-http-rejection",
+        help=(
+            "Settle one ambiguous charge that a provider rejection (HTTP 400) "
+            "created before generation; the reservation is released."
+        ),
+    )
+    rejection.add_argument("--request-key", required=True)
+    rejection.add_argument("--expected-ledger-sha256", required=True)
+    rejection.add_argument("--review-file", type=Path, required=True)
+    rejection.add_argument("--evidence-file", type=Path, required=True)
+    rejection.add_argument("--authorized-run-id", required=True)
+    rejection.add_argument("--operator-id", required=True)
+    rejection.add_argument("--streaming-budget-policy-file", type=Path, required=True)
+    rejection.add_argument("--price-config-file", type=Path, required=True)
+    rejection.add_argument("--execution-gate-file", type=Path, required=True)
+    rejection.add_argument("--shared-ledger-file", type=Path, required=True)
+    rejection.add_argument("--model-receipts-dir", type=Path, required=True)
+    rejection.add_argument("--ledger-config-transition-file", type=Path)
+    rejection.add_argument("--credential-file", type=Path, required=True)
+    rejection.add_argument(
+        "--prior-construction-spend-usd", type=Decimal, required=True
+    )
+
     orphaned = commands.add_parser(
         "authorize-orphaned-continuation",
         help="Release execution occupancy for a reviewed dead-owner request.",
@@ -741,6 +765,8 @@ def main(argv: list[str] | None = None) -> int:
             return _emit(args, abstention_cli.handle(args))
         if args.command == "reconcile-usage":
             return _emit(args, _reconcile_usage(args))
+        if args.command == "settle-http-rejection":
+            return _emit(args, _settle_http_rejection(args))
         if args.command == "authorize-ambiguous-continuation":
             return _emit(args, _authorize_ambiguous_continuation(args))
         if args.command == "authorize-orphaned-continuation":
@@ -942,6 +968,31 @@ def _authorize_ambiguous_continuation(args) -> dict[str, Any]:
         ),
     )
     return broker.authorize_ambiguous_continuation(
+        request_key=args.request_key,
+        expected_ledger_sha256=args.expected_ledger_sha256,
+        review_file=args.review_file.resolve(),
+        evidence_file=args.evidence_file.resolve(),
+        authorized_run_id=args.authorized_run_id,
+        operator_id=args.operator_id,
+    )
+
+
+def _settle_http_rejection(args) -> dict[str, Any]:
+    broker = SharedGeminiBroker(
+        policy_file=args.streaming_budget_policy_file.resolve(),
+        price_config_file=args.price_config_file.resolve(),
+        execution_gate_file=args.execution_gate_file.resolve(),
+        ledger_file=args.shared_ledger_file.resolve(),
+        receipts_dir=args.model_receipts_dir.resolve(),
+        credential_file=args.credential_file.resolve(),
+        prior_construction_spend_usd=args.prior_construction_spend_usd,
+        config_transition_file=(
+            args.ledger_config_transition_file.resolve()
+            if args.ledger_config_transition_file
+            else None
+        ),
+    )
+    return broker.settle_http_rejection(
         request_key=args.request_key,
         expected_ledger_sha256=args.expected_ledger_sha256,
         review_file=args.review_file.resolve(),

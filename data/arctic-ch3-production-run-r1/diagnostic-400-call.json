@@ -1,0 +1,13 @@
+{
+  "schema": "arctic-ch3-diagnostic-call-v1",
+  "purpose": "Firstmate decision 2026-09-16 07:30 UTC step 1: one diagnostic generateContent call with the exact traced payload of the failed request, outside the broker, to read the 400 message.",
+  "request_key": "585436686ba860d2a789530888a8a8d15d11045d7489df09d62f53344190d680",
+  "model": "gemini-3.8-flash",
+  "request_sha256_from_trace": "f8e078e8ad6951cc982528cf26f6878137cd20e19c27116242b3183c6fa21ecd",
+  "canonical_payload_sha256": "25191b7922f1defbb18fbfceb827950403e02f8c4e5e49114230722f59b7c174",
+  "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
+  "started_at_utc": "2026-09-16T07:30:55.454684+00:00",
+  "finished_at_utc": "2026-09-16T07:30:56.651529+00:00",
+  "http_status": 400,
+  "response_body": "{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"Request contains an invalid argument.\",\n    \"status\": \"INVALID_ARGUMENT\"\n  }\n}\n"
+}
