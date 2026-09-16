@@ -1044,6 +1044,7 @@ def test_streaming_cli_moves_one_eligible_paper_to_validated_export(
     assert result["counts"] == {
         "accepted_base_questions": 1,
         "candidate_processing_fault": 0,
+        "count_tokens_unavailable": 0,
         "eligibility_rejected": 0,
         "eligibility_unresolved": 0,
         "generation_rejected": 0,
@@ -1515,6 +1516,7 @@ def test_streaming_advances_after_uncertain_brokered_eligibility(
     assert result["counts"] == {
         "accepted_base_questions": 0,
         "candidate_processing_fault": 0,
+        "count_tokens_unavailable": 0,
         "eligibility_rejected": 1,
         "eligibility_unresolved": 1,
         "generation_rejected": 0,
@@ -2705,6 +2707,7 @@ def test_streaming_cli_stops_after_eligibility_rejection(tmp_path: Path) -> None
     assert result["counts"] == {
         "accepted_base_questions": 0,
         "candidate_processing_fault": 0,
+        "count_tokens_unavailable": 0,
         "eligibility_rejected": 1,
         "eligibility_unresolved": 0,
         "generation_rejected": 0,
