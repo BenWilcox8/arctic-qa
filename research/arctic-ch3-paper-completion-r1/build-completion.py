@@ -568,6 +568,10 @@ class Activation:
     # ---- launch -----------------------------------------------------------
 
     def write_launcher(self, state: dict) -> None:
+        # The launcher is left read-only, so a relaunch makes it writable again
+        # before it writes the same contents.
+        if self.launcher.exists():
+            os.chmod(self.launcher, 0o644)
         self.launcher.write_text(
             "\n".join(
                 [
