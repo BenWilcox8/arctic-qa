@@ -216,17 +216,37 @@ class Activation:
 
     # ---- prepare ----------------------------------------------------------
 
-    def prepare(self) -> None:
+    def live_inputs(self) -> tuple[Path, Path, Path]:
+        """Return the gate, policy and transition of the run this succeeds.
+
+        A running producer names them itself. A producer that exited names
+        them nowhere, so the three come from the environment instead; the run
+        continues under the last authorized gate either way.
+        """
         live = self.live_producer()
-        assert live is not None, "no producer runs; name the live gate by hand"
-        _, arguments = live
-        live_gate = Path(self.live_argument(arguments, "--execution-gate-file"))
-        live_policy = Path(
-            self.live_argument(arguments, "--streaming-budget-policy-file")
+        if live is not None:
+            _, arguments = live
+            return (
+                Path(self.live_argument(arguments, "--execution-gate-file")),
+                Path(self.live_argument(arguments, "--streaming-budget-policy-file")),
+                Path(self.live_argument(arguments, "--ledger-config-transition-file")),
+            )
+        gate = os.environ.get("CH3_LIVE_GATE")
+        transition = os.environ.get("CH3_LIVE_TRANSITION")
+        assert gate and transition, (
+            "no producer runs; set CH3_LIVE_GATE and CH3_LIVE_TRANSITION to the "
+            "gate and transition of the run this one succeeds"
         )
-        live_transition = Path(
-            self.live_argument(arguments, "--ledger-config-transition-file")
+        return (
+            Path(gate),
+            Path(os.environ.get("CH3_LIVE_POLICY", str(POLICY_V10))),
+            Path(transition),
         )
+
+    def prepare(self) -> None:
+        live_gate, live_policy, live_transition = self.live_inputs()
+        assert live_gate.is_file(), live_gate
+        assert live_transition.is_file(), live_transition
         assert live_policy == POLICY_V10, live_policy
         prior_gate = read_json(live_gate)
         assert (
