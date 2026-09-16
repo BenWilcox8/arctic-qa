@@ -1,13 +1,23 @@
 {
   "schema": "benchmark-evaluation-model-pause-v1",
   "config_id": "arctic-abstention-model-pause-v1",
-  "purpose": "Models the evaluator must not call for now. A paused model's trials stay pending: they are not recorded, not counted as invalid, and they run after the resume time without a re-run of anything else. Captain order 2026-09-16: 'pause the fable evaluation because I only have ~80% fable usage left today; I will run the fable benchmarking after the reset at 6:00pm today'.",
+  "purpose": "Models the evaluator must not call for now. A paused model's trials stay pending: they are not recorded, not counted as invalid, and they run after the resume time without a re-run of anything else. Captain order 2026-09-16: 'pause the fable evaluation because I only have ~80% fable usage left today; I will run the fable benchmarking after the reset at 6:00pm today'. Firstmate order 2026-09-16: pause both Gemini models until the per-phase in-flight fix is landed and the production run is re-snapshotted.",
   "paused_models": {
     "claude-fable-5-1": {
       "reason": "the captain's daily Claude Fable quota is about 80 percent used",
       "paused_at_utc": "2026-09-16T10:20:00Z",
       "resume_at_utc": "2026-09-16T23:00:00Z",
       "resume_note": "6:00 pm Central on 2026-09-16, the captain's quota reset"
+    },
+    "gemini-3.8-flash": {
+      "reason": "a concurrent evaluation call fills the shared ledger's global in-flight count, which blocks the construction phase of the production run",
+      "paused_at_utc": "2026-09-16T11:40:00Z",
+      "resume_note": "firstmate lifts this entry after it lands the per-phase in-flight fix and re-snapshots the production run"
+    },
+    "gemini-3.7-flash": {
+      "reason": "a concurrent evaluation call fills the shared ledger's global in-flight count, which blocks the construction phase of the production run",
+      "paused_at_utc": "2026-09-16T11:40:00Z",
+      "resume_note": "firstmate lifts this entry after it lands the per-phase in-flight fix and re-snapshots the production run"
     }
   }
 }
