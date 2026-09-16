@@ -281,6 +281,12 @@ TRANSIENT_RESERVATION_RETRY_INTERVAL_SECONDS = 3.0
 # on 2026-09-16 while a release of another task held the lock.
 OPERATION_LOCK_WAIT_SECONDS = 120.0
 OPERATION_LOCK_WAIT_INTERVAL_SECONDS = 1.0
+# A concurrent request holds the operation lock only through its admission, so
+# the next request is usually waiting for a lock that frees within
+# milliseconds. A one-second poll would serialise the admissions at one a
+# second whatever the policy allows, so the concurrent path polls finely. The
+# bound and the refusal are unchanged.
+OPERATION_LOCK_CONCURRENT_WAIT_INTERVAL_SECONDS = 0.01
 OPERATION_LOCK_BUSY_REASON = "another paid broker operation is active"
 ALLOWED_LIVE_TEST_LIMITS = {(20, 100), (40, 100), (41, 101), (None, None)}
 STREAM_INPUT_BINDING_VERSION = "stream-input-binding-v1"
@@ -626,6 +632,7 @@ def hold_operation_lock(
     *,
     wait_seconds: float = 0.0,
     busy_error: type[ValueError] = ValueError,
+    poll_seconds: float | None = None,
 ) -> Any:
     """Open the exclusive operation lock file and hold it, or refuse.
 
@@ -653,7 +660,12 @@ def hold_operation_lock(
             if remaining <= 0:
                 handle.close()
                 raise busy_error(OPERATION_LOCK_BUSY_REASON) from error
-            time.sleep(min(OPERATION_LOCK_WAIT_INTERVAL_SECONDS, remaining))
+            interval = (
+                OPERATION_LOCK_WAIT_INTERVAL_SECONDS
+                if poll_seconds is None
+                else poll_seconds
+            )
+            time.sleep(min(interval, remaining))
 
 
 def activate_exclusive_batch_mode(
@@ -7042,6 +7054,11 @@ class SharedGeminiBroker:
                 self._operation_lock_file,
                 wait_seconds=OPERATION_LOCK_WAIT_SECONDS,
                 busy_error=BrokerOperationBusyError,
+                poll_seconds=(
+                    OPERATION_LOCK_CONCURRENT_WAIT_INTERVAL_SECONDS
+                    if self.concurrent_construction
+                    else None
+                ),
             )
         if concurrent:
             self._admission_lock.acquire()
