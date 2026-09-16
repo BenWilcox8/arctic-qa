@@ -28,7 +28,111 @@ CRITERIA = (
 
 ELIGIBILITY_RESPONSE_V2 = "eligibility-response-v2"
 ELIGIBILITY_RESPONSE_V3 = "eligibility-response-v3"
+ELIGIBILITY_RESPONSE_V4 = "eligibility-response-v4"
 ELIGIBILITY_STATUS_MAPPING_VERSION = "eligibility-criterion-status-map-v1"
+
+# One definition of "the criteria that must be satisfied", read by the status
+# mapping and by the bounded geography re-screen. Chapter 2 lost the whole
+# re-screen because the two carried different sets (audit 4.7, finding E2).
+REQUIRED_CRITERIA = frozenset(
+    {
+        "published_primary_findings",
+        "stable_identity_version",
+        "study_geography",
+        "access_rights_evidence",
+    }
+)
+# The frozen corpus carries no retraction registry, so this criterion is
+# uncertain on every paper. Uncertain satisfies it; failed does not.
+CORRECTION_SATISFIABLE_STATUSES = frozenset({"satisfied", "uncertain"})
+
+# The reason codes the classifier may write. They are recorded for measurement
+# and take no part in `_status_mapping_v2` and no part in the re-screen pool
+# (audit 4.7, finding E8). An out-of-enum code is a contract note, never an
+# error, because a rejected code would create a new lost-paper class.
+ELIGIBILITY_REASON_CODES = frozenset(
+    {
+        "lat_ge_66_56",
+        "wholly_north_region",
+        "crossing_region_with_northern_evidence",
+        "modeled_arctic_domain",
+        "all_activity_outside_boundary",
+        "incidental_arctic_reference",
+        "activity_not_located",
+        "boundary_crossing_unresolved",
+        "primary_research_reported",
+        "not_primary_research",
+        "retracted_or_corrected",
+        "no_correction_or_retraction_found",
+        "access_open",
+        "access_restricted",
+        "identifier_present",
+        "identifier_absent",
+        "coverage_unknown",
+        "other",
+    }
+)
+
+# The contracts that carry hash-bound article spans, and the subset of those
+# that also carry the eligible Arctic scope record.
+SPAN_CONTRACT_VERSIONS = frozenset(
+    {ELIGIBILITY_RESPONSE_V2, ELIGIBILITY_RESPONSE_V3, ELIGIBILITY_RESPONSE_V4}
+)
+SCOPE_CONTRACT_VERSIONS = frozenset({ELIGIBILITY_RESPONSE_V3, ELIGIBILITY_RESPONSE_V4})
+
+SCOPE_DIMENSIONS = ("geography", "period", "sample", "method", "definition")
+
+# A dimension label is a claim about the span's own text, so the label is
+# checked against that text (audit 4.7, phase B). The test only refuses a label
+# the span cannot support; it never admits a span the geography rules refused.
+_DIMENSION_MARKERS = {
+    "geography": re.compile(
+        r"\d+(?:[.,]\d+)?\s*(?:°|º|∘|deg(?:rees)?\.?)\s*[NSEW]\b"
+        r"|\d+(?:[.,]\d+)?\s*(?:°|º|∘|deg(?:rees)?\.?)?\s*"
+        r"(?:north|south)\b"
+        r"|\b(?:latitude|longitude|station|stations|site|sites|region|regions|"
+        r"sea|seas|ocean|island|islands|glacier|glaciers|fjord|fjords|bay|"
+        r"basin|transect|domain|grid|coast|coastal|peninsula|archipelago|"
+        r"tundra|permafrost|ice\s+cap|ice\s+sheet|shelf|catchment|watershed|"
+        r"arctic|antarctic|boreal|subarctic)\b",
+        re.IGNORECASE,
+    ),
+    "period": re.compile(
+        r"\b(?:1[89]|20)\d{2}\b"
+        r"|\b(?:january|february|march|april|may|june|july|august|september|"
+        r"october|november|december)\b",
+        re.IGNORECASE,
+    ),
+    "sample": re.compile(
+        r"\b(?:sampl\w*|collect\w*|measur\w*|specimen\w*|participant\w*|"
+        r"individual\w*|subject\w*|core|cores|replicate\w*|aliquot\w*|"
+        r"profile\w*|cohort\w*|observation\w*|record\w*)\b|\bn\s*=",
+        re.IGNORECASE,
+    ),
+    "method": re.compile(
+        r"\b(?:instrument\w*|sensor\w*|satellite\w*|radar|lidar|sonar|"
+        r"spectromet\w*|chromatograph\w*|microscop\w*|model|models|modell?ed|"
+        r"simulat\w*|reanalys\w*|algorithm\w*|retrieval\w*|vessel|icebreaker|"
+        r"ship|aircraft|buoy|buoys|mooring\w*|station|platform|analyz\w*|"
+        r"analys\w*|assay\w*|sequenc\w*|method\w*|resolution|protocol\w*|"
+        r"campaign|cruise|expedition)\b|R/V",
+        re.IGNORECASE,
+    ),
+    # An acronym is defined either as "expansion (ABBR)" or as "ABBR (expansion)".
+    "definition": re.compile(
+        r"\(\s*[A-Z][A-Za-z0-9‐-]{1,15}\s*\)|\b[A-Z][A-Z0-9]{1,15}\b\s*\("
+    ),
+}
+
+# A phrase that survives a bounded repair must still name a place, a stratum or
+# a population. A bare number, a percentage, a unit or a vague label is not a
+# scope phrase (audit 4.7, phase D, the streaming format re-ask).
+_NON_SPECIFIC_PHRASE = re.compile(
+    r"^(?:[-+]?\d+(?:[.,]\d+)?\s*(?:%|percent|per\s*cent|[a-z°/²³^-]{1,12})?"
+    r"|in\s+the\s+arctic|the\s+arctic|arctic|study\s+area|the\s+study\s+area"
+    r"|this\s+study|the\s+region|the\s+site|the\s+sites|the\s+station)$",
+    re.IGNORECASE,
+)
 
 # A formatting mistake is a mistake about how the answer is written, never about
 # the science. It must not end the paper and it must not halt the batch. The
@@ -40,14 +144,30 @@ ELIGIBILITY_STATUS_MAPPING_VERSION = "eligibility-criterion-status-map-v1"
 FORMAT_ERROR_CODES = frozenset(
     {
         "eligible_arctic_scope_activity_unbound",
+        "eligible_arctic_scope_dimension_unsupported",
         "eligible_arctic_scope_missing",
         "eligible_arctic_scope_phrase_missing",
+        "eligible_arctic_scope_phrase_not_specific",
         "eligible_arctic_scope_phrase_unbound",
         "eligible_arctic_scope_span_unknown",
+        # A residual safety net. Under the non-fatal rule below this code is
+        # emitted only beside a broken criterion record, so it is unreachable on
+        # its own; the entry keeps a future bare case re-askable instead of
+        # terminal (audit 4.7, finding E6).
+        "criterion_missing_context_absent",
     }
 )
 MAXIMUM_FORMAT_ATTEMPTS = 2
 UNRESOLVED_STATE = "unresolved_rescreenable"
+
+# A code that is recorded and never decides anything. `criteria_valid` stays
+# true, the decision stands, and the run is not paused.
+NON_FATAL_CONTRACT_CODES = frozenset(
+    {
+        "criterion_missing_context_absent",
+        "reason_code_out_of_enum",
+    }
+)
 
 
 _WRAPPED_WORD = re.compile(r"(?<=[^\W\d_])[-" + chr(0x2010) + r"]\s*\n\s*")
@@ -458,11 +578,7 @@ def _segments(text: str, page_chars: int = 12000) -> list[dict[str, Any]]:
 
 def _response_contract_version(schema: dict[str, Any]) -> str:
     value = (schema.get("properties") or {}).get("schema_version", {}).get("const")
-    return (
-        value
-        if value in {ELIGIBILITY_RESPONSE_V2, ELIGIBILITY_RESPONSE_V3}
-        else "eligibility-response-v1"
-    )
+    return value if value in SPAN_CONTRACT_VERSIONS else "eligibility-response-v1"
 
 
 def _line_fragments(text: str, maximum_bytes: int) -> list[str]:
@@ -602,10 +718,7 @@ def _span_manifest_v2(
 def _validation_evidence(
     text: str, extraction_sha256: str, schema: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    if _response_contract_version(schema) in {
-        ELIGIBILITY_RESPONSE_V2,
-        ELIGIBILITY_RESPONSE_V3,
-    }:
+    if _response_contract_version(schema) in SPAN_CONTRACT_VERSIONS:
         return _span_blocks_v2(text, extraction_sha256)
     return _segments(text)
 
@@ -627,7 +740,7 @@ def _persist_span_manifest_v2(
     schema: dict[str, Any],
 ) -> dict[str, str]:
     response_version = _response_contract_version(schema)
-    if response_version not in {ELIGIBILITY_RESPONSE_V2, ELIGIBILITY_RESPONSE_V3}:
+    if response_version not in SPAN_CONTRACT_VERSIONS:
         return {}
     manifest = _span_manifest_v2(
         _span_blocks_v2(text, extraction_sha256), response_version
@@ -719,17 +832,64 @@ def _repair_note(prior: dict[str, Any] | None) -> dict[str, Any] | None:
         for row in parsed.get("criteria", [])
         if isinstance(row, dict)
     }
+    # The chapter 2 note carried the codes and the frozen statuses and nothing
+    # else, so the model had to guess which phrase failed and against what text
+    # (audit 4.7, finding E6). The detail comes from the validator that raised
+    # the code, so the note names the exact defect.
+    detail = prior.get("validation") or {}
+    detail = detail.get("format_repair_detail") or {}
     return {
         "attempt": int(prior.get("attempts") or 0) + 1,
         "format_errors": list(prior.get("format_errors") or []),
         "frozen_criterion_statuses": statuses,
+        **(
+            {"unbound_phrases": list(detail["unbound_phrases"])}
+            if detail.get("unbound_phrases")
+            else {}
+        ),
+        **(
+            {"finding_span_text": str(detail["finding_span_text"])}
+            if detail.get("finding_span_text")
+            else {}
+        ),
+        **(
+            {"mislabelled_dimensions": list(detail["mislabelled_dimensions"])}
+            if detail.get("mislabelled_dimensions")
+            else {}
+        ),
         "instruction": (
             "Your last answer had a formatting mistake, listed in format_errors. "
-            "Answer again with the same criterion statuses, listed in "
+            "unbound_phrases lists each question_scope_phrases value that is not "
+            "in finding_span_text. Replace each one with a phrase you copy from "
+            "finding_span_text, or add the finding span that states it. Each "
+            "phrase must still name a station, region, stratum, population, or "
+            "modeled domain. mislabelled_dimensions lists each activity span "
+            "whose text does not state the dimension you gave it. Answer again "
+            "with the same criterion statuses, listed in "
             "frozen_criterion_statuses, and correct only the span and phrase "
             "fields. Do not change any criterion status."
         ),
     }
+
+
+def repaired_phrases_are_specific(parsed: Any) -> bool:
+    """Say whether every scope phrase of a repaired answer still names a scope.
+
+    A bounded re-ask must not buy a phrase that binds to the finding text and
+    identifies nothing. This runs on the repair answer only, so it cannot change
+    what a first-pass answer decides.
+    """
+    if not isinstance(parsed, dict):
+        return False
+    scope = parsed.get("eligible_arctic_scope")
+    if not isinstance(scope, dict):
+        return True
+    phrases = scope.get("question_scope_phrases")
+    if not isinstance(phrases, list):
+        return True
+    return all(
+        isinstance(phrase, str) and phrase_is_specific(phrase) for phrase in phrases
+    )
 
 
 def _repair_moved_a_status(prior: dict[str, Any] | None, parsed: Any) -> bool:
@@ -748,12 +908,56 @@ def _repair_moved_a_status(prior: dict[str, Any] | None, parsed: Any) -> bool:
     return current != frozen
 
 
+SHADOW_TWO_PASS_VERSION = "eligibility-two-pass-shadow-v1"
+SHADOW_SHORT_VIEW_CHARS = 8000
+
+
+def shadow_two_pass_measurement(
+    text: str, resolved_scope: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Measure what a short first view would have deferred. It decides nothing.
+
+    A two-pass screen was proposed as a saving and refuted (audit 4.10). A
+    positive eligibility decision is load-bearing downstream, because the
+    selected activity spans feed `_require_arctic_scope_custody` and the writer
+    context bundle, so a short view cannot decide eligible. This records the
+    deferral rate and the span quality at USD 0 until the numbers exist.
+
+    The record carries `applied: False` and `booked_usd: "0"`. No caller reads it
+    as a decision, and no provider call is made for it.
+    """
+    short_view = text[:SHADOW_SHORT_VIEW_CHARS]
+    spans = (resolved_scope or {}).get("activity_spans") or []
+    quotes = [str(span.get("quote") or "") for span in spans if isinstance(span, dict)]
+    inside = [quote for quote in quotes if quote and quote in short_view]
+    return {
+        "schema": SHADOW_TWO_PASS_VERSION,
+        "applied": False,
+        "decision_path": False,
+        "booked_usd": "0",
+        "short_view_chars": len(short_view),
+        "source_chars": len(text),
+        "short_view_holds_arctic_marker": bool(
+            _DIMENSION_MARKERS["geography"].search(_normalize_for_binding(short_view))
+        ),
+        "selected_activity_spans": len(quotes),
+        "activity_spans_inside_short_view": len(inside),
+        # The only two labels a short view may carry. Neither is a status.
+        "measurement": (
+            "short_view_covers_selected_spans"
+            if quotes and len(inside) == len(quotes)
+            else "defer_to_full_text"
+        ),
+    }
+
+
 def geography_rescreen_keys(prior_run_dir: Path) -> set[str]:
     """Return the papers a bounded geography re-screen may ask about again.
 
     A paper qualifies only when the first screening decided uncertain and
-    study_geography is its one unsatisfied criterion. A failed geography is a
-    decision, not an unresolved criterion, so a correct exclusion never returns.
+    study_geography is its one unsatisfied criterion, under the same required set
+    that `_status_mapping_v2` uses. A failed geography is a decision, not an
+    unresolved criterion, so a correct exclusion never returns.
     """
     keys: set[str] = set()
     for directory in ("jobs", "unresolved"):
@@ -771,14 +975,7 @@ def geography_rescreen_keys(prior_run_dir: Path) -> set[str]:
                 for item in (row.get("parsed_response") or {}).get("criteria", [])
                 if isinstance(item, dict)
             }
-            if statuses.get("study_geography") != "uncertain":
-                continue
-            others = [
-                name
-                for name, status in statuses.items()
-                if name != "study_geography" and status != "satisfied"
-            ]
-            if others:
+            if not geography_rescreen_eligible(statuses):
                 continue
             keys.add(str(row.get("candidate_key")))
     return keys
@@ -835,7 +1032,7 @@ def _request_payload(
         "metadata_sha256": sha256_bytes(canonical_json(metadata).encode()),
     }
     response_version = _response_contract_version(schema)
-    if response_version in {ELIGIBILITY_RESPONSE_V2, ELIGIBILITY_RESPONSE_V3}:
+    if response_version in SPAN_CONTRACT_VERSIONS:
         span_blocks = _span_blocks_v2(text, str(source["extraction_sha256"]))
         span_manifest = _span_manifest_v2(span_blocks, response_version)
         hashes["span_manifest_sha256"] = sha256_bytes(
@@ -1537,6 +1734,43 @@ def _validate_response_v1(
     }
 
 
+def unsatisfied_required_criteria(
+    statuses: dict[str, Any], *, ignore: frozenset[str] | set[str] = frozenset()
+) -> list[str]:
+    """Name every criterion that still bars an eligible decision.
+
+    This is the one definition of the required set. `_status_mapping_v2` reads
+    it with no exemption. The bounded geography re-screen reads it with
+    study_geography exempt, because that is the criterion it re-decides. The two
+    cannot drift apart again (audit 4.7, finding E2).
+    """
+    unresolved = [
+        criterion
+        for criterion in sorted(REQUIRED_CRITERIA - set(ignore))
+        if statuses.get(criterion) != "satisfied"
+    ]
+    if (
+        statuses.get("correction_retraction_coverage")
+        not in CORRECTION_SATISFIABLE_STATUSES
+    ):
+        unresolved.append("correction_retraction_coverage")
+    return sorted(set(unresolved))
+
+
+def geography_rescreen_eligible(statuses: dict[str, Any]) -> bool:
+    """Say whether one bounded geography re-screen can still free this paper.
+
+    The paper qualifies only when study_geography is uncertain and every other
+    required criterion is already satisfied. A failed geography is a decision,
+    not an unresolved criterion, so a correct exclusion never returns.
+    """
+    if statuses.get("study_geography") != "uncertain":
+        return False
+    return not unsatisfied_required_criteria(
+        statuses, ignore=frozenset({"study_geography"})
+    )
+
+
 def _status_mapping_v2(by_id: dict[str, dict[str, Any]]) -> tuple[str, list[str]]:
     failed = sorted(
         criterion
@@ -1545,24 +1779,16 @@ def _status_mapping_v2(by_id: dict[str, dict[str, Any]]) -> tuple[str, list[str]
     )
     if failed:
         return "excluded", [f"criterion_failed:{criterion}" for criterion in failed]
-    required = {
-        "published_primary_findings",
-        "stable_identity_version",
-        "study_geography",
-        "access_rights_evidence",
+    statuses = {
+        criterion: row.get("status")
+        for criterion, row in by_id.items()
+        if isinstance(row, dict)
     }
-    unresolved = sorted(
-        criterion
-        for criterion in required
-        if by_id.get(criterion, {}).get("status") != "satisfied"
-    )
-    correction = by_id.get("correction_retraction_coverage", {}).get("status")
-    if not unresolved and correction in {"satisfied", "uncertain"}:
+    unresolved = unsatisfied_required_criteria(statuses)
+    if not unresolved:
         return "eligible", ["all_required_criteria_satisfied"]
-    if correction not in {"satisfied", "uncertain"}:
-        unresolved.append("correction_retraction_coverage")
     return "uncertain", [
-        f"criterion_unresolved:{criterion}" for criterion in sorted(set(unresolved))
+        f"criterion_unresolved:{criterion}" for criterion in unresolved
     ]
 
 
@@ -1687,7 +1913,33 @@ def _span_catalog_v2(
     return catalog, sorted(set(errors))
 
 
-def _resolved_scope_span(span: dict[str, Any]) -> dict[str, Any]:
+def _dimension_supported(text: str, dimension: str) -> bool:
+    """Say whether a span's own text states the dimension it is labelled with.
+
+    The label is a claim, so it is checked against the text. A span with no date
+    is not a period span. The test refuses a label; it never admits a span that
+    the ordered geography procedure refused.
+    """
+    marker = _DIMENSION_MARKERS.get(dimension)
+    if marker is None:
+        return False
+    return bool(marker.search(_normalize_for_binding(text)))
+
+
+def phrase_is_specific(phrase: str) -> bool:
+    """Say whether a scope phrase still names a place, stratum or population.
+
+    A bare number, a percentage, a bare unit and a vague label such as "In the
+    Arctic" identify nothing to a downstream reader. Prompt v7 already stated the
+    rule; this makes it checkable on a repaired answer (audit 4.7, phase D).
+    """
+    value = _normalize_for_binding(phrase).strip()
+    return bool(value) and not _NON_SPECIFIC_PHRASE.match(value)
+
+
+def _resolved_scope_span(
+    span: dict[str, Any], *, dimension: str | None = None
+) -> dict[str, Any]:
     return {
         "span_id": span["span_id"],
         "locator": {
@@ -1699,7 +1951,28 @@ def _resolved_scope_span(span: dict[str, Any]) -> dict[str, Any]:
         "end_byte": span["end_byte"],
         "quote": span["text"],
         "source_bytes_sha256": span["span_sha256"],
+        **({"dimension": dimension} if dimension else {}),
     }
+
+
+def _measurement_relaxed_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Drop the reason-code enum from the schema the Python validator applies.
+
+    The shipped schema keeps the enum, so the provider's structured output
+    constrains what the classifier may write. The enum is a measurement
+    vocabulary: it takes no part in `_status_mapping_v2` and no part in the
+    re-screen pool (audit 4.7, finding E8). Enforcing it here would turn a
+    vocabulary slip into a lost paper, which is the defect finding E1 removed.
+    An out-of-enum code is recorded as a contract note instead.
+    """
+    criterion = ((schema.get("$defs") or {}).get("criterion") or {}).get(
+        "properties"
+    ) or {}
+    if "enum" not in ((criterion.get("reason_codes") or {}).get("items") or {}):
+        return schema
+    relaxed = json.loads(json.dumps(schema))
+    del relaxed["$defs"]["criterion"]["properties"]["reason_codes"]["items"]["enum"]
+    return relaxed
 
 
 def _validate_response_span_contract(
@@ -1710,7 +1983,12 @@ def _validate_response_span_contract(
     response_schema: dict[str, Any],
     response_schema_version: str,
 ) -> dict[str, Any]:
-    errors = _schema_errors(value, response_schema, response_schema)
+    applied_schema = (
+        _measurement_relaxed_schema(response_schema)
+        if response_schema_version == ELIGIBILITY_RESPONSE_V4
+        else response_schema
+    )
+    errors = _schema_errors(value, applied_schema, applied_schema)
     required = {
         "schema_version",
         "status_mapping_version",
@@ -1720,7 +1998,7 @@ def _validate_response_span_contract(
         "correction_metadata_used",
         "input_echo",
     }
-    if response_schema_version == ELIGIBILITY_RESPONSE_V3:
+    if response_schema_version in SCOPE_CONTRACT_VERSIONS:
         required.add("eligible_arctic_scope")
     if not isinstance(value, dict) or set(value) != required:
         return {
@@ -1758,6 +2036,7 @@ def _validate_response_span_contract(
         errors.append("criteria_invalid")
     by_id: dict[str, dict[str, Any]] = {}
     resolved: list[dict[str, Any]] = []
+    notes: list[str] = []
     for row in criteria:
         if not isinstance(row, dict) or set(row) != {
             "criterion_id",
@@ -1786,10 +2065,16 @@ def _validate_response_span_contract(
         ):
             errors.append(f"criterion_invalid:{criterion}")
             continue
+        if (
+            response_schema_version == ELIGIBILITY_RESPONSE_V4
+            and not set(row["reason_codes"]) <= ELIGIBILITY_REASON_CODES
+        ):
+            # Measurement only. A code outside the enum never prunes the
+            # re-screen pool and never moves a status (audit 4.7, finding E8).
+            notes.append(f"reason_code_out_of_enum:{criterion}")
+        criterion_errors = len(errors)
         if row["status"] in {"satisfied", "failed"} and not row["evidence"]:
             errors.append(f"criterion_evidence_missing:{criterion}")
-        if row["status"] == "uncertain" and not row["missing_context"]:
-            errors.append(f"criterion_missing_context_absent:{criterion}")
         selected_for_criterion: set[str] = set()
         for evidence in row["evidence"]:
             if not isinstance(evidence, dict) or set(evidence) != {"span_ids"}:
@@ -1836,32 +2121,73 @@ def _validate_response_span_contract(
                         ],
                     }
                 )
+        if row["status"] == "uncertain" and not row["missing_context"]:
+            # Chapter 2 lost 22 papers to this code, and neither the prompt nor
+            # the schema stated the rule (audit 4.7, finding E1). `missing_context`
+            # is a diagnostic field: it takes no part in `_status_mapping_v2`, so
+            # an empty one cannot make a paper eligible and must not delete the
+            # decision. Prompt v8 and schema v4 now state the rule, and the check
+            # is non-fatal whenever the rest of the criterion record is complete.
+            # It stays fatal only when that criterion already produced an error,
+            # where the paper is a screening error on the other code anyway.
+            if len(errors) == criterion_errors:
+                notes.append(f"criterion_missing_context_absent:{criterion}")
+            else:
+                errors.append(f"criterion_missing_context_absent:{criterion}")
     if set(by_id) != set(CRITERIA):
         errors.append("criterion_set_invalid")
     resolved_scope: dict[str, Any] | None = None
-    if response_schema_version == ELIGIBILITY_RESPONSE_V3:
+    repair_detail: dict[str, Any] = {}
+    if response_schema_version in SCOPE_CONTRACT_VERSIONS:
         scope = value.get("eligible_arctic_scope")
         geography = by_id.get("study_geography", {})
+        activity_key = (
+            "activity_spans"
+            if response_schema_version == ELIGIBILITY_RESPONSE_V4
+            else "activity_span_ids"
+        )
         if not isinstance(scope, dict) or set(scope) != {
             "component",
-            "activity_span_ids",
+            activity_key,
             "finding_span_ids",
             "question_scope_phrases",
         }:
             errors.append("eligible_arctic_scope_invalid")
         else:
             component = scope.get("component")
-            activity_ids = scope.get("activity_span_ids")
             finding_ids = scope.get("finding_span_ids")
             phrases = scope.get("question_scope_phrases")
-            lists_valid = all(
+            # v4 labels every activity span with the study-setting dimension its
+            # own text states (audit 4.7, phase B). v3 carries bare span ids.
+            activity_records = scope.get(activity_key)
+            if response_schema_version == ELIGIBILITY_RESPONSE_V4:
+                records_valid = isinstance(activity_records, list) and all(
+                    isinstance(record, dict)
+                    and set(record) == {"span_id", "dimension"}
+                    and isinstance(record.get("span_id"), str)
+                    and record["span_id"]
+                    and record.get("dimension") in SCOPE_DIMENSIONS
+                    for record in activity_records
+                )
+                activity_ids = (
+                    [record["span_id"] for record in activity_records]
+                    if records_valid
+                    else None
+                )
+                if not records_valid or len(activity_ids) != len(set(activity_ids)):
+                    errors.append("eligible_arctic_scope_invalid")
+                    activity_ids = None
+            else:
+                activity_ids = activity_records
+            lists_valid = activity_ids is not None and all(
                 isinstance(values, list)
                 and len(values) == len(set(values))
                 and all(isinstance(item, str) and item for item in values)
                 for values in (activity_ids, finding_ids, phrases)
             )
             if not lists_valid:
-                errors.append("eligible_arctic_scope_invalid")
+                if activity_ids is not None:
+                    errors.append("eligible_arctic_scope_invalid")
             elif geography.get("status") == "satisfied":
                 if (
                     component not in {"whole_study", "separable_arctic_component"}
@@ -1883,7 +2209,28 @@ def _validate_response_span_contract(
                 }
                 if unknown:
                     errors.append("eligible_arctic_scope_span_unknown")
-                if not set(activity_ids) <= geography_ids:
+                if response_schema_version == ELIGIBILITY_RESPONSE_V4:
+                    # The subset test made the writer's study-setting spans a
+                    # subset of the spans that prove latitude, so a date or a
+                    # sample sentence reached the writer only by accident (audit
+                    # 4.7, phase B). The custody chain needs one geography-bearing
+                    # span, not every span, so the test becomes an intersection.
+                    if not set(activity_ids) & geography_ids:
+                        errors.append("eligible_arctic_scope_activity_unbound")
+                    mislabelled = [
+                        record
+                        for record in activity_records
+                        if record["span_id"] in catalog
+                        and not _dimension_supported(
+                            catalog[record["span_id"]]["text"], record["dimension"]
+                        )
+                    ]
+                    if mislabelled:
+                        errors.append("eligible_arctic_scope_dimension_unsupported")
+                        repair_detail["mislabelled_dimensions"] = [
+                            dict(record) for record in mislabelled
+                        ]
+                elif not set(activity_ids) <= geography_ids:
                     errors.append("eligible_arctic_scope_activity_unbound")
                 if component == "separable_arctic_component" and not phrases:
                     errors.append("eligible_arctic_scope_phrase_missing")
@@ -1900,13 +2247,33 @@ def _validate_response_span_contract(
                 normalized_phrases = [
                     _normalize_for_binding(phrase) for phrase in phrases
                 ]
-                if any(phrase not in haystack for phrase in normalized_phrases):
+                unbound = [
+                    source
+                    for source, phrase in zip(phrases, normalized_phrases)
+                    if phrase not in haystack
+                ]
+                if unbound:
                     errors.append("eligible_arctic_scope_phrase_unbound")
+                    # The chapter 2 re-ask told the model the code and not the
+                    # diagnosis, so the model had to guess which phrase failed
+                    # and against what (audit 4.7, finding E6).
+                    repair_detail["unbound_phrases"] = list(unbound)
+                    repair_detail["finding_span_text"] = finding_text
+                dimensions = (
+                    {
+                        record["span_id"]: record["dimension"]
+                        for record in activity_records
+                    }
+                    if response_schema_version == ELIGIBILITY_RESPONSE_V4
+                    else {}
+                )
                 if not unknown and trusted_catalog:
                     resolved_scope = {
                         "component": component,
                         "activity_spans": [
-                            _resolved_scope_span(catalog[span_id])
+                            _resolved_scope_span(
+                                catalog[span_id], dimension=dimensions.get(span_id)
+                            )
                             for span_id in activity_ids
                         ],
                         "finding_spans": [
@@ -1923,12 +2290,16 @@ def _validate_response_span_contract(
     return {
         "valid": not unique_errors,
         "errors": unique_errors,
+        # Recorded, never decisive. Every entry names a diagnostic defect that
+        # takes no part in `_status_mapping_v2` (audit 4.7, findings E1 and E8).
+        "contract_notes": sorted(set(notes)),
         "resolved_evidence": resolved if not catalog_errors else [],
         **(
             {"resolved_eligible_arctic_scope": resolved_scope}
-            if response_schema_version == ELIGIBILITY_RESPONSE_V3
+            if response_schema_version in SCOPE_CONTRACT_VERSIONS
             else {}
         ),
+        **({"format_repair_detail": repair_detail} if repair_detail else {}),
         "decision": mapped if not unique_errors else "uncertain",
         "overall_reason_codes": reason_codes,
         "mapping_version": ELIGIBILITY_STATUS_MAPPING_VERSION,
@@ -1943,7 +2314,7 @@ def validate_response(
     response_schema: dict[str, Any],
 ) -> dict[str, Any]:
     response_version = _response_contract_version(response_schema)
-    if response_version in {ELIGIBILITY_RESPONSE_V2, ELIGIBILITY_RESPONSE_V3}:
+    if response_version in SPAN_CONTRACT_VERSIONS:
         return _validate_response_span_contract(
             value,
             segments,
@@ -2846,10 +3217,27 @@ def run_gemini_eligibility(
                 "raw_response": raw,
                 "parsed_response": parsed,
                 "validation": validation,
+                "shadow_two_pass": shadow_two_pass_measurement(
+                    text, validation.get("resolved_eligible_arctic_scope")
+                ),
                 "usage": usage,
                 "actual_cost_usd": str(actual),
             }
             prior = unresolved.get(job_key)
+            if (
+                validation["valid"]
+                and prior
+                and not repaired_phrases_are_specific(parsed)
+            ):
+                # A repair may not buy a phrase that binds and names nothing.
+                validation = {
+                    **validation,
+                    "valid": False,
+                    "errors": ["eligible_arctic_scope_phrase_not_specific"],
+                    "decision": "uncertain",
+                }
+                _record_unresolved(run_dir, job_key, record, validation)
+                continue
             if validation["valid"] and _repair_moved_a_status(prior, parsed):
                 # A repair corrects the shape of an answer. A repair that moves a
                 # criterion status is a new scientific judgment, so refuse it.

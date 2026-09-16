@@ -16,19 +16,27 @@ from .extraction import extract_source
 from .generation import generate_candidate
 from .gemini_eligibility import (
     DEFAULT_CALL_TIMEOUT_SECONDS,
-    ELIGIBILITY_RESPONSE_V2,
-    ELIGIBILITY_RESPONSE_V3,
     ELIGIBILITY_STATUS_MAPPING_VERSION,
+    MAXIMUM_FORMAT_ATTEMPTS,
+    SCOPE_CONTRACT_VERSIONS,
+    SPAN_CONTRACT_VERSIONS,
+    UNRESOLVED_STATE,
     _correction_metadata,
     _job_key,
     _known_context_gaps,
     _persist_span_manifest_v2,
+    _repair_moved_a_status,
+    _repair_note,
     _request_payload,
     _span_blocks_v2,
     _span_manifest_v2,
     _validation_evidence,
     call_timeout_seconds,
+    format_repairable,
+    geography_rescreen_eligible,
     maximum_call_timeout_seconds,
+    repaired_phrases_are_specific,
+    shadow_two_pass_measurement,
     validate_response,
 )
 from .providers import Provider, call_provider, provider_model
@@ -131,6 +139,18 @@ IMMEDIATE_ALTERNATIVE_FINDING_REASONS = frozenset(
         "interpretation_span_contains_answer",
     }
 )
+# Eligibility contract codes. They end a screening attempt before any candidate
+# exists, so no candidate-level rung can repair them; the eligibility stage has
+# its own bounded re-ask. They are registered here so the routing layer owns one
+# entry per code (chapter 3 slice arctic-ch3-eligibility-r1, audit 4.7).
+ELIGIBILITY_CONTRACT_REASONS = frozenset(
+    {
+        # The activity spans carry no dimension their own text states.
+        "eligible_arctic_scope_dimension_unsupported",
+        # A repaired scope phrase binds but names no station, region or stratum.
+        "eligible_arctic_scope_phrase_not_specific",
+    }
+)
 OPTION_REPAIR_REASONS = frozenset({"insufficient_verified_distractors"})
 ANSWER_RULE_REPAIR_REASONS = frozenset({"source_bound_numeric_rule_missing"})
 SURGICAL_CORRECTION_REASONS = frozenset(
@@ -205,6 +225,7 @@ def run_stream(
     eligibility_prompt_file: Path | None = None,
     eligibility_schema_file: Path | None = None,
     eligibility_policy_file: Path | None = None,
+    eligibility_rescreen_prompt_file: Path | None = None,
     roles_file: Path | None = None,
     role_profile: str | None = None,
 ) -> dict[str, Any]:
@@ -232,6 +253,7 @@ def run_stream(
         prompt_file=eligibility_prompt_file,
         schema_file=eligibility_schema_file,
         policy_file=eligibility_policy_file,
+        rescreen_prompt_file=eligibility_rescreen_prompt_file,
     )
     selection = access_manifest.get("selection")
     if not isinstance(selection, list):
@@ -285,6 +307,7 @@ def run_stream(
         eligibility_prompt_file=eligibility_prompt_file,
         eligibility_schema_file=eligibility_schema_file,
         eligibility_policy_file=eligibility_policy_file,
+        eligibility_rescreen_prompt_file=eligibility_rescreen_prompt_file,
         model_roles=model_roles,
     )
     trusted_eligibility_decisions: dict[str, str] = {}
@@ -298,6 +321,7 @@ def run_stream(
             prompt_file=eligibility_prompt_file,
             schema_file=eligibility_schema_file,
             policy_file=eligibility_policy_file,
+            rescreen_prompt_file=eligibility_rescreen_prompt_file,
         )
     progress = _Progress(
         progress_file or namespace / "streaming-dataset-r1" / "progress.json",
@@ -448,6 +472,7 @@ def run_stream(
                     prompt_file=eligibility_prompt_file,
                     schema_file=eligibility_schema_file,
                     policy_file=eligibility_policy_file,
+                    rescreen_prompt_file=eligibility_rescreen_prompt_file,
                 )
             except Exception as error:
                 progress.error(candidate_key, access.get("title"), "eligibility", error)
@@ -495,10 +520,11 @@ def run_stream(
                     prompt_file=eligibility_prompt_file,
                     schema_file=eligibility_schema_file,
                     policy_file=eligibility_policy_file,
+                    rescreen_prompt_file=eligibility_rescreen_prompt_file,
                 )
                 eligibility = {
                     **eligibility,
-                    "state": "completed" if validation["valid"] else "screening_error",
+                    "state": _brokered_eligibility_state(eligibility, validation),
                     "validation": validation,
                 }
                 deterministic_unresolved = validation["valid"] is not True
@@ -2191,37 +2217,67 @@ def _bind_provider(
     )
 
 
+# One paper can hold three rows under the active versions: the first screening,
+# its bounded format re-ask, and its bounded geography re-screen. The last one
+# that ran is the paper's answer, so the loader orders them and takes it.
+_ELIGIBILITY_ATTEMPT_RANK = {
+    "initial": 0,
+    "format_repair": 1,
+    "geography_rescreen": 2,
+}
+
+
+def _attempt_order(item: dict[str, Any]) -> tuple[int, int]:
+    attempt = item.get("eligibility_attempt") or {}
+    kind = str(attempt.get("kind") or "initial")
+    return (
+        _ELIGIBILITY_ATTEMPT_RANK.get(kind, 0),
+        int(attempt.get("attempt") or 1),
+    )
+
+
 def _load_eligibility_jobs(
     run_dir: Path,
     *,
     prompt_file: Path | None,
     schema_file: Path | None,
     policy_file: Path | None,
+    rescreen_prompt_file: Path | None = None,
 ) -> dict[str, dict[str, Any]]:
-    expected_hashes = (
-        {
-            "prompt_sha256": sha256_file(prompt_file),
-            "schema_sha256": sha256_file(schema_file),
-            "policy_sha256": sha256_file(policy_file),
-        }
-        if prompt_file is not None
-        and schema_file is not None
-        and policy_file is not None
-        else None
+    versioned = (
+        prompt_file is not None and schema_file is not None and policy_file is not None
     )
+    prompt_hashes = (
+        {
+            sha256_file(path)
+            for path in (prompt_file, rescreen_prompt_file)
+            if path is not None
+        }
+        if versioned
+        else set()
+    )
+    schema_hash = sha256_file(schema_file) if versioned else None
+    policy_hash = sha256_file(policy_file) if versioned else None
     selected: dict[str, dict[str, Any]] = {}
     for path in sorted((run_dir / "jobs").glob("*.json")):
         item = _read(path)
-        if expected_hashes is not None and any(
-            item.get(field) != expected for field, expected in expected_hashes.items()
+        if versioned and (
+            item.get("prompt_sha256") not in prompt_hashes
+            or item.get("schema_sha256") != schema_hash
+            or item.get("policy_sha256") != policy_hash
         ):
             continue
         key = str(item["candidate_key"])
-        if key in selected:
+        held = selected.get(key)
+        if held is None:
+            selected[key] = item
+            continue
+        if _attempt_order(item) == _attempt_order(held):
             raise ValueError(
                 "a candidate has more than one eligibility job for the active version"
             )
-        selected[key] = item
+        if _attempt_order(item) > _attempt_order(held):
+            selected[key] = item
     return selected
 
 
@@ -2235,6 +2291,7 @@ def _trusted_brokered_eligibility_decisions(
     prompt_file: Path,
     schema_file: Path,
     policy_file: Path,
+    rescreen_prompt_file: Path | None = None,
 ) -> dict[str, str]:
     decisions: dict[str, str] = {}
     processed = 0
@@ -2269,6 +2326,7 @@ def _trusted_brokered_eligibility_decisions(
             prompt_file=prompt_file,
             schema_file=schema_file,
             policy_file=policy_file,
+            rescreen_prompt_file=rescreen_prompt_file,
         )
         decision = validation["decision"]
         if validation["valid"] is not True and decision != "uncertain":
@@ -2359,6 +2417,7 @@ def _write_run_manifest(
     eligibility_prompt_file: Path | None,
     eligibility_schema_file: Path | None,
     eligibility_policy_file: Path | None,
+    eligibility_rescreen_prompt_file: Path | None,
     model_roles: dict[str, Any],
 ) -> Path:
     def file_hash(path: Path | None) -> str | None:
@@ -2381,6 +2440,9 @@ def _write_run_manifest(
         "eligibility_prompt_sha256": file_hash(eligibility_prompt_file),
         "eligibility_schema_sha256": file_hash(eligibility_schema_file),
         "eligibility_policy_sha256": file_hash(eligibility_policy_file),
+        "eligibility_rescreen_prompt_sha256": file_hash(
+            eligibility_rescreen_prompt_file
+        ),
         "author": {"provider": author.name, "model": author.model},
         "verifier": {"provider": verifier.name, "model": verifier.model},
         "model_roles": model_roles,
@@ -2522,7 +2584,35 @@ def _read(path: Path) -> dict[str, Any]:
     return value
 
 
-def _run_eligibility(
+def _eligibility_job_key(
+    access: dict[str, Any],
+    config: dict[str, Any],
+    prompt_file: Path,
+    schema_file: Path,
+    policy_file: Path,
+    provider: Provider,
+    *,
+    attempt_note: dict[str, Any] | None = None,
+) -> str:
+    """Bind one eligibility identity to the exact bytes that were sent.
+
+    A bounded re-ask and a bounded geography re-screen send a different payload,
+    so each one gets its own key, its own broker receipt and its own job row. The
+    note is the same object the payload carries, so the identity is rebuildable
+    from the stored row alone.
+    """
+    identity: dict[str, Any] = {
+        "base_job_key": _job_key(access, config, prompt_file, schema_file, policy_file),
+        "provider_identity": provider.request_identity(),
+        "model": provider.model,
+        "authority": "shared_gemini_broker",
+    }
+    if attempt_note is not None:
+        identity["attempt_note"] = attempt_note
+    return sha256_bytes(canonical_json(identity).encode())
+
+
+def _eligibility_attempt(
     db: Database,
     access: dict[str, Any],
     run_dir: Path,
@@ -2532,36 +2622,35 @@ def _run_eligibility(
     prompt_file: Path,
     schema_file: Path,
     policy_file: Path,
+    text: str,
+    kind: str,
+    attempt: int,
+    attempt_note: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    broker = getattr(provider, "broker", None)
-    if broker is None:
-        raise ValueError("new eligibility calls require the shared broker")
+    """Make one eligibility call and write its receipt-bound job row."""
+    broker = provider.broker
     config = broker.config
-    prompt = prompt_file.read_text(encoding="utf-8")
     schema = _read(schema_file)
     policy = _read(policy_file)
-    text = Path(access["extraction_path"]).read_text(encoding="utf-8")
-    job_key = sha256_bytes(
-        canonical_json(
-            {
-                "base_job_key": _job_key(
-                    access, config, prompt_file, schema_file, policy_file
-                ),
-                "provider_identity": provider.request_identity(),
-                "model": provider.model,
-                "authority": "shared_gemini_broker",
-            }
-        ).encode()
+    job_key = _eligibility_job_key(
+        access,
+        config,
+        prompt_file,
+        schema_file,
+        policy_file,
+        provider,
+        attempt_note=attempt_note,
     )
     request, hashes = _request_payload(
         source=access,
         policy=policy,
         text=text,
-        prompt=prompt,
+        prompt=prompt_file.read_text(encoding="utf-8"),
         schema=schema,
         config=config,
         request_id=job_key,
         policy_sha256=sha256_file(policy_file),
+        repair=attempt_note,
     )
     span_manifest_reference = _persist_span_manifest_v2(
         run_dir,
@@ -2571,8 +2660,6 @@ def _run_eligibility(
         schema,
     )
     generation = request["generationConfig"]
-    system = request["systemInstruction"]["parts"][0]["text"]
-    user_prompt = request["contents"][0]["parts"][0]["text"]
     parameters = {
         "temperature": generation.get("temperature", 0),
         "max_tokens": generation["maxOutputTokens"],
@@ -2584,8 +2671,8 @@ def _run_eligibility(
         run_id=run_id,
         entity_id=stable_id("eligibility", access["candidate_key"], job_key),
         role="eligibility",
-        system=system,
-        prompt=user_prompt,
+        system=request["systemInstruction"]["parts"][0]["text"],
+        prompt=request["contents"][0]["parts"][0]["text"],
         prompt_version=prompt_file.stem,
         parameters=parameters,
         response_schema=schema,
@@ -2616,13 +2703,14 @@ def _run_eligibility(
         source_version_id=identity["source_version_id"],
         payload=request,
     )
-    receipt_path = broker.effective_receipt_path(request_key)
     job = {
         "schema": "gemini-eligibility-job-v1",
         "job_key": job_key,
         "execution_authority": "shared_gemini_broker",
         "broker_request_key": request_key,
-        "broker_receipt_sha256": sha256_file(receipt_path),
+        "broker_receipt_sha256": sha256_file(
+            broker.effective_receipt_path(request_key)
+        ),
         "candidate_key": access["candidate_key"],
         "model": provider.model,
         "model_version": result.returned_model,
@@ -2633,9 +2721,17 @@ def _run_eligibility(
         "policy_sha256": sha256_file(policy_file),
         "prompt_sha256": sha256_file(prompt_file),
         "schema_sha256": sha256_file(schema_file),
+        "eligibility_attempt": {
+            "kind": kind,
+            "attempt": attempt,
+            "attempt_note": attempt_note,
+        },
         **span_manifest_reference,
         "parsed_response": result.payload,
         "validation": validation,
+        "shadow_two_pass": shadow_two_pass_measurement(
+            text, validation.get("resolved_eligible_arctic_scope")
+        ),
         "input_tokens": result.input_tokens,
         "output_tokens": result.output_tokens,
         "actual_cost_usd": (
@@ -2647,6 +2743,233 @@ def _run_eligibility(
     return job
 
 
+# A refused repair leaves the first screening's science untouched. The paper
+# spent its bounded attempts on the shape of the answer, so it stays
+# re-screenable under a later prompt or schema version, exactly as the batch
+# path records it (audit 4.7, finding E6).
+_REPAIR_REFUSAL_CODES = frozenset({"repair_changed_criterion_status"})
+
+
+def _eligibility_is_rescreenable(errors: Any) -> bool:
+    return format_repairable(errors) or (
+        isinstance(errors, list)
+        and bool(errors)
+        and set(errors) <= _REPAIR_REFUSAL_CODES
+    )
+
+
+def _brokered_eligibility_state(
+    eligibility: dict[str, Any], validation: dict[str, Any]
+) -> str:
+    """Keep a formatting mistake re-screenable after the re-validation.
+
+    A paper that spent its bounded re-ask attempts on a formatting mistake is not
+    a screening error, and a later prompt or schema version screens it again
+    (audit 4.7, finding E6).
+    """
+    if validation["valid"]:
+        return "completed"
+    if eligibility.get("state") == UNRESOLVED_STATE and _eligibility_is_rescreenable(
+        validation.get("errors")
+    ):
+        return UNRESOLVED_STATE
+    return "screening_error"
+
+
+def _criterion_statuses(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        str(row.get("criterion_id")): row.get("status")
+        for row in (job.get("parsed_response") or {}).get("criteria", [])
+        if isinstance(row, dict)
+    }
+
+
+def _rescreen_note(job: dict[str, Any]) -> dict[str, Any]:
+    """Freeze the four criteria the geography re-screen may not touch."""
+    return {
+        "kind": "geography_rescreen",
+        "frozen_criterion_statuses": {
+            name: status
+            for name, status in _criterion_statuses(job).items()
+            if name != "study_geography"
+        },
+        "instruction": (
+            "A first screening left study_geography unresolved. Decide that one "
+            "criterion again from the supplied spans. Every other criterion keeps "
+            "the status in frozen_criterion_statuses. Do not change any of them."
+        ),
+    }
+
+
+def _rescreen_moved_a_frozen_status(note: dict[str, Any], job: dict[str, Any]) -> bool:
+    """Say whether a re-screen answer moved a criterion it had to keep."""
+    frozen = note.get("frozen_criterion_statuses") or {}
+    current = _criterion_statuses(job)
+    return any(current.get(name) != status for name, status in frozen.items())
+
+
+def _run_eligibility(
+    db: Database,
+    access: dict[str, Any],
+    run_dir: Path,
+    *,
+    run_id: str,
+    provider: Provider,
+    prompt_file: Path,
+    schema_file: Path,
+    policy_file: Path,
+    rescreen_prompt_file: Path | None = None,
+) -> dict[str, Any]:
+    """Screen one paper, with the bounded re-ask and the bounded re-screen.
+
+    Chapter 2 lost 38 of 200 papers here, because the re-ask lived only in the
+    batch module and the re-screen selected nothing (audit 4.7, findings E2 and
+    E6). Both now run inside the same pass, each bounded by its own attempt
+    count, and neither can move a criterion status.
+    """
+    if getattr(provider, "broker", None) is None:
+        raise ValueError("new eligibility calls require the shared broker")
+    text = Path(access["extraction_path"]).read_text(encoding="utf-8")
+    job = _eligibility_attempt(
+        db,
+        access,
+        run_dir,
+        run_id=run_id,
+        provider=provider,
+        prompt_file=prompt_file,
+        schema_file=schema_file,
+        policy_file=policy_file,
+        text=text,
+        kind="initial",
+        attempt=1,
+    )
+    # One bounded format re-ask. A formatting mistake is a mistake about how the
+    # answer is written, never about the science, so the paper stays re-screenable
+    # instead of ending as a screening error.
+    attempt = 1
+    while (
+        not job["validation"]["valid"]
+        and format_repairable(job["validation"]["errors"])
+        and attempt < MAXIMUM_FORMAT_ATTEMPTS
+    ):
+        prior = {
+            "attempts": attempt,
+            "format_errors": list(job["validation"]["errors"]),
+            "parsed_response": job["parsed_response"],
+            "validation": job["validation"],
+        }
+        attempt += 1
+        repaired = _eligibility_attempt(
+            db,
+            access,
+            run_dir,
+            run_id=run_id,
+            provider=provider,
+            prompt_file=prompt_file,
+            schema_file=schema_file,
+            policy_file=policy_file,
+            text=text,
+            kind="format_repair",
+            attempt=attempt,
+            attempt_note=_repair_note(prior),
+        )
+        refusal = None
+        if repaired["validation"]["valid"]:
+            if _repair_moved_a_status(prior, repaired["parsed_response"]):
+                # A repair corrects the shape of an answer. A repair that moves a
+                # criterion status is a new scientific judgment, so refuse it.
+                refusal = "repair_changed_criterion_status"
+            elif not repaired_phrases_are_specific(repaired["parsed_response"]):
+                # A repaired phrase must still name a station, region, stratum or
+                # population. A bound phrase that identifies nothing is not a fix.
+                refusal = "eligible_arctic_scope_phrase_not_specific"
+        if refusal is not None:
+            repaired = {
+                **repaired,
+                "state": "screening_error",
+                "validation": {
+                    **repaired["validation"],
+                    "valid": False,
+                    "errors": [refusal],
+                    "decision": "uncertain",
+                },
+            }
+        job = repaired
+    if not job["validation"]["valid"] and _eligibility_is_rescreenable(
+        job["validation"]["errors"]
+    ):
+        # The paper spent its bounded attempts on the shape of its answer. It is
+        # not a screening error, and a later prompt or schema version screens it
+        # again.
+        job = {**job, "state": UNRESOLVED_STATE}
+    if job["validation"]["valid"] and geography_rescreen_eligible(
+        _criterion_statuses(job)
+    ):
+        job = _run_geography_rescreen(
+            db,
+            access,
+            run_dir,
+            run_id=run_id,
+            provider=provider,
+            prior=job,
+            text=text,
+            rescreen_prompt_file=rescreen_prompt_file,
+            schema_file=schema_file,
+            policy_file=policy_file,
+        )
+    return job
+
+
+def _run_geography_rescreen(
+    db: Database,
+    access: dict[str, Any],
+    run_dir: Path,
+    *,
+    run_id: str,
+    provider: Provider,
+    prior: dict[str, Any],
+    text: str,
+    rescreen_prompt_file: Path | None,
+    schema_file: Path,
+    policy_file: Path,
+) -> dict[str, Any]:
+    """Re-decide study_geography once, with the other four criteria frozen.
+
+    The re-screen reads the same spans under the same ordered geography
+    procedure, with the v8 span and phrase blocks, so a recovered paper enters
+    with the same phrase discipline. It decides one criterion. A failed geography
+    is a decision and is never re-screened, so a correct exclusion never returns.
+    """
+    if rescreen_prompt_file is None:
+        return {**prior, "geography_rescreen": "skipped_no_prompt"}
+    note = _rescreen_note(prior)
+    rescreened = _eligibility_attempt(
+        db,
+        access,
+        run_dir,
+        run_id=run_id,
+        provider=provider,
+        prompt_file=rescreen_prompt_file,
+        schema_file=schema_file,
+        policy_file=policy_file,
+        text=text,
+        kind="geography_rescreen",
+        attempt=1,
+        attempt_note=note,
+    )
+    if not rescreened["validation"]["valid"]:
+        return {**prior, "geography_rescreen": "unresolved_invalid_response"}
+    if _rescreen_moved_a_frozen_status(note, rescreened):
+        # The re-screen decides one criterion. An answer that moves another is a
+        # second scientific opinion the run did not ask for, so refuse it.
+        return {**prior, "geography_rescreen": "refused_moved_frozen_status"}
+    return {
+        **rescreened,
+        "geography_rescreen": "applied",
+        "rescreened_from": prior["job_key"],
+    }
+
+
 def _validate_brokered_eligibility(
     eligibility: dict[str, Any],
     provider: Provider,
@@ -2655,40 +2978,46 @@ def _validate_brokered_eligibility(
     prompt_file: Path,
     schema_file: Path,
     policy_file: Path,
+    rescreen_prompt_file: Path | None = None,
 ) -> dict[str, Any]:
     if eligibility.get("execution_authority") != "shared_gemini_broker":
         raise ValueError("the eligibility job did not use the shared broker")
     broker = provider.broker
-    prompt = prompt_file.read_text(encoding="utf-8")
+    # A bounded re-ask and a bounded re-screen record the exact note they sent,
+    # so the stored row rebuilds its own request and stays receipt-bound.
+    attempt = eligibility.get("eligibility_attempt") or {}
+    attempt_note = attempt.get("attempt_note")
+    if attempt.get("kind") == "geography_rescreen":
+        if rescreen_prompt_file is None:
+            raise ValueError("a re-screened eligibility job needs its re-screen prompt")
+        prompt_file = rescreen_prompt_file
     schema = _read(schema_file)
     policy = _read(policy_file)
-    expected_job_key = sha256_bytes(
-        canonical_json(
-            {
-                "base_job_key": _job_key(
-                    access, broker.config, prompt_file, schema_file, policy_file
-                ),
-                "provider_identity": provider.request_identity(),
-                "model": provider.model,
-                "authority": "shared_gemini_broker",
-            }
-        ).encode()
+    expected_job_key = _eligibility_job_key(
+        access,
+        broker.config,
+        prompt_file,
+        schema_file,
+        policy_file,
+        provider,
+        attempt_note=attempt_note,
     )
     text = Path(access["extraction_path"]).read_text(encoding="utf-8")
     request, hashes = _request_payload(
         source=access,
         policy=policy,
         text=text,
-        prompt=prompt,
+        prompt=prompt_file.read_text(encoding="utf-8"),
         schema=schema,
         config=broker.config,
         request_id=expected_job_key,
         policy_sha256=sha256_file(policy_file),
+        repair=attempt_note,
     )
     response_version = (
         schema.get("properties", {}).get("schema_version", {}).get("const")
     )
-    if response_version in {ELIGIBILITY_RESPONSE_V2, ELIGIBILITY_RESPONSE_V3}:
+    if response_version in SPAN_CONTRACT_VERSIONS:
         manifest_path = Path(str(eligibility.get("span_manifest_path") or ""))
         expected_manifest = _span_manifest_v2(
             _span_blocks_v2(text, str(access["extraction_sha256"])),
@@ -2799,7 +3128,7 @@ def _validate_pair(access: dict[str, Any], eligibility: dict[str, Any]) -> None:
     decision_consistent = (
         version == "eligibility-response-v1" and parsed.get("overall") == decision
     ) or (
-        version in {ELIGIBILITY_RESPONSE_V2, ELIGIBILITY_RESPONSE_V3}
+        version in SPAN_CONTRACT_VERSIONS
         and "overall" not in parsed
         and "overall_reason_codes" not in parsed
         and (eligibility.get("validation") or {}).get("mapping_version")
@@ -2913,8 +3242,7 @@ def _import_source(
         ),
         **(
             {"status_mapping_version": eligibility["validation"].get("mapping_version")}
-            if parsed.get("schema_version")
-            in {ELIGIBILITY_RESPONSE_V2, ELIGIBILITY_RESPONSE_V3}
+            if parsed.get("schema_version") in SPAN_CONTRACT_VERSIONS
             else {}
         ),
         "study_geography": geography,
@@ -2930,7 +3258,7 @@ def _import_source(
                     "resolved_eligible_arctic_scope"
                 ),
             }
-            if parsed.get("schema_version") == ELIGIBILITY_RESPONSE_V3
+            if parsed.get("schema_version") in SCOPE_CONTRACT_VERSIONS
             else {}
         ),
         "known_missing_context": parsed.get("known_missing_context", []),
@@ -2948,7 +3276,7 @@ def _import_source(
             WHERE source_id=?""",
             (
                 "gemini-fulltext-arctic-eligibility-v2"
-                if parsed.get("schema_version") == ELIGIBILITY_RESPONSE_V3
+                if parsed.get("schema_version") in SCOPE_CONTRACT_VERSIONS
                 else "gemini-fulltext-arctic-eligibility-v1",
                 canonical_json(scope_evidence),
                 now(),

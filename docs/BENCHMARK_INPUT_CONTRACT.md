@@ -80,6 +80,34 @@ A separable Arctic component keeps its span restriction, and receives only the s
 
 The writer fills a `referent_slots` record with one entry for each of the ten referent slots.
 The record is a diagnostic. No gate reads it, and it never supplies a slot that the displayed task leaves unfixed.
+
+### Dimension-labelled study-setting spans
+
+Eligibility response contract `eligibility-response-v4` labels each activity span with the study-setting dimension that its own text states.
+The model answers with `eligible_arctic_scope.activity_spans`, an array of `{span_id, dimension}` objects, at most twelve.
+The dimension is one of `geography`, `period`, `sample`, `method`, or `definition`.
+The validator checks each label against the span text and rejects a label the text cannot support.
+It also requires at least one activity span in the selected `study_geography` evidence, as an intersection test, not a subset test.
+
+The forwarded record is the shape that `resolved_eligible_arctic_scope.activity_spans` carries into `sources.scope_evidence_json`.
+Each entry holds the keys that contract v3 already wrote, plus one new key:
+
+```json
+{
+  "span_id": "s000042",
+  "locator": {"source_block_id": "text-block-00001", "section_id": "extracted-text", "page_id": null},
+  "start_byte": 5120,
+  "end_byte": 5402,
+  "quote": "An Arctic Ocean research cruise was conducted aboard the R/V Mirai from October 24 to December 3, 2018.",
+  "source_bytes_sha256": "…",
+  "dimension": "period"
+}
+```
+
+The `dimension` key is present only for a v4 record. A v3 record carries the same entry without it.
+A consumer must treat a missing `dimension` as unknown and must not infer one from the span text.
+Custody is unchanged: `quote` and `source_bytes_sha256` still bind the span to the frozen extraction, and the label never becomes selectable evidence.
+Downstream code groups the forwarded spans by dimension for display and applies the separable-component phrase test to a `geography` span only.
 ## Chapter 2 gate contracts
 
 The r15 holistic acceptance audit replaced four gate contracts.
