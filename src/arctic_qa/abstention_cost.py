@@ -53,6 +53,7 @@ LIST_PRICE_SCHEMA = "benchmark-evaluation-list-prices-v1"
 MILLION = Decimal("1000000")
 CENT = Decimal("0.000001")
 PAUSE_KIND = "vendor_pause"
+RESUME_KIND = "vendor_resume"
 ITEM_KIND = "item"
 
 
@@ -452,6 +453,23 @@ def pause_row(
     }
 
 
+def resume_row(*, run_id: str, vendor: str, paused_reason: str) -> dict[str, Any]:
+    """Build one journal row that records a resumed vendor.
+
+    A vendor paused for an ambiguous charge waits on a supervisor release, not
+    on a restart. This row is the record of the resume the evaluator made on
+    its own, and it names the pause it lifted.
+    """
+    return {
+        "schema": JOURNAL_ROW_SCHEMA,
+        "kind": RESUME_KIND,
+        "run_id": run_id,
+        "vendor": vendor,
+        "paused_reason": paused_reason,
+        "recorded_at_utc": _utc_now(),
+    }
+
+
 # --- Journal file ----------------------------------------------------------------
 
 
@@ -726,6 +744,7 @@ __all__ = [
     "ITEM_KIND",
     "JOURNAL_FILENAME",
     "PAUSE_KIND",
+    "RESUME_KIND",
     "accepted_item_count",
     "construction_totals",
     "cost_row",
@@ -737,6 +756,7 @@ __all__ = [
     "model_metrics",
     "outcome_counts",
     "pause_row",
+    "resume_row",
     "read_ledger",
     "subscription_evaluation_cost",
     "summarize_journal",

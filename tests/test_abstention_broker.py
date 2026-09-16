@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import urllib.error
 from decimal import Decimal
 from pathlib import Path
 
@@ -1134,3 +1135,124 @@ def test_cli_apply_evaluation_ceiling_writes_the_event_and_calls_nothing(
     shown = json.loads(capsys.readouterr().out)
     assert shown["authorized_ceiling_usd"] == "200.00"
     assert shown["transition_event_sha256"] == result["transition_event_sha256"]
+
+
+class Http503ThenLetter(LetterTransport):
+    """One HTTP 503 on the first generation, then the ordinary answer.
+
+    This is the shape of the live 503 of 2026-09-16 at 17:53 UTC: the provider
+    reported a server error, no usage came back, and the charge is unknown.
+    """
+
+    def __init__(self, letter: str = "B") -> None:
+        super().__init__(letter=letter)
+        self.generation_calls = 0
+
+    def post(self, model: str, method: str, body: dict) -> dict:
+        if method != "countTokens":
+            self.generation_calls += 1
+            if self.generation_calls == 1:
+                self.methods.append(method)
+                raise urllib.error.HTTPError(
+                    "https://fake.invalid", 503, "upstream failure", {}, None
+                )
+        return super().post(model, method, body)
+
+
+def test_an_evaluation_ambiguity_is_released_under_its_own_evaluation_gate(
+    tmp_path: Path,
+) -> None:
+    """The release reads the evaluation gate and lifts the evaluation halt.
+
+    Two checks of `authorize_ambiguous_continuation` knew only the construction
+    phase, so the 503 of 2026-09-16 at 17:53 UTC could not be released at all:
+    the phase-scoped halt never sets `halted`, and an evaluation request binds
+    a `benchmark-evaluation-execution-gate-v1` gate whose authorized run is in
+    `authorized_run_id`, not `authorized_new_run_id`.
+    """
+    values = evaluation_fixture(tmp_path, transport=Http503ThenLetter())
+    bind(values)
+    receipt = execute(values, trial_id="t1")
+    assert receipt["state"] == "ambiguous_charge"
+    assert receipt["http_status"] == 503
+    before = json.loads(values["ledger"].read_text())
+    assert before["halted"] is False
+    assert before["evaluation_halted"] is True
+    assert before["evaluation_halt_reason"] == "ambiguous_generation_charge"
+    review = tmp_path / "continuation-review.md"
+    review.write_text("pass\n", encoding="utf-8")
+    evidence = tmp_path / "continuation-evidence.json"
+    write_json(
+        evidence,
+        {
+            "schema": "shared-paid-call-ambiguous-continuation-evidence-v1",
+            "request_key": receipt["request_key"],
+            "error_class": "known_http_response_unknown_charge",
+            "http_status": 503,
+            "live_call_made": True,
+            "received_receipt_absent": True,
+            "actual_cost_known": False,
+            "replay_prohibited": True,
+            "affected_family_id": receipt["family_id"],
+            "authorized_run_id": receipt["run_id"],
+        },
+    )
+    result = values["broker"].authorize_ambiguous_continuation(
+        request_key=receipt["request_key"],
+        expected_ledger_sha256=sha256_file(values["ledger"]),
+        review_file=review,
+        evidence_file=evidence,
+        authorized_run_id=values["run_id"],
+        operator_id="test-operator",
+    )
+    assert result["applied"] is True
+    assert result["reserved_usd_retained"] == receipt["reserved_usd"]
+    event = json.loads(Path(result["continuation_receipt"]).read_text())
+    # The event binds the evaluation gate, not the construction gate.
+    assert event["gate_sha256"] == sha256_file(values["gate"])
+    assert event["gate_sha256"] != sha256_file(values["construction_gate"])
+    assert event["skip_reason_code"] == "operational_ambiguous_charge_http_500"
+    after = json.loads(values["ledger"].read_text())
+    # Only the evaluation halt lifts, and the reservation stays reserved.
+    assert after["evaluation_halted"] is False
+    assert after["evaluation_halt_reason"] is None
+    assert after["halted"] is False and after["halt_reason"] is None
+    assert after["ambiguous_reserved_usd"] == receipt["reserved_usd"]
+    status = values["broker"].status()
+    assert status["evaluation"]["phase_halted"] is False
+    assert status["evaluation"]["ambiguous_usd"] == receipt["reserved_usd"]
+    # Unrelated trials run again; the affected trial is never replayed.
+    assert execute(values, trial_id="t2", repeat=2)["state"] == "completed"
+    with pytest.raises(ValueError, match="request key already exists"):
+        execute(values, trial_id="t1")
+
+
+def test_an_evaluation_release_needs_the_evaluation_files(tmp_path: Path) -> None:
+    """A broker with no evaluation gate cannot release an evaluation ambiguity."""
+    values = evaluation_fixture(tmp_path, transport=Http503ThenLetter())
+    bind(values)
+    receipt = execute(values, trial_id="t1")
+    assert receipt["state"] == "ambiguous_charge"
+    construction_only = SharedGeminiBroker(
+        policy_file=ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
+        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=values["construction_gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=values["ledger"].parent / "receipts",
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+    )
+    review = tmp_path / "continuation-review.md"
+    review.write_text("pass\n", encoding="utf-8")
+    evidence = tmp_path / "continuation-evidence.json"
+    write_json(evidence, {"schema": "unused"})
+    with pytest.raises(ValueError, match="no benchmark evaluation policy"):
+        construction_only.authorize_ambiguous_continuation(
+            request_key=receipt["request_key"],
+            expected_ledger_sha256=sha256_file(values["ledger"]),
+            review_file=review,
+            evidence_file=evidence,
+            authorized_run_id=values["run_id"],
+            operator_id="test-operator",
+        )
+    assert json.loads(values["ledger"].read_text())["evaluation_halted"] is True
