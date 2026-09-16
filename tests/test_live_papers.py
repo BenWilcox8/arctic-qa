@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import re
 import sqlite3
 import threading
+import time
 import urllib.request
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
@@ -11,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from arctic_qa import live_papers
 from arctic_qa.corpus_viewer import CorpusArtifacts, CorpusServer
 from arctic_qa.db import Database
 from arctic_qa.live_papers import (
@@ -538,6 +541,24 @@ def test_the_ledger_reader_takes_the_shared_lock_and_rejects_another_schema(
     path.write_text(json.dumps({"schema": "other-v1"}), encoding="utf-8")
     with pytest.raises(ValueError, match="schema is invalid"):
         read_shared_ledger(path)
+
+
+def test_the_reader_gives_up_the_lock_rather_than_delay_a_paid_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A writer that holds the lock never blocks the page past the bound."""
+    path = tmp_path / "shared-paid-call-ledger.json"
+    path.write_text(json.dumps(fixture_ledger()), encoding="utf-8")
+    lock = path.with_name(f".{path.name}.lock")
+    lock.write_bytes(b"")
+    monkeypatch.setattr(live_papers, "_LOCK_WAIT_SECONDS", 0.2)
+    with lock.open("a+") as writer:
+        fcntl.flock(writer, fcntl.LOCK_EX)
+        started = time.monotonic()
+        ledger = read_shared_ledger(path)
+        waited = time.monotonic() - started
+    assert set(ledger["requests"]) == set(fixture_ledger()["requests"])  # type: ignore[index]
+    assert waited < 2
 
 
 def test_http_route_serves_the_section_payload(tmp_path: Path) -> None:
