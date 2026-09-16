@@ -123,7 +123,19 @@ Both evaluator snapshots were run against the labelled copy on 2026-09-16:
 
 An older reader that does not know the table leaves it alone, because its `SCHEMA` never drops a table and the version already matches.
 
-## 6. The activation
+## 6. Landing on the paper concurrency
+
+`arctic-ch3-paper-concurrency-r1` rewrites the same paper loop into one thread per paper.
+This work lands on top of theirs.
+A trial merge of their branch on 2026-09-16 auto-merged `db.py`, which holds their threaded `Database` and this table together, and left twelve conflicts: seven in `streaming.py`, three in `tests/test_streaming.py`, one in `cli.py` and one in `research/README.md`.
+All of them are in the paper loop, the counts and the resume tests that both tasks changed.
+
+Under their loop the label work keeps its shape.
+The skip is the first thing `process_paper` does for a paper, before any binding or receipt read.
+The counts of a skipped paper are taken under the same tally lock as every other paper's counts.
+The self-labelling stays at the three terminal points of the per-paper chain.
+
+## 7. The activation
 
 `build-completion.py` in this directory prepares and cuts over the activation set, in the shape of `build-concurrency.py` of `arctic-ch3-paper-concurrency-r1`.
 
@@ -136,11 +148,11 @@ A runtime snapshot is a `git archive` extraction with no `.git`, so `git rev-par
 
 `launch` stops the producer at a zero-in-flight boundary, runs the batch dry run and then the apply while nothing writes the table, starts the new producer in tmux session `arctic-ch3-production-r1`, and measures launch to first paid call.
 
-## 7. Result of the live cut
+## 8. Result of the live cut
 
 PENDING.
 
-## 8. Tests
+## 9. Tests
 
 `tests/test_paper_completion.py`:
 

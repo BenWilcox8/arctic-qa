@@ -1613,7 +1613,16 @@ def test_streaming_advances_after_uncertain_brokered_eligibility(
 
     resumed = run_stream(**arguments)
 
-    assert resumed["paper_results"] == result["paper_results"]
+    # Both papers are labelled now, so this run skips both and reaches the
+    # same dispositions without reading one receipt.
+    assert resumed["counts"]["completion_labelled_skipped"] == 2
+    assert [
+        {key: value for key, value in row.items() if key != "completion_label"}
+        for row in resumed["paper_results"]
+    ] == [
+        {key: value for key, value in row.items() if key != "completion_label"}
+        for row in result["paper_results"]
+    ]
     resumed_status = broker.status()
     assert resumed_status["generation_submissions"] == 2
     assert (
