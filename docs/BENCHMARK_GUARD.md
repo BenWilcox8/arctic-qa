@@ -165,7 +165,14 @@ The guard removes only its own entries.
 An entry that an operator or the captain wrote stays exactly as written.
 
 The evaluator must read the same file.
-Give the evaluator launcher the same path that the guard writes.
+Give the evaluator launcher the same path that the guard writes, through its `--pause-file` option.
+The evaluator re-reads that file before every item, so a pause takes effect without a restart.
+Read the state back with the evaluator's own reader:
+
+```bash
+PYTHONPATH=src python -m arctic_qa --json abstention-eval --action pause-status \
+  --pause-file <the pause file the evaluator reads>
+```
 
 ## Operate the guard
 

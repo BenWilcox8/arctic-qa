@@ -170,13 +170,14 @@ The metrics come from `abstention_score.metrics_from_counts`, the same function 
 
 ## 6. Deployment
 
-The viewer service now runs a read-only runtime snapshot of the landed commit `89217f4`.
-The snapshot is `/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-benchmark-guard-site-r1/runtime/app-89217f4-arctic-benchmark-guard-site-r1`.
+The branch is rebased onto `main` at `183779b`, so the merge stays a fast-forward.
+The viewer service and the guard service both run a read-only runtime snapshot of the branch tip `2942738`.
+The snapshot is `/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-benchmark-guard-site-r1/runtime/app-2942738-arctic-benchmark-guard-site-r1`.
 The exact unit command is below.
 It is the previous command of `arctic-corpus-stage-r1-formatting.service` with two changes: the new snapshot path, and the two new benchmark options.
 
 ```sh
-APP=/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-benchmark-guard-site-r1/runtime/app-89217f4-arctic-benchmark-guard-site-r1
+APP=/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-benchmark-guard-site-r1/runtime/app-2942738-arctic-benchmark-guard-site-r1
 G=/mnt/crdata/research-abstention/arctic-qa/abstention-eval/guard-r1
 systemctl --user stop arctic-corpus-stage-r1-formatting.service
 systemd-run --user --unit=arctic-corpus-stage-r1-formatting \
@@ -236,27 +237,47 @@ Verification of the deployment:
 - `/api/state`, `/api/candidates`, `/api/live-dataset` and `/api/pipeline-trace` all answer 200. `/downloads/dataset-metadata.json` answers 503 as before, because the unit selects no dataset metadata file.
 - `/api/live-benchmark` returns the 9 model rows, the 5 question rows, the budget block, the four quota windows and the six rules, with no error.
 
-## 7. The open coordination item
+## 7. The pause interface, proved end to end
 
 The guard writes `/mnt/crdata/research-abstention/arctic-qa/abstention-eval/guard-r1/model-pause.json`.
 That file already carries the captain's Fable pause, copied from the entry that task `arctic-abstention-streaming-eval-r1` wrote.
+The guard left that entry untouched through every cycle so far.
 
-**The evaluator must read the same file for a guard pause to take effect.**
-The per-model pause is still in progress on `fm/arctic-abstention-streaming-eval-r1`.
-Its work-in-progress commit loads `config/benchmark-evaluation-model-pause-v1.json` relative to the working directory, and the watch loop does not pass the pause to `run_plan` yet.
-Two things are needed before a guard pause can reach a live run:
+Task `arctic-abstention-streaming-eval-r1` has now landed the whole pause interface on its branch, at `8863129`.
+The evaluator takes `--pause-file`, re-reads that file before every item, and reports the state with `--action pause-status`.
+Its expiry rule is the same as the guard's: an entry with no `resume_at_utc` holds, and an entry whose `resume_at_utc` has passed does not.
 
-1. the watch loop passes the paused models to `run_plan`, and re-reads the pause file on every item;
-2. the streaming launcher points the evaluator at the guard path above, through the evaluator's `--pause-file` option.
+The interface was proved with the evaluator's own reader, not with a copy of it.
 
-Until then the guard still measures, still extrapolates, still logs and still shows everything on the page.
-Only the pause action is inert.
+```
+$ PYTHONPATH=src python -m arctic_qa --json abstention-eval --action pause-status \
+    --pause-file .../guard-r1/model-pause.json
+{"paused_now":["claude-fable-5-1"], ...}
+```
+
+A guard-written entry reads back the same way.
+A forced `claude_session_window_floor` pause, run into a scratch directory against the recorded low-session report, produced an entry with `owner`, `rule`, `vendor`, `numbers` and `cost_per_question_usd`.
+The evaluator's `pause-status` accepted it and listed the model in `paused_now`.
+The extra fields are additional keys of the entry, which the evaluator ignores.
+
+One step remains, and it belongs to the evaluator's launcher, not to this task:
+
+- the streaming launcher must pass `--pause-file /mnt/crdata/research-abstention/arctic-qa/abstention-eval/guard-r1/model-pause.json`.
+
+Without that option the evaluator reads its own default file and a guard pause is inert.
+The guard still measures, still extrapolates, still logs and still shows everything on the page.
 This is a coordination item for firstmate. This task does not change the evaluator.
 
 A second item is smaller.
 The guard reads `config/benchmark-evaluation-policy-v1.json`, which carries the USD 5.00 canary ceiling.
-When the evaluation crew lands the raised USD 200 ceiling, repoint `--evaluation-policy-file` at the new policy file and restart the guard unit.
+The evaluation crew has a reviewed ceiling transition on its branch.
+When the raised USD 200 ceiling lands, repoint `--evaluation-policy-file` at the new policy file and restart the guard unit.
 The ceiling-margin rule becomes active at that moment, because the new ceiling is more than USD 20.
+
+A third item is a cleanup.
+The guard carries its own reader of the pause file, because the evaluator's reader is not on `main` yet.
+After both branches merge, `benchmark_guard.read_pause_file` and `benchmark_guard.active_pauses` can call `abstention_plan.load_pause` and `abstention_plan.paused_models` instead.
+The two readers apply the same rule today, and the interoperation test above proves it.
 
 ## 8. Tests
 
