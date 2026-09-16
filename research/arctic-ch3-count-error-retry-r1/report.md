@@ -117,3 +117,24 @@ The predecessor producer of the f53e3e2 snapshot was relaunched at 21:41Z on fir
 It could not have finished: the f53e3e2 broker refuses a request key that holds a terminal `count_error` row with `the paid request key already exists`, so it would have exited again on the same paper.
 The count-retry round of this commit is what lets that key be counted again.
 Nothing moved while it ran: `spent_usd` 76.302066 before and after.
+
+## 6. The second exit, at 22:27 UTC
+
+The `ae91e40` producer ran 34 minutes of free replay and then exited with the same line: `the broker stopped with state count_error`.
+It made no paid call, and the ledger stayed unhalted at `spent_usd` 76.302066.
+
+The retry of section 2 was never reached.
+
+A relaunched producer re-asks every paper of its run directory, under the same request key.
+`broker_provider.invoke` looks for the receipt of that key on disk first, and returns it rather than calling the broker again.
+That reuse is right for a completed call, which must never be paid for twice.
+It was wrong for a count error: the free count charged nothing, so the stored refusal is not a result.
+The producer read the immutable receipt of 21:11 UTC, `_provider_result` turned `count_error` into a `ProviderError`, and the broker seam marked it a run stop.
+The reviewed continuation and the `transient` class on the ledger row changed nothing, because the request never reached `execute`.
+
+Commit `2ebc354` closes it.
+`model_broker.count_error_is_transient` is now the one reading of a stored count error.
+`invoke` sends such a request back through `execute`, which opens the next count-retry round; a permanent count error is read back as before.
+A receipt written before the class field existed is read from its error string and fails closed to permanent, so the 503 of 21:11 UTC and the reviewed 404 of 2026-09-15 each keep their own meaning.
+
+`tests/test_count_error_retry.py` holds both regressions: the stored transient count error that is counted again rather than replayed, and the class read back from an old receipt.
