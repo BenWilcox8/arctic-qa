@@ -4013,7 +4013,7 @@ def _serve_banked_finding(
     rows = db.rows(
         """SELECT * FROM finding_bank
         WHERE run_id=? AND paper_family_id=? AND bank_key=? AND admission_status=?
-        ORDER BY created_at, rank, bank_row_id""",
+        ORDER BY rowid""",
         (
             identity["run_id"],
             identity["paper_family_id"],
