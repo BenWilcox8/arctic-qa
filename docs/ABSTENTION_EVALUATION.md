@@ -471,7 +471,9 @@ One stop is item-scoped and never pauses a vendor: the per-item repeat limit of 
 That limit counts the calls of one item, condition, model and arm, so it says nothing about the next item.
 The evaluator records the stop on that item and takes the next one with every vendor still active.
 The running service met this on 2026-09-16: a re-evaluated question exhausted its Gemini repeat budget, and the Gemini arm was then off for every later question.
-The pause row names the vendor and the reason, and a restart clears it.
+The pause row names the vendor and the reason.
+A start clears the vendor pauses the last invocation left and logs one `vendor_pause_cleared` event for each, because a start is an operator action that says to try again.
+A model pause is not cleared by a start: it lives in the pause files, which an operator and the cost guard own.
 The evaluator stops when every vendor is paused.
 It exits non-zero only on a real error.
 

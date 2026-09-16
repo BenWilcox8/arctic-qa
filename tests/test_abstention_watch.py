@@ -1489,3 +1489,55 @@ def test_a_fully_held_item_waits_for_the_resume_instead_of_every_poll(
     assert len(journal.item_rows()) == 2
     assert journal.completed_item_ids() == {"aqa-a"}
     assert journal.latest_item_rows()[0]["evaluation"]["recorded_trials"] == 48
+
+
+def test_a_start_clears_the_vendor_pause_of_the_last_invocation(
+    tmp_path: Path,
+) -> None:
+    """A start is an operator action that says to try again.
+
+    The docs said a restart clears a vendor pause, and it did not: the pause
+    lived in `watch-state.json` and the next start excluded that vendor. The
+    running service showed it on 2026-09-16, when a transient npm upgrade hid
+    the Claude Code binary for one item and the restart then measured five of
+    the eight models. A model pause is not cleared, because it lives in the
+    pause files that an operator and the cost guard own.
+    """
+    db = state_db(tmp_path, chapter3=["aqa-a"])
+    ledger_file = construction_ledger(tmp_path, {"family-aqa-a": ["0.01"]})
+    auth = authorization(tmp_path, db, maximum_items=4)
+    work = tmp_path / "work"
+    work.mkdir(parents=True, exist_ok=True)
+    atomic_json(
+        work / WATCH_STATE_FILENAME,
+        {
+            "schema": "abstention-streaming-watch-state-v1",
+            "paused_vendors": {
+                PROVIDER_ANTHROPIC_CLAUDE_CODE: {"reason": "failed: the binary is gone"}
+            },
+            "skipped_items": {},
+        },
+    )
+    events: list[dict] = []
+    result = scripted_watch(
+        db=db,
+        work_dir=work,
+        ledger_file=ledger_file,
+        authorization_file=auth,
+        log=events.append,
+    )
+    # Every vendor of the plan is active again, and the clearing is recorded.
+    assert result["active_vendors"] == [
+        PROVIDER_GOOGLE_GEMINI,
+        PROVIDER_ANTHROPIC_CLAUDE_CODE,
+        PROVIDER_OPENAI_CODEX,
+    ]
+    assert result["paused_vendors"] == {}
+    cleared = [row for row in events if row["event"] == "vendor_pause_cleared"]
+    assert len(cleared) == 1
+    assert cleared[0]["vendor"] == PROVIDER_ANTHROPIC_CLAUDE_CODE
+    assert cleared[0]["reason"] == "failed: the binary is gone"
+    # The item ran on all three vendors.
+    row = CostJournal(work).item_rows()[0]
+    assert row["evaluation"]["vendors_paused"] == []
+    assert row["evaluation"]["recorded_trials"] == 48

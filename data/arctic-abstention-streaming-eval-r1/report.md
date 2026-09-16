@@ -363,7 +363,14 @@ test that fails on the old code.
    only after the loop ended, and a service loop does not end, so
    `watch-state.json` stood at the values of the first pass. It is written
    after every poll now.
-3. **A held item was revisited on every poll.** The six questions of the first
+3. **A restart did not clear a vendor pause, although the documentation said
+   it did.** A transient npm upgrade hid the Claude Code binary for one item,
+   the evaluator paused that vendor, and the restart then measured five of the
+   eight models, because the pause lived in `watch-state.json`. A start now
+   clears the vendor pauses of the last invocation and logs one
+   `vendor_pause_cleared` event for each. A model pause is untouched: it lives
+   in the pause files that an operator and the cost guard own.
+4. **A held item was revisited on every poll.** The six questions of the first
    pass each held six Claude Fable trials, and every poll took all six items
    up again: each revisit recorded nothing, called nothing and appended one
    more journal row. Twelve rows for six questions after two polls. An item
@@ -782,6 +789,7 @@ The new tests cover:
 - The item-scoped stop: the per-item repeat limit records a stop on that item and keeps every vendor active, while a ceiling stop or a harness error still pauses the vendor.
 - The published state: the poll count and the item list of `watch-state.json` rise between two polls of a running watcher.
 - The held item that waits: a second pass under the same pause leaves it alone and journals no second row, a pause of another model does not hold it, and the pass after the resume finishes its 48 trials.
+- The vendor pause a start clears: a state file that names a paused vendor no longer excludes it, the clearing is logged per vendor, and the item then runs its 48 trials.
 - The model pause on the path that has a broker: the ceiling precheck of the Gemini vendor keeps its own record, so a paused model stays held while Gemini keeps its slot. This is the defect of section 5.5.
 - The evaluation ceiling: the shipped v3 policy differs from v2 in the ceiling and its names only, the registered step is the only one, and the construction reserve still covers it.
 - The applied ceiling transition: the larger ceiling is refused without it, the event is immutable and names its predecessor, a later start needs no file, a paid call binds the event hash, and a fork of the chain is refused.

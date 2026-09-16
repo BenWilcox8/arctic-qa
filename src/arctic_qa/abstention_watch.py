@@ -622,13 +622,18 @@ def watch(
     wanted = set(vendors) - set(plan_vendors(plan)) if vendors else set()
     if wanted:
         raise ValueError(f"the plan has no vendor {sorted(wanted)[0]}")
+    # A vendor pause is a circuit breaker for one invocation, and a start is an
+    # operator action that says to try again. So a start clears the pauses the
+    # last invocation left, and records which ones it cleared. A model pause is
+    # not cleared: it lives in the pause files, which an operator or the cost
+    # guard owns.
+    cleared_vendor_pauses = dict(state["paused_vendors"])
+    state["paused_vendors"] = {}
     active = [
-        vendor
-        for vendor in plan_vendors(plan)
-        if vendor not in state["paused_vendors"] and (not vendors or vendor in vendors)
+        vendor for vendor in plan_vendors(plan) if not vendors or vendor in vendors
     ]
     if not active:
-        raise ValueError("every vendor of the plan is excluded or paused")
+        raise ValueError("every vendor of the plan is excluded")
     vendors = active
     stop = {"now": False}
 
@@ -647,6 +652,7 @@ def watch(
     errors: list[str] = []
     polls = 0
     started = clock()
+    state["started_at_utc"] = _utc_now()
 
     def emit(event: dict[str, Any]) -> None:
         if log is not None:
@@ -664,6 +670,15 @@ def watch(
                 "started_at_utc": state.get("started_at_utc") or _utc_now(),
                 "updated_at_utc": _utc_now(),
             },
+        )
+
+    for vendor, record in sorted(cleared_vendor_pauses.items()):
+        emit(
+            {
+                "event": "vendor_pause_cleared",
+                "vendor": vendor,
+                "reason": (record or {}).get("reason"),
+            }
         )
 
     while True:
