@@ -937,6 +937,25 @@ def test_run_plan_mixes_a_live_gemini_broker_with_a_subscription_vendor(
     assert codex_ledger["submissions"] == 18 and codex_ledger["spent_usd"] == "0"
 
 
+def fable_pause() -> dict:
+    """The captain's standing pause of 2026-09-16, as a record of its own.
+
+    A test must not read the committed file for this, because that file is
+    operational: it carries whatever an operator or the cost guard paused at
+    the time. The committed entry for this model is asserted once, in
+    :func:`test_the_pause_record_merges_the_file_and_the_command_line`.
+    """
+    return {
+        "schema": "benchmark-evaluation-model-pause-v1",
+        "paused_models": {
+            "claude-fable-5-1": {
+                "reason": "the captain's daily Claude Fable quota is about 80 percent used",
+                "resume_at_utc": "2026-09-16T23:00:00Z",
+            }
+        },
+    }
+
+
 def test_the_pause_record_merges_the_file_and_the_command_line(tmp_path: Path) -> None:
     """The paused-model interface: the file, the options, and the resume time.
 
@@ -944,12 +963,15 @@ def test_the_pause_record_merges_the_file_and_the_command_line(tmp_path: Path) -
     ~80% fable usage left today; I will run the fable benchmarking after the
     reset at 6:00pm today".
     """
-    shipped = load_pause(PAUSE_FILE)
-    assert set(shipped["paused_models"]) == {"claude-fable-5-1"}
+    # The committed file is operational: an operator or the cost guard adds
+    # and removes entries while the run goes on. So this asserts the captain's
+    # standing entry only, and the rest of the test owns its own record.
+    committed = load_pause(PAUSE_FILE)
     assert (
-        shipped["paused_models"]["claude-fable-5-1"]["resume_at_utc"]
+        committed["paused_models"]["claude-fable-5-1"]["resume_at_utc"]
         == "2026-09-16T23:00:00Z"
     )
+    shipped = fable_pause()
     before = datetime(2026, 9, 16, 12, 0, tzinfo=UTC)
     after = datetime(2026, 9, 17, 0, 0, tzinfo=UTC)
     assert paused_models(shipped, now=before) == frozenset({"claude-fable-5-1"})
@@ -1000,7 +1022,7 @@ def test_a_paused_model_holds_its_trials_and_runs_after_the_resume_time(
         code_commit="test-commit",
         **CONSTRUCTION,
     )
-    held = dry_run_plan(**common, pause=load_pause(PAUSE_FILE))
+    held = dry_run_plan(**common, pause=fable_pause())
     # Six of the 48 trials belong to the paused model: 2 conditions x 3 repeats.
     assert held["recorded_trials"] == 42 and held["planned_trials"] == 48
     assert held["complete"] is False
