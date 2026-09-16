@@ -288,6 +288,14 @@ COMPLETION_CLASS_DISPOSITIONS = {
         paper_completion.DISPOSITION_OUTCOME_CLASSES.items()
     )
 }
+COMPLETION_CLASS_FINAL_STATES = {
+    "eligibility_excluded": "rejected",
+    "eligibility_unresolved": "unresolved",
+    "generation_accepted": "accepted",
+    "generation_rejected": "generation_rejected",
+    "incomplete_non_mcq": "incomplete_non_mcq",
+    "paper_cost_cap_reached": "paper_cost_cap_reached",
+}
 COMPLETION_CLASS_COUNTS = {
     "eligibility_excluded": "eligibility_rejected",
     "eligibility_unresolved": "eligibility_unresolved",
@@ -584,6 +592,22 @@ def run_stream(
             counts["completion_labelled_skipped"] += 1
             if outcome_class in {"generation_rejected", "paper_cost_cap_reached"}:
                 progress.increment(outcome_class)
+            # The progress record lists the paper as a replay would, so the
+            # viewer reads the same run whether a paper was walked or skipped.
+            progress.paper(
+                paper_id=str(completion["source_id"] or candidate_key),
+                title=access.get("title"),
+                current_stage="completed",
+                final_state=COMPLETION_CLASS_FINAL_STATES[outcome_class],
+                final_reason=(
+                    "machine_accepted_unverified"
+                    if outcome_class == "generation_accepted"
+                    else str(
+                        completion["reason_code"]
+                        or COMPLETION_CLASS_DISPOSITIONS[outcome_class]
+                    )
+                ),
+            )
             paper_results.append(
                 {
                     "candidate_key": candidate_key,
