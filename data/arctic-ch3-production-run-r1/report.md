@@ -218,6 +218,13 @@ The corrected run is `chapter3-7dc6485-r2`: the same campaign `arctic-qa-product
 Paper 1 is screened again by the corrected request, which has a new request key; nothing is replayed.
 The decision named "the same run id"; the immutable manifest makes that impossible without deleting a run artifact, so the run id moved to r2. Section 6b gives the launch evidence.
 
+### 6b. The r2 launch
+
+Launched at 2026-09-16 08:05:18 UTC by `build-activation.py c545cf8 launch` (run id r2): tmux session `arctic-ch3-production-r1`, pane `%30`, producer PID 1999695, launcher `launcher-c545cf8-ch3.sh`, runtime `app-c545cf8-arctic-ch3-production-run-r1` (sha256 `53d94841...`), gate `live-execution-gate-c545cf8-ch3.json` (sha256 `a25e62b6...`).
+The receipt `activation-receipt-c545cf8-ch3.json` recorded a fresh progress observation at 08:05:22 UTC: state `running`, stage `eligibility`, 4420 papers ready.
+At 08:06:02 UTC paper 1 had two completed eligibility calls under the corrected schema and no halt.
+The receipt lists every calibration recording (v4, v5, v6) with its misses, and the settlement of the r1 rejection.
+
 ## 7. The eligibility watch
 
 Not reached: no paper was screened.

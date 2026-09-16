@@ -213,6 +213,12 @@ class Database:
         if existing:
             row = self.connection.execute("SELECT version FROM schema_info").fetchone()
             if row and row[0] == SCHEMA_VERSION:
+                # The version is current, but a table added to SCHEMA under the
+                # same version (the chapter 3 finding bank) is created here.
+                # Every statement in SCHEMA is IF NOT EXISTS, so this is a
+                # no-op on a complete database.
+                with self.transaction():
+                    self.connection.executescript(SCHEMA)
                 return
             if self.path.stat().st_size:
                 backup_dir.mkdir(parents=True, exist_ok=True)
