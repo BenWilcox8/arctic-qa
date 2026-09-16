@@ -539,6 +539,18 @@ class Activation:
         live = self.live_producer()
         if live is not None:
             pid, _ = live
+            # Stop at a zero-in-flight boundary: a request killed on the wire
+            # leaves a liability the next start has to recover. Wait for the
+            # boundary first, then stop at once.
+            for _ in range(600):
+                ledger = read_json(LEDGER)
+                if int(ledger["inflight"]) == 0:
+                    break
+                time.sleep(0.5)
+            ledger = read_json(LEDGER)
+            assert int(ledger["inflight"]) == 0, (
+                f"no zero-in-flight boundary; inflight {ledger['inflight']}"
+            )
             print(f"stopping the live producer {pid}", file=sys.stderr)
             subprocess.run(["kill", str(pid)], check=False)
             for _ in range(120):
@@ -547,13 +559,6 @@ class Activation:
                 time.sleep(1)
             assert self.live_producer() is None, "the live producer did not stop"
         subprocess.run(["tmux", "kill-session", "-t", TMUX_SESSION], check=False)
-        # A stopped producer can leave one request submitted. Recovery settles
-        # it on the next start; a live call must not be in flight now.
-        for _ in range(120):
-            ledger = read_json(LEDGER)
-            if int(ledger["inflight"]) == 0 and not ledger["halted"]:
-                break
-            time.sleep(1)
         ledger = read_json(LEDGER)
         assert int(ledger["inflight"]) == 0, f"inflight {ledger['inflight']}"
         assert not ledger["halted"], "the ledger is halted"
