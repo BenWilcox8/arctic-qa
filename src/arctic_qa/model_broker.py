@@ -674,7 +674,7 @@ def _omitted_zero_usage_field(usage: dict[str, Any]) -> str | None:
     - ``thoughtsTokenCount`` absent, with ``total == prompt + candidates``.
     - ``candidatesTokenCount`` absent, with ``total == prompt + thoughts``.
       gemini-3.7-flash returned that shape on 2026-09-16 for a one-letter
-      answer (data/arctic-abstention-streaming-eval-r1/report.md, section 7).
+      answer (research/arctic-abstention-streaming-eval-r1/report.md, section 7).
 
     Anything else is an inconsistent usage record and stays an ambiguous
     charge.

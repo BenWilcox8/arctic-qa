@@ -1,9 +1,11 @@
 """Replay the recorded chapter 2 candidates through the current deterministic gates.
 
-The chapter 2 yield audit (``data/arctic-ch2-yield-audit-r1``) recorded every
-candidate of run ``chapter2-e8d4cad-r1`` in one evidence bundle per paper
-family. Each bundle holds the candidate record, the cited chunk text and the
-gate reasons the deployed code produced. This module runs those records
+The chapter 2 yield audit recorded every candidate of run
+``chapter2-e8d4cad-r1`` in one evidence bundle per paper family. That evidence
+is an external input, not a file of this repository: ``ARCTIC_CH2_EVIDENCE_DIR``
+gives its directory, and ``docs/REPRODUCTION.md`` says how to get it. Each
+bundle holds the candidate record, the cited chunk text and the gate reasons
+the deployed code produced. This module runs those records
 through ``_qa_gate_reasons`` as it is now and reports which candidates change
 outcome. No model is called: every judge verdict is the recorded one, and the
 answer-agreement record is recomputed only when the deterministic tier now

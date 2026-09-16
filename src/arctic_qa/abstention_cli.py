@@ -88,6 +88,7 @@ from .abstention_watch import (
     watch,
 )
 from .model_broker import SharedGeminiBroker
+from .paths import default_credential_file
 from .util import atomic_json, canonical_json
 
 
@@ -114,7 +115,7 @@ CANARY_CEILING_USD = Decimal("5.00")
 CANARY_ARM = "medium"
 CANARY_REPEATS = 1
 PROVIDER_CHOICES = (PROVIDER_GOOGLE_GEMINI, *SUBSCRIPTION_PROVIDER_NAMES)
-DEFAULT_CREDENTIAL_FILE = Path("/home/ben/.config/arctic-qa/gemini-api-key")
+DEFAULT_CREDENTIAL_FILE = default_credential_file()
 
 
 def add_parser(commands: argparse._SubParsersAction) -> None:

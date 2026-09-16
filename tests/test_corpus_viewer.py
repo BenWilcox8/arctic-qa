@@ -19,11 +19,22 @@ from arctic_qa.model_broker import SharedGeminiBroker, broker_request_key
 from arctic_qa.util import sha256_file
 
 
-REAL_CORPUS = Path("/mnt/crdata/research-abstention/arctic-qa/corpus-search-r1")
-REAL_RUN = "20260911T232247Z"
+# The corpus search run of the paper. These tests skip when it is absent, so a
+# clean checkout without the mounted research drive still runs the suite. The
+# defaults are the values of the machine that produced the run.
+REAL_CORPUS = Path(
+    os.environ.get(
+        "ARCTIC_REAL_CORPUS_DIR",
+        "/mnt/crdata/research-abstention/arctic-qa/corpus-search-r1",
+    )
+)
+REAL_RUN = os.environ.get("ARCTIC_REAL_CORPUS_RUN", "20260911T232247Z")
 REAL_ZOTERO = Path(
-    "/home/ben/.treehouse/firstmate-c40011/6/firstmate/"
-    "data/research-workbench/zotero/receipts"
+    os.environ.get(
+        "ARCTIC_ZOTERO_RECEIPTS_DIR",
+        "/home/ben/.treehouse/firstmate-c40011/6/firstmate/"
+        "data/research-workbench/zotero/receipts",
+    )
 )
 POLICY = Path(__file__).parents[1] / "config" / "metadata-prefilter-policy-v1.json"
 

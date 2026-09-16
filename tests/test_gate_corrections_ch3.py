@@ -725,6 +725,9 @@ def test_the_new_reason_code_is_registered_in_the_routing_sets() -> None:
 # --- the deterministic replay of the 139 chapter 2 candidates ---------------
 
 
+# The chapter 2 yield-audit evidence bundle. It is an external input, so these
+# tests skip when it is absent. The default is the path of the machine that
+# produced the run; `docs/REPRODUCTION.md` says how to point it somewhere else.
 EVIDENCE_DIR = Path(
     os.environ.get(
         "ARCTIC_CH2_EVIDENCE_DIR",
