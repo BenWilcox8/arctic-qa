@@ -343,6 +343,12 @@ class Activation:
         assert transition["to_policy_sha256"] == sha256_file(live_policy), (
             "the live transition does not end at the live policy"
         )
+        # A successor of a start that already applied the v12 transition
+        # (the 05:01 UTC apply of 2026-09-17 on commit 948c860) binds that
+        # transition and writes no new one: the policy is already v12.
+        successor = sha256_file(live_policy) == sha256_file(POLICY_V12)
+        if successor:
+            self.ledger_transition = live_transition
 
         DATA.mkdir(parents=True, exist_ok=True)
         if not self.archive.exists():
@@ -384,13 +390,14 @@ class Activation:
             assert sha256_file(self.runtime / name) == prior_gate[key], name
         # The v12 policy is the v11 policy with exactly the two request-rate
         # fields changed. Nothing else may move.
-        v11 = read_json(live_policy)
-        v12 = read_json(POLICY_V12)
-        expected = dict(v11)
-        for field, limits in CHANGED_FIELDS.items():
-            assert v11[field] == limits["from"], (field, v11[field])
-            expected[field] = limits["to"]
-        assert v12 == expected, "the v12 policy moves more than the two rate fields"
+        if not successor:
+            v11 = read_json(live_policy)
+            v12 = read_json(POLICY_V12)
+            expected = dict(v11)
+            for field, limits in CHANGED_FIELDS.items():
+                assert v11[field] == limits["from"], (field, v11[field])
+                expected[field] = limits["to"]
+            assert v12 == expected, "the v12 policy moves more than the two rate fields"
         # The runtime knows the store and the rate pair.
         constants = json.loads(
             self.runtime_python(
@@ -482,10 +489,19 @@ class Activation:
                 "prior_activation_gate_sha256": sha256_file(live_gate),
                 "budget_policy_file": str(POLICY_V12),
                 "budget_policy_sha256": sha256_file(POLICY_V12),
-                "prior_budget_policy_file": str(live_policy),
-                "prior_budget_policy_sha256": sha256_file(live_policy),
+                "prior_budget_policy_file": (
+                    prior_gate.get("prior_budget_policy_file")
+                    if successor
+                    else str(live_policy)
+                ),
+                "prior_budget_policy_sha256": (
+                    prior_gate.get("prior_budget_policy_sha256")
+                    if successor
+                    else sha256_file(live_policy)
+                ),
                 "policy_changed_fields": CHANGED_FIELDS,
                 "ledger_config_transition_file": str(self.ledger_transition),
+                "successor_of_applied_transition": successor,
                 "ledger_store_schema": constants["journal_schema"],
                 "ledger_store_compaction_interval_seconds": constants[
                     "compaction_interval_seconds"
@@ -531,6 +547,7 @@ class Activation:
             "policy": str(POLICY_V12),
             "policy_sha256": sha256_file(POLICY_V12),
             "transition": str(self.ledger_transition),
+            "successor_of_applied_transition": successor,
             "jev_ranking_file": str(jev_ranking),
             "paper_workers": PAPER_WORKERS,
             "option_workers": OPTION_WORKERS,
@@ -795,7 +812,9 @@ class Activation:
 
     def launch(self) -> None:
         state = read_json(self.state)
-        assert "transition_applied" in state, "apply the transition first"
+        assert "transition_applied" in state or state.get(
+            "successor_of_applied_transition"
+        ), "apply the transition first"
         assert self.live_producer() is None, "a producer of this run is already live"
         assert unit_state(EVAL_UNIT) != "active", (
             "the evaluator must stay stopped until the first paid construction call"
