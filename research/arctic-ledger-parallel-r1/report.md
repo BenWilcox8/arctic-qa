@@ -226,3 +226,21 @@ The state database ran in rollback-journal mode, so every write transaction of t
 
 Fixed on `0d5e696` and live since 05:24 UTC: every opener of the state database goes through `db.connect_read_only`, which carries the shared timeout; the database runs in write-ahead logging (switched live at 05:23:31, kept by `Database.__init__` for a fresh one), so a reader never waits for a writer; and a locked read is a retry (`db.retry_locked_read`), never an exit.
 The guard and the viewer were restarted on the same snapshot.
+
+## 9. The run it is left at
+
+Five minutes on `7d42bbf`, 05:30:13 to 05:35:13 UTC, with the evaluator live and every lock section logged: 90 paid requests (18.0 a minute), 34 papers screened, peak 7 in flight, no 429, no 503, no ambiguous charge, one contained candidate-processing fault.
+Every hold of the exclusive operation lock in that window was under a millisecond; the waits were queueing of the sixteen threads (mean 0.13 s for the count registration, 0.53 s for the orphan recovery, 0.74 s for the reservation).
+The bookkeeping of one paid call is now about 100 ms of the store and three queued lock sections; the free `countTokens` round trip and the paper's own work between two calls are the rest, and the process runs at 60 to 75 percent of one core.
+
+What caps the run below sixteen in flight now is not the ledger, not the state database and not Google: it is the producer's own per-paper work under one interpreter lock, which the sixteen threads share.
+The next step, if sixteen on the wire is wanted, is paper workers in processes rather than threads.
+
+The producer of run `chapter3-7dc6485-r3` is left on `7d42bbf` with sixteen paper workers and four option workers under policy v12 (16 concurrent, 100 a minute), the evaluator on `0d5e696`, the cost guard and the website viewer on `0d5e696`, all reading and writing the store.
+The branch head carries two later commits over the running code: the release-suite repairs (`fbaf822`, tests and the every-section log threshold back to one second) and the report; neither changes the accounting.
+
+## 10. The release suite
+
+Run after the relaunch, on the merged branch, in six slices: 1,626 passed, six failed.
+Four were tests that wrote the ledger file by hand and now rebind it through the store; one was the every-section trace line landing ahead of the CLI's stderr JSON, which the threshold of one second restores; one was the evaluation pacing bound, which a one-second poll of the operation lock on the sequential path made flaky under load (main fails it 5 times in 6 on this machine today) and which every path now polls at the short interval.
+All six pass on `fbaf822`; the pacing test passed five times in a row.
