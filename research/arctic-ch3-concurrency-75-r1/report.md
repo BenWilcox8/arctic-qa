@@ -1,0 +1,237 @@
+# Seventy-five papers in flight
+
+Captain's ask, 2026-09-17 09:14 UTC, verbatim:
+
+> At 8:45 stop all generation of new questions so that the evaluations can
+> catch back up.
+> Also raise concurrency for the night to 75 instead of 50.
+> If this gives problems, lower it to 50 again.
+
+08:45 in the captain's local time is 13:45 UTC.
+
+Run `chapter3-7dc6485-r3`, campaign `arctic-qa-production-campaign-003`,
+shared ledger
+`/mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json`.
+The predecessor is `research/arctic-ch3-concurrency-50-r1/report.md`, which
+took the run from 16 to 50 papers in flight and measured the stage.
+
+This report records three things: the rate pair the night runs at, the
+measured window that decided whether to keep it, and the stop that ends
+generation at 13:45 UTC.
+
+## 1. What the fifty-thread stage measured
+
+| measurement | at 50 paper threads |
+| --- | --- |
+| peak requests in flight | 43 |
+| papers an hour | 564 |
+| provider refusals (HTTP 429) | none |
+| mean wait for the exclusive operation lock | 1 ms |
+| mean hold of the exclusive operation lock | 0.319 s |
+
+The predecessor found the knee of the thread-count curve near 32 threads, and
+it is the interpreter, not the ledger and not the provider. Nobody waits for
+the exclusive lock any more; what grows with the thread count is the hold,
+because the holder shares one interpreter with every other paper thread. The
+number of calls in flight settles at the call length over that hold, so more
+papers past the knee buys breadth and pays in request rate.
+
+Seventy-five threads is one step past that knee, not a new design. The captain
+asked for it for one night and asked for the fall back if it gives problems,
+so the change is made in a way that makes the fall back free.
+
+## 2. Policy v15, and why the fall back needs no transition
+
+Policy v15 is policy v14 with exactly two fields changed:
+
+| field | v14 | v15 |
+| --- | --- | --- |
+| `maximum_concurrent_generation_requests` | 50 | 75 |
+| `maximum_generation_requests_per_minute` | 300 | 450 |
+
+No money field moves. The away-session ceiling and the construction review
+checkpoint stay at USD 653.990121, the project lifetime ceiling stays at
+USD 1,000.00, the per-request cap stays at USD 0.25, the paper cost cap stays
+at USD 1.00, and both project design counts stay where the USD 600 allocation
+left them.
+
+The two limits are one registered pair (`ALLOWED_REQUEST_RATES`), so a policy
+can never raise one of them alone; `CHAPTER3_NIGHT_CHANGE` is the registered
+move. Every earlier pair stays registered, so a relaunch at 50 papers in
+flight under policy v15 needs no further transition: it is the same policy
+file and the same applied transition, with one launcher argument changed.
+
+### The tranche a rate transition names
+
+A rate transition moves no money, so it names the construction ceiling that is
+already authorized as its cumulative tranche. That ceiling is not a constant.
+The three earlier rate transitions named the expansion tranche of
+USD 253.990121. The USD 600 allocation moved the ceiling to USD 653.990121
+earlier on 2026-09-17, so this one names USD 653.990121 instead. A transition
+that names the wrong tranche is refused with "the policy transition identity
+changed", which is how the parallel transition was refused at 04:53 UTC on
+2026-09-17.
+
+`tests/test_ledger_proof_cost.py` reads that rule out of the source, so a
+fifth rate pair cannot forget it silently.
+
+## 3. The cut-over
+
+A policy transition needs a settled ledger of every caller, so both callers
+stop first and the evaluator comes back as soon as the ledger is busy again.
+
+| time (UTC) | step |
+| --- | --- |
+| 09:34:35 | the stop begins; the evaluator holds no paid call |
+| 09:38:13 | the evaluator is down, drained at trial boundaries |
+| 09:39:07 | the producer is down at a boundary: this run holds no submitted request |
+| 09:39:48 | the v14 to v15 transition is applied and the ledger is proved |
+| 09:39:57 | the producer is back, 75 paper workers, 4 option workers |
+| 09:44:00 | the evaluator is back, on its own snapshot, started by its own crew |
+| 09:44:12 | the first paid construction call of the relaunched producer |
+| 09:44:40 | the website viewer is back, on this snapshot |
+
+The ledger at the boundary held no request in flight, was not halted, and had
+spent USD 211.290557. The proof after the transition returned
+`integrity_valid: true`, `halted: false` and the same USD 211.290557: the
+transition moved no money. The limits it left are 75 concurrent generation
+requests and 450 a minute, with the away ceiling and the review checkpoint
+both still USD 653.990121 and the project lifetime ceiling still USD 1,000.00.
+
+### The evaluator keeps its own snapshot
+
+The evaluator shares the ledger, so the transition needs it settled and
+stopped. It does not need it moved. Another crew put the unit on commit
+`82612f5` with concurrent item scoring at 09:20 UTC, which is later than this
+snapshot and already reads the store, so this activation records the unit's
+own launcher and working directory before the stop and starts exactly that
+again afterwards. The cost guard, on the same commit since 09:21 UTC, is not
+touched at all: a restart on this snapshot would undo the captain's quota
+floors.
+
+In the event the other crew started the unit itself at 09:44:00, twelve
+seconds before the first construction call. The restart step saw the unit
+already active and started nothing, because the unit belongs to that crew.
+Twelve seconds is a real overlap: an applied transition is validated again on
+every broker start until its first construction request, and that validation
+needs `inflight` to be 0. The producer had already started at 09:39:57 and had
+passed its validation, so the overlap cost nothing here. It is still the
+window the two crews have to keep apart.
+
+### One stop timeout that was still the transient default
+
+The live evaluator unit carried `TimeoutStopUSec=1min 30s`, the transient
+default. That default is shorter than one trial of the slowest vendor and is
+what made systemd kill the evaluator at 07:25:55 UTC on 2026-09-17. The stop
+therefore signals the unit's main process itself and waits for it, so systemd
+never reaches that bound, and the restart gives the unit
+`TimeoutStopSec=900`. The drain took 3 minutes 38 seconds and finished eight
+items on the way out; nothing was killed.
+
+## 4. The measured window, and why the rate went back to fifty
+
+### The producer's own numbers at 75
+
+The window ran from 09:44:45 to 10:04:45 UTC, which includes the relaunch replay.
+
+| measurement | value |
+| --- | --- |
+| requests | 163 |
+| requests a minute | 8.15 |
+| papers | 55 |
+| papers an hour | 165 |
+| peak requests in flight | 31 |
+| 429 | none |
+| 5xx, and any halt | none |
+| new ambiguous rows | 0 |
+| `candidate_processing_fault` delta | 0 |
+| producer CPU fraction | 0.18 |
+
+| exclusive section | calls | mean wait | mean hold | longest hold |
+| --- | --- | --- | --- | --- |
+| `orphan_recovery` | 215 | 0.058 s | 0.642 s | 50.35 s |
+| `count_registration` | 215 | 1.898 s | 0.605 s | 48.42 s |
+| `reserve` | 163 | 0.071 s | 0.414 s | 12.70 s |
+
+That is 1.661 s of serialised bookkeeping per paid call, against 0.762 s measured
+at 50 threads over 09:20 to 09:34. Once the replay ended the producer itself ran
+well: 59, 42, 34, 74 and 47 reservations in the minutes from 10:05, and holds back
+down near 0.1 s.
+
+### The relaunch replay is not a stall
+
+For the first twelve minutes the run made two paid calls, one thread waited 180 s
+for the exclusive lock, and the evaluator held that lock in 118 of 120 half-second
+samples. That reads like starvation and is not: it is the replay `AGENTS.md`
+describes, in which the producer walks the papers its eligibility run directory
+already holds before its first paid call. During the replay the producer asks for
+the lock rarely, and `flock` gives no fairness, so a caller that asks often holds
+it almost continuously. The replay ended at 09:56 and the producer took the lock
+back in 43 of 60 samples.
+
+A health window shorter than the replay sees a live producer, a moving
+`progress.json` and no ledger movement at all. Read the reservation count, not the
+request count, before calling such a window a stall.
+
+### What decided the fall back: the evaluator's wait, not the producer's rate
+
+The producer and the evaluator share one exclusive operation lock. The measurement
+that matters is therefore the other caller's wait, and the evaluator logs its own
+sections above the one-second default.
+
+| producer threads | window | `orphan_recovery` mean wait | `count_registration` mean wait | evaluator lock wait per call | longest single wait |
+| --- | --- | --- | --- | --- | --- |
+| 50 | 09:20 to 09:34 | 1.92 s | 1.41 s | **3.33 s** | 7.2 s |
+| 75 | 10:05 to 10:12 | 30.49 s | 3.12 s | **33.61 s** | 81.2 s |
+
+Ten times the wait, for a producer rate that was no better. The evaluation crew
+measured the same thing independently and reported 22 s of ledger lock per Gemini
+call under the 75-thread producer.
+
+That is the captain's condition, so the producer went back to 50 papers in flight
+at 10:11:11 UTC under the same policy v15, with no transition and no new gate: the
+fifty pair stays registered, and the launcher takes the worker count as an
+argument. The evaluator kept running through the fall back, because the applied
+transition had already had its first construction request.
+
+The producer's own memory is a second reason to prefer 50. Its resident size grew
+from 1.0 GB to 3.2 GB over the 75-thread stage and sat at 0.37 GB shortly after
+the relaunch at 50.
+
+### What the fifty-thread window after the fall back can and cannot say
+
+The window from 10:20 to 10:40 UTC ran with the evaluator down, because an
+unrelated ambiguous charge had halted the evaluation phase at 10:03:34 UTC. Its
+lock numbers are therefore producer-only and are not comparable with the two rows
+above. Its value is the fault and paper counts.
+
+FIFTY_WINDOW
+
+## 5. Stopping generation at 13:45 UTC
+
+The first half of the captain's ask is a stop, not a change of rate. It has its
+own script, because it is operated later and under time pressure:
+
+```
+/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-ch3-concurrency-75-r1/stop-generation.sh
+```
+
+It stops the producer only. The evaluator keeps its unit and keeps scoring,
+because catching up is what the stop makes room for.
+
+The script reads the runtime snapshot alone and never the task worktree, which
+is disposable. It waits until this run holds no submitted request, then ends
+the producer process and the tmux session and writes a receipt beside itself.
+A free token count reserves nothing and is never waited for: at 75 paper
+threads one of them is open at almost every instant, so a wait for zero of
+them would never reach a boundary.
+
+The wait matters, because the producer installs no signal handler. A signal
+sent while calls are on the wire kills the process and leaves those rows for
+orphan recovery, which charges the money and discards the answer. If no
+boundary is reached inside `CH3_STOP_TIMEOUT_SECONDS` (1800 by default) the
+script stops nothing, writes the receipt and exits 1.
+
+`stop-generation.sh --dry-run` reports the boundary and changes nothing. Both
+dry paths were exercised before the hand-over: the dry run against the live
+producer, and the receipt that the "no live producer" path writes.

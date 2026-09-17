@@ -373,6 +373,10 @@ Without `concurrent_construction` the lock is held for the whole call, as before
 The policy still bounds the rate: `maximum_concurrent_generation_requests` and `maximum_generation_requests_per_minute`.
 The two are one registered pair (`ALLOWED_REQUEST_RATES`), so a transition can never raise one of them alone.
 `CHAPTER3_CONCURRENCY_CHANGE` is the registered move from 2 and 10 to 8 and 40; it moves no money and keeps the expansion tranche.
+`CHAPTER3_PARALLEL_CHANGE`, `CHAPTER3_SCALE_CHANGE` and `CHAPTER3_NIGHT_CHANGE` are the moves that follow it, to 16 and 100, to 50 and 300, and to 75 and 450.
+None of them moves money either, so each names the construction ceiling that is already authorized as its cumulative tranche.
+That ceiling is not a constant: the USD 600 allocation moved it on 2026-09-17, so a rate transition applied before that date names the expansion tranche and one applied after it names the six-hundred tranche.
+Every earlier pair stays registered, so a fall back to a lower rate needs no transition.
 
 ### Phase slots and windows
 
