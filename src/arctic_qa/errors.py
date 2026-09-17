@@ -70,6 +70,34 @@ class PaperBindingConflictError(ArcticQAError, ValueError):
     """
 
 
+class TransientReservationError(ArcticQAError, ValueError):
+    """The paid-call slots or the minute window of this phase stayed full.
+
+    The broker names two scheduling refusals that describe the moment and not
+    the request: the concurrency slots of the phase are complete, or its
+    minute window is. ``execute`` waits a bounded time for room, and this
+    error is what the bound raises for a caller that asked to be told instead
+    of being handed a recorded refusal.
+
+    Nothing is reserved, nothing is submitted and nothing is charged, and the
+    ledger row of the request stays ``counting``, so the next attempt counts
+    the same request key again and reuses that row. The refusal proves nothing
+    about the model and nothing about the next request, exactly as
+    :class:`BrokerOperationBusyError` and :class:`HarnessUnavailableError` do.
+
+    The alternative is the recorded ``not_submitted`` refusal, and that
+    receipt is immutable: it can only be resumed under a later reviewed
+    transition. For the producer that is one skipped paper. For the streaming
+    evaluator, whose policy forbids a re-ask of a recorded trial, it strands
+    the question short of its planned responses, which is what five questions
+    met between 16:30 and 16:43 UTC on 2026-09-17. It subclasses
+    ``ValueError`` and keeps the broker's own reason text, so every caller
+    that matches on either is unaffected.
+    """
+
+    code = "TRANSIENT_RESERVATION_UNAVAILABLE"
+
+
 class HarnessUnavailableError(ArcticQAError):
     """A subscription harness binary could not be started for this trial.
 

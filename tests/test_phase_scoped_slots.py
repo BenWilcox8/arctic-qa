@@ -25,8 +25,9 @@ ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from arctic_qa import model_broker  # noqa: E402
+from arctic_qa import ledger_store, model_broker  # noqa: E402
 from arctic_qa.broker_provider import BrokerProvider, _request_payload  # noqa: E402
+from arctic_qa.errors import TransientReservationError  # noqa: E402
 from arctic_qa.model_broker import (  # noqa: E402
     CONCURRENCY_LIMIT_REASON,
     EVALUATION_PHASE,
@@ -439,3 +440,94 @@ def test_the_tolerance_reads_the_stage_family_not_only_the_phase() -> None:
     stale = ledger_with("eligibility")
     stale["requests"]["k"]["completed_at_utc"] = _stamp(120)
     assert only_evaluation(stale, applied)
+
+
+# --- A refusal the evaluator can never re-ask ---------------------------------
+
+
+def test_a_deferring_caller_hears_the_refusal_and_nothing_is_recorded(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The bound raises instead of recording, and the row stays ``counting``.
+
+    The recorded ``not_submitted`` refusal is immutable and resumes only under
+    a later reviewed transition, which is right for the producer: it skips the
+    paper and the next transition brings the request back. It is wrong for the
+    streaming evaluator, whose policy forbids a re-ask of a recorded trial, so
+    a refused trial is a question that can never reach its 48 responses. Five
+    questions were stranded that way in the thirty minutes to 16:43 UTC on
+    2026-09-17.
+
+    A caller that sets ``defer_transient_reservations`` is told instead. It
+    holds the trial pending and asks again, and here the same request key
+    reaches the provider under the same authorization, with no transition at
+    all.
+    """
+    transport = LetterTransport()
+    values = evaluation_fixture(
+        tmp_path, transport=transport, defer_transient_reservations=True
+    )
+    bind(values)
+    _refusing_reserve(monkeypatch, CONCURRENCY_LIMIT_REASON, times=None)
+    monkeypatch.setattr(model_broker, "TRANSIENT_RESERVATION_RETRY_SECONDS", 0.0)
+
+    with pytest.raises(TransientReservationError, match=CONCURRENCY_LIMIT_REASON):
+        evaluation_execute(values, trial_id="trial-deferred")
+
+    # Nothing was written: no receipt, and the row is the free count alone.
+    assert list((tmp_path / "receipts").glob("*.json")) == []
+    ledger = ledger_store.read_ledger(values["ledger"])
+    rows = list(ledger["requests"].values())
+    assert [row["state"] for row in rows] == ["counting"]
+    assert ledger["halted"] is False and ledger["inflight"] == 0
+    assert values["broker"].status()["integrity_valid"] is True
+
+    # The next attempt of the same key runs, and reuses the counting row.
+    monkeypatch.undo()
+    receipt = evaluation_execute(values, trial_id="trial-deferred")
+    assert receipt["state"] == "completed"
+    ledger = ledger_store.read_ledger(values["ledger"])
+    assert len(ledger["requests"]) == 1
+    assert values["broker"].status()["integrity_valid"] is True
+
+
+@pytest.mark.parametrize("reason", [CONCURRENCY_LIMIT_REASON, MINUTE_LIMIT_REASON])
+def test_a_deferring_caller_still_records_every_other_refusal(
+    tmp_path: Path, monkeypatch, reason: str
+) -> None:
+    """Only the two scheduling refusals are deferred, and both of them are.
+
+    Every other refusal describes the request, its authorization or the money,
+    so it stays the recorded ``not_submitted`` refusal it has always been.
+    """
+    values = evaluation_fixture(
+        tmp_path, transport=LetterTransport(), defer_transient_reservations=True
+    )
+    bind(values)
+    monkeypatch.setattr(model_broker, "TRANSIENT_RESERVATION_RETRY_SECONDS", 0.0)
+
+    _refusing_reserve(monkeypatch, reason, times=None)
+    with pytest.raises(TransientReservationError):
+        evaluation_execute(values, trial_id="trial-scheduling")
+    monkeypatch.undo()
+
+    monkeypatch.setattr(model_broker, "TRANSIENT_RESERVATION_RETRY_SECONDS", 0.0)
+    _refusing_reserve(monkeypatch, model_broker.AUTHORIZED_CAP_REASON, times=None)
+    recorded = evaluation_execute(values, trial_id="trial-cap")
+    assert recorded["state"] == "not_submitted"
+    assert recorded["reason"] == model_broker.AUTHORIZED_CAP_REASON
+
+
+def test_the_default_broker_keeps_the_recorded_refusal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The producer's broker is unchanged: it records and skips the paper."""
+    values = fixture(tmp_path, transport=Transport())
+    assert values["broker"].defer_transient_reservations is False
+    _refusing_reserve(monkeypatch, CONCURRENCY_LIMIT_REASON, times=None)
+    monkeypatch.setattr(model_broker, "TRANSIENT_RESERVATION_RETRY_SECONDS", 0.0)
+
+    blocked = execute(values["broker"])
+
+    assert blocked["state"] == "not_submitted"
+    assert blocked["reason"] == CONCURRENCY_LIMIT_REASON

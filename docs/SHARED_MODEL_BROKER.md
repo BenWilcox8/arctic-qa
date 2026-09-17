@@ -392,6 +392,16 @@ After that wait it records the refusal as a `not_submitted` receipt with the con
 
 A request that such a refusal stopped resumes under the next reviewed transition, like a request the live-test cap stopped.
 
+A caller can ask to hear that refusal instead: `defer_transient_reservations` on the broker.
+
+The bound then raises `errors.TransientReservationError` and writes nothing at all, and the ledger row stays `counting` for the next attempt of the same request key to reuse.
+
+The streaming evaluator sets it, because its policy forbids a re-ask of a recorded trial: a recorded refusal there is a question that can never reach its planned responses, and five were stranded that way in the thirty minutes to 16:43 UTC on 2026-09-17.
+
+The producer does not set it and is unchanged: it records the refusal, skips the paper, and the next reviewed transition brings the request back.
+
+A caller that sets it must be able to hold the request and ask again; see "A refusal the provider never saw" in `docs/ABSTENTION_EVALUATION.md`.
+
 The resume needs the refused request to carry a transition hash, and the active transition must name that hash as its predecessor.
 
 The resumed request keeps its identity and runs under the active price and policy hashes.

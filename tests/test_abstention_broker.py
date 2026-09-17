@@ -69,6 +69,7 @@ def evaluation_fixture(
     policy_changes: dict | None = None,
     repeats: int = 2,
     run_id: str = "eval-run-1",
+    defer_transient_reservations: bool = False,
 ) -> dict:
     """A broker with construction files plus the evaluation policy, prices, gate."""
     models = models or [PRO]
@@ -127,6 +128,7 @@ def evaluation_fixture(
         evaluation_policy_file=policy_file,
         evaluation_price_config_file=prices_file,
         evaluation_gate_file=gate,
+        defer_transient_reservations=defer_transient_reservations,
     )
     return {
         "broker": broker,

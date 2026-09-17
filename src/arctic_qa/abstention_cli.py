@@ -44,6 +44,7 @@ from .abstention_plan import (
     GATE_FILENAME_BY_VENDOR,
     build_vendor_runs,
     dry_run_plan,
+    evaluation_admission,
     load_pause,
     load_plan,
     merge_pause,
@@ -658,7 +659,14 @@ def _watch(args: argparse.Namespace) -> dict[str, Any]:
         work_dir=args.work_dir,
         shared_ledger_file=args.shared_ledger_file,
         broker_factory=(
-            (lambda gate: _broker(args, evaluation_gate_file=gate, concurrent=True))
+            (
+                lambda gate: _broker(
+                    args,
+                    evaluation_gate_file=gate,
+                    concurrent=True,
+                    defer_transient_reservations=True,
+                )
+            )
             if needs_broker
             else None
         ),
@@ -874,7 +882,14 @@ def _run_plan(args: argparse.Namespace) -> dict[str, Any]:
         evaluation_policy_file=args.evaluation_policy_file,
         subscription_models_file=args.subscription_models_file.resolve(),
         broker_factory=(
-            (lambda gate: _broker(args, evaluation_gate_file=gate, concurrent=True))
+            (
+                lambda gate: _broker(
+                    args,
+                    evaluation_gate_file=gate,
+                    concurrent=True,
+                    defer_transient_reservations=True,
+                )
+            )
             if needs_broker
             else None
         ),
@@ -886,6 +901,12 @@ def _run_plan(args: argparse.Namespace) -> dict[str, Any]:
         concurrency=parse_concurrency(args.concurrency),
         vendors=vendors,
         scratch_root=args.scratch_dir.resolve() if args.scratch_dir else None,
+        # One plan run is one question, so the gate only ever holds back what
+        # the policy already holds back. It is here so that the pacing lives
+        # with the provider and not with the caller that runs a wave.
+        admission=evaluation_admission(
+            json.loads(args.evaluation_policy_file.read_text(encoding="utf-8"))
+        ),
     )
     summary = run_plan(
         set_dir=args.eval_set_dir,
@@ -949,8 +970,16 @@ def _broker(
     *,
     evaluation_gate_file: Path,
     concurrent: bool = False,
+    defer_transient_reservations: bool = False,
 ) -> SharedGeminiBroker:
     """Build the evaluation broker.
+
+    ``defer_transient_reservations`` says that a scheduling refusal the
+    bounded wait could not clear comes back as ``TransientReservationError``
+    and writes nothing. Only the callers that run trials through
+    ``abstention_plan.run_vendor`` set it, because only they can hold the
+    trial pending for the next pass; every other caller keeps the recorded
+    ``not_submitted`` refusal.
 
     ``concurrent`` says that this broker shares the ledger with the live
     producer, which the streaming evaluator and the concurrent plan both do.
@@ -994,6 +1023,7 @@ def _broker(
             else None
         ),
         concurrent_requests=bool(concurrent),
+        defer_transient_reservations=bool(defer_transient_reservations),
     )
     broker.deferred_snapshot = bool(concurrent)
     return broker

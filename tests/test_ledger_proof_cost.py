@@ -159,16 +159,22 @@ def test_the_evaluator_shape_lists_the_receipts_directory_once(
 
 
 def test_the_evaluator_broker_says_it_shares_the_ledger() -> None:
-    """The evaluator's own factory sets the flag, not a caller of it.
+    """The evaluator's own factory sets the flags, not a caller of them.
 
     ``abstention_cli._broker`` builds every broker the streaming evaluator and
-    the concurrent plan use, and both pass ``concurrent=True``.
+    the concurrent plan use. Both say that they share the ledger, and both ask
+    to hear a scheduling refusal instead of being handed one they can never
+    re-ask: the trial then waits it out and is left pending.
     """
     source = (ROOT / "src" / "arctic_qa" / "abstention_cli.py").read_text(
         encoding="utf-8"
     )
     assert "concurrent_requests=bool(concurrent)," in source
-    assert source.count("evaluation_gate_file=gate, concurrent=True") == 2
+    assert (
+        "defer_transient_reservations=bool(defer_transient_reservations),"
+    ) in source
+    assert source.count("evaluation_gate_file=gate,\n                    concurrent=True,") == 2
+    assert source.count("defer_transient_reservations=True,") == 2
     assert "deferred_snapshot=True" not in source
 
 

@@ -17,6 +17,7 @@ import json
 import shutil
 import statistics
 import subprocess
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -573,8 +574,13 @@ def build_broker_provider(
     arms: list[str],
     repeats: int,
     output_tokens_by_arm: dict[str, int] | None = None,
+    admission: AbstractContextManager[Any] | None = None,
 ) -> tuple[GeminiBrokerEvaluationProvider, dict[str, Any]]:
-    """Bind the run to the broker gate and return the provider and decoding."""
+    """Bind the run to the broker gate and return the provider and decoding.
+
+    ``admission`` paces the paid calls of every question this process runs at
+    once under the one concurrency limit of the evaluation phase.
+    """
     manifest, _ = load_eval_set(set_dir)
     decoding = decoding_record(
         broker.evaluation_config or {}, models, arms, output_tokens_by_arm
@@ -599,7 +605,9 @@ def build_broker_provider(
         abstention_option_text=binding["abstention_option_text"],
         decoding=decoding,
     )
-    provider = GeminiBrokerEvaluationProvider(broker, run_id=run_id, decoding=decoding)
+    provider = GeminiBrokerEvaluationProvider(
+        broker, run_id=run_id, decoding=decoding, admission=admission
+    )
     return provider, decoding
 
 

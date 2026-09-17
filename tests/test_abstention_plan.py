@@ -18,6 +18,7 @@ from arctic_qa.abstention_plan import (
     VendorRun,
     dry_run_plan,
     effective_concurrency,
+    evaluation_admission,
     load_pause,
     load_plan,
     merge_pause,
@@ -30,6 +31,8 @@ from arctic_qa.abstention_plan import (
 )
 from arctic_qa.abstention_providers import (
     PROVIDER_GOOGLE_GEMINI,
+    EvaluationRequest,
+    GeminiBrokerEvaluationProvider,
     ScriptedEvaluationProvider,
 )
 from arctic_qa.abstention_render import N0
@@ -50,7 +53,11 @@ from arctic_qa.abstention_subscription import (
 )
 from arctic_qa.abstention_run import plan_trials
 from arctic_qa.cli import main as cli_main
-from arctic_qa.errors import BrokerOperationBusyError, HarnessUnavailableError
+from arctic_qa.errors import (
+    BrokerOperationBusyError,
+    HarnessUnavailableError,
+    TransientReservationError,
+)
 from arctic_qa.model_broker import OPERATION_LOCK_WAIT_INTERVAL_SECONDS, SharedGeminiBroker
 from arctic_qa.util import atomic_json
 from arctic_qa import ledger_store  # noqa: E402
@@ -1571,3 +1578,200 @@ def test_the_harness_probe_refuses_a_binary_that_cannot_be_started(
     missing.chmod(0o755)
     assert harness_binary_path(str(missing)) == missing
     assert require_harness_binary(PROVIDER_ANTHROPIC_CLAUDE_CODE, str(missing)) == missing
+
+
+def test_full_paid_call_slots_are_the_same_kind_of_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ledger's scheduling refusal is waited out, then left pending.
+
+    The concurrency slots and the minute window of the evaluation phase
+    describe the moment, not the request: the broker reserved nothing,
+    submitted nothing and charged nothing. Recorded as a response the trial is
+    spent, because nothing re-asks a recorded trial, and the question can
+    never reach its 48 planned responses. Five questions met this between
+    16:30 and 16:43 UTC on 2026-09-17.
+    """
+    monkeypatch.setattr("arctic_qa.abstention_plan.PRE_PROVIDER_RETRY_BASE_SECONDS", 0.0)
+    monkeypatch.setattr("arctic_qa.abstention_plan.PRE_PROVIDER_RETRY_ROUNDS", 2)
+    assert TransientReservationError in PRE_PROVIDER_REFUSALS
+    plan = load_plan(PLAN_FILE)
+    set_dir = frozen_set(tmp_path, count=1)
+    run_dir = tmp_path / "slots-pending"
+    # Two attempts per trial, so three refusals spend the whole bound of the
+    # first trial and one attempt of the second.
+    provider = _BusyThenAnswerProvider(
+        refusals=3, refusal=TransientReservationError, policy="gold"
+    )
+    first = run_plan(
+        set_dir=set_dir,
+        output_dir=run_dir,
+        run_id="plan-slots-r1",
+        plan=plan,
+        vendor_runs=_gemini_only(plan, provider),
+    )
+    gemini = first["vendors"][PROVIDER_GOOGLE_GEMINI]
+    assert gemini["deferred_trials"] == 1
+    assert gemini["recorded_trials"] == 11
+    assert gemini["complete"] is False
+    # The whole point: it is not a stop, so the arm keeps every later question.
+    assert gemini["stopped_this_pass"] is None
+    assert gemini["stopped_on"] is None
+    assert gemini["error"] is None
+    # The next pass runs exactly the trial that was left pending.
+    second = run_plan(
+        set_dir=set_dir,
+        output_dir=run_dir,
+        run_id="plan-slots-r1",
+        plan=plan,
+        vendor_runs=_gemini_only(plan, ScriptedEvaluationProvider(policy="gold")),
+    )
+    again = second["vendors"][PROVIDER_GOOGLE_GEMINI]
+    assert again["recorded_trials"] == 12
+    assert again["deferred_trials"] == 0
+    assert again["complete"] is True
+
+
+# --- Pacing the wave under the one limit -------------------------------------
+
+
+class _CountingBroker:
+    """A broker whose ``execute`` records how many calls are in flight."""
+
+    def __init__(self, receipts_dir: Path) -> None:
+        self.receipts_dir = receipts_dir
+        self.lock = threading.Lock()
+        self.now = 0
+        self.peak = 0
+
+    def evaluation_enabled(self) -> bool:
+        return True
+
+    def effective_receipt_path(self, request_key: str) -> Path | None:
+        # No receipt is written here: this fake measures admission, not money.
+        return None
+
+    def execute(self, **kwargs) -> dict:
+        with self.lock:
+            self.now += 1
+            self.peak = max(self.peak, self.now)
+        try:
+            time.sleep(0.02)
+            return {
+                "state": "completed",
+                "request_key": kwargs["request_key"],
+                "response": {
+                    "candidates": [
+                        {
+                            "finishReason": "STOP",
+                            "content": {"parts": [{"text": "A"}]},
+                        }
+                    ]
+                },
+                "usage": {"promptTokenCount": 1, "candidatesTokenCount": 1},
+                "actual_cost_usd": "0.000001",
+            }
+        finally:
+            with self.lock:
+                self.now -= 1
+
+
+def _gemini_trial(index: int) -> dict:
+    return {
+        "trial_id": f"abstention-trial-{index:04d}",
+        "eval_set_id": "eval-set-gate",
+        "item_id": "aqa-gate",
+        "condition": "gold_present",
+        "arm": "medium",
+        "repeat": 1,
+        "model": "gemini-3.8-flash",
+        "system_text": "Reply with one letter.",
+        "user_text": f"Question {index}",
+        "letters": "ABCD",
+    }
+
+
+def test_one_gate_paces_every_question_under_the_policy_limit(
+    tmp_path: Path,
+) -> None:
+    """The evaluation slots count the process, so one gate holds them all.
+
+    ``effective_concurrency`` is per question and right for one question. A
+    wave multiplies it: eight questions at four Gemini calls in flight each
+    reached the broker as 32 calls against a policy limit of 4, and every call
+    past the limit waited out the broker's bounded wait and was refused. One
+    gate, at the limit itself, makes the wave wait in this process instead,
+    where waiting is free and nothing is recorded.
+    """
+    policy = {"maximum_concurrent_requests": 3}
+    admission = evaluation_admission(policy)
+    broker = _CountingBroker(tmp_path / "receipts")
+    decoding = {
+        "temperature_by_model": {"gemini-3.8-flash": "0"},
+        "max_output_tokens_by_arm": {"medium": 4096},
+    }
+    # Four questions, each with its own provider over the one shared gate.
+    providers = [
+        GeminiBrokerEvaluationProvider(
+            broker,
+            run_id=f"plan-gate-r{index}",
+            decoding=decoding,
+            admission=admission,
+        )
+        for index in range(4)
+    ]
+    identity = {
+        "paper_id": "aqa-gate",
+        "family_id": "evaluation-item:aqa-gate",
+        "source_version_id": "evaluation-item:aqa-gate:hash",
+    }
+
+    def score(index: int) -> None:
+        provider = providers[index]
+        for repeat in range(4):
+            provider.answer(
+                EvaluationRequest(
+                    trial=_gemini_trial(index * 10 + repeat),
+                    identity=identity,
+                    run_id=provider.run_id,
+                )
+            )
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for future in [pool.submit(score, index) for index in range(4)]:
+            future.result()
+
+    assert broker.peak <= int(policy["maximum_concurrent_requests"])
+    assert broker.peak > 1
+
+
+def test_without_the_gate_the_wave_reaches_the_broker_whole(tmp_path: Path) -> None:
+    """The gate is what holds the wave: without it every call goes at once."""
+    broker = _CountingBroker(tmp_path / "receipts")
+    decoding = {
+        "temperature_by_model": {"gemini-3.8-flash": "0"},
+        "max_output_tokens_by_arm": {"medium": 4096},
+    }
+    provider = GeminiBrokerEvaluationProvider(
+        broker, run_id="plan-nogate-r1", decoding=decoding
+    )
+    identity = {
+        "paper_id": "aqa-gate",
+        "family_id": "evaluation-item:aqa-gate",
+        "source_version_id": "evaluation-item:aqa-gate:hash",
+    }
+
+    def answer(index: int) -> None:
+        provider.answer(
+            EvaluationRequest(
+                trial=_gemini_trial(index),
+                identity=identity,
+                run_id=provider.run_id,
+            )
+        )
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for future in [pool.submit(answer, index) for index in range(6)]:
+            future.result()
+
+    assert broker.peak > 3

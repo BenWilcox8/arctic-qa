@@ -20,6 +20,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -270,12 +271,21 @@ class GeminiBrokerEvaluationProvider:
         *,
         run_id: str,
         decoding: dict[str, Any],
+        admission: AbstractContextManager[Any] | None = None,
     ) -> None:
         if not broker.evaluation_enabled():
             raise ValueError("the broker has no benchmark evaluation configuration")
         self.broker = broker
         self.run_id = run_id
         self._decoding = decoding
+        # The paid-call slots of the evaluation phase belong to the whole
+        # process, and this provider belongs to one question. ``admission`` is
+        # how the caller paces every question it runs at once under that one
+        # limit: see :func:`arctic_qa.abstention_plan.evaluation_admission`.
+        # Without it the questions in flight multiply the calls that reach the
+        # broker by the questions in flight, and every call past the limit
+        # waits out the broker's bounded wait and is refused.
+        self._admission = admission
 
     def supports_enum_output(self, model: str) -> bool:
         return True
@@ -330,27 +340,30 @@ class GeminiBrokerEvaluationProvider:
                 resumed=True,
             )
         started = time.monotonic()
-        receipt = self.broker.execute(
-            phase=EVALUATION_PHASE,
-            run_id=request.run_id,
-            stage=evaluation_stage(trial["model"]),
-            paper_id=request.identity["paper_id"],
-            family_id=request.identity["family_id"],
-            source_version_id=request.identity["source_version_id"],
-            request_key=request_key,
-            payload=payload,
-            trial={
-                name: trial[name]
-                for name in (
-                    "trial_id",
-                    "eval_set_id",
-                    "item_id",
-                    "condition",
-                    "arm",
-                    "repeat",
-                )
-            },
-        )
+        # The gate is taken around the paid call alone. A replayed receipt
+        # above costs no slot, so it must never wait for one.
+        with self._admission or nullcontext():
+            receipt = self.broker.execute(
+                phase=EVALUATION_PHASE,
+                run_id=request.run_id,
+                stage=evaluation_stage(trial["model"]),
+                paper_id=request.identity["paper_id"],
+                family_id=request.identity["family_id"],
+                source_version_id=request.identity["source_version_id"],
+                request_key=request_key,
+                payload=payload,
+                trial={
+                    name: trial[name]
+                    for name in (
+                        "trial_id",
+                        "eval_set_id",
+                        "item_id",
+                        "condition",
+                        "arm",
+                        "repeat",
+                    )
+                },
+            )
         latency = time.monotonic() - started
         final_path = self.broker.effective_receipt_path(request_key)
         return response_from_receipt(

@@ -516,11 +516,14 @@ The question keeps the trials it recorded, its row says it is not complete, and 
 ### A refusal the provider never saw
 
 A trial can be refused before the provider ever sees the request.
-Two shapes reach the evaluator, and `abstention_plan.PRE_PROVIDER_REFUSALS` is that closed set:
+Three shapes reach the evaluator, and `abstention_plan.PRE_PROVIDER_REFUSALS` is that closed set:
 
 - `errors.BrokerOperationBusyError`, the exclusive operation lock of the shared paid-call ledger, held past the bounded wait.
 - `errors.HarnessUnavailableError`, a subscription harness binary that cannot be started.
   The probe `abstention_subscription.require_harness_binary` runs before the trial reserves its row, and the transport owns it: `SubprocessTransport.probe` asks, a scripted transport starts no process and answers by doing nothing.
+- `errors.TransientReservationError`, the paid-call concurrency slots or the minute window of the evaluation phase, still full past the broker's own bounded wait.
+  The broker raises it only for a caller that sets `defer_transient_reservations`, which the evaluator's brokers do; every other caller keeps the recorded `not_submitted` refusal.
+  Nothing is written for it: no receipt, no ledger mutation, and the row stays `counting` for the next attempt to reuse.
 
 Such a refusal reserved nothing, submitted nothing and charged nothing.
 It proves nothing about the model and nothing about the next trial.
@@ -538,6 +541,20 @@ This rule is the answer to a live failure.
 The containment that shipped at 13:00 UTC on 2026-09-17 kept the unit alive but recorded the busy lock as a vendor stop on the question.
 In three hours the unit journal held 87 `item_done` events with `complete: false` against 16 with `complete: true`.
 Worse, the journal still called those questions complete: 73 of the 155 closed questions of the `streaming-r11` work directory hold fewer than their 48 responses, 1047 trials in all, and none of them was ever taken up again.
+
+The full paid-call slots were the same defect by another road.
+The broker recorded them as a `not_submitted` response of the trial, which the no-retry contract never asks again, and only a later reviewed transition can resume such a row.
+Five questions were stranded that way in the thirty minutes to 16:43 UTC on 2026-09-17, and 16 recorded responses of the work directory hold that refusal instead of a letter.
+
+### Pacing the wave under the one limit
+
+The concurrency limit of the evaluation phase belongs to the shared paid-call ledger, so it counts the calls of the whole process.
+`abstention_plan.effective_concurrency` reads the same limit per question, which is right for one question alone and wrong for a wave: at eight questions in flight the plan's four Gemini workers each became four calls reaching the broker, which is 32 against the policy's 4.
+
+`abstention_plan.evaluation_admission` is the one gate that holds them.
+`watch` builds it once per invocation at `maximum_concurrent_requests` of the evaluation policy and hands it to every question, and `GeminiBrokerEvaluationProvider` takes it around the paid call alone, never around a replayed receipt.
+So a call past the limit waits in this process, where waiting is free, instead of waiting out the broker's bound and being refused.
+The per-vendor slots of the subscription arms are unchanged, because a slot there belongs to the vendor and nothing outside this process enforces it.
 
 ### A harness the question could not start, and a harness that was upgraded
 

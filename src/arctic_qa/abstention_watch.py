@@ -86,6 +86,7 @@ import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -109,6 +110,7 @@ from .abstention_plan import (
     GATE_FILENAME_BY_VENDOR,
     PLAN_SUMMARY_FILENAME,
     build_vendor_runs,
+    evaluation_admission,
     load_pause,
     load_plan,
     load_vendor_rows,
@@ -484,6 +486,7 @@ def evaluate_item(
     progress: Callable[[dict[str, Any]], None] | None = None,
     pause: dict[str, Any] | None = None,
     should_stop: Callable[[], bool] | None = None,
+    admission: AbstractContextManager[Any] | None = None,
 ) -> dict[str, Any]:
     """Freeze one item, run the whole plan on it, and journal its cost row.
 
@@ -498,6 +501,10 @@ def evaluate_item(
     A vendor in the second list and not in the first is paused, and it owes
     this item its trials, so the item is not complete. A vendor in neither
     owes nothing, because the operator put it out of scope.
+
+    ``admission`` is the one gate that paces the paid Gemini calls of every
+    question in flight under the concurrency limit of the evaluation phase,
+    which belongs to the whole process and not to one question.
     """
     manifest = build_eval_set(
         state_db=state_db,
@@ -557,6 +564,7 @@ def evaluate_item(
         concurrency=concurrency,
         vendors=vendors,
         scratch_root=scratch_root,
+        admission=admission,
     )
     run_dir = runs_dir / item_id
     started = time.monotonic()
@@ -907,6 +915,16 @@ def watch(
     plan = load_plan(plan_file)
     prices = load_list_prices(list_price_file)
     price_config = json.loads(evaluation_price_config_file.read_text(encoding="utf-8"))
+    # One gate for the whole invocation, at the concurrency limit of the
+    # evaluation phase. Every question in flight shares it, because the limit
+    # it mirrors is the shared ledger's and counts this whole process. Without
+    # it eight questions each sent the plan's four Gemini calls at a limit of
+    # four, and every call past the limit waited out the broker's bounded wait
+    # and was refused: five questions were stranded that way in the thirty
+    # minutes to 16:43 UTC on 2026-09-17.
+    admission = evaluation_admission(
+        json.loads(evaluation_policy_file.read_text(encoding="utf-8"))
+    )
     work_dir.mkdir(parents=True, exist_ok=True)
     journal = CostJournal(work_dir)
     state_path = work_dir / WATCH_STATE_FILENAME
@@ -1391,6 +1409,7 @@ def watch(
                 # holds stay pending, the item is not complete, and a later
                 # invocation runs what is missing.
                 should_stop=lambda: stop["now"],
+                admission=admission,
             )
         except BrokerOperationBusyError as busy:
             # The exclusive operation lock of the shared ledger stayed held

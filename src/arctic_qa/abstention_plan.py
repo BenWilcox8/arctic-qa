@@ -27,6 +27,7 @@ import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -69,7 +70,11 @@ from .abstention_subscription import (
     vendor_entry,
     vendor_policy_limit,
 )
-from .errors import BrokerOperationBusyError, HarnessUnavailableError
+from .errors import (
+    BrokerOperationBusyError,
+    HarnessUnavailableError,
+    TransientReservationError,
+)
 from .model_broker import SharedGeminiBroker
 from .util import atomic_json, canonical_json, sha256_file
 
@@ -87,17 +92,25 @@ GATE_FILENAME_BY_VENDOR = {vendor: f"{vendor}.json" for vendor in VENDOR_NAMES}
 
 # A refusal that reached the trial before the provider saw the request. It
 # reserved nothing, submitted nothing and charged nothing, so it proves nothing
-# about this trial, about this model or about the next trial. The two shapes
-# are the exclusive operation lock of the shared paid-call ledger and a
-# subscription harness binary that cannot be started.
+# about this trial, about this model or about the next trial. The three shapes
+# are the exclusive operation lock of the shared paid-call ledger, a
+# subscription harness binary that cannot be started, and the paid-call slots
+# or minute window of the evaluation phase that stayed full past the broker's
+# own bounded wait.
 #
 # The evaluation policy forbids a retry of a call the provider answered. It
 # says nothing about a call the provider never saw, and treating the two alike
 # is what stranded the closed questions of the streaming-r11 work directory:
 # the busy lock closed each one with its Gemini trials unrecorded and the
 # journal still called the question complete. The settled count is in
-# research/arctic-eval-busy-strand-r1/report.md.
-PRE_PROVIDER_REFUSALS = (BrokerOperationBusyError, HarnessUnavailableError)
+# research/arctic-eval-busy-strand-r1/report.md. The full slots stranded five
+# more questions between 16:30 and 16:43 UTC on 2026-09-17, as a recorded
+# ``not_submitted`` refusal that only a later reviewed transition could resume.
+PRE_PROVIDER_REFUSALS = (
+    BrokerOperationBusyError,
+    HarnessUnavailableError,
+    TransientReservationError,
+)
 # The bounded wait inside the trial. The broker's own queue for the exclusive
 # lock is already minutes long, so these rounds are the last word before the
 # trial is left pending, and the next poll takes it up again.
@@ -280,6 +293,26 @@ def effective_concurrency(
     return max(value, 1)
 
 
+def evaluation_admission(policy: dict[str, Any]) -> threading.BoundedSemaphore:
+    """Return the one gate that paces every question of this process.
+
+    The concurrency limit of the evaluation phase belongs to the shared
+    paid-call ledger, so it counts the calls of the whole process and not the
+    calls of one question. ``effective_concurrency`` reads the same limit per
+    question, which is right for one question alone and wrong for a wave: at
+    eight questions in flight the plan's four Gemini workers each became four
+    calls reaching the broker, which is 32 against the policy's 4.
+
+    The broker refuses the calls past the limit after a bounded wait, and a
+    refusal it records is a trial the no-retry contract may never ask again.
+    Pacing the wave under the limit is what keeps the wave inside the policy
+    instead: a call waits for a slot in this process, where waiting is free,
+    rather than for a slot in the ledger, where the wait has a bound and the
+    bound is a stranded question.
+    """
+    return threading.BoundedSemaphore(int(policy["maximum_concurrent_requests"]))
+
+
 def parse_concurrency(value: str | None) -> dict[str, int]:
     """Parse ``vendor=N,vendor=N`` from the command line."""
     result: dict[str, int] = {}
@@ -408,12 +441,19 @@ def build_vendor_runs(
     vendors: list[str] | None = None,
     scratch_root: Path | None = None,
     binaries: dict[str, str] | None = None,
+    admission: AbstractContextManager[Any] | None = None,
 ) -> dict[str, VendorRun]:
     """Bind every vendor of the plan to its gate and return the vendor runs.
 
     ``broker_factory`` receives the Gemini gate file and returns the broker
     that already binds the shared ledger. ``subscription_ledger_root`` holds
     one ledger directory per subscription vendor.
+
+    ``admission`` is the gate of :func:`evaluation_admission`, which a caller
+    that runs several questions at once builds once and hands to every one of
+    them. Only the Gemini vendor takes it: its concurrency limit is the shared
+    ledger's, which counts the whole process. A subscription vendor's slots
+    belong to the vendor and are unchanged.
     """
     policy = json.loads(evaluation_policy_file.read_text(encoding="utf-8"))
     runs: dict[str, VendorRun] = {}
@@ -430,6 +470,7 @@ def build_vendor_runs(
                 models=models,
                 arms=list(plan["arms"]),
                 repeats=int(plan["repeats"]),
+                admission=admission,
             )
         else:
             if subscription_ledger_root is None:
@@ -1144,6 +1185,7 @@ __all__ = [
     "build_vendor_runs",
     "dry_run_plan",
     "effective_concurrency",
+    "evaluation_admission",
     "load_pause",
     "load_plan",
     "merge_pause",

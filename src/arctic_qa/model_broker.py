@@ -22,6 +22,7 @@ from .errors import (
     BrokerOperationBusyError,
     DuplicateRequestKeyError,
     PaperBindingConflictError,
+    TransientReservationError,
 )
 from .gemini_eligibility import (
     DEFAULT_CALL_TIMEOUT_SECONDS,
@@ -1824,6 +1825,7 @@ class SharedGeminiBroker:
         evaluation_policy_transition_file: Path | None = None,
         concurrent_construction: bool = False,
         concurrent_requests: bool = False,
+        defer_transient_reservations: bool = False,
     ) -> None:
         self.policy_file = policy_file.resolve()
         self.price_config_file = price_config_file.resolve()
@@ -1875,6 +1877,19 @@ class SharedGeminiBroker:
         # The start of this broker reads it, so it is a parameter and never
         # an attribute a caller sets afterwards.
         self._concurrent_requests = bool(concurrent_requests)
+        # What a scheduling refusal that outlived the bounded wait becomes. By
+        # default it is the immutable ``not_submitted`` receipt this broker has
+        # always written, which the producer reads as one skipped paper and a
+        # later reviewed transition resumes.
+        #
+        # A caller whose contract forbids a re-ask of a recorded refusal sets
+        # this instead, and the bound raises ``TransientReservationError`` with
+        # nothing written at all: no receipt, no ledger mutation, and the row
+        # left ``counting`` for the next attempt to reuse. The streaming
+        # evaluator sets it, because a recorded refusal there is a trial that
+        # may never be asked again and a question that can never reach its 48
+        # responses.
+        self.defer_transient_reservations = bool(defer_transient_reservations)
         self._pacing_state = threading.local()
         # The wait and the hold of every exclusive section, by lock handle, and
         # the whole-call lock of the sequential path by thread. The second one
@@ -9298,6 +9313,16 @@ class SharedGeminiBroker:
                             reserved_operation = None
                         time.sleep(TRANSIENT_RESERVATION_RETRY_INTERVAL_SECONDS)
                         continue
+                    if (
+                        str(error) in TRANSIENT_RESERVATION_REASONS
+                        and self.defer_transient_reservations
+                    ):
+                        # The room never came, and this caller asked to hear
+                        # it rather than to be handed a refusal it can never
+                        # re-ask. Nothing is written: no receipt, no ledger
+                        # mutation, and the row stays ``counting``, which the
+                        # next attempt of this request key reuses.
+                        raise TransientReservationError(str(error)) from error
                     receipt = {
                         **base,
                         "state": "not_submitted",
