@@ -71,9 +71,11 @@ invocation, because the policy forbids a retry, and a start clears that pause.
 One pause lifts on its own: an ambiguous charge. The broker keeps the
 reservation of a paid call whose charge it cannot prove and halts the
 evaluation phase until a supervisor releases it with a reviewed continuation.
-That release is a ledger fact, so the watcher reads the shared ledger on every
-poll, and resumes the Gemini vendor on the first poll after the release with a
-``vendor_resumed`` event and a journal row. No restart is needed.
+That release is a ledger fact, so the watcher asks the shared ledger before
+every question it admits, and resumes the Gemini vendor with a
+``vendor_resumed`` event and a journal row. No restart is needed. It asks at
+every admission and not only at the top of a poll cycle, because one cycle
+scores four waves and the arm was dark for the rest of one on 2026-09-17.
 """
 
 from __future__ import annotations
@@ -923,6 +925,61 @@ def watch(
             },
         )
 
+    def resume_gemini_if_released() -> bool:
+        """Resume the Gemini arm once its ambiguous charge is released.
+
+        The mirror of :func:`pause_vendor`, and it holds the same ``gate``,
+        because both move ``vendors`` and ``state["paused_vendors"]``.
+
+        A vendor paused for an ambiguous charge waits on a release of the
+        shared ledger, not on a restart: the broker keeps the reservation and
+        halts the evaluation phase until a reviewed continuation releases it.
+        The release is a ledger fact, so this asks the ledger.
+
+        It is asked before every question, not only between poll cycles. One
+        cycle scores four waves, which was 44 minutes of wall time at eight
+        questions in flight on 2026-09-17, and the Gemini arm was dark for all
+        of it after a pause at 11:31:26 UTC that the ledger had already
+        released. The ledger is read only when the arm is actually paused for
+        an ambiguous charge, so an admission that has nothing to resume pays
+        nothing.
+        """
+        nonlocal vendors
+        if PROVIDER_GOOGLE_GEMINI not in authorized_vendors:
+            return False
+        if PROVIDER_GOOGLE_GEMINI in vendors:
+            return False
+        record = state["paused_vendors"].get(PROVIDER_GOOGLE_GEMINI) or {}
+        if not is_ambiguous_charge_reason(record.get("reason")):
+            return False
+        if (
+            phase_halt_reason(read_ledger(shared_ledger_file), EVALUATION_PHASE)
+            is not None
+        ):
+            return False
+        paused_reason = str(record["reason"])
+        del state["paused_vendors"][PROVIDER_GOOGLE_GEMINI]
+        running = set(vendors) | {PROVIDER_GOOGLE_GEMINI}
+        vendors = [name for name in authorized_vendors if name in running]
+        atomic_json(state_path, {**state, "updated_at_utc": _utc_now()})
+        journal.append(
+            resume_row(
+                run_id=str(authorization["run_id_prefix"]),
+                vendor=PROVIDER_GOOGLE_GEMINI,
+                paused_reason=paused_reason,
+            )
+        )
+        emit(
+            {
+                "event": "vendor_resumed",
+                "vendor": PROVIDER_GOOGLE_GEMINI,
+                "paused_reason": paused_reason,
+                "reason": "the released ambiguous charge no longer halts "
+                "the evaluation phase",
+            }
+        )
+        return True
+
     def pause_vendor(vendor: str, record: dict[str, Any], *, run_id: str) -> None:
         """Pause one vendor for the rest of this invocation. Hold ``gate``."""
         nonlocal vendors
@@ -949,6 +1006,10 @@ def watch(
         with gate:
             if stop["now"] or halt["now"]:
                 return None
+            # An arm held by an ambiguous charge the ledger has released comes
+            # back here, before the question is admitted, and not only at the
+            # next poll cycle.
+            resume_gemini_if_released()
             # Re-read the pause files before every item: a cost guard can
             # pause a model at any moment, and a resume time can pass while
             # the wave runs.
@@ -1160,40 +1221,8 @@ def watch(
         # the evaluation phase can call again, and resumes the vendor itself.
         # Only the shared-ledger vendor is covered, because that ledger is the
         # record that proves the release.
-        if (
-            PROVIDER_GOOGLE_GEMINI in authorized_vendors
-            and PROVIDER_GOOGLE_GEMINI not in vendors
-            and is_ambiguous_charge_reason(
-                (state["paused_vendors"].get(PROVIDER_GOOGLE_GEMINI) or {}).get(
-                    "reason"
-                )
-            )
-            and phase_halt_reason(read_ledger(shared_ledger_file), EVALUATION_PHASE)
-            is None
-        ):
-            paused_reason = str(
-                state["paused_vendors"][PROVIDER_GOOGLE_GEMINI]["reason"]
-            )
-            del state["paused_vendors"][PROVIDER_GOOGLE_GEMINI]
-            running = set(vendors) | {PROVIDER_GOOGLE_GEMINI}
-            vendors = [name for name in authorized_vendors if name in running]
-            atomic_json(state_path, {**state, "updated_at_utc": _utc_now()})
-            journal.append(
-                resume_row(
-                    run_id=str(authorization["run_id_prefix"]),
-                    vendor=PROVIDER_GOOGLE_GEMINI,
-                    paused_reason=paused_reason,
-                )
-            )
-            emit(
-                {
-                    "event": "vendor_resumed",
-                    "vendor": PROVIDER_GOOGLE_GEMINI,
-                    "paused_reason": paused_reason,
-                    "reason": "the released ambiguous charge no longer halts "
-                    "the evaluation phase",
-                }
-            )
+        with gate:
+            resume_gemini_if_released()
         # An item whose only missing trials belong to a model that is still
         # paused cannot advance: a revisit records nothing, calls nothing and
         # appends one more journal row. So it waits here until the pause

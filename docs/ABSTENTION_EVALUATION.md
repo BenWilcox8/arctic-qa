@@ -564,9 +564,11 @@ Before 2026-09-17 the two were one field and a paused vendor did not stop an ite
 One pause lifts on its own: an ambiguous charge.
 The broker keeps the reservation of a paid call whose charge it cannot prove, and it halts the evaluation phase of the shared ledger.
 A supervisor releases that charge with a reviewed continuation, which is the `authorize-ambiguous-continuation` command of `docs/SHARED_MODEL_BROKER.md`.
-The release is a ledger fact, so the evaluator reads the shared ledger on every poll.
-On the first poll after the release, it resumes the Gemini vendor, logs a `vendor_resumed` event, and appends a `vendor_resume` row to the journal.
+The release is a ledger fact, so the evaluator asks the shared ledger before every question it admits.
+At the first admission after the release, it resumes the Gemini vendor, logs a `vendor_resumed` event, and appends a `vendor_resume` row to the journal.
 No restart is needed.
+The question is asked at every admission and not only at the top of a poll cycle, because one cycle scores four waves: the arm stopped at 11:31:26 UTC on 2026-09-17 on a charge the ledger had already released, and it was dark for the rest of that cycle while the two subscription arms worked.
+The ledger is read only while the arm is actually paused for an ambiguous charge, so an admission with nothing to resume pays nothing.
 The evaluator resumes only the Gemini vendor this way, because the shared ledger is the record that proves the release.
 A vendor paused for any other reason stays paused until a start clears it.
 The 503 of 2026-09-16 at 17:53 UTC showed why: the Gemini arm, which the USD 200 allocation pays for, was off for every later question until an operator restarted the unit.

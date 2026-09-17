@@ -1780,6 +1780,109 @@ def test_a_released_ambiguous_charge_resumes_gemini_on_the_next_poll(
     assert resumes[0]["paused_reason"] == "ambiguous_charge"
 
 
+def test_a_released_ambiguous_charge_resumes_gemini_inside_the_wave(
+    tmp_path: Path,
+) -> None:
+    """The arm comes back at the next question, not at the next poll cycle.
+
+    One poll cycle scores four waves, which was 44 minutes of wall time at
+    eight questions in flight on 2026-09-17. The Gemini arm stopped on an
+    ambiguous charge at 11:31:26 UTC that the ledger had already released,
+    and it stayed dark for the rest of the cycle because only the top of the
+    loop asked. Every admission asks now.
+    """
+    import arctic_qa.abstention_watch as module
+
+    db = state_db(tmp_path / "db", chapter3=["aqa-a", "aqa-b", "aqa-c"])
+    ledger_file = construction_ledger(
+        tmp_path,
+        {
+            "family-aqa-a": ["0.01"],
+            "family-aqa-b": ["0.01"],
+            "family-aqa-c": ["0.01"],
+        },
+    )
+    _halt_the_evaluation_phase(ledger_file, halted=True)
+    auth = authorization(tmp_path, db, maximum_items=4)
+    work = tmp_path / "inside"
+    events: list[dict] = []
+    budget = [1]
+
+    class ReleasingGeminiProvider(StoppingGeminiProvider):
+        """Stops once, and the supervisor releases the charge at that moment."""
+
+        def answer(self, request):  # type: ignore[no-untyped-def]
+            stopping = self.budget[0] > 0
+            response = super().answer(request)
+            if stopping:
+                _halt_the_evaluation_phase(ledger_file, halted=False)
+            return response
+
+    def fake_build(*, plan, set_dir, run_id, gate_dir, vendors, **_: object):
+        runs = {}
+        for vendor in vendors:
+            provider = (
+                ReleasingGeminiProvider(budget=budget, policy="gold")
+                if vendor == PROVIDER_GOOGLE_GEMINI
+                else ScriptedEvaluationProvider(policy="gold")
+            )
+            runs[vendor] = VendorRun(
+                vendor=vendor,
+                provider=provider,
+                decoding={"scripted": True, "vendor": vendor},
+                models=plan["vendors"][vendor]["models"],
+                concurrency=1,
+            )
+        return runs
+
+    original = module.build_vendor_runs
+    module.build_vendor_runs = fake_build  # type: ignore[assignment]
+    try:
+        result = watch(
+            authorization_file=auth,
+            plan_file=PLAN_FILE,
+            contract_file=CH3_CONTRACT,
+            evaluation_policy_file=POLICY_V2,
+            evaluation_price_config_file=PRICES,
+            subscription_models_file=MODELS_FILE,
+            state_db=db,
+            work_dir=work,
+            shared_ledger_file=ledger_file,
+            broker_factory=None,
+            subscription_ledger_root=work / "subscription",
+            list_price_file=LIST_PRICES,
+            poll_seconds=5,
+            once=True,
+            item_workers=1,
+            code_commit="test-commit",
+            ledger_run_prefixes=("chapter3-",),
+            backfill_contract_file=CH2_CONTRACT,
+            log=events.append,
+        )
+    finally:
+        module.build_vendor_runs = original  # type: ignore[assignment]
+
+    assert result["errors"] == []
+    # One poll cycle, so a resume at the top of the loop could not have done it.
+    assert result["polls"] == 1
+    paused = [row for row in events if row["event"] == "vendor_paused"]
+    resumed = [row for row in events if row["event"] == "vendor_resumed"]
+    assert len(paused) == 1
+    assert len(resumed) == 1
+    assert resumed[0]["paused_reason"] == "ambiguous_charge"
+    started = [row for row in events if row["event"] == "item_started"]
+    assert [row["item_id"] for row in started] == ["aqa-a", "aqa-b", "aqa-c"]
+    # The resume lands inside the cycle, before the last question is admitted,
+    # and that question runs the arm.
+    order = [row["event"] for row in events]
+    assert order.index("vendor_resumed") < len(order) - 1 - order[::-1].index(
+        "item_started"
+    )
+    assert PROVIDER_GOOGLE_GEMINI in started[-1]["vendors"]
+    assert result["paused_vendors"] == {}
+    assert PROVIDER_GOOGLE_GEMINI in result["active_vendors"]
+
+
 def test_an_unreleased_ambiguous_charge_keeps_gemini_paused(tmp_path: Path) -> None:
     """The evaluation halt is the release, so a standing halt keeps the pause."""
     db = state_db(tmp_path / "now", chapter3=["aqa-a"])
