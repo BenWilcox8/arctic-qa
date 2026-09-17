@@ -133,13 +133,14 @@ under `arctic-eval-authorization-r8`.
 | `e46dd7f` | 11:16:08 UTC | and the share of every wave for every arm |
 | `71e3c35` | 11:49:14 UTC | and the resume asked at every admission |
 | `8a61b0f` | 12:02:45 UTC | and the full slot kept inside one question |
-| `f121d93` | 12:30:22 UTC | and the seeded start, and the contained busy lock |
+| `f121d93` | 12:30:22 UTC | and the seeded start, and the busy lock contained in the frame |
+| `88d2384` | 13:02:08 UTC | and the busy lock contained on all three of its routes |
 
 `8477fd5` was replaced at 11:05:32 UTC while the two crews of the night both
 held the unit, and the Gemini arm was idle for the whole of its eight minutes,
 so it measured nothing. The captain's supervisor then gave the unit to this
-task alone. `8a61b0f` was restarted once at 12:21:24 UTC, after the watch
-exited on the busy lock that `f121d93` contains.
+task alone. `8a61b0f` was restarted once at 12:21:24 UTC and `f121d93` once at 12:51:25
+UTC, each after the watch exited on the busy lock.
 
 The stop was settled every time.
 A cut-over while a Gemini call is on the wire orphans the call and halts the
@@ -258,13 +259,23 @@ is a stop that reserved nothing, submitted nothing and charged nothing:
   broker names those two as the refusals that describe the moment and not the
   request. They joined `ITEM_SCOPED_REASONS` after they took the arm down at
   11:55 UTC, minutes after it became fast enough to fill a slot.
-- a `BrokerOperationBusyError` raised in the frame around the plan was the
-  question's error, and one question's error halts the wave and ends the
-  watch. The unit exited 1 at 12:14:20 UTC with one such error per question of
-  the wave. It is contained against the question now.
+- a `BrokerOperationBusyError` was the question's error, and one question's
+  error halts the wave and ends the watch. The unit exited 1 at 12:14:20 UTC
+  with one such error per question of the wave.
 
 The first two were found by watching the live arm after a cut-over. The third
-was found by the supervisor, from the unit's exit, and not by this task.
+was found by the supervisor, from the unit's exit, and not by this task, and
+the first fix for it was wrong: it sat around the call to `evaluate_item`,
+which catches what the plan raises, journals the question's row and hands the
+text back in `result["error"]`. The unit exited again at 12:49:45 UTC. All
+three routes are contained now, against one predicate over the text, and the
+final raise drops these lines whatever route they took, because a raise ends
+the unit and that is for an authorization, an integrity or a halt error.
+
+The lesson is the one the producer already learned twice this week and wrote
+into `AGENTS.md`: a refusal that reserved nothing, submitted nothing and
+charged nothing belongs to one unit of work, and it must be contained where
+the work reports it, not where it is convenient to catch it.
 
 ## What is left
 
