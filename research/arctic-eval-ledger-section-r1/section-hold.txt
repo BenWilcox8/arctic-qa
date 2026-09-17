@@ -1,3 +1,9 @@
+NOTE: these two windows are not paired. The before window carried a busy
+producer (6.65 paid calls a minute) and the after window an almost idle one
+(0.54). See producer-load.txt and "What the live windows do and do not show"
+in report.md: the difference alone can account for the change, so this file
+records what was seen and proves nothing about the code.
+
 === BEFORE: snapshot 09314ae, no fix, 11:05:41 to 11:12:00 UTC ===
 (the unit's own default threshold of 1.00 s)
 sections 69  held 264.0 s  waited 978.9 s

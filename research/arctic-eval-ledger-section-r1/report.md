@@ -11,30 +11,37 @@ This record holds where those 22 s went and what this task removed.
 
 ## Answer first
 
-The exclusive section went from 10.56 s to 4.04 s per paid Gemini call, and
-the arm from 19.8 to 40.8 questions an hour, measured live across the
-cut-over of 11:16 UTC. The goal was under 2 s, and "What is left" says where
-the rest of it is.
+Four costs are measured and removed, each on the live ledger. What is **not**
+established is a live before-and-after of the arm's rate: the producer's own
+load moved between every pair of windows this task could take, and it moves
+the same numbers. "What the live windows do and do not show" holds that in
+full, and gives the command to run after 13:45 UTC, when the captain's order
+stops generation and a producer-idle window comes for free.
 
-Two costs put the evaluator there, and neither is the money proof itself.
+The costs, and none of them is the money proof itself.
 
-| What | Measured | After |
+| What | Was | Now |
 | --- | --- | --- |
 | One ledger read, receipts fingerprint moved | 0.21 to 0.26 s | 0.026 s |
-| One broker start | 3.93 s | 3.93 s at the first, about 2.6 s after it |
-| The start compaction, under the shared ledger lock | 1.16 s a question | once a process |
+| The proof of every row at a broker start | 2.6 s a question | once a process, then the signatures alone |
+| The custody of every terminal receipt at a start | 0.24 s a question | once a process |
+| The compaction of the whole ledger at a start | 1.16 s a question | once a process |
 | The duplicate materialization of the identity check | 0.19 s a question | removed |
 
 Every number above was measured on the live chapter 3 ledger on 2026-09-17,
-at 13,309 request rows, a 18 MB snapshot, a 41 MB journal and 52,716 receipt
-files, on an idle machine with a warm page cache.
+on an idle machine with a warm page cache: the reads at 13,309 request rows,
+a 18 MB snapshot, a 41 MB journal and 52,716 receipt files; the row proof and
+the custody at 15,347 rows, three hours later.
+The evaluator builds one broker per question, because the derived evaluation
+gate belongs to the question, so every "a question" line above was paid once a
+question, under the shared ledger lock.
 The live evaluator shares one interpreter and one rotating USB disk with the
 producer, which multiplies each of them: the 50-crew measured the same
 multiplier at 0.206 s a call at 32 paper threads and 0.319 s at 50, for the
 same 26 ms of real work
 (`research/arctic-ch3-concurrency-50-r1/report.md`).
 
-## The first cost: the evaluator kept the exact receipts listing
+## The receipts listing the evaluator kept exact
 
 `RECEIPT_LISTING_REFRESH_SECONDS` bounds how often a broker lists the receipts
 directory again.
@@ -68,7 +75,7 @@ A concurrent construction run is one by definition, so the producer's flag
 still implies it, and no reviewed operation changes.
 The evaluator's own broker factory sets it.
 
-## The second cost: the evaluator started the ledger once a question
+## The whole-ledger start the evaluator ran once a question
 
 The evaluator builds one broker per question, because the derived evaluation
 gate belongs to the question.
@@ -113,21 +120,28 @@ the first and keeps proving on every read.
 `tests/test_ledger_proof_cost.py` holds the shape and the proof together: each
 test that removes a cost also shows that the thing it removed is still caught.
 
-## The cut-over
+## The cut-overs
 
-Snapshot `e46dd7f`, successor authorization
-`streaming-eval-r11-authorization-e46dd7f.json`, review record
-`streaming-eval-r11-review-e46dd7f.md`, unit `arctic-abstention-stream-r3`,
-work directory `abstention-eval/streaming-r11`, at 11:16:08 UTC.
-`resnapshot-evaluator.sh` is the script.
+The unit is `arctic-abstention-stream-r3`, the work directory is
+`abstention-eval/streaming-r11`, and `resnapshot-evaluator.sh` is the script.
+Each snapshot has its own successor authorization and review record beside it,
+under `arctic-eval-authorization-r8`.
 
-An earlier snapshot of the same branch, `8477fd5`, ran from 10:57:36 to
-11:05:32 UTC and was replaced while the two crews of the night both held the
-unit. The Gemini arm was idle for the whole of those eight minutes, so that
-snapshot measured nothing; the captain's supervisor then gave the unit to this
-task alone.
+| Snapshot | Live from | What it carried |
+| --- | --- | --- |
+| `8477fd5` | 10:57:36 UTC | the receipts listing and the once-a-process start |
+| `e46dd7f` | 11:16:08 UTC | and the share of every wave for every arm |
+| `71e3c35` | 11:49:14 UTC | and the resume asked at every admission |
+| `8a61b0f` | 12:02:45 UTC | and the full slot kept inside one question |
+| `f121d93` | 12:30:22 UTC | and the seeded start, and the contained busy lock |
 
-The stop was settled.
+`8477fd5` was replaced at 11:05:32 UTC while the two crews of the night both
+held the unit, and the Gemini arm was idle for the whole of its eight minutes,
+so it measured nothing. The captain's supervisor then gave the unit to this
+task alone. `8a61b0f` was restarted once at 12:21:24 UTC, after the watch
+exited on the busy lock that `f121d93` contains.
+
+The stop was settled every time.
 A cut-over while a Gemini call is on the wire orphans the call and halts the
 evaluation phase, which happened at 10:03 UTC on 2026-09-17.
 So the script reads the evaluation requests in flight from the ledger store,
@@ -135,8 +149,8 @@ waits for 0, then signals the process itself and waits for it to leave, rather
 than let systemd kill it: the running unit carried the 90 s default
 `TimeoutStopSec`, and that default killed the evaluator mid-trial at 07:25:55
 UTC on 2026-09-17.
-The evaluator left at a trial boundary after 130 s.
-The new unit carries `TimeoutStopSec=600` and `nice 10`.
+The evaluator left at a trial boundary each time, after 45 to 130 s.
+Every unit this task started carries `TimeoutStopSec=600` and `nice 10`.
 
 The new launcher also lowers
 `ARCTIC_QA_OPERATION_LOCK_LOG_SECONDS` to 0.05 s, so every section of the
@@ -172,72 +186,110 @@ The first wave after the cut-over:
 Seven of the eight questions owed the Gemini arm trials, against none of the
 eight an hour earlier.
 
-## The live measurement
+## What the live windows do and do not show
 
-The cut-over was at 11:16:08 UTC.
-The before window is the evaluator on 09314ae, which carries neither change;
-the after window is 11:20 to 11:33 UTC, which leaves out the first four
-minutes, because a process start pays one cold broker start and that is now
-once a process rather than once a question.
+The numbers in "Answer first" are of the ledger itself: one read, one start,
+one compaction, timed directly. They stand on their own.
 
-The two windows do not share a log threshold.
-The unit on 09314ae kept the 1.00 s default, so its log holds no section under
-that; the launcher of this snapshot lowers it to 0.05 s.
-The like-for-like line reads the after window at 1.00 s as well, and the
-before number is therefore an undercount of the hold, never an overcount.
-`section-hold.txt` and `gemini-call-rate.txt` hold both readings.
+The rate of the Gemini arm is a different claim, and this task cannot make it.
+Three windows were taken, and the producer's load is different in every one.
+`measure-phase-rate.py` reads both phases out of the ledger and
+`producer-load.txt` holds the reading:
 
-| | Before, 09314ae | After, e46dd7f |
-| --- | --- | --- |
-| Exclusive section held per paid Gemini call | 10.56 s | 4.04 s |
-| Waited for that section per paid call | 39.2 s | 9.5 s |
-| Paid Gemini calls a minute | 3.96 | 8.15 |
-| Questions an hour on the Gemini arm | 19.8 | 40.8 |
+```
+11:05-11:12Z (before, 09314ae):  away_production 6.65/min,  evaluation 3.96/min
+11:20-11:33Z (after,  e46dd7f):  away_production 0.54/min,  evaluation 8.38/min
+12:34-12:45Z (after,  f121d93):  away_production    0/min,  evaluation 2.27/min
+```
 
-At the 0.05 s threshold, which sees every section, the after window holds
-4.54 s per paid call.
+The before window carried a busy producer and the after window an almost idle
+one. That difference alone can account for the change, so the pair proves
+nothing about this task's code, and an earlier draft of this report that read
+it as a 2.1-times gain was wrong.
 
-The arm is 2.1 times faster, and 3.0 times faster than the 13.7 questions an
-hour that `research/arctic-eval-parallel-items-r1/extrapolation.md` measured
-at 09:55 UTC.
-The goal of the task was under 2 s of exclusive section per call, and 4.04 s
-is not that.
-The next section says where the rest of it is.
+The third window says the same thing from the other side. It holds no
+construction row at all and is slower than both, at 4 to 7 s of hold per
+section. The producer process was running through it, replaying its run
+directory after its 12:18 UTC relaunch: that costs CPU and disk for about
+twenty minutes and writes no ledger row. The 50-crew measured what such
+contention does to a hold, and it is the same mechanism
+(`research/arctic-ch3-concurrency-50-r1/report.md`).
 
-The ledger stayed valid across the cut-over and the window: not halted, no
-integrity record, and the evaluation phase running.
-At 11:31:26 UTC the Gemini arm took a vendor pause of its own kind, an
-ambiguous charge on an interrupted request, which the reviewed rule of
-54695f1 continues through and which resumes the vendor on the next poll. That
-pause is not of this change: the settled stop of the cut-over held the
-evaluation requests in flight at zero and the evaluator left at a trial
-boundary, fifteen minutes earlier.
+So the honest statement of this task is: the ledger work is measured, the
+throughput claim is not.
+
+### The measurement that is still owed
+
+The captain's order stops generation at 13:45 UTC. After that the producer
+makes no paid call, and a producer-idle window costs nothing. Take twenty
+minutes of it and compare against `before-09314ae.txt`, which is the only
+window with the old code:
+
+```
+cd <the arctic-qa worktree>
+nix develop -c python research/arctic-eval-ledger-section-r1/measure-locks.py \
+  "<HH:MM local start>" "<HH:MM local end>" 1.0
+nix develop -c env PYTHONPATH=src python \
+  research/arctic-eval-ledger-section-r1/measure-gemini-calls.py \
+  /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
+  <START>Z <END>Z
+nix develop -c env PYTHONPATH=src python \
+  research/arctic-eval-ledger-section-r1/measure-phase-rate.py \
+  /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
+  <START>Z <END>Z
+```
+
+`journalctl --since` takes local time and the ledger takes UTC, which is why
+the two differ above. The third command is the control: it must report no
+`away_production` row in the window, and the before window's 6.65 a minute is
+what the old reading carried. The hold per paid call is the total held of the
+first command over the call count of the second, at the same 1.0 s threshold
+the old unit logged at.
+
+## What the night cost the arm, and what it did not
+
+Three defects took the Gemini arm down after the first cut-over, and each one
+is a stop that reserved nothing, submitted nothing and charged nothing:
+
+- the ambiguous-charge resume ran once a poll cycle, and a cycle is four
+  waves. The arm was dark from 11:31:26 UTC on a charge the ledger had
+  already released. Every admission asks now.
+- a full concurrency slot or a full minute window paused the whole arm. The
+  broker names those two as the refusals that describe the moment and not the
+  request. They joined `ITEM_SCOPED_REASONS` after they took the arm down at
+  11:55 UTC, minutes after it became fast enough to fill a slot.
+- a `BrokerOperationBusyError` raised in the frame around the plan was the
+  question's error, and one question's error halts the wave and ends the
+  watch. The unit exited 1 at 12:14:20 UTC with one such error per question of
+  the wave. It is contained against the question now.
+
+The first two were found by watching the live arm after a cut-over. The third
+was found by the supervisor, from the unit's exit, and not by this task.
 
 ## What is left
 
-The broker start still proves every row of the ledger against its receipts:
-2.29 s of the 3.93 s, at 13,309 rows, under the shared ledger lock, once a
-question.
-It is the largest ledger cost the evaluator still pays per question.
+The evaluator still builds one broker per question, and that start still costs
+the store's own load, the money validation of the whole ledger and the
+signature of every row: about one second at 15,347 rows, under the shared
+ledger lock. A seeded start removed the receipt proof behind those signatures,
+which was the large half, and left this.
 
-The proof is a pure function of the ledger bytes and the receipt files, so one
-process could keep it and every broker of the same ledger could adopt it, as
-the producer's one broker already does across its 75 threads.
-Every `_validated_ledger` call sits inside `self._ledger_lock()`, and that lock
-is an `flock` taken through a new open file description each time, so it
-serializes the threads of one process exactly as it serializes two processes.
-The state to share is the store, `_immutable_events_proved`, its context and
-its clock, `_ledger_evidence_proved`, `_custody_proved`,
-`_accepted_events_proved` and the receipts listing.
+The change that removes the rest needs no shared state at all: stop building a
+broker per question. The only thing that differs per question is the
+evaluation gate, and a gate passed per request rather than held on the broker
+would let one broker serve the whole run. That is a money-path interface, so
+it wants its own task and its own review, not a night under a deadline.
 
-This task did not do it.
-Most of those are rebound rather than mutated in place, so sharing them means
-moving them onto one object and reaching them through properties, and a defect
-in that object raises a false integrity halt, which stops the producer and the
-evaluator together.
-That is not a change to make three hours before a deadline, with the producer
-live.
-The alternative that needs no shared state is to stop building a broker per
-question: the only thing that differs per question is the evaluation gate, and
-a gate passed per request rather than held on the broker would let one broker
-serve the whole run.
+Two further things this night showed and did not fix.
+
+The producer exits on `the paid-call broker is halted` even when the automatic
+continuation of `54695f1` lifts that halt moments later; it did so three times
+before 12:12 UTC. Telling a halt the continuation owns from a halt that needs
+a supervisor is that rule's own business, and what ends a run is a reviewed
+boundary (`streaming.RUN_ENDING_LEDGER_STOPS`).
+
+A question whose arm stopped inside it keeps its partial trials and is not
+reopened by a later pass, which is the reviewed rule. Under a storm of busy
+locks that is a question burned: the arm lost every question of the wave
+between 12:13 and 12:14 UTC that way. The rule is right when a stop is rare;
+it wants revisiting if the stop is common.

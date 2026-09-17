@@ -102,7 +102,7 @@ The benchmark measures how often a model abstains when no listed option is corre
 | `arctic-ch3-concurrency-50-r1/` | Fifty papers in flight: the lock-hold measurement that attributed the 21-requests-a-minute cap to 2.44 s of serialised bookkeeping per paid call, the four rules that took one warm ledger read from 371 ms to 12 ms, the rollback defect the fifty-thread test found, policy v13 and the staged relaunch. |
 | `arctic-eval-parallel-items-r1/` | Several questions scored at once: the measured rates per arm of the streaming evaluator at eight questions in flight, the captain's quota floors of 2026-09-17, and the extrapolation of the dataset to the 13:00 and 14:00 UTC deadlines. |
 | `arctic-ch3-concurrency-75-r1/` | Seventy-five papers in flight for one night: policy v15, the tranche a rate transition names once the ceiling has moved, the measured window that kept or refused the rate, and the settled stop that ends generation at 13:45 UTC. |
-| `arctic-eval-ledger-section-r1/` | The exclusive ledger section of the streaming evaluator: the receipts listing it kept exact because it said nothing about sharing the ledger, the whole-ledger start it ran once a question, the cut-over to snapshot 8477fd5 with a settled stop, and the idle Gemini arm the measurement window found. |
+| `arctic-eval-ledger-section-r1/` | The exclusive ledger section of the streaming evaluator: the receipts listing it kept exact because it said nothing about sharing the ledger, the whole-ledger proof and compaction it ran once a question, the share of every wave that keeps each arm busy, the three stops that took the Gemini arm down after each cut-over, and why the live rate windows are not paired. |
 
 ## Cost guard
 

@@ -1,0 +1,9 @@
+=== producer and evaluator calls a minute, from the ledger, per measurement window ===
+11:05-11:12Z (6.3 min): away_production 42 (6.65/min), benchmark_evaluation 25 (3.96/min)
+11:20-11:33Z (13.0 min): away_production 7 (0.54/min), benchmark_evaluation 109 (8.38/min)
+12:34-12:45Z (11.0 min): benchmark_evaluation 25 (2.27/min)
+
+The before window carried a busy producer and the after window an almost idle one,
+so the pair does not isolate this task's change. The 12:34 window has no producer
+row at all and is slower than both: the producer process was replaying its run
+directory after its 12:18 relaunch, which costs CPU and disk and no ledger row.
