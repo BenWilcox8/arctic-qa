@@ -30,12 +30,24 @@ from arctic_qa.model_broker import (
 )
 from arctic_qa.cli import main as cli_main
 from arctic_qa.util import canonical_json, sha256_bytes, sha256_file
-from arctic_qa import ledger_store  # noqa: E402
+from arctic_qa import ledger_store, model_broker  # noqa: E402
 from test_abstention_render import item
 from test_model_broker import Transport, payload, write_json
 
 
 ROOT = Path(__file__).parents[1]
+
+
+@pytest.fixture(autouse=True)
+def no_automatic_continuation(monkeypatch):
+    """Drive the halt and the reviewed release, not the automatic continuation.
+
+    An ambiguous charge of a bounded case releases itself while the hourly
+    bound of its phase has room, so the halt these tests read is the one that
+    stands once that bound is used up. The test of the automatic rule raises
+    the bound itself.
+    """
+    monkeypatch.setattr(model_broker, "AUTOMATIC_CONTINUATION_LIMIT_PER_HOUR", 0)
 PRO = "gemini-3.1-pro-preview"
 
 
@@ -1259,3 +1271,40 @@ def test_an_evaluation_release_needs_the_evaluation_files(tmp_path: Path) -> Non
             operator_id="test-operator",
         )
     assert json.loads(values["ledger"].read_text())["evaluation_halted"] is True
+
+
+def test_an_unknown_evaluation_charge_continues_the_arm_inside_its_own_bound(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The evaluation phase gets its own hourly bound of automatic releases.
+
+    Firstmate order 2026-09-17 10:26 UTC. A construction charge never spends
+    the evaluation phase's bound, and the reservation is retained in full, so
+    the evaluation ceiling still counts every unknown charge.
+    """
+    monkeypatch.setattr(model_broker, "AUTOMATIC_CONTINUATION_LIMIT_PER_HOUR", 5)
+    values = evaluation_fixture(tmp_path, transport=Http503ThenLetter())
+    bind(values)
+    receipt = execute(values, trial_id="t1")
+    assert receipt["state"] == "ambiguous_charge"
+    ledger = json.loads(values["ledger"].read_text())
+    # Neither halt stands: the arm keeps scoring.
+    assert ledger.get("evaluation_halted", False) is False
+    assert ledger.get("evaluation_halt_reason") is None
+    assert ledger["halted"] is False
+    # The reservation is retained and nothing is spent on it.
+    assert ledger["ambiguous_reserved_usd"] == receipt["reserved_usd"]
+    event = json.loads(
+        (
+            values["ledger"].parent
+            / "receipts"
+            / f"ambiguous-continuation-{receipt['request_key']}.json"
+        ).read_text()
+    )
+    assert event["operator_id"] == "automatic-ambiguous-continuation"
+    assert event["authorized_run_id"] == values["run_id"]
+    # Unrelated trials run, and the affected trial is never replayed.
+    assert execute(values, trial_id="t2", repeat=2)["state"] == "completed"
+    with pytest.raises(ValueError, match="request key already exists"):
+        execute(values, trial_id="t1")
+    assert values["broker"].status()["integrity_valid"] is True

@@ -11,11 +11,24 @@ from arctic_qa.gemini_eligibility import (
     call_timeout_seconds,
     maximum_call_timeout_seconds,
 )
+from arctic_qa import model_broker
 from arctic_qa.model_broker import SharedGeminiBroker, broker_request_key
 from arctic_qa.util import canonical_json, sha256_file
 
 
 ROOT = Path(__file__).parents[1]
+
+
+@pytest.fixture(autouse=True)
+def no_automatic_continuation(monkeypatch):
+    """Drive the reviewed manual release, not the automatic one.
+
+    An ambiguous charge of a bounded case releases itself while the hourly
+    bound of its phase has room. Every test below is about the reviewed
+    release, which is what runs once that bound is used up, so the bound is
+    zero here. The two tests of the automatic rule raise it themselves.
+    """
+    monkeypatch.setattr(model_broker, "AUTOMATIC_CONTINUATION_LIMIT_PER_HOUR", 0)
 
 
 def write_json(path: Path, value: object) -> None:
@@ -759,3 +772,95 @@ def test_stage_call_timeout_comes_from_the_price_config(tmp_path: Path) -> None:
     judge = execute_answer_verifier(broker, paper="judge", run_id="run-current")
     assert judge["state"] == "completed"
     assert judge["timeout_seconds"] == 300
+
+
+class AlwaysHttp500:
+    """Every generation call answers HTTP 500, so every one is ambiguous."""
+
+    def __init__(self) -> None:
+        self.methods: list[str] = []
+
+    def post(self, model: str, method: str, body: dict) -> dict:
+        self.methods.append(method)
+        if method == "countTokens":
+            return {"totalTokens": 100}
+        raise urllib.error.HTTPError(
+            "https://fake.invalid", 500, "upstream failure", {}, None
+        )
+
+
+def test_one_unknown_charge_continues_the_run_and_the_sixth_halts_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An ambiguous charge of a bounded case releases itself, five times an hour.
+
+    Firstmate order 2026-09-17 10:26 UTC, on the captain's standing intent that
+    the run and the evaluation keep going through the night. This was the third
+    halt of the day on this class. The reservation is retained in full and
+    nothing is settled, retried or replayed, so no ceiling moves.
+    """
+    monkeypatch.setattr(model_broker, "AUTOMATIC_CONTINUATION_LIMIT_PER_HOUR", 5)
+    values = fixture(tmp_path, transport=AlwaysHttp500())
+    broker = values["broker"]
+    keys = []
+    for index in range(5):
+        receipt = execute(broker, paper=f"p{index}", run_id="run-current")
+        assert receipt["state"] == "ambiguous_charge"
+        keys.append(receipt["request_key"])
+        ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+        # The run never stops, and the reservation stays reserved.
+        assert ledger["halted"] is False, index
+        assert ledger["halt_reason"] is None, index
+
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    reserved = sum(
+        Decimal(ledger["requests"][key]["reserved_usd"]) for key in keys
+    )
+    assert Decimal(ledger["ambiguous_reserved_usd"]) == reserved
+    assert Decimal(ledger["spent_usd"]) == Decimal("0")
+
+    for key in keys:
+        event = json.loads(
+            (values["receipts"] / f"ambiguous-continuation-{key}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert event["operator_id"] == "automatic-ambiguous-continuation"
+        assert event["skip_reason_code"] == "operational_ambiguous_charge_http_500"
+        assert event["reservation_policy"] == (
+            "retain_full_reservation_in_ambiguous_reserved_and_count_against_all_caps"
+        )
+        assert event["scope"] == "unrelated_families_only"
+
+    # The sixth unknown charge of the hour halts the phase exactly as before.
+    sixth = execute(broker, paper="p5", run_id="run-current")
+    assert sixth["state"] == "ambiguous_charge"
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    assert ledger["halted"] is True
+    assert ledger["halt_reason"] == "ambiguous_generation_charge"
+    assert not (
+        values["receipts"] / f"ambiguous-continuation-{sixth['request_key']}.json"
+    ).exists()
+    # The whole ledger still validates: every automatic record reads back.
+    assert broker.status()["integrity_valid"] is True
+
+
+def test_an_automatic_continuation_never_settles_the_charge(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The released request keeps its ambiguous custody and is never replayed."""
+    monkeypatch.setattr(model_broker, "AUTOMATIC_CONTINUATION_LIMIT_PER_HOUR", 5)
+    values = fixture(tmp_path, transport=AlwaysHttp500())
+    broker = values["broker"]
+    receipt = execute(broker, paper="p0", run_id="run-current")
+    key = receipt["request_key"]
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    assert ledger["requests"][key]["state"] == "ambiguous_charge"
+    assert "actual_cost_usd" not in ledger["requests"][key]
+    assert Decimal(ledger["spent_usd"]) == Decimal("0")
+    # The affected family is never asked again; an unrelated paper continues.
+    with pytest.raises(ValueError, match="request key already exists"):
+        execute(broker, paper="p0", run_id="run-current")
+    assert execute(broker, paper="p1", run_id="run-current")["state"] == (
+        "ambiguous_charge"
+    )

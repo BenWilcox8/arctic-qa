@@ -518,6 +518,32 @@ INTERRUPTED_ORPHAN_SKIP_REASON = "operational_ambiguous_charge_interrupted_orpha
 # that gate. The release then proves a later authorized successor of the same
 # gate instead, and records both digests. It never edits the ledger row.
 SUPERSEDED_GATE_REASON = "gate rewritten by the evaluator cut-over before release"
+# One unknown charge stops neither caller. For every bounded ambiguous case the
+# broker writes the same release record the reviewed release writes, keeps the
+# full reservation as charged, and continues. It never settles, retries or
+# replays the request, and no ceiling moves: the reservation still counts
+# against every cap. The bound is per phase and per hour, and beyond it the
+# charge halts its phase exactly as before, because a run that books unknown
+# charges faster than that has a fault the operator must see.
+AUTOMATIC_CONTINUATION_OPERATOR_ID = "automatic-ambiguous-continuation"
+AUTOMATIC_CONTINUATION_LIMIT_PER_HOUR = 5
+AUTOMATIC_CONTINUATION_REVIEW = (
+    "# Automatic continuation of one ambiguous charge\n"
+    "\n"
+    "The broker wrote this record itself, under the rule that one unknown\n"
+    "charge stops neither the producer nor the evaluator (firstmate order\n"
+    "2026-09-17 10:26 UTC, on the captain's standing intent that the run and\n"
+    "the evaluation keep going through the night).\n"
+    "\n"
+    "The request is one of the bounded ambiguous cases: the call went out, no\n"
+    "usage came back, and the charge cannot be proved. The full reservation\n"
+    "stays in `ambiguous_reserved_usd` and counts against every cap. Nothing\n"
+    "settles, retries or replays the request, and the affected family keeps\n"
+    "its ambiguous custody. Only unrelated work continues.\n"
+    "\n"
+    "The evidence file beside this record names the case, and the release\n"
+    "record names the receipt, the reservation and the gate.\n"
+)
 AMBIGUOUS_CONTINUATION_RESERVATION_POLICY = (
     "retain_full_reservation_in_ambiguous_reserved_and_count_against_all_caps"
 )
@@ -4534,6 +4560,240 @@ class SharedGeminiBroker:
             raise ValueError("an ambiguous continuation time changed")
         return event
 
+    def _bounded_ambiguous_case(
+        self, request_key: str, request: dict[str, Any]
+    ) -> tuple[str, str, str, dict[str, Any]] | None:
+        """Name the bounded ambiguous case of one settled request, if it is one.
+
+        Returns the event schema, the error class, the skip reason code and the
+        extra event fields of the case. Returns ``None`` when the receipt is
+        none of the four, which is the case an operator must still read.
+        """
+        final_path = self.receipts_dir / f"{request_key}.json"
+        received_path = self.receipts_dir / f"{request_key}.received.json"
+        trace_path = self.receipts_dir / f"{request_key}.request-trace.json"
+        if not final_path.is_file():
+            return None
+        final = _read(final_path)
+        if (
+            final.get("state") == "ambiguous_charge"
+            and final.get("error_class") == "known_http_response_unknown_charge"
+            and _is_server_error_status(final.get("http_status"))
+            and final.get("live_call_made") is True
+            and "response" not in final
+            and not received_path.exists()
+            and final.get("reserved_usd") == request.get("reserved_usd")
+            and final.get("actual_cost_usd") is None
+        ):
+            return (
+                AMBIGUOUS_CONTINUATION_SCHEMA,
+                "known_http_response_unknown_charge",
+                "operational_ambiguous_charge_http_500",
+                {
+                    "http_status": final["http_status"],
+                    "received_receipt_absent": True,
+                },
+            )
+        if _is_provider_timeout_ambiguous_case(
+            final, request, received_receipt_present=received_path.exists()
+        ):
+            return (
+                PROVIDER_TIMEOUT_CONTINUATION_SCHEMA,
+                PROVIDER_TIMEOUT_ERROR_CLASS,
+                PROVIDER_TIMEOUT_SKIP_REASON,
+                {
+                    "error": PROVIDER_TIMEOUT_ERROR,
+                    "timeout_seconds": _receipt_timeout_seconds(final),
+                    "received_receipt_absent": True,
+                },
+            )
+        if _is_interrupted_orphan_ambiguous_case(
+            final, request, received_receipt_present=received_path.exists()
+        ):
+            return (
+                INTERRUPTED_ORPHAN_CONTINUATION_SCHEMA,
+                INTERRUPTED_ORPHAN_ERROR_CLASS,
+                INTERRUPTED_ORPHAN_SKIP_REASON,
+                {
+                    "error": INTERRUPTED_ORPHAN_ERROR,
+                    "received_receipt_absent": True,
+                    "superseded_gate": None,
+                },
+            )
+        if (
+            received_path.is_file()
+            and trace_path.is_file()
+            and _is_received_max_tokens_ambiguous_case(
+                final, _read(received_path), _read(trace_path), request
+            )
+        ):
+            return (
+                RECEIVED_MAX_TOKENS_CONTINUATION_SCHEMA,
+                "received_max_tokens_usage_unknown",
+                "operational_ambiguous_charge_received_max_tokens",
+                {
+                    "received_receipt_sha256": sha256_file(received_path),
+                    "request_trace_sha256": sha256_file(trace_path),
+                    "finish_reason": "MAX_TOKENS",
+                    "received_receipt_present": True,
+                },
+            )
+        return None
+
+    def _automatic_continuations_in_last_hour(
+        self, ledger: dict[str, Any], phase: str, now: datetime
+    ) -> int:
+        """Count this phase's automatic continuations of the last hour."""
+        total = 0
+        for other_key, event in self._ambiguous_continuation_events(ledger).items():
+            if event.get("operator_id") != AUTOMATIC_CONTINUATION_OPERATOR_ID:
+                continue
+            other = ledger["requests"].get(other_key)
+            if other is None or other.get("phase") != phase:
+                continue
+            try:
+                written = datetime.fromisoformat(
+                    str(event["authorized_at_utc"]).replace("Z", "+00:00")
+                )
+            except ValueError:
+                continue
+            if (now - written).total_seconds() < 3600:
+                total += 1
+        return total
+
+    def _automatic_ambiguous_continuation(
+        self, ledger: dict[str, Any], request_key: str, request: dict[str, Any]
+    ) -> bool:
+        """Release one ambiguous charge without a halt, inside the hourly bound.
+
+        The record is the one the reviewed release writes, so every reader
+        validates it the same way and the reservation stays exactly where the
+        reviewed release leaves it. The evidence and the review are written
+        here because the broker is the reviewer of this bounded class.
+        """
+        continuation_path = (
+            self.receipts_dir / f"ambiguous-continuation-{request_key}.json"
+        )
+        if continuation_path.exists():
+            return False
+        case = self._bounded_ambiguous_case(request_key, request)
+        if case is None:
+            return False
+        schema, error_class, skip_reason_code, extra = case
+        now = datetime.now(UTC)
+        if (
+            self._automatic_continuations_in_last_hour(ledger, request["phase"], now)
+            >= AUTOMATIC_CONTINUATION_LIMIT_PER_HOUR
+        ):
+            return False
+        gate_file = (
+            self.evaluation_gate_file
+            if request["phase"] == EVALUATION_PHASE
+            else self.execution_gate_file
+        )
+        if gate_file is None or not Path(gate_file).is_file():
+            return False
+        gate = _read(Path(gate_file))
+        commit = str(gate.get("integrated_code_commit") or "").strip()
+        run_id = str(request.get("run_id") or "").strip()
+        if not commit or not run_id:
+            return False
+        # The two sidecars must not share the event's own name prefix: every
+        # ``ambiguous-continuation-*.json`` in this directory is read as an
+        # event, and an evidence file read as an event fails the ledger.
+        evidence_path = (
+            self.receipts_dir / f"automatic-ambiguous-evidence-{request_key}.json"
+        )
+        review_path = (
+            self.receipts_dir / f"automatic-ambiguous-review-{request_key}.md"
+        )
+        evidence: dict[str, Any] = {
+            "schema": {
+                AMBIGUOUS_CONTINUATION_SCHEMA: (
+                    AMBIGUOUS_CONTINUATION_EVIDENCE_SCHEMA
+                ),
+                PROVIDER_TIMEOUT_CONTINUATION_SCHEMA: (
+                    PROVIDER_TIMEOUT_CONTINUATION_EVIDENCE_SCHEMA
+                ),
+                INTERRUPTED_ORPHAN_CONTINUATION_SCHEMA: (
+                    INTERRUPTED_ORPHAN_CONTINUATION_EVIDENCE_SCHEMA
+                ),
+                RECEIVED_MAX_TOKENS_CONTINUATION_SCHEMA: (
+                    RECEIVED_MAX_TOKENS_CONTINUATION_EVIDENCE_SCHEMA
+                ),
+            }[schema],
+            "request_key": request_key,
+            "error_class": error_class,
+            "actual_cost_known": False,
+            "replay_prohibited": True,
+            "affected_family_id": request["family_id"],
+            "authorized_run_id": run_id,
+            "live_call_made": True,
+        }
+        if schema == AMBIGUOUS_CONTINUATION_SCHEMA:
+            evidence["http_status"] = extra["http_status"]
+            evidence["received_receipt_absent"] = True
+        elif schema == PROVIDER_TIMEOUT_CONTINUATION_SCHEMA:
+            evidence["error"] = PROVIDER_TIMEOUT_ERROR
+            evidence["timeout_seconds"] = extra["timeout_seconds"]
+            evidence["received_receipt_absent"] = True
+        elif schema == INTERRUPTED_ORPHAN_CONTINUATION_SCHEMA:
+            evidence["error"] = INTERRUPTED_ORPHAN_ERROR
+            evidence["received_receipt_absent"] = True
+        else:
+            evidence["finish_reason"] = "MAX_TOKENS"
+            evidence["received_receipt_present"] = True
+        atomic_json(evidence_path, evidence, immutable=True)
+        review_path.write_text(AUTOMATIC_CONTINUATION_REVIEW, encoding="utf-8")
+        os.chmod(review_path, 0o444)
+        event = {
+            "schema": schema,
+            "request_key": request_key,
+            "ambiguous_receipt_sha256": sha256_file(
+                self.receipts_dir / f"{request_key}.json"
+            ),
+            "request_identity": {
+                key: request[key]
+                for key in (
+                    "run_id",
+                    "stage",
+                    "paper_id",
+                    "family_id",
+                    "source_version_id",
+                    "request_sha256",
+                    "reserved_usd",
+                )
+            },
+            "error_class": error_class,
+            "live_call_made": True,
+            "reserved_usd": str(
+                _money(request["reserved_usd"], "ambiguous reservation", positive=True)
+            ),
+            "reservation_policy": AMBIGUOUS_CONTINUATION_RESERVATION_POLICY,
+            "scope": "unrelated_families_only",
+            "affected_family_id": request["family_id"],
+            "skip_reason_code": skip_reason_code,
+            "authorized_run_id": run_id,
+            "evidence_file": str(evidence_path.resolve()),
+            "evidence_file_sha256": sha256_file(evidence_path),
+            "review_file": str(review_path.resolve()),
+            "review_file_sha256": sha256_file(review_path),
+            "ledger_sha256_before": sha256_file(self.ledger_file),
+            "gate_sha256": str(request["gate_sha256"]),
+            "integrated_code_commit": commit,
+            "authorized_at_utc": now.replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "operator_id": AUTOMATIC_CONTINUATION_OPERATOR_ID,
+            **extra,
+        }
+        atomic_json(continuation_path, event, immutable=True)
+        # This call wrote three receipts, so the kept listing and everything
+        # derived from it are stale. The next read lists the directory again.
+        self._receipt_listing = None
+        self._receipt_derived = {}
+        return True
+
     def _validate_interrupted_orphan_continuation(
         self, event: dict[str, Any], path: Path
     ) -> dict[str, Any]:
@@ -8158,7 +8418,9 @@ class SharedGeminiBroker:
             request = ledger["requests"].get(request_key)
             state = None if request is None else request.get("state")
             if state == "submitted":
-                self._apply_settlement(ledger, request, actual=actual, usage=usage)
+                self._apply_settlement(
+                    ledger, request_key, request, actual=actual, usage=usage
+                )
                 self._commit_ledger(ledger)
         if state != "submitted":
             self._record_settle_skipped(
@@ -8172,6 +8434,7 @@ class SharedGeminiBroker:
     def _apply_settlement(
         self,
         ledger: dict[str, Any],
+        request_key: str,
         request: dict[str, Any],
         *,
         actual: Decimal | None,
@@ -8215,14 +8478,20 @@ class SharedGeminiBroker:
                     _money(live["ambiguous_usd"], "live ambiguous") + amount
                 )
             request["state"] = "ambiguous_charge"
-            if request["phase"] == EVALUATION_PHASE:
-                # Halt the evaluation phase only. The construction phase
-                # keeps its own ceiling, slots and window.
-                ledger["evaluation_halted"] = True
-                ledger["evaluation_halt_reason"] = AMBIGUOUS_HALT_REASON
-            else:
-                ledger["halted"] = True
-                ledger["halt_reason"] = AMBIGUOUS_HALT_REASON
+            # One unknown charge stops neither caller while the hourly bound of
+            # its phase has room. The continuation keeps the whole reservation
+            # and records the same release the reviewed operation records.
+            if not self._automatic_ambiguous_continuation(
+                ledger, request_key, request
+            ):
+                if request["phase"] == EVALUATION_PHASE:
+                    # Halt the evaluation phase only. The construction phase
+                    # keeps its own ceiling, slots and window.
+                    ledger["evaluation_halted"] = True
+                    ledger["evaluation_halt_reason"] = AMBIGUOUS_HALT_REASON
+                else:
+                    ledger["halted"] = True
+                    ledger["halt_reason"] = AMBIGUOUS_HALT_REASON
         else:
             actual = _money(actual, "actual cost")
             if actual > reserved:
