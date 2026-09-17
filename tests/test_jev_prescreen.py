@@ -475,10 +475,19 @@ def test_the_ledger_replays_its_own_rows_and_reports_what_is_left(tmp_path):
 
 def test_the_ceiling_refuses_a_call_before_it_is_made(tmp_path):
     ledger = jev.CallLedger(tmp_path / "ledger", ceiling_usd=Decimal("0.10"))
-    ledger.reserve(Decimal("0.05"))
-    ledger.record({"state": "completed", "candidate_key": "a", "cost_usd": "0.05"})
-    ledger.reserve(Decimal("0.05"))
-    ledger.record({"state": "completed", "candidate_key": "b", "cost_usd": "0.05"})
+    # A caller takes a reservation, makes its call, records it, and gives the
+    # reservation back. This is what `run_screen` does for every paper.
+    for candidate_key in ("a", "b"):
+        ledger.reserve(Decimal("0.05"))
+        with ledger.reservation_held(Decimal("0.05")):
+            ledger.record(
+                {
+                    "state": "completed",
+                    "candidate_key": candidate_key,
+                    "cost_usd": "0.05",
+                }
+            )
+    assert ledger.spent_usd == Decimal("0.10")
     assert ledger.ceiling_reached is True
     with pytest.raises(jev.JevCeilingReached):
         ledger.reserve(Decimal("0.01"))
@@ -1441,3 +1450,280 @@ def test_an_unreadable_article_fails_its_own_paper_and_not_the_screen(tmp_path):
     faulted = [row for row in rows if row["state"] == "failed"]
     assert len(faulted) == 1
     assert "FileNotFoundError" in faulted[0]["error"]
+
+
+# --------------------------------------------------------------------------
+# The defects the adversarial review found
+
+
+def test_concurrent_reservations_cannot_pass_the_ceiling(tmp_path):
+    import threading as real_threading
+
+    ledger = jev.CallLedger(tmp_path / "ledger", ceiling_usd=Decimal("1.00"))
+    barrier = real_threading.Barrier(8)
+    granted: list[int] = []
+    refused: list[int] = []
+    lock = real_threading.Lock()
+
+    def worker() -> None:
+        barrier.wait()
+        try:
+            ledger.reserve(Decimal("0.30"))
+        except jev.JevCeilingReached:
+            with lock:
+                refused.append(1)
+            return
+        with lock:
+            granted.append(1)
+
+    threads = [real_threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    # Three reservations of 0.30 fit under 1.00; a fourth does not.
+    assert len(granted) == 3
+    assert len(refused) == 5
+
+
+def test_a_released_reservation_gives_its_room_back(tmp_path):
+    ledger = jev.CallLedger(tmp_path / "ledger", ceiling_usd=Decimal("1.00"))
+    ledger.reserve(Decimal("0.90"))
+    with pytest.raises(jev.JevCeilingReached):
+        ledger.reserve(Decimal("0.20"))
+    # The ceiling latched, so the abandoned reservation alone does not reopen
+    # it. A fresh ledger over the same directory has spent nothing.
+    ledger.release(Decimal("0.90"))
+    again = jev.CallLedger(tmp_path / "ledger", ceiling_usd=Decimal("1.00"))
+    assert again.spent_usd == Decimal("0")
+    with again.reservation_held(Decimal("0.90")):
+        pass
+    again.reserve(Decimal("0.90"))
+
+
+def test_a_reservation_is_released_even_when_the_call_raises(tmp_path):
+    ledger = jev.CallLedger(tmp_path / "ledger", ceiling_usd=Decimal("1.00"))
+    with pytest.raises(ValueError):
+        with ledger.reservation_held(Decimal("0.90")):
+            raise ValueError("the call failed")
+    summary = json.loads((tmp_path / "ledger" / "ledger.json").read_text())
+    assert summary["reserved_usd"] == "0.000000"
+
+
+def test_a_boolean_probability_is_refused_and_not_a_crash():
+    answers = _answers()
+    answers["reports_own_finding"] = {"type": "noul", "noul": True}
+    with pytest.raises(jev.JevPrescreenError, match="not a noul"):
+        jev.read_probabilities(answers)
+    answers = _answers()
+    answers["geography_status"]["probabilities"]["arctic_activity_stated"] = True
+    with pytest.raises(jev.JevPrescreenError, match="bad probability"):
+        jev.read_probabilities(answers)
+
+
+def test_a_boolean_probability_leaves_the_ranking_running(tmp_path):
+    manifest = _small_corpus(tmp_path, count=2)
+    rows = jev.read_manifest(manifest)
+    responses = tmp_path / "responses"
+    responses.mkdir()
+    for row, broken in zip(rows, (True, False)):
+        response = _response()
+        if broken:
+            response["answers"]["reports_own_finding"] = {"type": "noul", "noul": True}
+        record = {
+            "candidate_key": row["candidate_key"],
+            "question_set_sha256": jev.question_set_sha256(),
+            "answered_model": jev.DEFAULT_MODEL,
+            "selection": {"selection_rule": "whole"},
+            "response": response,
+        }
+        jev.response_file(responses, row["candidate_key"]).write_text(
+            json.dumps(record), encoding="utf-8"
+        )
+    result = jev.build_ranking(
+        manifest_file=manifest,
+        responses_dir=responses,
+        output_dir=tmp_path / "rank",
+    )
+    # One paper is unreadable, the other still ranks. The pass never crashes.
+    assert result["counts"] == {"ranked": 1, "unreadable": 1}
+
+
+def test_a_response_of_an_older_question_set_is_screened_again(tmp_path):
+    manifest = _small_corpus(tmp_path, count=1)
+    row = jev.read_manifest(manifest)[0]
+    responses = tmp_path / "run" / "responses"
+    responses.mkdir(parents=True)
+    stale = {
+        "candidate_key": row["candidate_key"],
+        "question_set_sha256": "0" * 64,
+        "response": _response(),
+    }
+    jev.response_file(responses, row["candidate_key"]).write_text(
+        json.dumps(stale), encoding="utf-8"
+    )
+    client = FakeClient()
+    receipt = jev.run_screen(
+        manifest_file=manifest,
+        output_dir=tmp_path / "run",
+        client=client,
+        ceiling_usd=Decimal("1.00"),
+        workers=1,
+    )
+    assert receipt["counts"]["already_recorded"] == 0
+    assert receipt["counts"]["completed"] == 1
+    assert len(client.requests) == 1
+    # The new answer replaces it, and the paid receipt of the old one is kept.
+    record = json.loads(jev.response_file(responses, row["candidate_key"]).read_text())
+    assert record["question_set_sha256"] == jev.question_set_sha256()
+    kept = list((responses / "superseded").glob("*.json"))
+    assert len(kept) == 1
+    assert json.loads(kept[0].read_text())["question_set_sha256"] == "0" * 64
+    # A superseded answer is never read as a second row of the same paper.
+    result = jev.build_ranking(
+        manifest_file=manifest,
+        responses_dir=responses,
+        output_dir=tmp_path / "rank",
+    )
+    assert result["counts"] == {"ranked": 1, "unreadable": 0}
+
+
+def test_a_truncated_last_ledger_line_does_not_block_the_screen(tmp_path):
+    ledger_dir = tmp_path / "ledger"
+    ledger_dir.mkdir(parents=True)
+    good = json.dumps(
+        {"schema": jev.CALL_SCHEMA, "state": "completed", "cost_usd": "0.25"},
+        sort_keys=True,
+    )
+    (ledger_dir / "calls.jsonl").write_text(
+        good + '\n{"schema": "jev-prescreen-call-v1", "state": "comp',
+        encoding="utf-8",
+    )
+    ledger = jev.CallLedger(ledger_dir, ceiling_usd=Decimal("5.00"))
+    # The one whole row survives and the partial write is set aside.
+    assert ledger.spent_usd == Decimal("0.25")
+    assert (ledger_dir / "calls.partial-line").is_file()
+    # The ledger takes new rows again.
+    ledger.record({"state": "completed", "candidate_key": "a", "cost_usd": "0.10"})
+    assert ledger.spent_usd == Decimal("0.35")
+
+
+def test_a_corrupt_line_that_is_not_the_last_is_refused(tmp_path):
+    ledger_dir = tmp_path / "ledger"
+    ledger_dir.mkdir(parents=True)
+    good = json.dumps({"state": "completed", "cost_usd": "0.25"}, sort_keys=True)
+    (ledger_dir / "calls.jsonl").write_text(
+        "not json at all\n" + good + "\n", encoding="utf-8"
+    )
+    with pytest.raises(jev.JevPrescreenError, match="corrupt at line 1"):
+        jev.CallLedger(ledger_dir, ceiling_usd=Decimal("5.00"))
+
+
+def test_the_family_count_matches_the_producer_materializer(tmp_path):
+    from arctic_qa.full_run_plan import materialize_frozen_access_run
+
+    rows = []
+    for index in range(2):
+        path = _extraction(tmp_path, f"f{index}", "text " * 100)
+        source = tmp_path / "originals" / f"s{index}" / "source.pdf"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"%PDF-1.4\n")
+        row = _frozen_row(f"10.1/p{index}", index + 1, path)
+        # The other convention this repository produces: a paper family named
+        # by `paper_family_id`, with both rows in one family and no family_key.
+        del row["family_key"]
+        row["paper_family_id"] = "same-family"
+        row["access_receipt"]["source_path"] = str(source)
+        rows.append(row)
+    manifest = _write_jsonl(tmp_path / "frozen.jsonl", rows)
+    descriptor = tmp_path / "descriptor.json"
+    descriptor.write_text(
+        json.dumps(
+            {
+                "schema": "full-text-ready-freeze-descriptor-v1",
+                "freeze_id": "test-freeze-r1",
+                "counts": {"manifest_records": 2, "unique_paper_families": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    order = _write_jsonl(
+        tmp_path / "order.jsonl",
+        [{"rank": 1, "candidate_key": "10.1/p1", "rank_probability": "0.9"}],
+    )
+    result = jev.write_ranked_manifest(
+        frozen_manifest_file=manifest,
+        frozen_descriptor_file=descriptor,
+        order_file=order,
+        output_dir=tmp_path / "out",
+    )
+    assert result["counts"]["unique_paper_families"] == 1
+    # The producer's own materializer accepts it, which is the whole promise.
+    access = materialize_frozen_access_run(
+        source_manifest_file=Path(result["ranked_manifest"]),
+        descriptor_file=Path(result["ranked_descriptor"]),
+        output_dir=tmp_path / "materialized",
+    )
+    assert access["target_total"] == 2
+
+
+def test_a_billed_call_reaches_the_ledger_before_its_response_file(tmp_path):
+    manifest = _small_corpus(tmp_path, count=1)
+    written: list[str] = []
+    import arctic_qa.jev_prescreen as module
+
+    original = module._write_response
+
+    def failing(responses_dir, candidate_key, record):  # noqa: ARG001
+        written.append(candidate_key)
+        raise OSError("the corpus volume went away")
+
+    module._write_response = failing
+    try:
+        receipt = jev.run_screen(
+            manifest_file=manifest,
+            output_dir=tmp_path / "run",
+            client=FakeClient(),
+            ceiling_usd=Decimal("1.00"),
+            workers=1,
+        )
+    finally:
+        module._write_response = original
+    assert written  # the call really was made and really was billed
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "run" / "ledger" / "calls.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    completed = [row for row in rows if row["state"] == "completed"]
+    # The spend is on the ledger even though the response file never landed.
+    assert len(completed) == 1
+    assert Decimal(completed[0]["cost_usd"]) > 0
+    summary = json.loads((tmp_path / "run" / "ledger" / "ledger.json").read_text())
+    assert Decimal(summary["spent_usd"]) > 0
+    # The paper itself is still reported as faulted, not as completed.
+    assert receipt["counts"]["faulted"] == 1
+
+
+def test_a_manifest_that_repeats_a_candidate_is_refused(tmp_path):
+    path = _extraction(tmp_path, "a", "text " * 100)
+    row = {
+        "schema": jev.MANIFEST_SCHEMA,
+        "candidate_key": "10.1/a",
+        "paper_id": "10.1/a",
+        "family_key": "10.1/a",
+        "doi": None,
+        "title": None,
+        "year": None,
+        "has_full_text": True,
+        "extraction_path": str(path),
+        "extraction_sha256": "b" * 64,
+        "source_characters": 500,
+        "estimated_tokens": 125,
+        "frozen_manifest_position": 1,
+        "manifest_position": 1,
+    }
+    manifest = _write_jsonl(tmp_path / "manifest.jsonl", [row, dict(row)])
+    with pytest.raises(jev.JevPrescreenError, match="repeats a candidate"):
+        jev.read_manifest(manifest)

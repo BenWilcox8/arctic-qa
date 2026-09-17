@@ -23,6 +23,7 @@ Actions, through ``python -m arctic_qa jev-prescreen --action <action>``:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -33,7 +34,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from .db import now
 from .paths import configured_config_dir
@@ -71,8 +72,8 @@ PRICE_SOURCE = "https://docs.typesafe.ai/cookbooks/parallel_questions.md"
 PRICE_STATUS = "unverified_cookbook_constant"
 
 # The provider documents no state size limit, so the budget is ours. 120,000
-# characters is about 30,000 tokens and carries about 87% of the frozen corpus
-# whole. Every call records the rule that produced its state.
+# characters is about 30,000 tokens and carries 3,799 of the 4,420 frozen
+# papers whole. Every call records the rule that produced its state.
 DEFAULT_STATE_CHARACTER_BUDGET = 120_000
 CHARACTERS_PER_TOKEN = 4
 QUESTION_OVERHEAD_TOKENS = 700
@@ -155,7 +156,7 @@ def _choice(
 # One narrow judgement per question, every question answerable as a probability,
 # and every question tied to a rejection reason this run actually recorded.
 # `targets` names those codes and `docs/JEV_PRESCREEN.md` holds the counts,
-# measured over the 276 labelled papers of run chapter3-7dc6485-r3.
+# measured over the 276 papers run chapter3-7dc6485-r3 had completed.
 #
 # A gate is a near-necessary condition: a paper that fails it cannot yield a
 # question at all, so the gates multiply. A quality term separates the papers
@@ -534,6 +535,13 @@ def read_manifest(manifest_file: Path) -> list[dict[str, Any]]:
     ]
     if not rows:
         raise JevPrescreenError(f"the prescreen manifest is empty: {manifest_file}")
+    # `build_manifest` cannot produce a duplicate, but a hand-edited manifest
+    # can, and two workers would then pay for the same paper twice.
+    keys = [str(row["candidate_key"]) for row in rows]
+    if len(set(keys)) != len(keys):
+        raise JevPrescreenError(
+            f"the prescreen manifest repeats a candidate: {manifest_file}"
+        )
     return rows
 
 
@@ -649,20 +657,35 @@ def read_probabilities(answers: dict[str, Any]) -> dict[str, Decimal]:
         if answer.get("type") != question["type"]:
             raise JevPrescreenError(f"the answer for {key} is not a {question['type']}")
         if question["type"] == "noul":
-            if not isinstance(answer.get("noul"), (int, float)):
-                raise JevPrescreenError(f"the answer for {key} is not a noul")
-            value = Decimal(str(answer["noul"]))
+            value = _as_number(
+                answer.get("noul"), f"the answer for {key} is not a noul"
+            )
         elif question["type"] == "choice":
             value = _choice_mass(question, answer)
         else:
-            if not isinstance(answer.get("score"), (int, float)):
-                raise JevPrescreenError(f"the answer for {key} is not a score")
+            score = _as_number(
+                answer.get("score"), f"the answer for {key} is not a score"
+            )
             top = len(question["criteria"]) - 1
-            value = Decimal(str(answer["score"])) / Decimal(top)
+            if top < 1:
+                raise JevPrescreenError(f"the question {key} has fewer than two levels")
+            value = score / Decimal(top)
         if value < 0 or value > 1:
             raise JevPrescreenError(f"the probability for {key} is outside [0,1]")
         values[key] = value
     return values
+
+
+def _as_number(value: Any, message: str) -> Decimal:
+    """Return a JSON number as a Decimal, and refuse anything else.
+
+    `bool` is a subclass of `int` in Python, so a JSON `true` would pass a
+    plain `isinstance` check and then fail inside `Decimal`, which raises an
+    error this module does not catch. It is rejected here instead.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise JevPrescreenError(message)
+    return Decimal(str(value))
 
 
 def _choice_mass(question: dict[str, Any], answer: dict[str, Any]) -> Decimal:
@@ -678,10 +701,9 @@ def _choice_mass(question: dict[str, Any], answer: dict[str, Any]) -> Decimal:
         )
     mass = Decimal("0")
     for option in question["good_options"]:
-        value = probabilities[option]
-        if not isinstance(value, (int, float)):
-            raise JevPrescreenError(f"the answer for {key} has a bad probability")
-        mass += Decimal(str(value))
+        mass += _as_number(
+            probabilities[option], f"the answer for {key} has a bad probability"
+        )
     return mass
 
 
@@ -789,6 +811,11 @@ class CallLedger:
         self.ceiling_usd = _usd(ceiling_usd)
         self._lock = threading.Lock()
         self._spent = Decimal("0")
+        # What the calls now in flight are expected to cost. Without it, every
+        # worker would measure the ceiling against a spend that none of them
+        # has recorded yet, and four workers would pass a ceiling one call
+        # should have stopped.
+        self._reserved = Decimal("0")
         self._calls = 0
         self._input_tokens = 0
         self._output_tokens = 0
@@ -799,10 +826,24 @@ class CallLedger:
         if not self.calls_file.is_file():
             self._write_summary()
             return
-        for line in self.calls_file.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            row = json.loads(line)
+        lines = [
+            line
+            for line in self.calls_file.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        for position, line in enumerate(lines):
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as error:
+                # A kill in the middle of an append can leave a partial last
+                # line. That one is an incomplete write and is dropped, so the
+                # ledger stays usable. Any earlier bad line is real corruption.
+                if position == len(lines) - 1:
+                    self._truncate_partial_line()
+                    break
+                raise JevPrescreenError(
+                    f"the prescreen ledger is corrupt at line {position + 1}: {error}"
+                ) from None
             if row.get("state") != "completed":
                 continue
             self._calls += 1
@@ -810,6 +851,27 @@ class CallLedger:
             self._input_tokens += int(row.get("input_tokens") or 0)
             self._output_tokens += int(row.get("output_tokens") or 0)
         self._write_summary()
+
+    def _truncate_partial_line(self) -> None:
+        """Drop an incomplete trailing line so the ledger can be appended to.
+
+        The dropped text is kept beside the ledger, because a partial row is
+        still evidence that a call may have been made.
+        """
+        text = self.calls_file.read_text(encoding="utf-8")
+        whole: list[str] = []
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                json.loads(line)
+            except json.JSONDecodeError:
+                break
+            whole.append(line)
+        dropped = text[len("".join(line + "\n" for line in whole)) :]
+        if dropped.strip():
+            atomic_write(self.dir / "calls.partial-line", dropped.encode())
+        atomic_write(self.calls_file, "".join(line + "\n" for line in whole).encode())
 
     @property
     def spent_usd(self) -> Decimal:
@@ -822,13 +884,39 @@ class CallLedger:
             return self._ceiling_reached
 
     def reserve(self, projected_usd: Decimal) -> None:
-        """Refuse before a call whose projected cost passes the ceiling."""
+        """Refuse before a call whose projected cost passes the ceiling.
+
+        The check counts the calls already in flight, so concurrent workers
+        cannot each pass a ceiling that only one of them fits under.
+        """
         with self._lock:
-            if self._ceiling_reached or self._spent + projected_usd > self.ceiling_usd:
+            if (
+                self._ceiling_reached
+                or self._spent + self._reserved + projected_usd > self.ceiling_usd
+            ):
                 self._ceiling_reached = True
                 raise JevCeilingReached(
                     f"the prescreen ceiling {self.ceiling_usd} USD stops this call"
                 )
+            self._reserved += projected_usd
+
+    def release(self, projected_usd: Decimal) -> None:
+        """Give back a reservation once its call is settled or abandoned."""
+        with self._lock:
+            self._reserved = max(Decimal("0"), self._reserved - projected_usd)
+
+    @contextlib.contextmanager
+    def reservation_held(self, projected_usd: Decimal) -> Iterator[None]:
+        """Give a reservation back on every path out of the call it covers.
+
+        `reserve` takes it, because a refusal there has to be handled by the
+        caller. This gives it back whether the call succeeded, failed or
+        raised, so an abandoned call never holds room against the ceiling.
+        """
+        try:
+            yield
+        finally:
+            self.release(projected_usd)
 
     def record(self, row: dict[str, Any]) -> None:
         """Append one attempt and update the summary."""
@@ -857,6 +945,7 @@ class CallLedger:
                 "updated_at_utc": now(),
                 "ceiling_usd": str(self.ceiling_usd),
                 "spent_usd": str(_usd(self._spent)),
+                "reserved_usd": str(_usd(self._reserved)),
                 "remaining_usd": str(
                     _usd(max(Decimal("0"), self.ceiling_usd - self._spent))
                 ),
@@ -976,6 +1065,42 @@ def _short_error_body(error: urllib.error.HTTPError) -> str:
 # The screen
 
 
+def _write_response(
+    responses_dir: Path, candidate_key: str, record: dict[str, Any]
+) -> Path:
+    """Write one response, moving an older question set's answer aside first.
+
+    A recorded response is immutable, so a paper re-screened under a new
+    question set cannot overwrite its old answer. The old one is kept beside
+    it, named by the question set it answered, because it is the receipt for a
+    call that was really paid for.
+    """
+    path = response_file(responses_dir, candidate_key)
+    if path.is_file():
+        previous = json.loads(path.read_text(encoding="utf-8"))
+        stale = str(previous.get("question_set_sha256") or "unknown")[:16]
+        # A subdirectory, never a sibling: `build_ranking` globs `*.json` here
+        # and must not read a superseded answer as a second row of the paper.
+        atomic_write(
+            responses_dir / "superseded" / f"{path.stem}.{stale}.json",
+            path.read_bytes(),
+        )
+        path.unlink()
+    atomic_json(path, record, immutable=True)
+    return path
+
+
+def _answers_this_question_set(path: Path, question_hash: str) -> bool:
+    """Say whether a recorded response answers the current question set."""
+    if not path.is_file():
+        return False
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return record.get("question_set_sha256") == question_hash
+
+
 def _failed_row(
     candidate_key: str, digest: str, model: str, started: str, error: str
 ) -> dict[str, Any]:
@@ -1030,10 +1155,15 @@ def run_screen(
     ledger = CallLedger(output_dir / "ledger", ceiling_usd=ceiling_usd)
     question_hash = question_set_sha256()
 
+    # A recorded response counts as done only when it answers the question set
+    # this screen sends. A response of an older set is re-queued, because the
+    # ranking would otherwise drop that paper as unreadable for ever.
     pending = [
         row
         for row in rows
-        if not response_file(responses_dir, row["candidate_key"]).is_file()
+        if not _answers_this_question_set(
+            response_file(responses_dir, row["candidate_key"]), question_hash
+        )
     ]
     counts = {
         "selected": len(rows),
@@ -1091,114 +1221,121 @@ def run_screen(
             with lock:
                 counts["stopped_on_ceiling"] += 1
             return
-        try:
-            raw = client.invoke(body)
-        except JevOverlargeRequestError:
-            # The provider documents no state size limit, so this is the only
-            # way to learn one. One retry at a quarter of the budget, recorded
-            # as its own selection, and then the paper is given up.
-            smaller = max(1000, budget // 4)
-            if smaller >= selection["state_characters"]:
+        with ledger.reservation_held(projected):
+            try:
+                raw = client.invoke(body)
+            except JevOverlargeRequestError:
+                # The provider documents no state size limit, so this is the only
+                # way to learn one. One retry at a quarter of the budget, recorded
+                # as its own selection, and then the paper is given up.
+                smaller = max(1000, budget // 4)
+                if smaller >= selection["state_characters"]:
+                    ledger.record(
+                        _failed_row(
+                            candidate_key,
+                            digest,
+                            model,
+                            started,
+                            "HTTP 422 on a state already at the floor",
+                        )
+                    )
+                    with lock:
+                        counts["failed"] += 1
+                    return
+                # The refused attempt leaves its own row, so the ledger holds every
+                # request this screen made. A 422 is refused before generation, so
+                # the row costs nothing.
                 ledger.record(
                     _failed_row(
                         candidate_key,
                         digest,
                         model,
                         started,
-                        "HTTP 422 on a state already at the floor",
+                        "HTTP 422 on the full state, retried smaller",
                     )
                 )
+                selection = select_state_text(text, budget=smaller)
+                selection["shrunk_after_422_from_budget"] = budget
+                body = build_request(selection["state_text"], model=model)
+                digest = request_sha256(body)
+                try:
+                    raw = client.invoke(body)
+                except JevPrescreenError as error:
+                    ledger.record(
+                        _failed_row(candidate_key, digest, model, started, str(error))
+                    )
+                    with lock:
+                        counts["failed"] += 1
+                        counts["shrunk_and_failed"] += 1
+                    return
                 with lock:
-                    counts["failed"] += 1
-                return
-            # The refused attempt leaves its own row, so the ledger holds every
-            # request this screen made. A 422 is refused before generation, so
-            # the row costs nothing.
-            ledger.record(
-                _failed_row(
-                    candidate_key,
-                    digest,
-                    model,
-                    started,
-                    "HTTP 422 on the full state, retried smaller",
-                )
-            )
-            selection = select_state_text(text, budget=smaller)
-            selection["shrunk_after_422_from_budget"] = budget
-            body = build_request(selection["state_text"], model=model)
-            digest = request_sha256(body)
-            try:
-                raw = client.invoke(body)
+                    counts["shrunk_after_422"] += 1
             except JevPrescreenError as error:
                 ledger.record(
                     _failed_row(candidate_key, digest, model, started, str(error))
                 )
                 with lock:
                     counts["failed"] += 1
-                    counts["shrunk_and_failed"] += 1
                 return
-            with lock:
-                counts["shrunk_after_422"] += 1
-        except JevPrescreenError as error:
-            ledger.record(
-                _failed_row(candidate_key, digest, model, started, str(error))
-            )
-            with lock:
-                counts["failed"] += 1
-            return
-        usage = raw.get("usage") or {}
-        input_tokens = int(usage.get("input_tokens") or 0)
-        output_tokens = int(usage.get("output_tokens") or 0)
-        # A provider that reports no input count cannot prove the charge, so
-        # the projection is billed instead and the row says so.
-        billed_estimate = input_tokens == 0
-        if billed_estimate:
-            input_tokens = selection["estimated_tokens"] + QUESTION_OVERHEAD_TOKENS
-        cost = call_cost_usd(input_tokens, output_tokens)
-        finished = now()
-        record = {
-            "schema": RESULT_SCHEMA,
-            "contract_id": CONTRACT_ID,
-            "candidate_key": candidate_key,
-            "paper_id": row["paper_id"],
-            "family_key": row["family_key"],
-            "manifest_position": row["manifest_position"],
-            "extraction_sha256": row["extraction_sha256"],
-            "question_set_sha256": question_hash,
-            "request_sha256": digest,
-            "requested_model": model,
-            "answered_model": raw.get("model"),
-            "selection": {
-                key: value for key, value in selection.items() if key != "state_text"
-            },
-            "started_at_utc": started,
-            "finished_at_utc": finished,
-            "usage": {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "billed_from_estimate": billed_estimate,
-            },
-            "cost_usd": str(cost),
-            "response": raw,
-        }
-        atomic_json(response_file(responses_dir, candidate_key), record, immutable=True)
-        ledger.record(
-            {
-                "state": "completed",
+            usage = raw.get("usage") or {}
+            input_tokens = int(usage.get("input_tokens") or 0)
+            output_tokens = int(usage.get("output_tokens") or 0)
+            # A provider that reports no input count cannot prove the charge, so
+            # the projection is billed instead and the row says so.
+            billed_estimate = input_tokens == 0
+            if billed_estimate:
+                input_tokens = selection["estimated_tokens"] + QUESTION_OVERHEAD_TOKENS
+            cost = call_cost_usd(input_tokens, output_tokens)
+            finished = now()
+            record = {
+                "schema": RESULT_SCHEMA,
+                "contract_id": CONTRACT_ID,
                 "candidate_key": candidate_key,
+                "paper_id": row["paper_id"],
+                "family_key": row["family_key"],
+                "manifest_position": row["manifest_position"],
+                "extraction_sha256": row["extraction_sha256"],
+                "question_set_sha256": question_hash,
                 "request_sha256": digest,
-                "model": model,
+                "requested_model": model,
                 "answered_model": raw.get("model"),
+                "selection": {
+                    key: value
+                    for key, value in selection.items()
+                    if key != "state_text"
+                },
                 "started_at_utc": started,
                 "finished_at_utc": finished,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "billed_from_estimate": billed_estimate,
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "billed_from_estimate": billed_estimate,
+                },
                 "cost_usd": str(cost),
+                "response": raw,
             }
-        )
-        with lock:
-            counts["completed"] += 1
+            # The money lands first. The call is already made and already
+            # billed, so if the response file cannot be written the spend must
+            # still be on the ledger. The other order would report a paid call
+            # as a free failure and understate the spend against the ceiling.
+            ledger.record(
+                {
+                    "state": "completed",
+                    "candidate_key": candidate_key,
+                    "request_sha256": digest,
+                    "model": model,
+                    "answered_model": raw.get("model"),
+                    "started_at_utc": started,
+                    "finished_at_utc": finished,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "billed_from_estimate": billed_estimate,
+                    "cost_usd": str(cost),
+                }
+            )
+            _write_response(responses_dir, candidate_key, record)
+            with lock:
+                counts["completed"] += 1
 
     if pending:
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
@@ -1411,14 +1548,13 @@ def write_ranked_manifest(
             raise JevPrescreenError("the selected count is outside the frozen manifest")
         ordered_keys = ordered_keys[:limit]
 
+    rank_of = {candidate_key: index for index, candidate_key in enumerate(order, 1)}
     rows: list[dict[str, Any]] = []
     for position, candidate_key in enumerate(ordered_keys, start=1):
         row = dict(by_key[candidate_key])
         row["original_manifest_position"] = row["manifest_position"]
         row["manifest_position"] = position
-        row["jev_prescreen_rank"] = (
-            order.index(candidate_key) + 1 if candidate_key in seen else None
-        )
+        row["jev_prescreen_rank"] = rank_of.get(candidate_key)
         rows.append(row)
 
     output_dir = output_dir.resolve()
@@ -1431,8 +1567,17 @@ def write_ranked_manifest(
         "freeze_id": f"{descriptor['freeze_id']}-jev-prescreen-{len(rows)}-r1",
         "counts": {
             "manifest_records": len(rows),
+            # Counted exactly as `materialize_frozen_access_run` counts it, so
+            # the descriptor and its only consumer can never disagree.
             "unique_paper_families": len(
-                {str(row.get("family_key") or row["candidate_key"]) for row in rows}
+                {
+                    str(
+                        row.get("paper_family_id")
+                        or row.get("family_key")
+                        or row["candidate_key"]
+                    )
+                    for row in rows
+                }
             ),
         },
         "source_freeze_id": descriptor["freeze_id"],

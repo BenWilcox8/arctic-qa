@@ -12,8 +12,9 @@ It keeps its own append-only call ledger with its own USD ceiling.
 ## 1. Why an order is worth money
 
 The pipeline pays a full-text eligibility call on every paper it opens.
-In run `chapter3-7dc6485-r3`, eligibility and finding extraction were 72.7% of the run cost.
-Of the 276 papers the run labelled, 21 produced an accepted question.
+In run `chapter3-7dc6485-r3`, eligibility and finding extraction were 72.7% of the run cost at the 2026-09-17T02:02Z snapshot, and near 72% when this was written.
+The run is live, so the share moves.
+Of the 276 papers the run had completed, 21 produced an accepted question.
 117 ended at eligibility and 132 ended at generation.
 
 A paper that fails eligibility still costs a paid call of about 24,000 input tokens.
@@ -28,8 +29,12 @@ The metadata pre-filter retained 16,339 papers with the disposition `retained_ar
 Every one of the 4,420 is inside the 16,339, and they are the frozen corpus `full-text-ready-4420-seed20260912-r1`.
 
 The other 11,919 have no text on disk.
-They are the `excluded_other_access_candidates` of the freeze receipt.
-A prescreen cannot read them, because there is no article to read.
+That number is 16,339 retained papers minus the 4,420 that have text, and `--action build-manifest` computes it.
+It is close to, but not the same as, the `excluded_other_access_candidates` count of 11,921 in the freeze receipt.
+The receipt counts against the access run's own target of 16,341 records, which is two more than the retained set.
+Do not read the two numbers as the same set.
+
+A prescreen cannot read those papers, because there is no article to read.
 `article-access-r1` is the stage that would fetch them, and that fetch is a separate task with its own cost and its own licence questions.
 
 So the prescreen runs on the 4,420 first.
@@ -46,9 +51,13 @@ Batching is what makes this cheap.
 The document dominates the request, so eight separate calls would pay for the article eight times.
 The provider's own cookbook measures 13 batched questions as 12.2 times cheaper than 13 single-question calls, with no change in the answers.
 
-Jev returns no text.
+Jev writes no prose.
 It returns a probability for a yes/no question (`noul`), a probability per option for a `choice`, and a probability-weighted level for a `score`.
 Every question below is answerable in one of those three shapes.
+
+A `choice` answer does carry a `choice` string and a `score` answer carries a `legend` map.
+Both only echo the option keys and the level descriptions that this module sent.
+Neither is text the model wrote, and `read_probabilities` reads neither: it takes `probabilities` and `score` only.
 
 ### The gates
 
@@ -97,7 +106,7 @@ A reader of the article cannot predict them, so a question about them would add 
 | `option_set_not_mutually_exclusive`, `option_set_verdict_missing` | 5 | These judge the distractors the writer model produced. |
 | `alternative_finding_not_distinct`, `reconstruction_alternative_answer_present` | 7 | These depend on the generated question text. |
 
-The 276 labelled papers of the run account for exactly:
+The 276 papers the run had completed account for exactly:
 
 | Group | Papers |
 | --- | --- |
@@ -108,7 +117,13 @@ The 276 labelled papers of the run account for exactly:
 | Accepted | 21 |
 | Total | 276 |
 
-So the prescreen's questions name 171 of the 255 losses.
+So the prescreen's questions name 171 of the 255 papers that did not produce a question.
+
+"Completed" here is not the same as "labelled".
+All 276 carry an `outcome_class` and a `reason_code`, and this table groups them by that code.
+Only 270 of them carry a calibration label, because the run never finished judging 6 of them.
+Those 6 sit inside the tail row of this table.
+Section 8 holds the label rule and never treats an unfinished paper as a rejection.
 
 `standalone_det_question_context_referent_unresolved` is the one borderline entry among the 87.
 It depends on the question the writer model produced, so it is not fully predictable from the article.
@@ -197,13 +212,17 @@ Measured over the 4,420 frozen papers:
 | 99th percentile | 231,057 | 57,764 |
 | Maximum | 2,149,706 | 537,426 |
 
-So the default budget carries about 87% of the corpus whole.
+So the default budget carries 3,799 of the 4,420 papers whole, which is 86%.
 
 `select_state_text` chooses the state in three steps:
 
 1. If the article fits the budget, send it whole. The rule is recorded as `whole`.
 2. If it does not fit, cut the trailing reference list, because it holds no finding of this study. The rule is recorded as `references_trimmed`.
 3. If the body alone is still over the budget, keep 60% of the budget from the head and 40% from the tail, and mark the gap with an elision line. The rule is recorded as `head_tail` or `references_trimmed_head_tail`.
+
+The budget bounds the article characters, not the whole state.
+A head-and-tail state also carries the elision line, which is 67 characters, so it is that much longer than the budget.
+`select_state_text` records `state_characters`, which is the true length of what was sent.
 
 The head carries the title, the abstract and the introduction.
 The tail carries the discussion and the conclusions, which is where a stated main finding lives.
@@ -213,6 +232,9 @@ The tail carries the discussion and the conclusions, which is where a stated mai
 A section-preference rule was the first design, and the corpus refuses it.
 The extracted text is a flat PDF dump with column-flow artifacts, so headings are rarely on their own line.
 Of the 4,420 papers, a strict own-line heading finds `abstract` in 819 and `results` in 518.
+That measurement used a regex that anchors the heading word to its own line, with at most 40 leading spaces and an optional section number.
+A looser pattern that accepts the word anywhere finds `results` in 3,928 papers, which is mostly body prose rather than headings.
+The reference-list statistic below is the load-bearing one, because `_REFERENCES` in the module reproduces it exactly.
 A rule that depends on locating the results section would fail on most of the corpus and fail silently.
 
 The reference list is the one section that is found reliably and late.
@@ -291,7 +313,7 @@ The run has already decided 276 papers, so the answer is measurable for USD 0.23
 `generation_rejected`, `eligibility_excluded` and `eligibility_unresolved` are `rejected`.
 `incomplete_non_mcq` and `paper_cost_cap_reached` carry no label, because the run never finished judging them.
 
-For run `chapter3-7dc6485-r3` at the time of writing, that is 276 papers: 21 accepted, 249 rejected and 6 unlabelled.
+For run `chapter3-7dc6485-r3` at the time of writing, that is 276 completed papers: 21 accepted, 249 rejected and 6 left unlabelled.
 The whole labelled set is the calibration sample, which is better than a matched draw, because it uses every label the run has.
 
 `--action calibrate` reports:
@@ -431,6 +453,7 @@ The client retries 429 and 529 with exponential back-off, and obeys `retry-after
 ## 13. What is still unknown
 
 - The real price. TypeSafe publishes no price page, and the cookbook constant is disclaimed.
+- Whether the price belongs to the model that answers. The cookbook attributes `0.042` to `jev-1.12`, while the default request model is `jev-latest`, which a newer concrete version serves. The module records the answered model on every row but never compares it to the model the price was measured on, so a reviewer has to do that by hand.
 - The state size limit. None is published. A 422 is the only signal, and section 5 says what the screen does with one.
 - The rate limit. None is published.
 - The full model roster. `models.list()` needs a live key.
