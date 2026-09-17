@@ -1090,7 +1090,9 @@ def select_continuation(
         ranked[key] = item
 
     ledger_bytes = shared_ledger_file.read_bytes()
-    ledger = json.loads(ledger_bytes)
+    ledger = ledger_store.apply_journal(
+        shared_ledger_file, json.loads(ledger_bytes), ledger_bytes
+    )
     if ledger.get("schema") != "shared-paid-call-ledger-v1" or not isinstance(
         ledger.get("requests"), dict
     ):

@@ -466,3 +466,128 @@ def test_the_snapshot_is_bound_by_the_bytes_that_were_read(tmp_path: Path) -> No
     assert ledger_store.apply_journal(
         ledger, json.loads(fresh_bytes.decode()), fresh_bytes
     )["spent_usd"] == "1"
+
+
+# -- the rest of the adversarial audit of 2026-09-17 --------------------------
+
+
+def test_a_torn_tail_is_cut_before_this_process_appends(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.json"
+    write_json(ledger, {"spent_usd": "0", "requests": {}})
+    ledger_store.initialize_store(ledger)
+    store = ledger_store.LedgerStore(ledger)
+    state = store.load()
+    state["spent_usd"] = "1"
+    store.commit(state, now="2026-09-17T00:00:00Z")
+    store.flush()
+    store.close()
+    with ledger_store.journal_file(ledger).open("ab") as handle:
+        handle.write(b'{"schema":"shared-paid-call-ledger-journ')
+    again = ledger_store.LedgerStore(ledger)
+    again_state = again.load()
+    again_state["spent_usd"] = "2"
+    again.commit(again_state, now="2026-09-17T00:00:01Z")
+    again.flush()
+    assert ledger_store.read_ledger(ledger)["spent_usd"] == "2"
+
+
+def test_a_broker_refuses_a_ledger_without_a_store(tmp_path: Path) -> None:
+    values = fixture(tmp_path, transport=Transport())
+    execute(values["broker"], paper="paper-1")
+    ledger_store.journal_file(values["ledger"]).unlink()
+    ledger_store.journal_base_file(values["ledger"]).unlink()
+    with pytest.raises(ValueError, match="no store beside it"):
+        fixture(tmp_path, transport=Transport())
+
+
+def test_a_record_that_moves_only_a_paper_row_is_proved_on_read(
+    tmp_path: Path,
+) -> None:
+    """A journal line edited by hand, or written by a broken writer."""
+    values = _concurrent(tmp_path, parallel=True)
+    broker = values["broker"]
+    execute(broker, paper="paper-1")
+    state = ledger_store.read_ledger(values["ledger"])
+    family = next(iter(state["papers"]))
+    record = {
+        "schema": ledger_store.JOURNAL_RECORD_SCHEMA,
+        "seq": broker._store.sequence + 1,
+        "at": "2026-09-17T00:00:00Z",
+        "delta": {"papers": {"set": {family: {**state["papers"][family], "spent_usd": "0"}}}},
+    }
+    with ledger_store.journal_file(values["ledger"]).open("ab") as handle:
+        handle.write((canonical_json(record) + "\n").encode())
+    with pytest.raises(ValueError, match="papers total is inconsistent"):
+        execute(broker, paper="paper-2")
+
+
+def test_a_refused_reservation_rolls_back_without_a_reload(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.json"
+    write_json(ledger, {"spent_usd": "0", "requests": {}, "papers": {}})
+    ledger_store.initialize_store(ledger)
+    store = ledger_store.LedgerStore(ledger)
+    state = store.load()
+    state["papers"]["family-x"] = {"spent_usd": "0"}
+    state["spent_usd"] = "9"
+    assert store.is_dirty()
+    store.rollback()
+    assert not store.is_dirty()
+    assert "family-x" not in state["papers"]
+    assert state["spent_usd"] == "0"
+    reloads = store.reload_count
+    assert store.read() is state
+    assert store.reload_count == reloads
+
+
+def test_a_reader_seeks_past_the_records_the_snapshot_holds(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.json"
+    write_json(ledger, {"spent_usd": "0", "requests": {}})
+    ledger_store.initialize_store(ledger)
+    store = ledger_store.LedgerStore(ledger)
+    state = store.load()
+    for index in range(3):
+        state["spent_usd"] = str(index + 1)
+        store.commit(state, now="2026-09-17T00:00:00Z")
+    store.flush()
+    assert store.compact() is True
+    _seq, offset, identity = ledger_store.snapshot_binding(ledger)
+    assert offset == ledger_store.journal_file(ledger).stat().st_size
+    assert identity is not None
+    state["spent_usd"] = "4"
+    store.commit(state, now="2026-09-17T00:00:01Z")
+    store.flush()
+    assert ledger_store.read_ledger(ledger)["spent_usd"] == "4"
+
+
+def test_a_failed_fsync_marks_nothing_durable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os as _os
+
+    ledger = tmp_path / "ledger.json"
+    write_json(ledger, {"spent_usd": "0", "requests": {}})
+    ledger_store.initialize_store(ledger)
+    store = ledger_store.LedgerStore(ledger)
+    state = store.load()
+    state["spent_usd"] = "1"
+    store.commit(state, now="2026-09-17T00:00:00Z")
+    real = _os.fsync
+
+    def failing(fd: int) -> None:
+        monkeypatch.setattr(ledger_store.os, "fsync", real)
+        raise OSError("EIO")
+
+    monkeypatch.setattr(ledger_store.os, "fsync", failing)
+    with pytest.raises(OSError):
+        store.flush()
+    assert store._durable_offset < store._written_offset
+    store.flush()
+    assert store._durable_offset == store._written_offset
+
+
+def test_a_leftover_store_beside_a_ledger_is_refused(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.json"
+    write_json(ledger, {"spent_usd": "0", "requests": {}})
+    ledger_store.initialize_store(ledger)
+    with pytest.raises(ValueError, match="already has a store"):
+        ledger_store.initialize_store(ledger)

@@ -21,6 +21,7 @@ ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(Path(__file__).parent))
 
+from arctic_qa import ledger_store
 from arctic_qa.model_broker import (  # noqa: E402
     SharedGeminiBroker,
     broker_request_key,
@@ -123,7 +124,7 @@ def test_two_construction_calls_are_in_flight_at_once(tmp_path: Path) -> None:
     assert status["halted"] is False
     assert status["integrity_valid"] is True
     assert status["generation_submissions"] == 2
-    ledger = json.loads((tmp_path / "shared-ledger.json").read_text(encoding="utf-8"))
+    ledger = ledger_store.read_ledger(tmp_path / "shared-ledger.json")
     assert ledger["inflight"] == 0
     assert Decimal(ledger["reserved_usd"]) == 0
     assert {row["state"] for row in ledger["requests"].values()} == {"completed"}

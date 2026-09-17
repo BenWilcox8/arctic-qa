@@ -23,6 +23,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from . import ledger_store
+
 from .db import Database, now
 from .util import atomic_json, canonical_json
 
@@ -215,8 +217,8 @@ def _ledger_family_times(ledger_file: Path | None) -> dict[str, str]:
     if ledger_file is None or not ledger_file.is_file():
         return {}
     try:
-        ledger = json.loads(ledger_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        ledger = ledger_store.read_ledger(ledger_file)
+    except (OSError, ValueError, json.JSONDecodeError):
         return {}
     times: dict[str, str] = {}
     for request in (ledger.get("requests") or {}).values():

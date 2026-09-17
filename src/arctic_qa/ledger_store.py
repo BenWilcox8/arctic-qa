@@ -73,7 +73,7 @@ class _Tracked(dict):
     A row reports to its map, and a map reports to the ledger.
     """
 
-    __slots__ = ("_dirty", "_parent", "_parent_key", "_wrap_rows")
+    __slots__ = ("_dirty", "_parent", "_parent_key", "_wrap_rows", "_previous")
 
     def __init__(
         self,
@@ -85,6 +85,10 @@ class _Tracked(dict):
     ) -> None:
         super().__init__(data or {})
         self._dirty: set[str] = set()
+        # The value each dirty key had before its first change, so a
+        # mutation that was never committed rolls back in place instead of
+        # costing a reload of the whole snapshot.
+        self._previous: dict[str, Any] = {}
         self._parent = parent
         self._parent_key = parent_key
         # A map of rows wraps every row it is given, so a caller that replaces
@@ -98,13 +102,32 @@ class _Tracked(dict):
         return self._dirty
 
     def clear_dirty(self) -> None:
-        self._dirty = set()
-        for value in self.values():
+        if not self._dirty:
+            return
+        for key in self._dirty:
+            value = dict.get(self, key)
             if isinstance(value, _Tracked):
                 value.clear_dirty()
+        self._dirty = set()
+        self._previous = {}
+
+    def rollback(self) -> None:
+        """Put every touched key back to the value it had at the last commit."""
+        for key in list(self._dirty):
+            if key in self._previous:
+                previous = self._previous[key]
+                if previous is _ABSENT:
+                    dict.pop(self, key, None)
+                else:
+                    dict.__setitem__(self, key, self._prepare(key, previous))
+        self._dirty = set()
+        self._previous = {}
 
     def _touch(self, key: Any) -> None:
-        self._dirty.add(str(key))
+        name = str(key)
+        if name not in self._previous:
+            self._previous[name] = plain(dict.get(self, key, _ABSENT))
+        self._dirty.add(name)
         parent = self._parent
         if parent is not None and self._parent_key is not None:
             parent._touch(self._parent_key)
@@ -161,6 +184,9 @@ class _Tracked(dict):
         super().clear()
 
 
+_ABSENT = object()
+
+
 def wrap(ledger: dict[str, Any]) -> _Tracked:
     """Return the ledger as tracked containers, with nothing marked changed."""
     root = _Tracked(ledger)
@@ -178,6 +204,8 @@ def wrap(ledger: dict[str, Any]) -> _Tracked:
 
 def plain(value: Any) -> Any:
     """Return the same state as ordinary dicts and lists."""
+    if value is _ABSENT:
+        return value
     if isinstance(value, dict):
         return {key: plain(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -254,7 +282,7 @@ def compaction_lock_file(ledger_file: Path) -> Path:
 
 
 @contextlib.contextmanager
-def held_compaction_lock(ledger_file: Path) -> Iterator[bool]:
+def held_compaction_lock(ledger_file: Path, *, wait: bool = False) -> Iterator[bool]:
     """Hold the compaction lock, or report that another compactor holds it.
 
     Compaction never takes the shared ledger lock, so it never delays a paid
@@ -265,7 +293,7 @@ def held_compaction_lock(ledger_file: Path) -> Iterator[bool]:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+") as handle:
         try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(handle, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
         except OSError:
             yield False
             return
@@ -295,6 +323,33 @@ def _iter_records(data: bytes) -> Iterator[dict[str, Any]]:
         yield record
 
 
+def truncate_torn_tail(path: Path) -> int:
+    """Cut a torn last line off the journal, and say how many bytes went.
+
+    A stop in the middle of an append leaves bytes that are not a record.
+    Readers ignore them, but the next append would land after them and glue
+    the two into one unreadable line. The caller holds the shared ledger
+    lock. Found by the adversarial audit of 2026-09-17.
+    """
+    try:
+        size = os.path.getsize(path)
+    except FileNotFoundError:
+        return 0
+    if size == 0:
+        return 0
+    with path.open("rb+") as handle:
+        handle.seek(-1, os.SEEK_END)
+        if handle.read(1) == b"\n":
+            return 0
+        handle.seek(0)
+        data = handle.read()
+        _whole, keep = _complete_bytes(data)
+        handle.truncate(keep)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return size - keep
+
+
 def _complete_bytes(data: bytes) -> tuple[bytes, int]:
     """Return the records that are whole, and how many bytes they occupy.
 
@@ -320,16 +375,45 @@ def apply_journal(
     ledger_file = Path(ledger_file)
     if snapshot_bytes is None:
         raise ValueError("apply_journal needs the bytes the snapshot was read from")
-    applied_seq = snapshot_applied_seq(ledger_file, snapshot_bytes)
+    applied_seq, _seq, _offset = _replay(ledger_file, snapshot, snapshot_bytes)
+    return snapshot
+
+
+def _journal_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return (stat.st_dev, stat.st_ino)
+
+
+def _replay(
+    ledger_file: Path, state: dict[str, Any], data: bytes
+) -> tuple[int, int, int]:
+    """Apply the journal's tail to a snapshot read as ``data``.
+
+    Returns the applied sequence of the snapshot, the highest sequence
+    applied and the byte offset after the last whole record.
+    """
+    applied_seq, start, bound_identity = snapshot_binding(ledger_file, data)
     path = journal_file(ledger_file)
     if not path.is_file():
-        return snapshot
-    whole, _offset = _complete_bytes(path.read_bytes())
+        return applied_seq, applied_seq, 0
+    if bound_identity is None or bound_identity != _journal_identity(path):
+        start = 0
+    with path.open("rb") as handle:
+        if start:
+            handle.seek(start)
+        tail = handle.read()
+    whole, used = _complete_bytes(tail)
+    highest = applied_seq
     for record in _iter_records(whole):
-        if int(record["seq"]) <= applied_seq:
+        seq = int(record["seq"])
+        if seq <= applied_seq:
             continue
-        apply_delta(snapshot, record["delta"])
-    return snapshot
+        apply_delta(state, record["delta"])
+        highest = max(highest, seq)
+    return applied_seq, highest, start + used
 
 
 def read_ledger(ledger_file: Path) -> dict[str, Any]:
@@ -343,7 +427,38 @@ def read_ledger(ledger_file: Path) -> dict[str, Any]:
     return state
 
 
+def snapshot_binding(
+    ledger_file: Path, data: bytes | None = None
+) -> tuple[int, int, tuple[int, int] | None]:
+    """The applied sequence, the journal byte offset and the journal identity
+    the snapshot on disk is bound to.
+
+    The offset lets a reader seek past every record the snapshot already
+    holds instead of parsing the whole journal; it is only trusted when the
+    journal is the same file (device and inode) the base record named.
+    """
+    applied_seq, base = _bound_base(ledger_file, data)
+    if base is None:
+        return applied_seq, 0, None
+    offset = base.get("journal_offset")
+    identity = base.get("journal_identity")
+    if (
+        not isinstance(offset, int)
+        or offset < 0
+        or not isinstance(identity, list)
+        or len(identity) != 2
+    ):
+        return applied_seq, 0, None
+    return applied_seq, offset, (int(identity[0]), int(identity[1]))
+
+
 def snapshot_applied_seq(ledger_file: Path, data: bytes | None = None) -> int:
+    return _bound_base(ledger_file, data)[0]
+
+
+def _bound_base(
+    ledger_file: Path, data: bytes | None = None
+) -> tuple[int, dict[str, Any] | None]:
     """Say which journal records the snapshot on disk already holds.
 
     The base record binds the snapshot by its hash. A snapshot that matches
@@ -366,7 +481,7 @@ def snapshot_applied_seq(ledger_file: Path, data: bytes | None = None) -> int:
                 raise ValueError(
                     "the shared paid-call ledger journal has no base record"
                 )
-            return 0
+            return 0, None
         base = _read_json(base_path)
         if (
             not isinstance(base, dict)
@@ -375,7 +490,7 @@ def snapshot_applied_seq(ledger_file: Path, data: bytes | None = None) -> int:
         ):
             raise ValueError("the shared paid-call ledger base record is invalid")
         if digest == base.get("snapshot_sha256"):
-            return int(base["applied_seq"])
+            return int(base["applied_seq"]), base
         superseded = base.get("supersedes")
         if isinstance(superseded, dict) and digest == superseded.get(
             "snapshot_sha256"
@@ -383,7 +498,7 @@ def snapshot_applied_seq(ledger_file: Path, data: bytes | None = None) -> int:
             # The base record is written before the snapshot it names, so a
             # stop between the two leaves the snapshot it superseded. That
             # one is bound too, and the records after it replay onto it.
-            return int(superseded["applied_seq"])
+            return int(superseded["applied_seq"]), superseded
         if attempt == 0:
             # A compactor may have written a newer base record since these
             # bytes were read. The record it wrote names the bytes it
@@ -399,19 +514,7 @@ def materialize(ledger_file: Path) -> tuple[dict[str, Any], int, int]:
     state = json.loads(data.decode())
     if not isinstance(state, dict):
         raise ValueError("the shared paid-call ledger snapshot is invalid")
-    applied_seq = snapshot_applied_seq(ledger_file, data)
-    path = journal_file(ledger_file)
-    if not path.is_file():
-        return state, applied_seq, 0
-    data = path.read_bytes()
-    whole, offset = _complete_bytes(data)
-    highest = applied_seq
-    for record in _iter_records(whole):
-        seq = int(record["seq"])
-        if seq <= applied_seq:
-            continue
-        apply_delta(state, record["delta"])
-        highest = max(highest, seq)
+    _applied, highest, offset = _replay(ledger_file, state, data)
     return state, highest, offset
 
 
@@ -443,6 +546,7 @@ class LedgerStore:
         # or the rows another process's journal records moved.
         self._pending_full = True
         self._pending_requests: set[str] = set()
+        self._pending_compare = False
         # Group commit. One thread flushes the journal for everybody that
         # appended before it, which is what makes a durable write cost one
         # `fsync` for a wave of concurrent calls instead of one each.
@@ -458,6 +562,11 @@ class LedgerStore:
     def sequence(self) -> int:
         """The journal sequence number this process has applied."""
         return self._seq
+
+    @property
+    def offset(self) -> int:
+        """The journal byte offset this process has applied up to."""
+        return self._offset
 
     # -- the state -------------------------------------------------------
     def load(self) -> _Tracked:
@@ -528,6 +637,10 @@ class LedgerStore:
         return state
 
     def _note_applied(self, delta: dict[str, Any]) -> None:
+        # Every applied record owes the comparison of the totals, whatever
+        # keys it names: a record that moves a paper row and no request row
+        # is exactly the shape a hand edit of the journal would take.
+        self._pending_compare = True
         entry = delta.get("requests")
         if not isinstance(entry, dict):
             return
@@ -537,13 +650,24 @@ class LedgerStore:
         self._pending_requests.update(entry.get("set") or {})
         self._pending_requests.update(entry.get("removed") or [])
 
-    def take_changes(self) -> tuple[bool, set[str]]:
-        """Say what the broker still owes a proof for, and forget it."""
+    def take_changes(self) -> tuple[bool, set[str] | None]:
+        """Say what the broker still owes a proof for, and forget it.
+
+        ``(True, _)`` is a full pass. ``(False, keys)`` is a delta pass over
+        those rows, and an empty set still means the comparison of the totals
+        is owed. ``(False, None)`` means nothing was applied.
+        """
         full = self._pending_full
         keys = self._pending_requests
+        compare = self._pending_compare
         self._pending_full = False
         self._pending_requests = set()
-        return full, keys
+        self._pending_compare = False
+        if full:
+            return True, keys
+        if keys or compare:
+            return False, keys
+        return False, None
 
     def is_dirty(self) -> bool:
         """Report a mutation that was never committed."""
@@ -556,6 +680,18 @@ class LedgerStore:
         if isinstance(requests, _Tracked):
             return set(requests.dirty)
         return set()
+
+    def rollback(self) -> None:
+        """Undo a mutation that was never committed, key by key, in place.
+
+        A refused reservation or an exception leaves touched keys behind. They
+        go back to their committed values; nothing is read from disk. Found
+        by the adversarial audit of 2026-09-17: the reload this replaces cost
+        a parse of the whole snapshot on every read that followed a refusal.
+        """
+        state = self._state
+        if state is not None:
+            state.rollback()
 
     def discard(self) -> None:
         """Forget the cached view after a mutation that was never committed."""
@@ -581,6 +717,7 @@ class LedgerStore:
                 self._handle = None
         if self._handle is None:
             self.journal_file.parent.mkdir(parents=True, exist_ok=True)
+            truncate_torn_tail(self.journal_file)
             self._handle = self.journal_file.open("ab")
             self._written_offset = self._handle.tell()
             self._durable_offset = self._written_offset
@@ -652,11 +789,17 @@ class LedgerStore:
                 try:
                     os.fsync(handle.fileno())
                     self.fsync_count += 1
-                finally:
+                except BaseException:
                     self._durability.acquire()
+                    # Nothing is durable. The waiters run their own attempt
+                    # and this one reports the disk to its caller.
                     self._flushing = False
-                    self._durable_offset = max(self._durable_offset, covered)
                     self._durability.notify_all()
+                    raise
+                self._durability.acquire()
+                self._flushing = False
+                self._durable_offset = max(self._durable_offset, covered)
+                self._durability.notify_all()
 
     # -- the compacted snapshot ------------------------------------------
     def compaction_due(self) -> bool:
@@ -681,7 +824,9 @@ class LedgerStore:
         with held_compaction_lock(self.ledger_file) as held:
             if not held:
                 return False
-            write_snapshot(self.ledger_file, state, self._seq)
+            write_snapshot(
+                self.ledger_file, state, self._seq, journal_offset=self._offset
+            )
         self._records_since_compaction = 0
         self._compacted_at = time.monotonic()
         self._rotate_if_large()
@@ -719,37 +864,55 @@ class LedgerStore:
             self._handle = None
 
 
-def write_snapshot(ledger_file: Path, state: dict[str, Any], seq: int) -> None:
+def write_snapshot(
+    ledger_file: Path,
+    state: dict[str, Any],
+    seq: int,
+    *,
+    journal_offset: int | None = None,
+) -> None:
     """Rewrite the compacted snapshot and bind it to the journal.
 
     The base record is written first and names both the snapshot it is about
     to write and the one that snapshot supersedes, so a stop between the two
     writes leaves a store that still reconstructs and a snapshot that is
-    still bound. The caller holds the compaction lock.
+    still bound. ``journal_offset`` is the byte offset after the last record
+    the snapshot holds, so a reader seeks past them. The caller holds the
+    compaction lock.
     """
     data = (canonical_json(plain(state)) + "\n").encode()
+    previous_seq, previous_offset, _identity = snapshot_binding(ledger_file)
     previous = {
-        "applied_seq": snapshot_applied_seq(ledger_file),
+        "applied_seq": previous_seq,
         "snapshot_sha256": sha256_file(ledger_file),
+        "journal_offset": previous_offset,
     }
-    atomic_json(
-        journal_base_file(ledger_file),
-        {
-            "schema": JOURNAL_BASE_SCHEMA,
-            "snapshot_sha256": sha256_bytes(data),
-            "applied_seq": int(seq),
-            "supersedes": previous,
-        },
-    )
+    identity = _journal_identity(journal_file(ledger_file))
+    record: dict[str, Any] = {
+        "schema": JOURNAL_BASE_SCHEMA,
+        "snapshot_sha256": sha256_bytes(data),
+        "applied_seq": int(seq),
+        "supersedes": previous,
+    }
+    if journal_offset is not None and identity is not None:
+        record["journal_offset"] = int(journal_offset)
+        record["journal_identity"] = [identity[0], identity[1]]
+    atomic_json(journal_base_file(ledger_file), record)
     atomic_write(ledger_file, data)
 
 
 def initialize_store(ledger_file: Path) -> None:
-    """Give a ledger file that has no journal yet an empty one."""
+    """Give a ledger file that has no store yet an empty one.
+
+    The base record lands before the journal, because a base with no journal
+    is a valid store and a journal with no base is not. A leftover journal or
+    base record beside a ledger is refused: replaying an old run's records
+    onto a fresh ledger is the one thing a migration must never do.
+    """
     path = journal_file(ledger_file)
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.touch()
+    base_path = journal_base_file(ledger_file)
+    if base_path.exists() or (path.exists() and path.stat().st_size > 0):
+        raise ValueError("the shared paid-call ledger already has a store beside it")
     atomic_json(
         journal_base_file(ledger_file),
         {
@@ -759,6 +922,8 @@ def initialize_store(ledger_file: Path) -> None:
             "supersedes": None,
         },
     )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
 
 
 def store_files(ledger_file: Path) -> Iterable[Path]:

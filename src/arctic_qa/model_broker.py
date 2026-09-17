@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import contextlib
 import fcntl
 import json
@@ -780,7 +781,8 @@ def activate_exclusive_batch_mode(
                 raise ValueError(
                     "the shared paid-call ledger changed before batch activation"
                 )
-            ledger = _read(ledger_file)
+            # The file is the compacted snapshot; the state is the store.
+            ledger = ledger_store.read_ledger(ledger_file)
             if (
                 ledger.get("schema") != "shared-paid-call-ledger-v1"
                 or ledger.get("halted") is not False
@@ -2851,6 +2853,12 @@ class SharedGeminiBroker:
                         "the shared paid-call ledger identity record is absent"
                     )
                 identity = _read(self._identity_file)
+                if not ledger_store.journal_base_file(self.ledger_file).is_file():
+                    raise ValueError(
+                        "the shared paid-call ledger has no store beside it; run "
+                        "arctic-qa migrate-ledger-store --apply with every writer "
+                        "stopped (docs/SHARED_MODEL_BROKER.md, Parallel bookkeeping)"
+                    )
                 self._validate_initial_identity(
                     identity, ledger_store.read_ledger(self.ledger_file)
                 )
@@ -2864,7 +2872,7 @@ class SharedGeminiBroker:
                 self._compacted_seq = ledger_store.snapshot_applied_seq(
                     self.ledger_file
                 )
-                self.compact()
+                self.compact(wait=True)
                 return
             if self._identity_file.exists():
                 raise ValueError(
@@ -3040,14 +3048,16 @@ class SharedGeminiBroker:
             raise ValueError("the shared paid-call ledger has an integrity halt")
         try:
             if self._store.is_dirty():
-                # A mutation was abandoned without a commit, so this process's
-                # view is not the store. Read it again from the store.
-                self._store.discard()
+                # A mutation was abandoned without a commit: a refused
+                # reservation, an exception. The touched keys go back to the
+                # committed values in place, which costs the touched keys and
+                # not a reload of the whole snapshot.
+                self._store.rollback()
             ledger = self._store.read()
             full, changed = self._store.take_changes()
             if full:
                 self._validate_ledger(ledger)
-            elif changed:
+            elif changed is not None:
                 self._validate_ledger_delta(ledger, changed)
             fingerprint = self._ledger_evidence_fingerprint()
             # The ledger's own consistency is proved on every read, above. The
@@ -5110,6 +5120,11 @@ class SharedGeminiBroker:
         """Start the one background thread that keeps the snapshot current."""
         if self._compaction_thread is not None:
             return
+        # A process that exits writes the snapshot one last time, so a plain
+        # reader of the file after the exit sees the state and not the last
+        # compaction tick. A signal that kills the process outright gets no
+        # such write; the activation's stop compacts for it.
+        atexit.register(self._compact_at_exit)
         thread = threading.Thread(
             target=self._compaction_loop,
             name="shared-ledger-compactor",
@@ -5129,7 +5144,7 @@ class SharedGeminiBroker:
                 self._publish_integrity_halt(error)
                 return
 
-    def compact(self) -> bool:
+    def compact(self, *, wait: bool = False) -> bool:
         """Rewrite the snapshot and the status file, and prove the whole ledger.
 
         Nothing here is on the path of a paid call. The compactor never takes
@@ -5137,18 +5152,30 @@ class SharedGeminiBroker:
         the journal, which are both safe to read while another process appends,
         and it writes the snapshot with an atomic rename. It also runs the full
         row-by-row proof, which the hot path no longer runs on every read.
+
+        ``wait`` is for a start and for a reviewed operation, which are not
+        hot paths and must not skip the snapshot because another compactor
+        held the lock at that instant: a reviewed operation binds the file.
         """
-        with ledger_store.held_compaction_lock(self.ledger_file) as held:
+        with ledger_store.held_compaction_lock(self.ledger_file, wait=wait) as held:
             if not held:
                 return False
-            state, seq, _offset = ledger_store.materialize(self.ledger_file)
+            state, seq, offset = ledger_store.materialize(self.ledger_file)
             if seq <= self._compacted_seq:
                 return False
             self._prove_ledger(state)
-            ledger_store.write_snapshot(self.ledger_file, state, seq)
+            ledger_store.write_snapshot(
+                self.ledger_file, state, seq, journal_offset=offset
+            )
         self._compacted_seq = seq
         self._publish_status(state)
         return True
+
+    def _compact_at_exit(self) -> None:
+        try:
+            self.stop_compactor()
+        except Exception:  # pragma: no cover - the process is leaving
+            pass
 
     def stop_compactor(self) -> None:
         """Stop the background compactor after one last compaction."""
@@ -5159,7 +5186,7 @@ class SharedGeminiBroker:
             self._compaction_thread = None
         with self._ledger_lock():
             pass
-        self.compact()
+        self.compact(wait=True)
 
     def _publish_status(self, ledger: dict[str, Any]) -> None:
         atomic_json(self._status_file, self._status_payload(ledger))
@@ -5306,12 +5333,14 @@ class SharedGeminiBroker:
         # One operation at a time, so the snapshot costs what it always cost
         # and stays exact for every reader of the plain file.
         self._store.flush()
-        with ledger_store.held_compaction_lock(self.ledger_file) as held:
-            if held:
-                ledger_store.write_snapshot(
-                    self.ledger_file, ledger, self._store.sequence
-                )
-                self._compacted_seq = self._store.sequence
+        with ledger_store.held_compaction_lock(self.ledger_file, wait=True):
+            ledger_store.write_snapshot(
+                self.ledger_file,
+                ledger,
+                self._store.sequence,
+                journal_offset=self._store.offset,
+            )
+            self._compacted_seq = self._store.sequence
         self._publish_status(ledger)
 
     def doctor(self) -> dict[str, Any]:
