@@ -1130,15 +1130,20 @@ def test_finding_prompt_requires_one_exact_source_span(
         "paper_cost_cap_reached": 0,
         "accepted_qa": 1,
     }
-    assert progress["recent_papers"] == [
-        {
-            "paper_id": result["paper_results"][0]["source_id"],
-            "title": "Synthetic public Arctic extraction fixture",
-            "current_stage": "completed",
-            "final_state": "accepted",
-            "final_reason": "machine_accepted_unverified",
-        }
-    ]
+    recent = progress["recent_papers"]
+    assert len(recent) == 1
+    # The row also carries when the paper reached this state, which the
+    # pipeline trace reads as the paper's completion time.
+    assert recent[0]["state_changed_at_utc"]
+    assert {
+        key: value for key, value in recent[0].items() if key != "state_changed_at_utc"
+    } == {
+        "paper_id": result["paper_results"][0]["source_id"],
+        "title": "Synthetic public Arctic extraction fixture",
+        "current_stage": "completed",
+        "final_state": "accepted",
+        "final_reason": "machine_accepted_unverified",
+    }
 
 
 def test_finding_span_id_resolves_to_exact_source_evidence(tmp_path: Path) -> None:
