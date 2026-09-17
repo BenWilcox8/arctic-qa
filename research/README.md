@@ -97,6 +97,7 @@ The benchmark measures how often a model abstains when no listed option is corre
 | `arctic-abstention-subscription-providers-r1/` | The Claude Code and Codex subscription providers, and their isolation flags. |
 | `arctic-abstention-streaming-eval-r1/` | The concurrent 8-model plan, the streaming evaluator, and the omitted token-count incident in section 7. |
 | `arctic-eval-503-release-r1/` | An HTTP 503 with no usage, and the reviewed release of that ambiguous charge. |
+| `arctic-jev-prescreen-r1/` | The TypeSafe Jev prescreen: the calibration of the ranking against this run own outcomes, the cost of scanning the frozen corpus, the unpublished token limit the paid calls uncovered, and the first production measurement of the reordered pipeline. |
 
 ## Cost guard
 
