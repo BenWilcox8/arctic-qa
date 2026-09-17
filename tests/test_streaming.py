@@ -2338,7 +2338,14 @@ def test_live_stream_cli_runs_inline_eligibility_and_qa(
     assert exit_code == 0
     result = json.loads(capsys.readouterr().out)
     assert result["counts"]["accepted_base_questions"] == 1
-    assert result["concurrency"] == {"paper_workers": 1, "option_workers": 1}
+    assert result["concurrency"] == {
+        "paper_workers": 1,
+        "option_workers": 1,
+        # No Jev ranking was given, so the pick-up order is the frozen order
+        # and the picker never read a ranking file.
+        "jev_ranking_file": None,
+        "jev_ranking_reloads": 0,
+    }
     assert broker.status()["generation_submissions"] == 12
     assert transport.methods.count("generateContent") == 12
 
