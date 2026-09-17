@@ -197,7 +197,30 @@ The two truncated items were re-opened on the live journal by `reopen-vendor-pau
 It appends one corrected copy of each affected row with `complete` false and a `correction` block naming the reason; it never rewrites a line, and `latest_item_rows` reads the last row of each item, so the correction takes effect, the original stays as the record and no total moves.
 The unit was restarted at 00:39:16Z with the Claude arm back, and it took `aqa-e9b83b35d9a33a604ec0` up at 00:39:17Z to run its 18 missing trials.
 
-## 10. The state at the end of this task
+## 10. An item could not be finished after a cutover
+
+The repair of section 9 had a second half, and the 00:39:20Z restart found it.
+
+The evaluator writes one plan manifest per item, and that manifest was immutable field by field.
+The two truncated items had theirs written while the Claude Code arm was paused, so it bound two vendors and 30 trials.
+The moment the arm came back, a three-vendor pass produced a different manifest and the run stopped with "the run directory holds a different plan manifest".
+So the arm could never come back to those items, and re-opening them stopped the whole unit.
+
+The identity of an item still cannot move: the plan, the run id, the evaluation set, the arms, the repeats and the gate directory are compared field by field.
+The vendor set and the code commit are not identity, and they grow.
+
+- `vendors` takes the union of the passes. A vendor in two passes must name the same models, because a changed model list is a changed plan.
+- `trials_per_item` is recomputed from that union.
+- `code_commits` appends the commit of each pass, and `code_commit` keeps the commit that opened the item.
+
+Nothing recorded is altered.
+Every response row now names the commit that ran that one call.
+The first vendor run manifest of an item stays byte for byte as it was written, and a later pass on another commit writes `run-manifest-<commit>.json` beside it, which names by hash the manifest it continues.
+
+This is also what a cutover needs: an item can now be finished by a later snapshot, in the same work directory and under the same run id.
+The rule that a new run id prefix needs a new work directory does not change, because the run id is identity.
+
+## 11. The state at the end of this task
 
 The evaluator runs as `arctic-abstention-stream-r3` from the snapshot `runtime/app-a65348d-arctic-eval-authorization-r8` of the activation directory `arctic-eval-authorization-r8`, on work directory `streaming-r11` and run id prefix `abstention-stream-r11`, with all three vendors and the Fable arm active.
 
