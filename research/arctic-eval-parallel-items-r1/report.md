@@ -1,7 +1,7 @@
 # Several questions at once, and the captain's quota floors
 
 Task `arctic-eval-parallel-items-r1`, 2026-09-17, branch `fm/arctic-eval-parallel-items-r1`.
-Commits: `82612f5` (the wave and the quota floors), `60f216c` (one count per question in the guard) and `8901214` (four waves a poll cycle).
+Commits: `82612f5` (the wave and the quota floors), `60f216c` (one count per question in the guard), `8901214` (four waves a poll cycle) and `c6f1767` (a busy ledger lock belongs to one question).
 
 ## The question
 
@@ -30,12 +30,17 @@ Nothing of one question moves: its own evaluation set, its own derived gates, it
 The per-vendor slots do not move either, because a slot belongs to the vendor and not to the question.
 `docs/ABSTENTION_EVALUATION.md`, "Several questions at once", holds the design and its four rules.
 
-Two records were corrected on the way.
+Three records were corrected on the way.
 
 A revisit of a question no longer pauses its vendor on an old recorded stop.
 Nothing retries a stop, so the vendor summary field `stopped_on` names it for ever.
 The evaluator reads the new `stopped_this_pass` instead.
 A revisit is how a paused arm finishes the questions it owes, so the old reading would have taken the arm down again at the first revisit.
+
+A busy exclusive operation lock of the shared ledger no longer pauses a whole arm.
+That refusal reserves nothing, submits nothing and charges nothing, and the producer records the same one against one paper and goes on.
+The evaluator read it as a vendor stop, and it took the Gemini arm down at 09:58 UTC until the unit was restarted.
+A wave meets that lock far more often than one question did: four Gemini threads queue on it, and every paid call holds it three times.
 
 The cost guard counted every journal row, and the evaluator appends one row per pass.
 At 09:21 UTC the guard reported 128 questions evaluated where 78 questions had a row.
@@ -62,9 +67,10 @@ Each snapshot has its own successor authorization, and each one binds the same f
 
 | Snapshot | Started | What moved |
 | --- | --- | --- |
-| `82612f5` | 09:20 UTC | the wave of 8 questions and the quota floors |
+| `82612f5` | 09:20 UTC, again 09:44 UTC | the wave of 8 questions and the quota floors |
 | `60f216c` | 09:25 UTC (guard), 09:37 UTC (viewer) | one count per question |
-| `8901214` | the next start | four waves a poll cycle |
+| `8901214` | 09:59 UTC | four waves a poll cycle |
+| `c6f1767` | 10:03 UTC | a busy ledger lock belongs to one question |
 
 The 75-worker crew stopped the evaluator at 09:38 UTC for its policy v15 transition, because a live evaluator breaks the revalidation of a fresh transition.
 It came back at 09:44 UTC on the `82612f5` launcher, at the producer's first paid call under v15.
@@ -76,7 +82,7 @@ It came back at 09:44 UTC on the `82612f5` launcher, at the producer's first pai
 Module tests before the restart, and the adjacent files after it.
 The captain's standing order of 09:01 UTC forbids the whole suite while the producer is live, so the release suite was not run.
 
-- `tests/test_abstention_watch.py`: the wave of four questions, the questions in flight, a vendor pause inside a wave, a paused model that leaves every question of a wave open, the ceiling precheck against the questions in flight, and the bound on the worker count.
+- `tests/test_abstention_watch.py`: the wave of four questions, the questions in flight, a vendor pause inside a wave, a paused model that leaves every question of a wave open, the ceiling precheck against the questions in flight, the bound on the worker count, the four waves of one poll cycle, and the busy ledger lock that belongs to one question.
 - `tests/test_abstention_plan.py`: a second pass reports no stop of its own.
 - `tests/test_benchmark_guard.py`: the 5 percent Claude floors, the 20 percent Fable bound, the retired rule and its pause entries, an expired guard entry, and one count per question.
 - Also run: `tests/test_live_benchmark_viewer.py`, `tests/test_abstention_run.py`, `tests/test_abstention_render.py`, `tests/test_abstention_broker.py`, `tests/test_abstention_subscription.py`, `tests/test_cost_call_plan.py`.
