@@ -115,6 +115,78 @@ def test_a_warm_read_lists_the_receipts_directory_once(
     assert counter.count == 1, counter.count
 
 
+def test_the_evaluator_shape_lists_the_receipts_directory_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The streaming evaluator is the ledger's other live writer, and says so.
+
+    It holds no construction request, so ``concurrent_construction`` says
+    nothing about it, and the listing refresh hung on that flag alone. The
+    producer moves the receipts directory on every paid call of every worker,
+    so the evaluator paid a full listing, and a re-derivation of everything
+    read out of it, on every ledger read it made inside the exclusive
+    operation lock: 0.25 s a read against 0.026 s kept, measured on the live
+    chapter 3 ledger at 13,309 rows and 52,716 receipts on 2026-09-17. Three
+    sections of one paid Gemini call held that lock about 22 s in total, and
+    the arm ran at 13.7 questions an hour because of it.
+    """
+    values = fixture(tmp_path, transport=Transport())
+    broker = values["broker"]
+    # The evaluator's shape: concurrent requests, no concurrent construction.
+    broker.concurrent_requests = True
+    broker.deferred_snapshot = True
+    assert broker.concurrent_construction is False
+    execute(broker, paper="p1")
+    counter = _CountingScandir(broker.receipts_dir)
+    monkeypatch.setattr(os, "scandir", counter)
+    for _ in range(8):
+        broker._validated_ledger()
+    assert counter.count == 0, counter.count
+
+    # The producer writes a receipt of its own, which moves the directory.
+    # The evaluator sees it at the next listing, which the timer bounds; it
+    # does not re-list, and does not throw away its derived values, on a move
+    # it did not make.
+    (broker.receipts_dir / "peer.json").write_text("{}", encoding="utf-8")
+    broker._validated_ledger()
+    assert counter.count == 0, counter.count
+
+    # A reviewed operation runs alone and keeps the exact fingerprint.
+    broker.concurrent_requests = False
+    (broker.receipts_dir / "later.json").write_text("{}", encoding="utf-8")
+    broker._validated_ledger()
+    assert counter.count == 1, counter.count
+
+
+def test_the_evaluator_broker_says_it_shares_the_ledger() -> None:
+    """The evaluator's own factory sets the flag, not a caller of it.
+
+    ``abstention_cli._broker`` builds every broker the streaming evaluator and
+    the concurrent plan use, and both pass ``concurrent=True``.
+    """
+    source = (ROOT / "src" / "arctic_qa" / "abstention_cli.py").read_text(
+        encoding="utf-8"
+    )
+    assert "broker.concurrent_requests = bool(concurrent)" in source
+    assert source.count("evaluation_gate_file=gate, concurrent=True") == 2
+    assert "deferred_snapshot=True" not in source
+
+
+def test_a_concurrent_construction_broker_still_shares_the_ledger(
+    tmp_path: Path,
+) -> None:
+    """The producer's flag still implies the listing refresh.
+
+    A concurrent construction run is one of the ledger's live writers by
+    definition, so the two flags are not independent.
+    """
+    values = _concurrent(tmp_path)
+    broker = values["broker"]
+    assert broker.concurrent_requests is True
+    broker.concurrent_construction = False
+    assert broker.concurrent_requests is False
+
+
 def test_a_warm_read_replays_only_the_rows_that_moved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

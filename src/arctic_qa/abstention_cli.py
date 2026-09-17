@@ -660,7 +660,7 @@ def _watch(args: argparse.Namespace) -> dict[str, Any]:
         broker_factory=(
             (
                 lambda gate: _broker(
-                    args, evaluation_gate_file=gate, deferred_snapshot=True
+                    args, evaluation_gate_file=gate, concurrent=True
                 )
             )
             if needs_broker
@@ -880,7 +880,7 @@ def _run_plan(args: argparse.Namespace) -> dict[str, Any]:
         broker_factory=(
             (
                 lambda gate: _broker(
-                    args, evaluation_gate_file=gate, deferred_snapshot=True
+                    args, evaluation_gate_file=gate, concurrent=True
                 )
             )
             if needs_broker
@@ -956,15 +956,28 @@ def _broker(
     args: argparse.Namespace,
     *,
     evaluation_gate_file: Path,
-    deferred_snapshot: bool = False,
+    concurrent: bool = False,
 ) -> SharedGeminiBroker:
     """Build the evaluation broker.
 
-    ``deferred_snapshot`` is for the concurrent evaluator. The compacted
-    snapshot and the status file are then written by the compactor thread
-    instead of inside every commit, which would hold the shared ledger lock
-    for the length of a durable 8 MB write and starve the producer that waits
-    for it. Read "Parallel bookkeeping" in ``docs/SHARED_MODEL_BROKER.md``.
+    ``concurrent`` says that this broker shares the ledger with the live
+    producer, which the streaming evaluator and the concurrent plan both do.
+    It sets two things.
+
+    The compacted snapshot and the status file are then written by the
+    compactor thread instead of inside every commit, which would hold the
+    shared ledger lock for the length of a durable 8 MB write and starve the
+    producer that waits for it.
+
+    The receipts directory is re-listed at most every
+    ``RECEIPT_LISTING_REFRESH_SECONDS`` instead of on every move of its
+    fingerprint. The producer moves that fingerprint on every paid call of
+    every worker, so the exact fingerprint made a full ``scandir`` of 52,716
+    entries, and a re-derivation of everything read out of it, part of every
+    ledger read this broker made inside the exclusive operation lock.
+
+    Read "Parallel bookkeeping" and "The immutable-event proof, and what one
+    read of it costs" in ``docs/SHARED_MODEL_BROKER.md``.
     """
     _require(args, "shared_ledger_file", "model_receipts_dir", "credential_file")
     broker = SharedGeminiBroker(
@@ -989,7 +1002,8 @@ def _broker(
             else None
         ),
     )
-    broker.deferred_snapshot = bool(deferred_snapshot)
+    broker.deferred_snapshot = bool(concurrent)
+    broker.concurrent_requests = bool(concurrent)
     return broker
 
 

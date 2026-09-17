@@ -1755,6 +1755,19 @@ class SharedGeminiBroker:
         # itself, because its own snapshot write would be 660 ms held under
         # the ledger lock that the producer waits for.
         self.deferred_snapshot = bool(concurrent_construction)
+        # Whether another live writer shares this ledger with this broker. The
+        # receipts directory then moves under it on every paid call of that
+        # writer, so the exact directory fingerprint makes a full ``scandir``
+        # part of every ledger read and throws away everything derived from
+        # the listing with it. Such a broker re-lists at most every
+        # ``RECEIPT_LISTING_REFRESH_SECONDS`` instead. A reviewed operation,
+        # which runs alone, keeps the exact fingerprint and sees a receipt the
+        # moment it lands. The streaming evaluator sets this itself: it is the
+        # second concurrent writer of the chapter 3 ledger, and without it one
+        # of its ledger reads cost 0.25 s of pure listing work against 0.026 s
+        # kept, measured on the live ledger at 13,309 rows and 52,716 receipts
+        # on 2026-09-17.
+        self._concurrent_requests = False
         self._pacing_state = threading.local()
         # The wait and the hold of every exclusive section, by lock handle, and
         # the whole-call lock of the sequential path by thread. The second one
@@ -3252,6 +3265,23 @@ class SharedGeminiBroker:
         if self._status_observer is not None:
             self._status_observer(self._status_file)
 
+    @property
+    def concurrent_requests(self) -> bool:
+        """Whether another live writer shares this ledger with this broker.
+
+        A concurrent construction run is one by definition. The streaming
+        evaluator is the other one, and it sets this itself: it holds no
+        construction request, so ``concurrent_construction`` says nothing
+        about it.
+        """
+        return self._concurrent_requests or bool(
+            getattr(self, "concurrent_construction", False)
+        )
+
+    @concurrent_requests.setter
+    def concurrent_requests(self, value: bool) -> None:
+        self._concurrent_requests = bool(value)
+
     def _receipt_names(self) -> list[str]:
         """List the receipts directory once, and keep the listing.
 
@@ -3265,18 +3295,26 @@ class SharedGeminiBroker:
         Under paper concurrency the directory moves on every paid call of
         every worker, so the fingerprint alone made the listing a full
         ``scandir`` of 32,251 entries on nearly every ledger read: 56 ms of
-        the 371 ms that one warm proof cost on 2026-09-17. A concurrent
-        broker therefore re-lists at most every
-        ``RECEIPT_LISTING_REFRESH_SECONDS``. The staleness is bounded and is
-        far tighter than the full immutable-event pass, which runs every
-        ``IMMUTABLE_EVENT_REVALIDATION_SECONDS`` and re-lists first. A
+        the 371 ms that one warm proof cost on 2026-09-17. A broker that
+        shares the ledger with another live writer therefore re-lists at most
+        every ``RECEIPT_LISTING_REFRESH_SECONDS``. The staleness is bounded
+        and is far tighter than the full immutable-event pass, which runs
+        every ``IMMUTABLE_EVENT_REVALIDATION_SECONDS`` and re-lists first. A
         sequential broker, which is every reviewed operation, keeps the exact
         fingerprint and sees a receipt the moment it lands.
+
+        The streaming evaluator is such a writer and did not say so, so every
+        one of its ledger reads paid the full listing and threw away every
+        value derived from it. That cost 0.25 s a read against 0.026 s kept,
+        measured on the live chapter 3 ledger on 2026-09-17, and a paid call
+        reads the ledger several times inside the exclusive operation lock.
+        ``concurrent_requests`` is the flag, and ``tests/test_ledger_proof_cost.py``
+        is the guard.
         """
         listing = getattr(self, "_receipt_listing", None)
         refresh = (
             RECEIPT_LISTING_REFRESH_SECONDS
-            if getattr(self, "concurrent_construction", False)
+            if getattr(self, "concurrent_requests", False)
             else 0.0
         )
         if listing is not None and refresh and time.monotonic() - listing[2] < refresh:
