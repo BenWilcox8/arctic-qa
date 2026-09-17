@@ -251,8 +251,14 @@ papers of the frozen order, which are cheap because they were never screened.
 
 ## 9. Tests
 
-The whole release suite at commit `72c395a`: 1433 tests, none failed, `ruff check` and `ruff format --check` clean.
-The log is `suite-72c395a.log` in the activation directory.
+The whole release suite at the merged head `b9d1350`: 1473 tests, none failed, `ruff check` and `ruff format --check` clean.
+The log is `suite-b9d1350.log` in the activation directory.
+
+The producer ran on commit `6fa9163`, whose `src/`, `tests/`, `config/` and
+`schemas/` are the same as `72c395a`, where the suite was also green with 1433
+tests. A run of the suite before the merge of `main` at 00:5x UTC failed five
+abstention pause tests; `774da61` on `main`, which holds a paused model against
+the real clock, is their fix, and they pass at `b9d1350`.
 
 
 `tests/test_paper_completion.py`:
