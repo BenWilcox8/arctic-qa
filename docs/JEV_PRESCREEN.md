@@ -196,10 +196,13 @@ That is measurement of the ranking, never construction of it.
 
 ## 5. The state: size, chunking and truncation
 
-TypeSafe publishes no state size limit.
-The largest document in any cookbook is 53,777 characters.
-So the budget is ours, and `--state-character-budget` carries it.
-The default is 120,000 characters, which is about 30,000 tokens.
+TypeSafe publishes no state size limit, and the calibration screen of 2026-09-17 measured one.
+The provider refuses an oversized request with HTTP 400 and the body `{"detail":{"error_type":"max_tokens_exceeded"}}`.
+It is not HTTP 422, which is what this module first expected.
+The largest accepted request of that screen carried 32,350 input tokens and every refusal lay above it, so `PROVIDER_TOKEN_LIMIT` is 32,768.
+
+The budget is therefore in tokens, not characters, and `--state-token-budget` carries it.
+The default is 30,000 tokens, which leaves room for the question set on top of the state.
 
 Measured over the 4,420 frozen papers:
 
@@ -219,6 +222,10 @@ So the default budget carries 3,799 of the 4,420 papers whole, which is 86%.
 1. If the article fits the budget, send it whole. The rule is recorded as `whole`.
 2. If it does not fit, cut the trailing reference list, because it holds no finding of this study. The rule is recorded as `references_trimmed`.
 3. If the body alone is still over the budget, keep 60% of the budget from the head and 40% from the tail, and mark the gap with an elision line. The rule is recorded as `head_tail` or `references_trimmed_head_tail`.
+
+If the provider still refuses the state, the screen halves the token budget and tries again, at most `OVERLARGE_RETRIES` times.
+It stops as soon as a smaller budget returns the same text, because another call would buy nothing.
+Every refused attempt leaves its own ledger row, and a refusal costs nothing because the provider refuses before generation.
 
 The budget bounds the article characters, not the whole state.
 A head-and-tail state also carries the elision line, which is 67 characters, so it is that much longer than the budget.
@@ -454,7 +461,7 @@ The client retries 429 and 529 with exponential back-off, and obeys `retry-after
 
 - The real price. TypeSafe publishes no price page, and the cookbook constant is disclaimed.
 - Whether the price belongs to the model that answers. The cookbook attributes `0.042` to `jev-1.12`, while the default request model is `jev-latest`, which a newer concrete version serves. The module records the answered model on every row but never compares it to the model the price was measured on, so a reviewer has to do that by hand.
-- The state size limit. None is published. A 422 is the only signal, and section 5 says what the screen does with one.
+- The exact state size limit. None is published. The calibration screen measured refusals above 32,350 accepted input tokens, so 32,768 is the working figure rather than a documented one.
 - The rate limit. None is published.
 - The full model roster. `models.list()` needs a live key.
 - Whether a 429 carries a `Retry-After` header at all. The client reads one when it is there and falls back to exponential back-off when it is not.

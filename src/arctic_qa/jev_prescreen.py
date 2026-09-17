@@ -71,12 +71,28 @@ PRICE_USD_PER_MILLION_OUTPUT_TOKENS = Decimal("0.00")
 PRICE_SOURCE = "https://docs.typesafe.ai/cookbooks/parallel_questions.md"
 PRICE_STATUS = "unverified_cookbook_constant"
 
-# The provider documents no state size limit, so the budget is ours. 120,000
-# characters is about 30,000 tokens and carries 3,799 of the 4,420 frozen
-# papers whole. Every call records the rule that produced its state.
-DEFAULT_STATE_CHARACTER_BUDGET = 120_000
-CHARACTERS_PER_TOKEN = 4
+# The provider publishes no state size limit, and the calibration screen of
+# 2026-09-17 measured one: it refuses a request with HTTP 400 and the body
+# `max_tokens_exceeded`. The largest accepted request of that screen carried
+# 32,350 input tokens and the refusals lay above it, so the limit is taken as
+# 32,768 and the default budget keeps headroom under it.
+PROVIDER_TOKEN_LIMIT = 32_768
+DEFAULT_STATE_TOKEN_BUDGET = 30_000
+
+# Characters per token, measured over the 116 recorded calls of that screen
+# that carry a real usage record: 5.38 at best, 3.88 median, 1.51 at worst.
+# Every worst-ratio paper is a Cyrillic journal. A flat ratio of 4 was safe for
+# Latin text and wrong by 2.6 times for Cyrillic, which both under-projected
+# the cost and pushed a state over the provider limit.
+ASCII_CHARACTERS_PER_TOKEN = 4.0
+WIDE_CHARACTERS_PER_TOKEN = 1.5
 QUESTION_OVERHEAD_TOKENS = 700
+
+# How many times a refused request is retried at half the budget.
+OVERLARGE_RETRIES = 3
+
+# The provider names an oversized request in its error body with this marker.
+OVERLARGE_MARKER = "max_tokens_exceeded"
 
 DEFAULT_WORKERS = 4
 DEFAULT_TIMEOUT_SECONDS = 120.0
@@ -398,9 +414,39 @@ def read_api_key(key_file: Path | None = None) -> str:
 # The input manifest
 
 
-def estimated_tokens(characters: int) -> int:
-    """Return the token estimate this module bills and bounds against."""
-    return characters // CHARACTERS_PER_TOKEN
+def wide_characters(text: str) -> int:
+    """Return how many characters of the text are outside plain ASCII."""
+    return sum(1 for character in text if ord(character) > 127)
+
+
+def estimated_tokens(characters: int, wide: int = 0) -> int:
+    """Return the token estimate this module bills and bounds against.
+
+    A Cyrillic or other non-Latin character costs far more tokens than a Latin
+    one, so the two are counted apart. `wide` is how many of `characters` are
+    outside ASCII.
+    """
+    if wide < 0 or wide > characters:
+        raise JevPrescreenError("the wide character count is outside the text")
+    plain = characters - wide
+    return int(plain / ASCII_CHARACTERS_PER_TOKEN + wide / WIDE_CHARACTERS_PER_TOKEN)
+
+
+def estimate_text_tokens(text: str) -> int:
+    """Return the token estimate of one piece of text."""
+    return estimated_tokens(len(text), wide_characters(text))
+
+
+def characters_per_token(text: str) -> float:
+    """Return how many characters of this text fit in one token.
+
+    A budget in tokens becomes a budget in characters through this ratio, which
+    is measured from the text's own script mix rather than assumed.
+    """
+    if not text:
+        return ASCII_CHARACTERS_PER_TOKEN
+    tokens = estimate_text_tokens(text)
+    return len(text) / tokens if tokens else ASCII_CHARACTERS_PER_TOKEN
 
 
 def build_manifest(
@@ -491,6 +537,7 @@ def _manifest_row(candidate_key: str, frozen: dict[str, Any] | None) -> dict[str
         "extraction_path": None,
         "extraction_sha256": None,
         "source_characters": None,
+        "non_ascii_characters": None,
         "estimated_tokens": None,
         "frozen_manifest_position": None,
         "manifest_position": None,
@@ -510,20 +557,23 @@ def _manifest_row(candidate_key: str, frozen: dict[str, Any] | None) -> dict[str
         }
     )
     if receipt.get("access_state") == "full_text_ready" and path.is_file():
-        characters = _character_count(path)
+        characters, wide = _character_count(path)
         row.update(
             {
                 "has_full_text": True,
                 "extraction_path": str(path),
                 "source_characters": characters,
-                "estimated_tokens": estimated_tokens(characters),
+                "non_ascii_characters": wide,
+                "estimated_tokens": estimated_tokens(characters, wide),
             }
         )
     return row
 
 
-def _character_count(path: Path) -> int:
-    return len(path.read_text(encoding="utf-8", errors="replace"))
+def _character_count(path: Path) -> tuple[int, int]:
+    """Return the character count of an extraction, and its wide share."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return len(text), wide_characters(text)
 
 
 def read_manifest(manifest_file: Path) -> list[dict[str, Any]]:
@@ -560,9 +610,13 @@ _ELISION = "\n\n[... middle of the article omitted by the prescreen budget ...]\
 
 
 def select_state_text(
-    text: str, *, budget: int = DEFAULT_STATE_CHARACTER_BUDGET
+    text: str, *, token_budget: int = DEFAULT_STATE_TOKEN_BUDGET
 ) -> dict[str, Any]:
     """Return the state text for one paper, and how it was chosen.
+
+    The budget is in tokens, because the provider's limit is in tokens. It
+    becomes a character budget through this text's own script mix, so a
+    Cyrillic article is cut shorter than a Latin one of the same length.
 
     Whole text when it fits. Otherwise the reference list is cut first, because
     it carries no finding of this study. If the body alone is still over the
@@ -571,8 +625,9 @@ def select_state_text(
     the discussion and the conclusions, which is where a stated main finding
     lives.
     """
-    if budget < 1000:
-        raise JevPrescreenError("the state character budget must be at least 1000")
+    if token_budget < 250:
+        raise JevPrescreenError("the state token budget must be at least 250")
+    budget = max(1000, int(token_budget * characters_per_token(text)))
     source_characters = len(text)
     if source_characters <= budget:
         return _selection(text, "whole", [(0, source_characters)], source_characters)
@@ -600,11 +655,12 @@ def _selection(
     return {
         "state_text": state,
         "selection_rule": rule,
+        "character_budget": len(state),
         "source_characters": source_characters,
         "state_characters": len(state),
         "state_sha256": sha256_bytes(state.encode()),
         "spans": [[int(start), int(stop)] for start, stop in spans],
-        "estimated_tokens": estimated_tokens(len(state)),
+        "estimated_tokens": estimate_text_tokens(state),
     }
 
 
@@ -1013,9 +1069,12 @@ class JevClient:
                 after = _retry_after_seconds(error)
                 detail = _short_error_body(error)
                 last = JevPrescreenError(f"HTTP {status} from the provider: {detail}")
-                if status == 422:
-                    # The request itself is wrong, so a repeat of it is wrong
-                    # too. The caller decides whether a smaller state helps.
+                if OVERLARGE_MARKER in detail or status == 422:
+                    # The provider refuses an oversized state with HTTP 400 and
+                    # this marker, not with 422, which the calibration screen of
+                    # 2026-09-17 measured on 27 papers. A repeat of the same
+                    # request would be refused again, so the caller decides
+                    # whether a smaller state helps.
                     raise JevOverlargeRequestError(str(last)) from None
                 if status not in RETRY_STATUS or attempt == self.attempts:
                     raise last from None
@@ -1131,7 +1190,7 @@ def run_screen(
     client: JevClient,
     ceiling_usd: Decimal,
     model: str = DEFAULT_MODEL,
-    budget: int = DEFAULT_STATE_CHARACTER_BUDGET,
+    token_budget: int = DEFAULT_STATE_TOKEN_BUDGET,
     workers: int = DEFAULT_WORKERS,
     limit: int | None = None,
     only_keys: Iterable[str] | None = None,
@@ -1210,7 +1269,7 @@ def run_screen(
         text = Path(row["extraction_path"]).read_text(
             encoding="utf-8", errors="replace"
         )
-        selection = select_state_text(text, budget=budget)
+        selection = select_state_text(text, token_budget=token_budget)
         body = build_request(selection["state_text"], model=model)
         digest = request_sha256(body)
         projected = projected_cost_usd(selection["estimated_tokens"], 1)
@@ -1224,45 +1283,59 @@ def run_screen(
         with ledger.reservation_held(projected):
             try:
                 raw = client.invoke(body)
-            except JevOverlargeRequestError:
-                # The provider documents no state size limit, so this is the only
-                # way to learn one. One retry at a quarter of the budget, recorded
-                # as its own selection, and then the paper is given up.
-                smaller = max(1000, budget // 4)
-                if smaller >= selection["state_characters"]:
+            except JevOverlargeRequestError as refusal:
+                # The provider refuses an oversized state with HTTP 400 and
+                # `max_tokens_exceeded`. Its limit is not published, so the
+                # only way through is to halve the budget and try again. Every
+                # refused attempt leaves its own ledger row: the provider
+                # refuses before generation, so the row costs nothing.
+                attempt_budget = token_budget
+                shrunk = False
+                for _ in range(OVERLARGE_RETRIES):
                     ledger.record(
                         _failed_row(
                             candidate_key,
                             digest,
                             model,
                             started,
-                            "HTTP 422 on a state already at the floor",
+                            f"{refusal} (retried at a smaller budget)",
                         )
                     )
-                    with lock:
-                        counts["failed"] += 1
-                    return
-                # The refused attempt leaves its own row, so the ledger holds every
-                # request this screen made. A 422 is refused before generation, so
-                # the row costs nothing.
-                ledger.record(
-                    _failed_row(
-                        candidate_key,
-                        digest,
-                        model,
-                        started,
-                        "HTTP 422 on the full state, retried smaller",
-                    )
-                )
-                selection = select_state_text(text, budget=smaller)
-                selection["shrunk_after_422_from_budget"] = budget
-                body = build_request(selection["state_text"], model=model)
-                digest = request_sha256(body)
-                try:
-                    raw = client.invoke(body)
-                except JevPrescreenError as error:
+                    attempt_budget = max(250, attempt_budget // 2)
+                    smaller = select_state_text(text, token_budget=attempt_budget)
+                    if smaller["state_characters"] >= selection["state_characters"]:
+                        break
+                    selection = smaller
+                    selection["shrunk_from_token_budget"] = token_budget
+                    selection["shrunk_to_token_budget"] = attempt_budget
+                    body = build_request(selection["state_text"], model=model)
+                    digest = request_sha256(body)
+                    try:
+                        raw = client.invoke(body)
+                    except JevOverlargeRequestError as again:
+                        refusal = again
+                        continue
+                    except JevPrescreenError as error:
+                        ledger.record(
+                            _failed_row(
+                                candidate_key, digest, model, started, str(error)
+                            )
+                        )
+                        with lock:
+                            counts["failed"] += 1
+                            counts["shrunk_and_failed"] += 1
+                        return
+                    shrunk = True
+                    break
+                if not shrunk:
                     ledger.record(
-                        _failed_row(candidate_key, digest, model, started, str(error))
+                        _failed_row(
+                            candidate_key,
+                            digest,
+                            model,
+                            started,
+                            f"{refusal} (still refused after shrinking)",
+                        )
                     )
                     with lock:
                         counts["failed"] += 1
@@ -1350,7 +1423,7 @@ def run_screen(
         "ledger_dir": str(ledger.dir),
         "question_set_sha256": question_hash,
         "requested_model": model,
-        "state_character_budget": budget,
+        "state_token_budget": token_budget,
         "counts": counts,
         "spent_usd": str(ledger.spent_usd),
         "ceiling_usd": str(ledger.ceiling_usd),
@@ -1827,7 +1900,7 @@ def add_parser(commands: argparse._SubParsersAction) -> None:
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--ceiling-usd", default="5.00")
     parser.add_argument(
-        "--state-character-budget", type=int, default=DEFAULT_STATE_CHARACTER_BUDGET
+        "--state-token-budget", type=int, default=DEFAULT_STATE_TOKEN_BUDGET
     )
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
@@ -1888,12 +1961,11 @@ def handle(args: argparse.Namespace) -> Any:
         if args.limit is not None:
             rows = rows[: args.limit]
         tokens = sum(
-            min(row["estimated_tokens"], estimated_tokens(args.state_character_budget))
-            for row in rows
+            min(row["estimated_tokens"], args.state_token_budget) for row in rows
         )
         return {
             "papers": len(rows),
-            "state_character_budget": args.state_character_budget,
+            "state_token_budget": args.state_token_budget,
             "estimated_input_tokens": tokens,
             "question_overhead_tokens": QUESTION_OVERHEAD_TOKENS * len(rows),
             "projected_cost_usd": str(projected_cost_usd(tokens, len(rows))),
@@ -1918,7 +1990,7 @@ def handle(args: argparse.Namespace) -> Any:
             client=client,
             ceiling_usd=Decimal(str(args.ceiling_usd)),
             model=args.model,
-            budget=args.state_character_budget,
+            token_budget=args.state_token_budget,
             workers=args.workers,
             limit=args.limit,
             only_keys=only_keys,

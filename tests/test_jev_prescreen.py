@@ -6,6 +6,7 @@ response fixture, so nothing in this file can make a paid call.
 
 from __future__ import annotations
 
+import io
 import json
 from decimal import Decimal
 from pathlib import Path
@@ -260,7 +261,7 @@ def test_build_manifest_skips_a_frozen_row_whose_text_is_not_ready(tmp_path):
 
 def test_a_short_article_is_sent_whole():
     text = "Abstract. A finding of 3.4 m." * 10
-    selection = jev.select_state_text(text, budget=10_000)
+    selection = jev.select_state_text(text, token_budget=2_500)
     assert selection["selection_rule"] == "whole"
     assert selection["state_text"] == text
     assert selection["spans"] == [[0, len(text)]]
@@ -273,7 +274,7 @@ def test_the_reference_list_is_cut_before_the_body_is_touched():
     body = "Introduction and results.\n" * 500
     tail = "\nReferences\n" + ("Author, A. 2020. A paper.\n" * 100)
     text = body + tail
-    selection = jev.select_state_text(text, budget=len(body) + 50)
+    selection = jev.select_state_text(text, token_budget=(len(body) + 50) // 4)
     assert selection["selection_rule"] == "references_trimmed"
     assert "Author, A. 2020" not in selection["state_text"]
     assert selection["state_text"] == text[: selection["spans"][0][1]]
@@ -283,7 +284,7 @@ def test_the_reference_list_is_cut_before_the_body_is_touched():
 def test_a_reference_word_early_in_the_body_is_not_a_cut_point():
     # The word appears in the first half, so it is not the reference list.
     text = "References\n" + ("body sentence. " * 5000)
-    selection = jev.select_state_text(text, budget=len(text))
+    selection = jev.select_state_text(text, token_budget=len(text) // 4)
     assert selection["selection_rule"] == "whole"
 
 
@@ -292,7 +293,7 @@ def test_an_over_budget_body_keeps_its_head_and_its_tail():
     tail_marker = "CONCLUSIONS the closing claim."
     text = head_marker + ("middle. " * 20_000) + tail_marker
     budget = 4_000
-    selection = jev.select_state_text(text, budget=budget)
+    selection = jev.select_state_text(text, token_budget=budget // 4)
     assert selection["selection_rule"] == "head_tail"
     assert head_marker in selection["state_text"]
     assert tail_marker in selection["state_text"]
@@ -305,22 +306,22 @@ def test_an_over_budget_body_keeps_its_head_and_its_tail():
 
 def test_an_over_budget_article_cuts_the_references_and_then_the_middle():
     text = ("body. " * 20_000) + "\nReferences\n" + ("Ref entry.\n" * 2000)
-    selection = jev.select_state_text(text, budget=4_000)
+    selection = jev.select_state_text(text, token_budget=1_000)
     assert selection["selection_rule"] == "references_trimmed_head_tail"
     assert "Ref entry." not in selection["state_text"]
 
 
 def test_the_state_selection_is_reproducible():
     text = "an article. " * 30_000
-    first = jev.select_state_text(text, budget=5_000)
-    second = jev.select_state_text(text, budget=5_000)
+    first = jev.select_state_text(text, token_budget=1_250)
+    second = jev.select_state_text(text, token_budget=1_250)
     assert first["state_sha256"] == second["state_sha256"]
     assert first["state_text"] == second["state_text"]
 
 
 def test_a_tiny_budget_is_refused():
     with pytest.raises(jev.JevPrescreenError):
-        jev.select_state_text("text", budget=10)
+        jev.select_state_text("text", token_budget=10)
 
 
 # --------------------------------------------------------------------------
@@ -1089,7 +1090,7 @@ class ShrinkingClient:
         return _response()
 
 
-def test_a_422_is_answered_once_with_a_smaller_state(tmp_path):
+def test_an_oversized_state_is_halved_until_the_provider_accepts_it(tmp_path):
     path = _extraction(tmp_path, "big", "sentence. " * 4000)
     freeze = _write_jsonl(tmp_path / "freeze.jsonl", [_frozen_row("10.1/big", 1, path)])
     dispositions = _write_jsonl(
@@ -1110,25 +1111,27 @@ def test_a_422_is_answered_once_with_a_smaller_state(tmp_path):
         output_dir=tmp_path / "run",
         client=client,
         ceiling_usd=Decimal("1.00"),
-        budget=40_000,
+        token_budget=10_000,
         workers=1,
     )
     assert receipt["counts"]["completed"] == 1
     assert receipt["counts"]["shrunk_after_422"] == 1
-    # Two calls: the full state, then a quarter of the budget.
-    assert len(client.sizes) == 2
-    assert client.sizes[0] > client.sizes[1]
-    assert client.sizes[1] <= 10_000 + len(jev._ELISION)
+    # The first call carries the whole article and is refused. Each retry
+    # halves the token budget, so every state is smaller than the last, and
+    # the one that lands is inside the provider limit.
+    assert len(client.sizes) >= 2
+    assert client.sizes == sorted(client.sizes, reverse=True)
+    assert client.sizes[-1] <= client.limit
     record = json.loads(
         next((tmp_path / "run" / "responses").glob("*.json")).read_text()
     )
-    assert record["selection"]["shrunk_after_422_from_budget"] == 40_000
+    assert record["selection"]["shrunk_from_token_budget"] == 10_000
+    assert record["selection"]["shrunk_to_token_budget"] < 10_000
 
 
-def test_a_422_on_a_state_already_under_the_shrink_target_is_not_retried(tmp_path):
-    # These articles are far smaller than a quarter of the budget, so a
-    # smaller state is the same state and a second paid call would buy
-    # nothing.
+def test_a_refusal_of_a_state_that_cannot_shrink_stops_retrying(tmp_path):
+    # These articles already fit the budget whole, so halving the budget
+    # returns the same state and another paid call would buy nothing.
     manifest = _small_corpus(tmp_path, count=2)
     client = ShrinkingClient(limit=10)
     receipt = jev.run_screen(
@@ -1136,12 +1139,14 @@ def test_a_422_on_a_state_already_under_the_shrink_target_is_not_retried(tmp_pat
         output_dir=tmp_path / "run",
         client=client,
         ceiling_usd=Decimal("1.00"),
-        budget=40_000,
+        token_budget=10_000,
         workers=1,
     )
     assert receipt["counts"]["completed"] == 0
     assert receipt["counts"]["failed"] == 2
     assert receipt["counts"]["shrunk_after_422"] == 0
+    # One paid call per paper. The retry loop stops as soon as a smaller
+    # budget yields the same text, so it never pays twice for one state.
     assert len(client.sizes) == 2
     rows = [
         json.loads(line)
@@ -1149,7 +1154,7 @@ def test_a_422_on_a_state_already_under_the_shrink_target_is_not_retried(tmp_pat
         .read_text()
         .splitlines()
     ]
-    assert all("already at the floor" in row["error"] for row in rows)
+    assert any("still refused after shrinking" in row["error"] for row in rows)
 
 
 def test_a_422_that_survives_the_shrink_fails_the_paper_alone(tmp_path):
@@ -1183,7 +1188,7 @@ def test_a_422_that_survives_the_shrink_fails_the_paper_alone(tmp_path):
         output_dir=tmp_path / "run",
         client=client,
         ceiling_usd=Decimal("1.00"),
-        budget=40_000,
+        token_budget=10_000,
         workers=1,
     )
     assert receipt["counts"]["completed"] == 1
@@ -1390,7 +1395,7 @@ def test_the_refused_attempt_and_its_retry_both_reach_the_ledger(tmp_path):
         output_dir=tmp_path / "run",
         client=ShrinkingClient(limit=12_000),
         ceiling_usd=Decimal("1.00"),
-        budget=40_000,
+        token_budget=10_000,
         workers=1,
     )
     rows = [
@@ -1399,8 +1404,9 @@ def test_the_refused_attempt_and_its_retry_both_reach_the_ledger(tmp_path):
         .read_text()
         .splitlines()
     ]
-    assert [row["state"] for row in rows] == ["failed", "completed"]
-    assert "retried smaller" in rows[0]["error"]
+    assert rows[-1]["state"] == "completed"
+    assert all(row["state"] == "failed" for row in rows[:-1])
+    assert "retried at a smaller budget" in rows[0]["error"]
     # The refusal happens before generation, so it costs nothing and the two
     # rows carry different request hashes.
     assert "cost_usd" not in rows[0]
@@ -1727,3 +1733,121 @@ def test_a_manifest_that_repeats_a_candidate_is_refused(tmp_path):
     manifest = _write_jsonl(tmp_path / "manifest.jsonl", [row, dict(row)])
     with pytest.raises(jev.JevPrescreenError, match="repeats a candidate"):
         jev.read_manifest(manifest)
+
+
+# --------------------------------------------------------------------------
+# Token sizing, as the live calibration screen measured it
+
+
+def test_a_cyrillic_article_is_estimated_far_above_its_character_quarter():
+    latin = "the sea ice thickness was 1.8 m in March. " * 100
+    cyrillic = "толщина морского льда составляла 1,8 м в марте. " * 100
+    # The old flat rule was len/4 for both, which the live screen showed is
+    # wrong by about 2.6 times for Cyrillic.
+    assert jev.estimate_text_tokens(latin) == len(latin) // 4
+    assert jev.estimate_text_tokens(cyrillic) > len(cyrillic) // 4 * 2
+    assert jev.characters_per_token(latin) > jev.characters_per_token(cyrillic)
+
+
+def test_the_token_estimate_counts_the_two_scripts_apart():
+    assert jev.estimated_tokens(1000, 0) == 250
+    assert jev.estimated_tokens(0, 0) == 0
+    # 1,000 wide characters at 1.5 characters per token.
+    assert jev.estimated_tokens(1000, 1000) == 666
+    assert jev.wide_characters("abcя") == 1
+    with pytest.raises(jev.JevPrescreenError):
+        jev.estimated_tokens(10, 20)
+
+
+def test_a_cyrillic_article_is_cut_shorter_than_a_latin_one(tmp_path):
+    latin = "sea ice thickness measured 1.8 m at the station. " * 3000
+    cyrillic = "толщина морского льда измерена 1,8 м на станции. " * 3000
+    budget = 2_000
+    latin_state = jev.select_state_text(latin, token_budget=budget)
+    cyrillic_state = jev.select_state_text(cyrillic, token_budget=budget)
+    # Both land under the budget in TOKENS, which is what the provider bounds,
+    # and the Cyrillic one is far shorter in characters to get there.
+    assert latin_state["estimated_tokens"] <= budget + 50
+    assert cyrillic_state["estimated_tokens"] <= budget + 50
+    assert cyrillic_state["state_characters"] < latin_state["state_characters"]
+
+
+def test_the_default_budget_stays_under_the_measured_provider_limit():
+    assert jev.DEFAULT_STATE_TOKEN_BUDGET < jev.PROVIDER_TOKEN_LIMIT
+    # The question set is billed on top of the state.
+    assert (
+        jev.DEFAULT_STATE_TOKEN_BUDGET + jev.QUESTION_OVERHEAD_TOKENS
+        < jev.PROVIDER_TOKEN_LIMIT
+    )
+
+
+def test_the_provider_marker_for_an_oversized_state_is_recognized():
+    import urllib.error
+
+    calls: list[int] = []
+
+    def fake_urlopen(request, timeout):  # noqa: ARG001
+        calls.append(1)
+        # The shape the live provider returned on 2026-09-17: HTTP 400, not
+        # 422, with the marker inside the body.
+        raise urllib.error.HTTPError(
+            jev.ENDPOINT,
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(b'{"detail":{"error_type":"max_tokens_exceeded"}}'),
+        )
+
+    import arctic_qa.jev_prescreen as module
+
+    original = module.urllib.request.urlopen
+    module.urllib.request.urlopen = fake_urlopen
+    try:
+        with pytest.raises(jev.JevOverlargeRequestError):
+            jev.JevClient("key", sleep=lambda _s: None).invoke(
+                jev.build_request("text")
+            )
+    finally:
+        module.urllib.request.urlopen = original
+    # An oversized request is never retried unchanged.
+    assert len(calls) == 1
+
+
+def test_a_plain_400_without_the_marker_is_not_treated_as_oversized():
+    import urllib.error
+
+    def fake_urlopen(request, timeout):  # noqa: ARG001
+        raise urllib.error.HTTPError(
+            jev.ENDPOINT, 400, "Bad Request", {}, io.BytesIO(b'{"detail":"nope"}')
+        )
+
+    import arctic_qa.jev_prescreen as module
+
+    original = module.urllib.request.urlopen
+    module.urllib.request.urlopen = fake_urlopen
+    try:
+        with pytest.raises(jev.JevPrescreenError) as caught:
+            jev.JevClient("key", sleep=lambda _s: None).invoke(
+                jev.build_request("text")
+            )
+        assert not isinstance(caught.value, jev.JevOverlargeRequestError)
+    finally:
+        module.urllib.request.urlopen = original
+
+
+def test_the_manifest_records_the_wide_character_share(tmp_path):
+    path = _extraction(tmp_path, "ru", "толщина льда 1,8 м. " * 200)
+    freeze = _write_jsonl(tmp_path / "freeze.jsonl", [_frozen_row("10.1/ru", 1, path)])
+    dispositions = _write_jsonl(
+        tmp_path / "d.ndjson", [_disposition("10.1/ru", "retained_article_type")]
+    )
+    descriptor = jev.build_manifest(
+        dispositions_file=dispositions,
+        freeze_manifest_file=freeze,
+        output_dir=tmp_path / "out",
+    )
+    row = jev.read_manifest(Path(descriptor["manifest_file"]))[0]
+    assert row["non_ascii_characters"] > 0
+    assert row["non_ascii_characters"] < row["source_characters"]
+    # The estimate is well above the old character quarter.
+    assert row["estimated_tokens"] > row["source_characters"] // 4
