@@ -112,3 +112,43 @@ The producer start and the evaluator therefore cannot overlap until the producer
 
 The order that resolves it: supersede the halt, settle the orphaned evaluation request, start the producer alone, let it make one construction call, then start the evaluator.
 That sequence belongs to the owner of the construction phase.
+
+## 7. What the ledger repair actually took
+
+Two integrity halts and two repairs, in this order.
+
+| Moment | Halt reason | Repair |
+|---|---|---|
+| 23:03:56Z | `the configuration transition ledger hash changed` | `settle-phaseless-refusal` of request `52c5da75`, applied 23:18:03Z |
+| 23:39:44Z | `a configuration transition requires a settled ledger` | the broker's own orphan recovery of request `bd118f1f`, applied 23:50Z |
+
+The second halt is the start-order race of section 6.
+The evaluator's Gemini call `bd118f1f` was in flight when a broker started on the new policy pair, and that start needs `inflight` to be 0.
+The call itself finished: its immutable final receipt records `completed`, `live_call_made` true and an actual cost of USD 0.012987.
+Only the ledger row stayed `submitted`, because the settlement read the ledger after the halt record was written and every read refuses then.
+
+The repair is the broker's own `_recover_orphans`, which settles that row from the immutable receipt and makes no paid call.
+The script is `recover-orphan-bd118f1f.py` of the activation directory `arctic-eval-authorization-r8`.
+It supersedes the halt record first, accepts only the halt of this incident, and prints the settled row and the ledger totals.
+Neither repair decided a number: the receipt held the money in one case and the row held no money in the other.
+
+A broker start on a policy pair that the ledger holds no request under runs the whole transition validation.
+A broker start on a pair the ledger already holds requests under does not.
+That is why both repairs were made with the construction files of the older pair, and why the evaluator, which binds those files, could start while the producer could not.
+
+## 8. The timeline
+
+| UTC | Event |
+|---|---|
+| 19:31:44 | The evaluator meets the item bound of 12, logs `item_bound_reached`, exits 0. Nothing says so. |
+| 22:57:58 | A restart exits the same way in one poll. |
+| 22:58:25 | The paper-concurrency transition `2d663a9f` is applied. |
+| 23:03:25 | The r8 authorization, 2000 items and USD 200, restarts the r10 unit. It evaluates again. |
+| 23:03:53 | A phase-less refusal, request `52c5da75`. |
+| 23:03:56 | The first integrity halt. Producer and evaluator both stop. |
+| 23:18:03 | The reviewed phase settlement. `integrity_valid` is true again. |
+| 23:22:43 | The cutover to snapshot `a65348d`, prefix `abstention-stream-r11`, work directory `streaming-r11`. |
+| 23:39:44 | The second integrity halt: a producer start meets the evaluator's call in flight. |
+| 23:50 | The orphan recovery. `inflight` 0, `integrity_valid` true, the ledger clear for the producer. |
+| 23:53 | The producer makes its first paid construction call, which closes the transition validation for good. |
+| 00:07 (17th) | The evaluator restarts on `streaming-r11` with all three vendors. |
