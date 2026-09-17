@@ -312,3 +312,74 @@ def test_a_receipt_that_changes_is_still_caught(tmp_path: Path) -> None:
     broker._ledger_evidence_proved = None
     with pytest.raises(ValueError, match="integrity validation"):
         broker._validated_ledger()
+
+
+def test_the_count_registration_takes_the_shared_ledger_lock_once(
+    tmp_path: Path,
+) -> None:
+    """Three steps register a counted request, under one held lock.
+
+    The shared ledger lock is shared with the benchmark evaluator, whose hold
+    was a median of 2.35 seconds on 2026-09-17, so each acquisition cost the
+    producer that wait. Three of them were about seven seconds of every paid
+    call.
+    """
+    values = _concurrent(tmp_path)
+    broker = values["broker"]
+    opened: list[str] = []
+    original = type(broker._lock_file).open
+
+    def counted(self, *args, **kwargs):
+        if self == broker._lock_file:
+            opened.append("ledger")
+        return original(self, *args, **kwargs)
+
+    import arctic_qa.model_broker as module
+
+    monkey = module.Path.open
+    module.Path.open = counted  # type: ignore[method-assign]
+    try:
+        with broker._ledger_session():
+            broker._open_count_retry(
+                "a" * 64, {"phase": "live_test"}, phase="live_test"
+            )
+            broker._resume_not_submitted("a" * 64, {})
+    finally:
+        module.Path.open = monkey  # type: ignore[method-assign]
+
+    assert opened.count("ledger") == 1
+
+
+def test_a_session_reads_the_ledger_once(tmp_path: Path) -> None:
+    values = _concurrent(tmp_path)
+    broker = values["broker"]
+    reads: list[int] = [0]
+    original = broker._validated_ledger
+
+    def counted():
+        reads[0] += 1
+        return original()
+
+    broker._validated_ledger = counted  # type: ignore[method-assign]
+    with broker._ledger_session():
+        with broker._locked_ledger() as first:
+            pass
+        with broker._locked_ledger() as second:
+            pass
+
+    assert reads[0] == 1
+    assert first is second
+
+
+def test_a_session_is_reentrant_and_does_not_deadlock(tmp_path: Path) -> None:
+    values = _concurrent(tmp_path)
+    broker = values["broker"]
+
+    with broker._ledger_session():
+        with broker._ledger_session():
+            with broker._locked_ledger() as ledger:
+                assert "requests" in ledger
+
+    # The lock is free again outside the session.
+    with broker._locked_ledger() as ledger:
+        assert "requests" in ledger

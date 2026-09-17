@@ -1501,6 +1501,9 @@ class SharedGeminiBroker:
         self._immutable_events_context: tuple[Any, ...] | None = None
         self._immutable_events_proved_at: float | None = None
         self._ledger_evidence_proved: tuple[Any, ...] | None = None
+        # One held shared ledger lock and one read of the ledger, per thread,
+        # for the length of a session.
+        self._ledger_session_state = threading.local()
         evaluation_files = (
             evaluation_policy_file,
             evaluation_price_config_file,
@@ -2063,6 +2066,59 @@ class SharedGeminiBroker:
                     "held_s": f"{held:.2f}",
                 },
             )
+
+    @contextlib.contextmanager
+    def _ledger_session(self) -> Iterator[None]:
+        """Hold the shared ledger lock across several ledger operations.
+
+        Three operations register one counted request, and each of them took
+        the shared ledger lock on its own. That lock is shared with the
+        benchmark evaluator, whose own hold was measured at a median of 2.35
+        seconds on 2026-09-17, so three acquisitions cost about seven seconds
+        of waiting for one paid call. Inside a session the lock is taken once
+        and the validated ledger is read once: no other writer can change the
+        file while it is held, so the second read would return the same bytes.
+
+        Every ledger operation inside a session must go through
+        :meth:`_locked_ledger`. ``flock`` is held by an open file description,
+        so a second ``open`` of the lock file inside a session deadlocks.
+        """
+        state = self._ledger_session_state
+        if getattr(state, "depth", 0):
+            state.depth += 1
+            try:
+                yield
+            finally:
+                state.depth -= 1
+            return
+        with self._lock_file.open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            state.depth = 1
+            state.ledger = None
+            try:
+                yield
+            finally:
+                state.depth = 0
+                state.ledger = None
+
+    @contextlib.contextmanager
+    def _locked_ledger(self) -> Iterator[dict[str, Any]]:
+        """Yield the validated ledger under the shared ledger lock.
+
+        Outside a session this is the historical shape: take the lock, read
+        and validate, act, release. Inside one, the lock is already held and
+        the ledger already read, and a commit writes the very object that is
+        held, so the session's copy stays the file's content.
+        """
+        state = self._ledger_session_state
+        if getattr(state, "depth", 0):
+            if state.ledger is None:
+                state.ledger = self._validated_ledger()
+            yield state.ledger
+            return
+        with self._lock_file.open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield self._validated_ledger()
 
     @contextlib.contextmanager
     def _exclusive_operation(self, section: str, request_key: str) -> Iterator[None]:
@@ -6489,9 +6545,7 @@ class SharedGeminiBroker:
         receipts. A permanent count error still refuses the key, because the
         request or the credential is wrong until a review says otherwise.
         """
-        with self._lock_file.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            ledger = self._validated_ledger()
+        with self._locked_ledger() as ledger:
             request = ledger["requests"].get(request_key)
             if request is None or request.get("state") != "count_error":
                 return 0
@@ -6593,9 +6647,7 @@ class SharedGeminiBroker:
     def _count_event(
         self, request_key: str, base: dict[str, Any], *, phase: str | None = None
     ) -> None:
-        with self._lock_file.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            ledger = self._validated_ledger()
+        with self._locked_ledger() as ledger:
             halt = self._phase_halted(ledger, phase or base.get("phase") or "live_test")
             if halt is not None:
                 raise ValueError(f"the paid-call broker is halted: {halt}")
@@ -6659,9 +6711,7 @@ class SharedGeminiBroker:
     def _resume_not_submitted(
         self, request_key: str, base: dict[str, Any]
     ) -> int | None:
-        with self._lock_file.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            ledger = self._validated_ledger()
+        with self._locked_ledger() as ledger:
             request = ledger["requests"].get(request_key)
             if request is None:
                 return None
@@ -7546,7 +7596,12 @@ class SharedGeminiBroker:
             # A request whose free count failed transiently counts again here,
             # before the resume path, which knows only the states a reservation
             # can reach.
-            with self._exclusive_operation("count_registration", request_key):
+            # One exclusive operation, one shared ledger lock and one read of
+            # the ledger for all three steps that register a counted request.
+            with (
+                self._exclusive_operation("count_registration", request_key),
+                self._ledger_session(),
+            ):
                 count_retry_round = self._open_count_retry(
                     request_key, base, phase=phase
                 )
