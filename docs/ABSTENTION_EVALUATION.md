@@ -471,6 +471,22 @@ A wave of every pending question would hold all of that for as long as the backl
 A paused arm leaves every question of a wave open, and a later pass finishes them all in place.
 A question is complete only when every active arm has its trials.
 
+#### Every arm gets a share of the wave
+
+The pick-up order is the oldest accepted question first, and a paused arm bends it.
+Every question the arm held stays open and keeps its place at the front of the queue, so when the pause lifts a wave of them fills all eight slots, and the arms that already finished those questions idle.
+That is what happened on 2026-09-17: the captain's Claude pause put 33 questions that owed Claude alone at the front, and the Gemini arm made no paid call between 10:03 and 11:06 UTC while 23 questions owed it trials.
+The slow arm idled while the fast one worked, which is the opposite of what eight questions in flight are for.
+
+`abstention_watch.wave_order` keeps a share of every wave for every arm that has a question to give it: `ceil(item_workers / vendors)` each, the arm with the fewest open questions served first, and the oldest question of that arm first.
+The rest of the wave fills in the pick-up order.
+The reorder runs before the wave is cut from the backlog, because a question an idle arm owes can be anywhere in it; beyond the waves the cycle keeps, the order is untouched.
+No question is held back and the order inside every group is the pick-up order, so the fourth rule above still holds: every reader is given the pick-up order back.
+
+`CostJournal.open_vendors_by_item` says what a question still owes, from the `outcomes_by_model` counts of its last row.
+A question the journal has never seen owes every arm its whole plan.
+Each poll emits a `wave_mix` event with the open questions per arm of the wave it chose.
+
 ### A stop that belongs to one question
 
 A vendor that stops is paused for the rest of the invocation, because the policy forbids a retry.

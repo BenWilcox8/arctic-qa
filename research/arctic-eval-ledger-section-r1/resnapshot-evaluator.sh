@@ -19,7 +19,7 @@ REPO=${ARCTIC_QA_REPO:?the arctic-qa worktree that holds the commit}
 LEDGER=/mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json
 UNIT=arctic-abstention-stream-r3
 STATEPY=${ARCTIC_LEDGER_STATE_PY:?the ledger-state reader}
-PREV=40638fe
+PREV=09314ae
 APP=$D/runtime/app-$SHA-arctic-eval-authorization-r8
 AUTH=$D/streaming-eval-r11-authorization-$SHA.json
 REVIEW=$D/streaming-eval-r11-review-$SHA.md
@@ -121,7 +121,10 @@ if systemctl --user is-active --quiet "$UNIT"; then
   else
     say "SKIP kill -TERM $main"
   fi
-  act systemctl --user stop "$UNIT"
+  # The evaluator that leaves of its own accord takes its transient unit with
+  # it, and systemd then refuses to stop a unit it no longer holds. That is
+  # the settled stop working, not a fault.
+  act systemctl --user stop "$UNIT" || say "  the unit left with its process"
 else
   say "  the unit is not running"
 fi
