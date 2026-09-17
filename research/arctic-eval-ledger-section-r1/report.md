@@ -277,6 +277,18 @@ into `AGENTS.md`: a refusal that reserved nothing, submitted nothing and
 charged nothing belongs to one unit of work, and it must be contained where
 the work reports it, not where it is convenient to catch it.
 
+The live run proved it. At 13:12:39 UTC, on snapshot `88d2384`, the same
+refusal arrived and the unit recorded it and went on:
+
+```
+{"at":"2026-09-17T13:12:39Z","event":"item_lock_busy",
+ "item_id":"aqa-e53132a3183c413d5ef9",
+ "error":"BrokerOperationBusyError: another paid broker operation is active"}
+```
+
+The unit was still active at 13:14 UTC with all three arms running and no
+vendor paused, against the two exits the same error caused an hour earlier.
+
 ## What is left
 
 The evaluator still builds one broker per question, and that start still costs
