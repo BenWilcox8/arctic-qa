@@ -16,7 +16,11 @@ from . import concurrency_repair
 from . import jev_prescreen
 from .access_readiness import run_access_readiness, supervise_access_readiness
 from .broker_provider import BrokerProvider
-from .corpus_viewer import serve_corpus_viewer
+from .corpus_viewer import (
+    SNAPSHOT_REFRESH_SECONDS,
+    WORKER_THREADS,
+    serve_corpus_viewer,
+)
 from .db import Database, now
 from .discovery import (
     crossref_exact_doi,
@@ -113,6 +117,10 @@ def parser() -> argparse.ArgumentParser:
     viewer.add_argument("--port", type=int, default=8787)
     viewer.add_argument("--stale-after-seconds", type=int, default=86400)
     viewer.add_argument("--process-stale-after-seconds", type=int, default=300)
+    viewer.add_argument(
+        "--refresh-interval-seconds", type=int, default=SNAPSHOT_REFRESH_SECONDS
+    )
+    viewer.add_argument("--worker-threads", type=int, default=WORKER_THREADS)
 
     metadata = commands.add_parser(
         "metadata-prefilter",
@@ -765,6 +773,8 @@ def main(argv: list[str] | None = None) -> int:
                 port=args.port,
                 stale_after_seconds=args.stale_after_seconds,
                 process_stale_after_seconds=args.process_stale_after_seconds,
+                refresh_interval_seconds=args.refresh_interval_seconds,
+                worker_threads=args.worker_threads,
             )
             return 0
         if args.command == "chapter2-corpus":

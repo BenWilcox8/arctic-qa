@@ -186,6 +186,140 @@ def test_report_joins_the_journal_metrics_with_the_guard_budget(
     assert report["guard"]["quota"]["codex_weekly"]["percent_remaining"] == 23
 
 
+def _revisited_journal(directory: Path) -> None:
+    """Write one question the evaluator passed over three times.
+
+    The row of each pass carries the question's whole record, so a reader that
+    counts rows reports three questions where the journal holds one. A reader
+    that trusts the row's ``complete`` flag reports a complete question where
+    24 of the 48 responses never arrived.
+    """
+    passes = []
+    for index, recorded in enumerate((12, 18, 24)):
+        row = json.loads(json.dumps(JOURNAL_ROW))
+        row["recorded_at_utc"] = f"2026-09-16T09:1{index}:21Z"
+        row["complete"] = True
+        row["evaluation"]["recorded_trials"] = recorded
+        row["evaluation"]["complete"] = True
+        row["evaluation"]["vendors_paused"] = []
+        row["outcomes_by_model"] = {
+            FABLE_MODEL: {"N0": 0, "N1": 0, "N2": 0, "N3": 3, "N4": 0, "N5": 3},
+            "claude-opus-5": {"N0": 0, "N1": 0, "N2": 0, "N3": 3, "N4": 0, "N5": 3},
+        }
+        passes.append(row)
+    # The last pass covers Fable's whole share of six and nothing else.
+    passes[-1]["outcomes_by_model"]["claude-opus-5"] = {
+        "N0": 0,
+        "N1": 0,
+        "N2": 0,
+        "N3": 1,
+        "N4": 0,
+        "N5": 1,
+    }
+    (directory / "cost-journal.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in passes), encoding="utf-8"
+    )
+
+
+def test_report_counts_questions_and_never_journal_rows(
+    benchmark_files: dict[str, Path],
+) -> None:
+    """One revisited question is one question, however many rows it wrote.
+
+    The live page reported 286 questions on 2026-09-17 where the journal held
+    160, because it counted the rows the evaluator appends per pass.
+    """
+    _revisited_journal(benchmark_files["journal"])
+    report = benchmark_report(
+        journal_dir=benchmark_files["journal"],
+        guard_state_file=benchmark_files["guard"],
+        now=BEFORE_RESUME,
+    )
+    coverage = report["coverage"]
+    assert coverage["question_rows"] == 3
+    assert coverage["questions_in_journal"] == 1
+    assert coverage["questions_with_a_response"] == 1
+    assert report["questions_evaluated"] == 1
+    assert coverage["questions_revisited"] == 1
+    assert coverage["questions_reopened"] == 1
+    assert str(benchmark_files["journal"]) in report["counts_source"]
+
+
+def test_report_calls_a_question_complete_only_on_every_response(
+    benchmark_files: dict[str, Path],
+) -> None:
+    """The row's own complete flag is not proof that the responses arrived.
+
+    A row written while an arm was paused sets it, and the question still
+    holds part of its plan. The page must read the recorded trials instead.
+    """
+    _revisited_journal(benchmark_files["journal"])
+    report = benchmark_report(
+        journal_dir=benchmark_files["journal"],
+        guard_state_file=benchmark_files["guard"],
+        now=BEFORE_RESUME,
+    )
+    coverage = report["coverage"]
+    assert coverage["questions_with_every_response"] == 0
+    assert report["questions_complete"] == 0
+    assert coverage["questions_partial"] == 1
+    assert coverage["questions_stranded"] == 1
+    assert coverage["trials_recorded"] == 24
+    assert coverage["trials_planned"] == 48
+
+
+def test_report_gives_each_arm_its_own_coverage(
+    benchmark_files: dict[str, Path],
+) -> None:
+    """An arm covers a question only when it recorded its whole share.
+
+    The share is the question's planned trials over the models of the plan,
+    and the divisor comes from the widest row of the journal: a row names only
+    the models that recorded something, so dividing by one row's own model
+    count put the share at 24 instead of 6.
+    """
+    _revisited_journal(benchmark_files["journal"])
+    report = benchmark_report(
+        journal_dir=benchmark_files["journal"],
+        guard_state_file=benchmark_files["guard"],
+        now=BEFORE_RESUME,
+    )
+    assert report["coverage"]["trials_per_model"] == 6
+    assert report["coverage"]["plan_models"] == 8
+    models = {model["model"]: model for model in report["models"]}
+    assert models[FABLE_MODEL]["questions_with_a_response"] == 1
+    assert models[FABLE_MODEL]["questions_with_every_response"] == 1
+    assert models["claude-opus-5"]["questions_with_a_response"] == 1
+    assert models["claude-opus-5"]["questions_with_every_response"] == 0
+    # An arm of the plan that answered nothing is still a row, at zero.
+    assert models["gpt-6-astra"]["questions_with_a_response"] == 0
+
+
+def test_report_states_the_evaluator_questions_in_flight(
+    benchmark_files: dict[str, Path],
+) -> None:
+    """The page says plainly what the evaluator is doing right now."""
+    watch = json.loads(
+        (benchmark_files["journal"] / "watch-state.json").read_text(encoding="utf-8")
+    )
+    watch["items_in_flight"] = ["aqa-1", "aqa-2", "aqa-3"]
+    watch["item_workers"] = 8
+    watch["started_at_utc"] = "2026-09-16T09:00:00Z"
+    (benchmark_files["journal"] / "watch-state.json").write_text(
+        json.dumps(watch), encoding="utf-8"
+    )
+    report = benchmark_report(
+        journal_dir=benchmark_files["journal"],
+        guard_state_file=benchmark_files["guard"],
+        now=BEFORE_RESUME,
+    )
+    evaluator = report["evaluator"]
+    assert evaluator["items_in_flight"] == ["aqa-1", "aqa-2", "aqa-3"]
+    assert evaluator["item_workers"] == 8
+    assert evaluator["started_at_utc"] == "2026-09-16T09:00:00Z"
+    assert evaluator["updated_at_utc"] == "2026-09-16T09:54:14Z"
+
+
 def test_report_marks_a_paused_model_with_its_reason(
     benchmark_files: dict[str, Path],
 ) -> None:

@@ -335,6 +335,16 @@ class PipelineTraceStore:
         self._receipt_cache: list[dict[str, Any]] = []
         self._job_cache_fingerprint: tuple[tuple[str, int, int], ...] = ()
         self._job_cache: list[tuple[Path, dict[str, Any]]] = []
+        # One entry each, replaced whole when an input moves. `_paper_records`
+        # reads every row of the state database, the candidate blob included,
+        # and joins it against every receipt; `_freshness` parses the shared
+        # ledger snapshot. Both ran per request until 2026-09-17, which made
+        # `/api/pipeline-trace` cost more than a minute and hundreds of
+        # megabytes on a route the page polls every 15 seconds.
+        self._records_version: tuple[Any, ...] | None = None
+        self._records_cache: dict[str, dict[str, Any]] | None = None
+        self._freshness_version: tuple[Any, ...] | None = None
+        self._freshness_cache: dict[str, Any] | None = None
 
     def list_papers(
         self,
@@ -625,7 +635,45 @@ class PipelineTraceStore:
         connection.row_factory = sqlite3.Row
         return connection
 
+    @staticmethod
+    def _path_version(path: Path) -> tuple[Any, ...]:
+        """A file's identity, or a marker that it is absent."""
+        try:
+            status = path.stat()
+        except OSError:
+            return ("absent",)
+        return (status.st_mtime_ns, status.st_size, status.st_ino)
+
     def _paper_records(
+        self, eligibility_jobs: list[tuple[Path, dict[str, Any]]]
+    ) -> dict[str, dict[str, Any]]:
+        """The per-family records, rebuilt only when one of their inputs moved.
+
+        Building them reads every row of the state database and parses every
+        candidate blob, so it costs the whole history whatever the page asked
+        for. The version below names every input the build reads: the database
+        and its write-ahead log, the producer's progress record, the receipt
+        listing and the eligibility jobs. The two listings are stat-only when
+        nothing moved, so an unchanged version costs a listing and not a read.
+        """
+        self._receipt_events()
+        version = (
+            self._path_version(self.db_file),
+            self._path_version(self.db_file.with_name(f"{self.db_file.name}-wal")),
+            self._path_version(
+                self.namespace / "streaming-dataset-r1" / "progress.json"
+            ),
+            self._receipt_cache_fingerprint,
+            self._job_cache_fingerprint,
+        )
+        if version == self._records_version and self._records_cache is not None:
+            return self._records_cache
+        records = self._build_paper_records(eligibility_jobs)
+        self._records_version = version
+        self._records_cache = records
+        return records
+
+    def _build_paper_records(
         self, eligibility_jobs: list[tuple[Path, dict[str, Any]]]
     ) -> dict[str, dict[str, Any]]:
         groups: dict[str, dict[str, Any]] = {}
@@ -1944,6 +1992,18 @@ class PipelineTraceStore:
 
     def _freshness(self) -> dict[str, Any]:
         progress_path = self.namespace / "streaming-dataset-r1" / "progress.json"
+        version = (
+            self._path_version(progress_path),
+            self._path_version(self.ledger_file),
+        )
+        if version == self._freshness_version and self._freshness_cache is not None:
+            return self._freshness_cache
+        reading = self._build_freshness(progress_path)
+        self._freshness_version = version
+        self._freshness_cache = reading
+        return reading
+
+    def _build_freshness(self, progress_path: Path) -> dict[str, Any]:
         progress = self._read_json(progress_path) if progress_path.is_file() else None
         ledger = (
             self._read_json(self.ledger_file) if self.ledger_file.is_file() else None

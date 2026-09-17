@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import json
 import os
+import queue
 import re
 import sqlite3
 import threading
+import time
+import traceback
 from collections import Counter
 from datetime import UTC, datetime
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +28,15 @@ from .live_papers import live_papers_report, read_shared_ledger, read_state_fact
 from .metadata_prefilter import DISPOSITIONS
 from .util import sha256_file
 
+
+# The page polls its four routes every 15 seconds. One background thread
+# builds the three parameter-free ones on the same cadence, and a request only
+# copies out the bytes that thread left. See `LiveSnapshot`.
+SNAPSHOT_REFRESH_SECONDS = 15
+# One fixed pool of request threads, and a bounded backlog. See `CorpusServer`.
+WORKER_THREADS = 8
+REQUEST_QUEUE_LIMIT = 64
+_TRACE_POLL_FIELDS = {"q", "state", "stage", "run_id", "cursor", "limit"}
 
 PROGRESS_STATES = {"not_running", "running", "paused", "error", "completed"}
 ELIGIBILITY_FILTERS = {"all", "unreviewed", "pending", "eligible", "excluded"}
@@ -2904,6 +2917,152 @@ class CorpusArtifacts:
         }
 
 
+def _release_free_memory() -> None:
+    """Hand glibc's free pages back to the kernel after a refresh cycle.
+
+    The refresher parses the 23 MB ledger and the query index on every cycle
+    and drops both again. Without this the freed pages stay in the arena of
+    the refresher thread, and the process keeps a working set it no longer
+    uses. The call is best effort: a C library without `malloc_trim` is not an
+    error, and nothing on the serving path depends on it.
+    """
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError, ValueError):
+        return
+
+
+class LiveSnapshot:
+    """Serve every polled route from bytes that one background thread builds.
+
+    Each of these routes reads the whole of some large record: the 23 MB
+    shared ledger, the 110 MB query index, the evaluator's cost journal. Doing
+    that inside the request thread cost the viewer its life twice on
+    2026-09-17. `/api/state` answered in 6 seconds, so a page that polls every
+    15 seconds queued its own requests behind each other; and each request ran
+    on a thread of its own, which glibc gives a 64 MB malloc arena and never
+    takes back, so the process walked to the arena cap (eight per core) and
+    3.8 GB over six hours, and then answered with empty responses.
+
+    One thread now does that work, on a fixed cadence, whatever the number of
+    clients. A request copies out the bytes of the last cycle and answers in
+    microseconds. The payload keeps its own `generated_at_utc`, so the page
+    always shows the moment the reading was taken and never the moment it was
+    served, and `X-Snapshot-Age-Seconds` states the difference.
+    """
+
+    # The four routes the page polls every 15 seconds. The trace list is here
+    # with its own default query: that is the one the poll asks for, and
+    # building it reads the whole state database.
+    ROUTES = (
+        "/api/state",
+        "/api/live-benchmark",
+        "/api/live-papers",
+        "/api/pipeline-trace",
+    )
+    TRACE_POLL_QUERY = "limit=25"
+
+    @classmethod
+    def is_trace_poll(cls, query: str) -> bool:
+        """True when this trace query is the page's own unfiltered poll.
+
+        The page builds its query from the filter form, so an empty form still
+        sends every field: `q=&state=&stage=&limit=25`. The match is therefore
+        on what the query means and never on its spelling.
+        """
+        parameters = parse_qs(query, keep_blank_values=True)
+        if any(
+            (parameters.get(name) or [""])[0].strip()
+            for name in ("q", "state", "stage", "run_id", "cursor")
+        ):
+            return False
+        limit = (parameters.get("limit") or ["25"])[0].strip() or "25"
+        return limit == "25" and not (set(parameters) - _TRACE_POLL_FIELDS)
+
+    def __init__(
+        self,
+        artifacts: CorpusArtifacts,
+        *,
+        interval_seconds: int = SNAPSHOT_REFRESH_SECONDS,
+    ) -> None:
+        self._artifacts = artifacts
+        self._interval = max(int(interval_seconds), 1)
+        self._lock = threading.Lock()
+        self._entries: dict[str, dict[str, Any]] = {}
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _build(self, route: str) -> dict[str, Any]:
+        if route == "/api/state":
+            return self._artifacts.state()
+        if route == "/api/live-benchmark":
+            return self._artifacts.live_benchmark()
+        if route == "/api/live-papers":
+            return self._artifacts.live_papers()
+        if route == "/api/pipeline-trace":
+            return self._artifacts.pipeline_trace_list(
+                parse_qs(self.TRACE_POLL_QUERY, keep_blank_values=True)
+            )
+        raise KeyError(f"route not found: {route}")
+
+    def refresh_once(self) -> None:
+        """Build every route once, keeping the last good bytes of a failure."""
+        for route in self.ROUTES:
+            try:
+                payload = self._build(route)
+                entry = {
+                    "body": _safe_json_bytes(payload),
+                    "availability": payload.get("availability"),
+                    "built_at": time.monotonic(),
+                    "built_at_utc": _utc_now(),
+                    "error": None,
+                }
+            except Exception as failure:  # noqa: BLE001 - see the note below.
+                # A refresher that dies freezes every route it owns, so one
+                # route's failure is recorded and the cycle goes on. The last
+                # good bytes stay served, with the failure beside them, and a
+                # route that never built answers 503 with the reason.
+                detail = f"{type(failure).__name__}: {failure}"
+                print(
+                    f"corpus viewer: {route} refresh failed: {detail}\n"
+                    f"{traceback.format_exc()}",
+                    flush=True,
+                )
+                with self._lock:
+                    kept = self._entries.get(route)
+                if kept is None:
+                    continue
+                entry = {**kept, "error": detail}
+            with self._lock:
+                self._entries[route] = entry
+        _release_free_memory()
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self._interval):
+            self.refresh_once()
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._loop, name="corpus-viewer-refresh", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def entry(self, route: str) -> dict[str, Any]:
+        with self._lock:
+            entry = self._entries.get(route)
+        if entry is None:
+            raise RuntimeError(
+                f"the background refresher has not built {route} yet; "
+                "retry in a moment"
+            )
+        return entry
+
+
 class CorpusRequestHandler(BaseHTTPRequestHandler):
     server_version = "ArcticCorpusViewer/1"
 
@@ -2911,10 +3070,29 @@ class CorpusRequestHandler(BaseHTTPRequestHandler):
     def artifacts(self) -> CorpusArtifacts:
         return self.server.artifacts  # type: ignore[attr-defined]
 
+    @property
+    def snapshot(self) -> LiveSnapshot:
+        return self.server.snapshot  # type: ignore[attr-defined]
+
+    def _cached(self, route: str) -> None:
+        """Answer a polled route from the background refresher's last bytes."""
+        entry = self.snapshot.entry(route)
+        self._age = int(max(time.monotonic() - entry["built_at"], 0))
+        self._refresh_error = entry["error"]
+        self._send(
+            HTTPStatus.OK, entry["body"], "application/json; charset=utf-8"
+        )
+
     def _headers(self, status: HTTPStatus, content_type: str, length: int) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(length))
+        age = getattr(self, "_age", None)
+        if age is not None:
+            self.send_header("X-Snapshot-Age-Seconds", str(age))
+        refresh_error = getattr(self, "_refresh_error", None)
+        if refresh_error:
+            self.send_header("X-Snapshot-Refresh-Error", refresh_error[:200])
         self.send_header("Cache-Control", "no-store")
         self.send_header(
             "Content-Security-Policy",
@@ -2946,7 +3124,7 @@ class CorpusRequestHandler(BaseHTTPRequestHandler):
                 body = Path(__file__).with_name("corpus_viewer.html").read_bytes()
                 self._send(HTTPStatus.OK, body, "text/html; charset=utf-8")
             elif parsed.path == "/api/state":
-                self._json(HTTPStatus.OK, self.artifacts.state())
+                self._cached("/api/state")
             elif parsed.path == "/api/candidates":
                 self._json(
                     HTTPStatus.OK,
@@ -2962,16 +3140,22 @@ class CorpusRequestHandler(BaseHTTPRequestHandler):
                     ),
                 )
             elif parsed.path == "/api/live-benchmark":
-                self._json(HTTPStatus.OK, self.artifacts.live_benchmark())
+                self._cached("/api/live-benchmark")
             elif parsed.path == "/api/live-papers":
-                self._json(HTTPStatus.OK, self.artifacts.live_papers())
+                self._cached("/api/live-papers")
             elif parsed.path == "/api/pipeline-trace":
-                self._json(
-                    HTTPStatus.OK,
-                    self.artifacts.pipeline_trace_list(
-                        parse_qs(parsed.query, keep_blank_values=True)
-                    ),
-                )
+                # The page's own poll is the default query and comes from the
+                # snapshot. A filter or a page the operator typed is built on
+                # demand, and the store's caches keep that cheap.
+                if LiveSnapshot.is_trace_poll(parsed.query):
+                    self._cached("/api/pipeline-trace")
+                else:
+                    self._json(
+                        HTTPStatus.OK,
+                        self.artifacts.pipeline_trace_list(
+                            parse_qs(parsed.query, keep_blank_values=True)
+                        ),
+                    )
             elif parsed.path == "/api/pipeline-trace/paper":
                 self._json(
                     HTTPStatus.OK,
@@ -3008,15 +3192,26 @@ class CorpusRequestHandler(BaseHTTPRequestHandler):
                     "application/x-ndjson; charset=utf-8",
                 )
             elif parsed.path == "/healthz":
-                state = self.artifacts.state()
+                # The health check reads the snapshot like every other poll.
+                # Rebuilding the whole state here made the one call that is
+                # meant to be cheap the most expensive call of the viewer.
+                entry = self.snapshot.entry("/api/state")
+                availability = entry["availability"]
+                age = int(max(time.monotonic() - entry["built_at"], 0))
                 status = (
                     HTTPStatus.OK
-                    if state["availability"] == "available"
+                    if availability == "available"
                     else HTTPStatus.SERVICE_UNAVAILABLE
                 )
                 self._json(
                     status,
-                    {"status": state["availability"], "run_id": self.artifacts.run_id},
+                    {
+                        "status": availability,
+                        "run_id": self.artifacts.run_id,
+                        "snapshot_age_seconds": age,
+                        "snapshot_built_at_utc": entry["built_at_utc"],
+                        "refresh_error": entry["error"],
+                    },
                 )
             else:
                 self._json(HTTPStatus.NOT_FOUND, {"error": "route not found"})
@@ -3036,10 +3231,92 @@ class CorpusRequestHandler(BaseHTTPRequestHandler):
         print(f"{self.address_string()} - {format % args}")
 
 
-class CorpusServer(ThreadingHTTPServer):
-    def __init__(self, address: tuple[str, int], artifacts: CorpusArtifacts) -> None:
+class CorpusServer(HTTPServer):
+    """Serve the viewer from a fixed pool of threads and a bounded backlog.
+
+    `ThreadingHTTPServer` starts one thread per request. glibc gives each new
+    thread a malloc arena of its own, 64 MB on this machine, and never returns
+    those pages, so a page that polls four routes every 15 seconds walked the
+    viewer to the arena cap of eight per core and about 4 GB over six hours.
+    The pages the arenas hold are not a cache: nothing reads them again.
+
+    A fixed pool holds the arena count at the size of the pool, and the
+    bounded backlog answers a flood with HTTP 503 instead of an unbounded
+    thread count. An unanswered request is what the captain saw on
+    2026-09-17, so the refusal says so in the body rather than dropping the
+    connection.
+    """
+
+    allow_reuse_address = True
+
+    def __init__(
+        self,
+        address: tuple[str, int],
+        artifacts: CorpusArtifacts,
+        snapshot: LiveSnapshot | None = None,
+        *,
+        workers: int = WORKER_THREADS,
+        queue_limit: int = REQUEST_QUEUE_LIMIT,
+        refresh_interval_seconds: int = SNAPSHOT_REFRESH_SECONDS,
+    ) -> None:
         super().__init__(address, CorpusRequestHandler)
         self.artifacts = artifacts
+        # The server owns the refresher: one build of every polled route
+        # before the port answers, and one thread keeping them current.
+        self.snapshot = snapshot or LiveSnapshot(
+            artifacts, interval_seconds=refresh_interval_seconds
+        )
+        self.snapshot.refresh_once()
+        self.snapshot.start()
+        self._requests: queue.Queue[tuple[Any, Any]] = queue.Queue(
+            maxsize=max(int(queue_limit), 1)
+        )
+        self._workers = [
+            threading.Thread(
+                target=self._serve_queued,
+                name=f"corpus-viewer-worker-{index}",
+                daemon=True,
+            )
+            for index in range(max(int(workers), 1))
+        ]
+        for worker in self._workers:
+            worker.start()
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        try:
+            self._requests.put_nowait((request, client_address))
+        except queue.Full:
+            self._refuse(request)
+
+    def _refuse(self, request: Any) -> None:
+        body = b'{"error": "the viewer backlog is full; retry in a moment"}'
+        head = (
+            "HTTP/1.1 503 Service Unavailable\r\n"
+            "Content-Type: application/json; charset=utf-8\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            "Cache-Control: no-store\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode()
+        try:
+            request.sendall(head + body)
+        except OSError:
+            pass
+        self.shutdown_request(request)
+
+    def server_close(self) -> None:
+        self.snapshot.stop()
+        super().server_close()
+
+    def _serve_queued(self) -> None:
+        while True:
+            request, client_address = self._requests.get()
+            try:
+                self.finish_request(request, client_address)
+            except Exception:  # noqa: BLE001 - a worker must outlive a request.
+                self.handle_error(request, client_address)
+            finally:
+                self.shutdown_request(request)
+                self._requests.task_done()
 
 
 def serve_corpus_viewer(
@@ -3073,9 +3350,15 @@ def serve_corpus_viewer(
     pipeline_eligibility_roots: tuple[Path, ...] = (),
     benchmark_journal_dir: Path | None = None,
     benchmark_guard_state_file: Path | None = None,
+    refresh_interval_seconds: int = SNAPSHOT_REFRESH_SECONDS,
+    worker_threads: int = WORKER_THREADS,
 ) -> None:
     if not 0 <= port <= 65535:
         raise ValueError("port must be between 0 and 65535")
+    if refresh_interval_seconds < 1:
+        raise ValueError("refresh-interval-seconds must be positive")
+    if worker_threads < 1:
+        raise ValueError("worker-threads must be positive")
     pipeline_trace_store = None
     if pipeline_namespace is not None:
         from .pipeline_trace import PipelineTraceStore
@@ -3113,9 +3396,19 @@ def serve_corpus_viewer(
         stale_after_seconds=stale_after_seconds,
         process_stale_after_seconds=process_stale_after_seconds,
     )
-    server = CorpusServer((host, port), artifacts)
+    server = CorpusServer(
+        (host, port),
+        artifacts,
+        workers=worker_threads,
+        refresh_interval_seconds=refresh_interval_seconds,
+    )
     actual_host, actual_port = server.server_address[:2]
-    print(f"Corpus viewer serving http://{actual_host}:{actual_port}/", flush=True)
+    print(
+        f"Corpus viewer serving http://{actual_host}:{actual_port}/ "
+        f"({worker_threads} request threads, "
+        f"{refresh_interval_seconds}s snapshot refresh)",
+        flush=True,
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -3159,6 +3452,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--stale-after-seconds", type=int, default=86400)
     parser.add_argument("--process-stale-after-seconds", type=int, default=300)
+    parser.add_argument(
+        "--refresh-interval-seconds",
+        type=int,
+        default=SNAPSHOT_REFRESH_SECONDS,
+        help="how often the background thread rebuilds the polled routes",
+    )
+    parser.add_argument(
+        "--worker-threads",
+        type=int,
+        default=WORKER_THREADS,
+        help="the fixed number of request threads",
+    )
     args = parser.parse_args(argv)
     serve_corpus_viewer(
         corpus_root=args.corpus_root,
@@ -3190,6 +3495,8 @@ def main(argv: list[str] | None = None) -> int:
         port=args.port,
         stale_after_seconds=args.stale_after_seconds,
         process_stale_after_seconds=args.process_stale_after_seconds,
+        refresh_interval_seconds=args.refresh_interval_seconds,
+        worker_threads=args.worker_threads,
     )
     return 0
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import queue
+import socket
 import subprocess
 import threading
 import urllib.error
@@ -938,6 +940,97 @@ def test_streaming_budget_and_progress_are_bounded_and_read_only(
     invalid = artifacts.state()["streaming_pipeline"]
     assert invalid["state"] == "error"
     assert invalid["telemetry"] == "invalid"
+
+
+def test_polled_routes_answer_from_the_background_snapshot(tmp_path: Path) -> None:
+    """A polled route reads the refresher's bytes and never the files again.
+
+    Rebuilding the whole state inside the request thread answered /api/state
+    in 6 seconds on 2026-09-17, so a page that polls every 15 seconds queued
+    its own requests. The refresher does that work once per cycle, whatever
+    the number of clients, and a request only copies out what it left.
+    """
+    fixture_corpus(tmp_path)
+    artifacts = CorpusArtifacts(tmp_path, "test-run", tmp_path / "runtime")
+    server = CorpusServer(("127.0.0.1", 0), artifacts)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    built: list[str] = []
+    artifacts.state = lambda: built.append("state")  # type: ignore[method-assign]
+    try:
+        for route in ("/api/state", "/api/live-benchmark", "/api/live-papers"):
+            with urllib.request.urlopen(f"{base}{route}") as response:
+                assert response.status == 200
+                assert json.loads(response.read())
+                assert int(response.headers["X-Snapshot-Age-Seconds"]) >= 0
+        with urllib.request.urlopen(f"{base}/healthz") as response:
+            health = json.loads(response.read())
+            assert health["status"] == "available"
+            assert health["snapshot_age_seconds"] >= 0
+            assert health["refresh_error"] is None
+        # Four polled answers, and the artifacts were never asked to rebuild.
+        assert built == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_the_request_threads_are_a_fixed_pool(tmp_path: Path) -> None:
+    """The viewer answers every request on the same few threads.
+
+    `ThreadingHTTPServer` started one thread per request, and glibc gives each
+    new thread a 64 MB malloc arena that it never returns. Six hours of
+    15-second polling walked the viewer to 3.8 GB and empty responses on
+    2026-09-17, so the pool is fixed and the arena count with it.
+    """
+    fixture_corpus(tmp_path)
+    artifacts = CorpusArtifacts(tmp_path, "test-run", tmp_path / "runtime")
+    server = CorpusServer(("127.0.0.1", 0), artifacts, workers=3)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        before = threading.active_count()
+        for _ in range(25):
+            with urllib.request.urlopen(f"{base}/healthz") as response:
+                response.read()
+        assert threading.active_count() == before
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_a_full_backlog_is_refused_and_never_dropped(tmp_path: Path) -> None:
+    """A request the viewer cannot take is answered, not left unanswered.
+
+    An accepted connection that returns nothing is what the captain saw on
+    2026-09-17, and it reads as a dead site. A refusal says which it is.
+    """
+    fixture_corpus(tmp_path)
+    artifacts = CorpusArtifacts(tmp_path, "test-run", tmp_path / "runtime")
+    server = CorpusServer(("127.0.0.1", 0), artifacts, workers=1, queue_limit=1)
+
+    class FullBacklog:
+        def put_nowait(self, item: object) -> None:
+            raise queue.Full
+
+    # A full backlog, held full, so the refusal is what the socket sees.
+    server._requests = FullBacklog()  # type: ignore[assignment]
+    # serve_forever is not running, so this test accepts the connection
+    # itself and hands the server exactly what its accept loop would.
+    client = socket.create_connection(("127.0.0.1", server.server_port))
+    try:
+        accepted, address = server.socket.accept()
+        server.process_request(accepted, address)
+        answer = client.recv(4096).decode()
+        assert "503 Service Unavailable" in answer
+        assert "backlog is full" in answer
+    finally:
+        client.close()
+        server.server_close()
 
 
 def test_http_surface_is_read_only_and_restricted(tmp_path: Path) -> None:

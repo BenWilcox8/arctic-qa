@@ -249,6 +249,8 @@
     .trace-section-note { color: var(--muted); line-height: 1.5; margin: 0 0 .7rem; }
     .trace-empty { color: var(--muted); line-height: 1.5; padding: 1.2rem; }
     .trace-error { background: var(--red-bg); color: var(--red); padding: .8rem; }
+    .stopped-notice { margin: .3rem 0 .5rem; padding: .45rem .7rem; border-radius: 6px; font-weight: 600;
+      background: rgba(214, 138, 0, .14); border: 1px solid rgba(214, 138, 0, .45); }
     .live-papers-panel h3 { margin-top: 1.2rem; }
     .live-papers-panel table { font-size: .82rem; }
     .live-papers-paper { display: grid; gap: .2rem; min-width: 0; }
@@ -461,6 +463,7 @@
       <div class="metadata-head">
         <div>
           <h2 id="live-papers-title">Papers in analysis now</h2>
+          <p class="stopped-notice" id="live-papers-stopped" hidden></p>
           <p id="live-papers-detail">Loading the papers the producer is working on...</p>
           <div class="meta" id="live-papers-meta"></div>
         </div>
@@ -624,8 +627,12 @@
         </div>
         <span class="badge" id="benchmark-state">Loading</span>
       </div>
-      <p class="meta" id="benchmark-scope">Every accepted question runs on the plan's models at the high reasoning preset, twice per condition and three times per repeat. Gemini calls bill the Google API credits. Claude Code and Codex calls bill the subscriptions at USD 0; their list-price equivalent is informational only.</p>
+      <p class="meta" id="benchmark-scope">Every count on this page is a count of questions, read from the last journal row of each one, and never a count of journal rows. Every accepted question runs on the plan's models at the high reasoning preset, twice per condition and three times per repeat. Gemini calls bill the Google API credits. Claude Code and Codex calls bill the subscriptions at USD 0; their list-price equivalent is informational only.</p>
       <div class="source-counts" id="benchmark-counts" aria-label="Live benchmarking counts"></div>
+      <p class="meta" id="benchmark-counts-source">Loading the count source...</p>
+      <h3>Evaluator state</h3>
+      <div class="source-counts" id="benchmark-evaluator-counts" aria-label="Evaluator state"></div>
+      <p class="meta" id="benchmark-evaluator-detail">Loading the evaluator state...</p>
       <h3>Gemini budget and extrapolation</h3>
       <p class="meta" id="benchmark-budget-detail">The guard has not written a state file yet.</p>
       <div class="source-counts" id="benchmark-budget-counts" aria-label="Gemini evaluation budget"></div>
@@ -726,6 +733,12 @@
     const formatNumber = (value) => new Intl.NumberFormat().format(value ?? 0);
     const label = (value) => value ? String(value).replaceAll('_', ' ').replaceAll('-', ' ') : 'Not available';
     const dateText = (value) => value ? new Date(value).toLocaleString() : 'Not available';
+    const utcText = (value) => {
+      if (!value) return 'Not available';
+      const instant = new Date(value);
+      if (Number.isNaN(instant.getTime())) return 'Not available';
+      return `${instant.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+    };
     const centralStateTime = (value) => value ? new Intl.DateTimeFormat('en-US', {
       year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit', timeZone: 'America/Chicago', timeZoneName: 'short'
     }).format(new Date(value)) : 'Unknown';
@@ -2403,14 +2416,30 @@
         ? `Guard updated ${dateText(guard.generated_at_utc)}`
         : 'The cost and quota guard has written no state file yet';
       $('benchmark-meta').textContent = `${guardAge} | Journal ${data.journal_dir || 'not selected'} | Page rebuilt ${dateText(data.generated_at_utc)}`;
+      const coverage = data.coverage || {};
+      const perQuestion = coverage.planned_trials_per_question;
       $('benchmark-counts').replaceChildren(
-        countBox('Questions evaluated', formatNumber(data.questions_evaluated)),
-        countBox('Complete questions', formatNumber(data.questions_complete)),
-        countBox('Trials recorded', formatNumber(data.trials_recorded)),
-        countBox('Models', formatNumber((data.models || []).length)),
-        countBox('Paused models', formatNumber(Object.keys(guard.paused_models || {}).length)),
-        countBox('Evaluator polls', formatNumber((data.evaluator || {}).polls))
+        countBox('Questions with a response', formatNumber(coverage.questions_with_a_response)),
+        countBox(`Questions with all ${formatNumber(perQuestion)}`, formatNumber(coverage.questions_with_every_response)),
+        countBox('Questions part answered', formatNumber(coverage.questions_partial)),
+        countBox('Stranded', formatNumber(coverage.questions_stranded)),
+        countBox('Reopened', formatNumber(coverage.questions_reopened)),
+        countBox('Trials recorded', `${formatNumber(coverage.trials_recorded)} of ${formatNumber(coverage.trials_planned)}`)
       );
+      $('benchmark-counts-source').textContent = data.counts_source || '';
+      const watchState = data.evaluator || {};
+      const inFlight = (watchState.items_in_flight || []).length;
+      $('benchmark-evaluator-counts').replaceChildren(
+        countBox('Evaluator', watchState.running ? 'running' : 'stopped'),
+        countBox('Questions in flight', formatNumber(inFlight)),
+        countBox('Question workers', formatNumber(watchState.item_workers)),
+        countBox('Polls', formatNumber(watchState.polls)),
+        countBox('Paused models', formatNumber(Object.keys(guard.paused_models || {}).length)),
+        countBox('Last update', dateText(watchState.updated_at_utc))
+      );
+      $('benchmark-evaluator-detail').textContent = watchState.present
+        ? `${watchState.running ? 'The evaluator is polling' : 'The evaluator is not polling'}: its watch state last moved ${utcText(watchState.updated_at_utc)}, ${formatNumber(watchState.age_seconds)} seconds ago, against a bound of ${formatNumber(watchState.stale_after_seconds)} seconds. It started ${utcText(watchState.started_at_utc)} and runs ${(watchState.active_vendors || []).map(label).join(', ') || 'no arm'}. A stranded question is one whose last row holds fewer responses than its plan and which no pause names, so nothing takes it up on its own; reopening one is an operator action.`
+        : 'The evaluator has written no watch state in this journal directory: it never started, or it runs elsewhere.';
       const budget = guard.gemini_budget || {};
       const phase = guard.evaluation_phase || {};
       const expectation = guard.expectation || {};
@@ -2425,7 +2454,7 @@
         countBox('Ledger ceiling left', usd(phase.remaining_usd)),
         countBox('Questions still expected', formatNumber(expectation.questions_still_expected))
       );
-      const modelHead = ['Model', 'Vendor', 'State', 'Questions', 'N1', 'N2', 'N3', 'N4', 'N5', 'ACC', 'Precision_abs', 'Recall_abs', 'F1_abs', 'Abstention rate', 'R-Acc', 'SSR', 'Invalid rate', 'Cost per question'];
+      const modelHead = ['Model', 'Vendor', 'State', 'Questions answered', 'Questions covered', 'N1', 'N2', 'N3', 'N4', 'N5', 'ACC', 'Precision_abs', 'Recall_abs', 'F1_abs', 'Abstention rate', 'R-Acc', 'SSR', 'Invalid rate', 'Cost per question'];
       simpleTable($('benchmark-model-table'), modelHead, (data.models || []).map((model) => {
         const metrics = model.metrics || {};
         const badge = text('span', model.paused ? 'paused' : 'active', `badge ${model.paused ? 'paused' : 'running'}`);
@@ -2436,7 +2465,8 @@
           model.model,
           model.vendor_label + (model.in_plan ? '' : ' (not in the current plan)'),
           state,
-          formatNumber(model.questions_evaluated),
+          formatNumber(model.questions_with_a_response),
+          `${formatNumber(model.questions_with_every_response)} of ${formatNumber(coverage.questions_with_a_response)}`,
           formatNumber(model.counts.N1), formatNumber(model.counts.N2), formatNumber(model.counts.N3),
           formatNumber(model.counts.N4), formatNumber(model.counts.N5),
           ratio(metrics.acc), ratio(metrics.precision_abs), ratio(metrics.recall_abs), ratio(metrics.f1_abs),
@@ -2460,8 +2490,8 @@
           item.detail
         ]), 'No guard rule has been evaluated yet.');
       $('benchmark-journal-note').textContent = data.questions_truncated
-        ? `The newest ${formatNumber((data.questions || []).length)} of ${formatNumber(data.questions_evaluated)} questions are shown.`
-        : 'Every evaluated question is shown, newest first.';
+        ? `The newest ${formatNumber((data.questions || []).length)} of ${formatNumber(coverage.questions_in_journal)} questions are shown, newest first. One row is one question: the journal's ${formatNumber(coverage.question_rows)} rows hold ${formatNumber(coverage.questions_in_journal)} questions, because the evaluator writes a row per pass.`
+        : 'Every evaluated question is shown, newest first. One row is one question, not one journal row.';
       simpleTable($('benchmark-question-table'),
         ['Question', 'Recorded', 'Complete', 'Generation USD', 'Gemini evaluation USD', 'Subscription tokens', 'List-price equivalent', 'Trials', 'Invalid rate', 'Wall seconds'],
         (data.questions || []).map((question) => {
@@ -2484,7 +2514,11 @@
         ['Age (seconds)', watch.age_seconds === null || watch.age_seconds === undefined ? 'Not available' : formatNumber(watch.age_seconds)],
         ['Active vendors', (watch.active_vendors || []).map(label).join(', ') || 'none'],
         ['Vendors paused by the evaluator', Object.keys(watch.paused_vendors || {}).map(label).join(', ') || 'none'],
-        ['Items evaluated', formatNumber(watch.evaluated_items)],
+        ['Items evaluated this pass', formatNumber(watch.evaluated_items)],
+        ['Questions in flight', formatNumber((watch.items_in_flight || []).length)],
+        ['Question workers', formatNumber(watch.item_workers)],
+        ['Questions stranded', formatNumber(coverage.questions_stranded)],
+        ['Questions reopened', formatNumber(coverage.questions_reopened)],
         ['Guard errors', (guard.errors || []).join('; ') || 'none']
       ], 'The evaluator has written no watch state yet.');
     }
@@ -2515,6 +2549,14 @@
       const producer = data.producer || {};
       const running = data.availability === 'available' && producer.running;
       setBadge($('live-papers-state'), data.availability === 'available' ? (running ? 'running' : 'not_running') : data.availability);
+      const stopped = $('live-papers-stopped');
+      if (!running && producer.stopped_at_utc) {
+        stopped.hidden = false;
+        stopped.textContent = `Generation stopped ${utcText(producer.stopped_at_utc)}. ${producer.message || ''}`.trim();
+      } else {
+        stopped.hidden = true;
+        stopped.textContent = '';
+      }
       $('live-papers-detail').textContent = data.message || 'No live paper record is available.';
       $('live-papers-meta').textContent = [
         `Run ${producer.run_id || 'not selected'}`,
@@ -2535,7 +2577,9 @@
       ]);
       simpleTable($('live-papers-table'), head, rows, running
         ? 'No paper has moved a paid call inside the window.'
-        : 'No producer is running, so no paper is in analysis.', ['Calls', 'Cost']);
+        : (producer.stopped_at_utc
+          ? `Generation stopped ${utcText(producer.stopped_at_utc)}, so no paper is in analysis. The finished papers of the run stay below.`
+          : 'No producer is running, so no paper is in analysis.'), ['Calls', 'Cost']);
       const finishedHead = ['Paper', 'Outcome', 'Reason', 'Questions', 'Calls', 'Cost', 'Finished'];
       const finishedRows = (data.finished || []).map((row) => [
         livePaperCell(row),

@@ -426,6 +426,13 @@ def _producer(
         "run_id": _text(progress.get("invocation_run_id")) or None,
         "campaign_id": _text(progress.get("run_id")) or None,
         "updated_at_utc": _text(progress.get("updated_at_utc")) or None,
+        # The moment generation stopped, so the section can say so plainly
+        # instead of showing an empty table. The producer writes its record
+        # per finished paper, so the last record of a stopped run is the
+        # moment it stopped. A running producer has no such moment.
+        "stopped_at_utc": (
+            None if running else (_text(progress.get("updated_at_utc")) or None)
+        ),
         "record_age_seconds": int(age) if age is not None else None,
         "stale": stale,
     }

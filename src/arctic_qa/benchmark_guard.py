@@ -297,6 +297,140 @@ def pause_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [row for row in rows if row.get("kind") == "vendor_pause"]
 
 
+def plan_model_count(
+    rows: list[dict[str, Any]],
+    *,
+    models_by_vendor: dict[str, tuple[str, ...]] | None = None,
+) -> int:
+    """The number of models one question's plan runs.
+
+    ``outcomes_by_model`` names only the models that recorded something, so a
+    question whose Gemini arm was paused throughout names six models and not
+    eight. The count is therefore the plan's own model count, raised to the
+    widest row of the journal when a run outgrew the plan, and it is never one
+    row's own model count: dividing a narrow row's planned trials by that put
+    the per-arm share at 24 instead of 6 and undercounted every arm.
+
+    Every reader of a share takes it from here, so the per-question counts and
+    the per-arm counts can never disagree about the same journal.
+    """
+    plan = models_by_vendor or dict(PLAN_MODELS_BY_VENDOR)
+    planned = len({model for models in plan.values() for model in models})
+    widest = max(
+        (len(row.get("outcomes_by_model") or {}) for row in item_rows(rows)),
+        default=0,
+    )
+    return max(planned, widest)
+
+
+def trials_per_model(row: dict[str, Any], *, plan_models: int) -> int:
+    """The share of one question's trials that belongs to one model."""
+    planned = int((row.get("evaluation") or {}).get("planned_trials") or 0)
+    return planned // plan_models if plan_models and planned else 0
+
+
+def row_recorded_trials(row: dict[str, Any]) -> int:
+    """The trials recorded for one question.
+
+    The evaluator's own field is the authority: a question's row records how
+    many of its plan it holds as ``evaluation.recorded_trials`` against
+    ``evaluation.planned_trials``. The outcomes are the fallback for a row
+    written before that field, and the two agreed on every row of
+    `streaming-r11` on 2026-09-17.
+    """
+    evaluation = row.get("evaluation") or {}
+    if "recorded_trials" in evaluation:
+        return int(evaluation.get("recorded_trials") or 0)
+    return sum(
+        sum(counts.values())
+        for counts in (row.get("outcomes_by_model") or {}).values()
+    )
+
+
+def row_is_pause_held(row: dict[str, Any]) -> bool:
+    """True when a pause names this question, so an arm still owes it trials."""
+    evaluation = row.get("evaluation") or {}
+    return bool(evaluation.get("models_paused")) or bool(
+        evaluation.get("vendors_paused")
+    )
+
+
+def question_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Count questions the way the evaluator counts them, not journal rows.
+
+    The evaluator appends one row per pass over a question and passes again
+    whenever a paused arm owes it trials, so the journal holds far more rows
+    than questions. Every count here reads the last row of each question,
+    which carries that question's whole record. A reader that counted rows
+    told the live page 286 questions on 2026-09-17 while the journal held 160,
+    so ``journal_rows`` and ``question_rows`` are reported beside the question
+    counts and the difference can never hide again.
+
+    ``complete`` in a row is not the same thing as "every response arrived".
+    A row the evaluator wrote while an arm was paused sets it, and the row
+    still holds part of its plan. So a question counts as complete here only
+    when its recorded trials reach its planned trials.
+    """
+    questions = latest_item_rows(rows)
+    seen: dict[str, int] = {}
+    best: dict[str, int] = {}
+    reopened: set[str] = set()
+    for row in item_rows(rows):
+        item_id = str(row["item_id"])
+        seen[item_id] = seen.get(item_id, 0) + 1
+        recorded = row_recorded_trials(row)
+        if item_id in best and recorded > best[item_id]:
+            # A later pass added trials to a question an earlier pass left
+            # short. That is the measurable evidence of a reopen.
+            reopened.add(item_id)
+        best[item_id] = max(best.get(item_id, 0), recorded)
+
+    plan_models = plan_model_count(rows)
+    with_response = 0
+    complete = 0
+    partial = 0
+    stranded = 0
+    pause_held = 0
+    recorded_total = 0
+    planned_total = 0
+    share = 0
+    for row in questions:
+        recorded = row_recorded_trials(row)
+        planned = int((row.get("evaluation") or {}).get("planned_trials") or 0)
+        share = share or trials_per_model(row, plan_models=plan_models)
+        recorded_total += recorded
+        planned_total += planned
+        if recorded:
+            with_response += 1
+        if planned and recorded >= planned:
+            complete += 1
+            continue
+        partial += 1
+        if row_is_pause_held(row):
+            pause_held += 1
+        else:
+            stranded += 1
+    return {
+        "questions_in_journal": len(questions),
+        "questions_with_a_response": with_response,
+        "questions_with_every_response": complete,
+        "questions_partial": partial,
+        "questions_stranded": stranded,
+        "questions_held_by_a_pause": pause_held,
+        "questions_revisited": sum(1 for count in seen.values() if count > 1),
+        "questions_reopened": len(reopened),
+        "trials_recorded": recorded_total,
+        "trials_planned": planned_total,
+        "planned_trials_per_question": (
+            planned_total // len(questions) if questions else 0
+        ),
+        "trials_per_model": share,
+        "plan_models": plan_models,
+        "journal_rows": len(rows),
+        "question_rows": len(item_rows(rows)),
+    }
+
+
 def read_watch_state(journal_dir: Path) -> dict[str, Any] | None:
     """Read the evaluator's watch state, or None when it never ran."""
     path = Path(journal_dir) / WATCH_STATE_FILENAME
@@ -880,6 +1014,9 @@ def model_readings(
                 "vendor": vendor_of_model(model),
                 "in_plan": model in planned,
                 "questions_evaluated": 0,
+                "questions_with_a_response": 0,
+                "questions_with_every_response": 0,
+                "trials_per_question": 0,
                 "trials": 0,
                 "counts": _counts_template(),
                 "tokens": _empty_tokens(),
@@ -893,10 +1030,22 @@ def model_readings(
         for model in plan.get(vendor) or ():
             reading(model)
 
+    plan_models = plan_model_count(rows, models_by_vendor=plan)
     for row in rows:
+        share = trials_per_model(row, plan_models=plan_models)
         for model, counts in (row.get("outcomes_by_model") or {}).items():
             entry = reading(model)
             entry["questions_evaluated"] += 1
+            recorded = sum(int(value) for value in counts.values())
+            # An arm covers a question only when it recorded its whole share
+            # of that question's plan. A question the arm answered once and
+            # then lost to a pause or a stop is not covered, and the page must
+            # not read it as one.
+            if recorded:
+                entry["questions_with_a_response"] += 1
+            if share and recorded >= share:
+                entry["questions_with_every_response"] += 1
+            entry["trials_per_question"] = entry["trials_per_question"] or share
             for name, value in counts.items():
                 entry["counts"][name] = entry["counts"].get(name, 0) + int(value)
                 entry["trials"] += int(value)
@@ -970,6 +1119,9 @@ def render_model_reading(
         "vendor_label": VENDOR_LABELS.get(entry["vendor"] or "", "unknown vendor"),
         "in_plan": bool(entry.get("in_plan", True)),
         "questions_evaluated": entry["questions_evaluated"],
+        "questions_with_a_response": entry["questions_with_a_response"],
+        "questions_with_every_response": entry["questions_with_every_response"],
+        "trials_per_question": entry["trials_per_question"],
         "trials": trials,
         "counts": dict(counts),
         "metrics": metrics,
@@ -1434,6 +1586,9 @@ def evaluator_activity(
         "active_vendors": (watch_state or {}).get("active_vendors") or [],
         "paused_vendors": (watch_state or {}).get("paused_vendors") or {},
         "evaluated_items": len((watch_state or {}).get("evaluated_items") or []),
+        "items_in_flight": list((watch_state or {}).get("items_in_flight") or []),
+        "item_workers": (watch_state or {}).get("item_workers"),
+        "started_at_utc": (watch_state or {}).get("started_at_utc"),
         "skipped_items": (watch_state or {}).get("skipped_items") or {},
     }
 
@@ -2162,6 +2317,8 @@ def benchmark_report(
             "generated_at_utc": _stamp(moment),
             "models": [],
             "questions": [],
+            "coverage": question_coverage([]),
+            "counts_source": "No streaming evaluation journal is selected.",
         }
     rows = read_journal_rows(journal_dir)
     items = latest_item_rows(rows)
@@ -2208,25 +2365,35 @@ def benchmark_report(
         models.append(record)
     activity = evaluator_activity(watch, now=moment)
     availability = "available" if items or watch is not None else "not_started"
+    coverage = question_coverage(rows)
     message = {
         "available": (
-            f"{len(items)} evaluated questions on {len(models)} models."
+            f"{coverage['questions_with_a_response']} questions answered on "
+            f"{len(models)} models, "
+            f"{coverage['questions_with_every_response']} of them with all "
+            f"{coverage['planned_trials_per_question']} responses."
             if items
             else "The streaming evaluator is selected but evaluated no question yet."
         ),
         "not_started": "The streaming evaluator has not run yet.",
     }[availability]
+    counts_source = (
+        f"The last row of each question in {journal_dir}/{JOURNAL_FILENAME}: "
+        f"{coverage['question_rows']} rows over "
+        f"{coverage['questions_in_journal']} questions. A question is complete "
+        "when its recorded trials reach its planned trials, not when its row "
+        "carries the complete flag."
+    )
     return {
         "availability": availability,
         "message": message,
         "generated_at_utc": _stamp(moment),
         "journal_dir": str(journal_dir),
-        "questions_evaluated": len(items),
-        "questions_complete": sum(1 for row in items if row.get("complete")),
-        "trials_recorded": sum(
-            int(((row.get("evaluation") or {}).get("recorded_trials")) or 0)
-            for row in items
-        ),
+        "questions_evaluated": coverage["questions_with_a_response"],
+        "questions_complete": coverage["questions_with_every_response"],
+        "trials_recorded": coverage["trials_recorded"],
+        "coverage": coverage,
+        "counts_source": counts_source,
         "models": models,
         "questions": [_question_cost_row(row) for row in items[-maximum_rows:]][::-1],
         "questions_truncated": max(len(items) - maximum_rows, 0),
