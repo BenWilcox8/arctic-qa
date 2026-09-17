@@ -98,6 +98,7 @@ The benchmark measures how often a model abstains when no listed option is corre
 | `arctic-abstention-streaming-eval-r1/` | The concurrent 8-model plan, the streaming evaluator, and the omitted token-count incident in section 7. |
 | `arctic-eval-503-release-r1/` | An HTTP 503 with no usage, and the reviewed release of that ambiguous charge. |
 | `arctic-jev-prescreen-r1/` | The TypeSafe Jev prescreen: the calibration of the ranking against this run own outcomes, the cost of scanning the frozen corpus, the unpublished token limit the paid calls uncovered, and the first production measurement of the reordered pipeline. |
+| `arctic-ledger-parallel-r1/` | The parallel bookkeeping store of the shared paid-call ledger: the measurement that attributed the per-call cost to durable writes on a rotating disk, the snapshot-plus-journal design, the live migration, the cutover to sixteen paper workers under policy v12, the adversarial audit and the state-database incident. |
 
 ## Cost guard
 
