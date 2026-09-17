@@ -175,9 +175,73 @@ It never did.
 Measured over the 3,257 Claude receipts of `streaming-r11` that carry both a submitted and a completed time, the peak overlap is exactly 3, which is the policy limit.
 Only the Gemini arm needed a gate, because its limit lives in the shared paid-call ledger and `effective_concurrency` read it per question.
 
+## The third defect: a binary being replaced under a trial
+
+The Claude arm of the unit on `f160074` scored for six minutes and paused
+again at 17:32:03 UTC, with a reason nobody had seen before:
+
+```json
+{"event":"vendor_paused","reason":"failed: claude printed no result object",
+ "vendor":"anthropic_claude_code"}
+```
+
+The receipt's `stderr_tail` names it: `OSError: [Errno 8] Exec format error`.
+The binary was being rewritten at that moment; its mtime is 17:31 UTC and it answers `--version` normally now.
+The child never ran, the trial was 0.075 seconds long, nothing was asked and nothing was charged.
+
+Two faults meet there.
+The probe before the row asks whether the path is executable, which a half-written file still is, so only the run-time result can see this.
+And `_parsed_answer` read `int(returncode or 0)`, which made a child that reported no exit status at all look like a clean one and hid the transport's own error behind the parser's.
+
+`is_harness_spawn_failure` already named a result with no exit status, and now names the exec-format error by text as well.
+`answer` treats a child that never ran and a child that never received its prompt alike: `errors.HarnessUnavailableError`, waited out inside the trial and left pending, with `SubscriptionLedger.abandon` dropping the row and writing no receipt.
+A None exit status is no longer coerced to a zero one.
+
+## The three windows
+
+Each window runs from its own relaunch, with 8 questions in flight.
+
+| Snapshot | Window (UTC) | Gemini trials | Claude trials | `vendor_stopped_on_this_item` | Vendor pauses |
+| --- | --- | --- | --- | --- | --- |
+| `c1fe938` | 17:10:20 to 17:24:03 | 148 | 22 | 2, both the per-item repeat cap | 1, the provider refusal |
+| `f160074` | 17:26:11 to 17:36:37 | 46 | 84 | none | 1, the binary being replaced |
+| `45e1769` | 17:37:18 to 17:52:20 | 0, nothing owed | 151 | none | none |
+
+No refusal of the paid-call concurrency limit was recorded after 17:04:32 UTC, which is on the snapshot before the first of these.
+The two repeat-cap events are the evaluation policy's `maximum_calls_per_item_condition_model_arm`, which this task does not touch: that refusal is recorded as a response, so the trial leaves the owed set and the cap is self-limiting rather than a loop. Both questions it names now hold all 48 of their rows, 10 and 9 of them the cap.
+
+The Gemini arm ran at 648 trials an hour in the first window, against the 343 an hour that `research/arctic-eval-reopen-r1/report.md` measured on the snapshot before it.
+
+## What is left
+
+`eval-finished.sh` at 17:53 UTC:
+
+```
+finished: 194 of 195 accepted questions hold all 48 responses; 1 cannot be
+cleared by the reopen rule: aqa-7f09e4bdf6bac5c50d4c holds 40 of 48 and its
+run directory belongs to run id abstention-stream-r10-aqa-7f09e4bdf6bac5c50d4c;
+100 recorded responses hold no provider answer
+```
+
+No question owes a trial any arm can run.
+The one shortfall is the question of another run id that `research/arctic-eval-reopen-r1/report.md` already named; finishing it needs a pass bound to the `streaming-r10` run id and work directory, which is its own reviewed authorization and the captain's to open.
+
+Of the 100 recorded responses that hold no provider answer, 16 are the paid-call concurrency refusal of this defect and 7 more were recorded between 16:43 and 17:04 UTC before the fix landed. They are spent: the refusal is a recorded row, and the no-retry contract never asks a recorded trial again. Only the trials the refusal left undispatched could be, and were, re-opened.
+
+## The re-opens
+
+| Time (UTC) | Batch | Questions | Trials |
+| --- | --- | --- | --- |
+| 17:10:15 | what the concurrency refusal stranded | 12 | 60 |
+| 17:26:06 | what the provider refusal stranded | 11 | 115 |
+| 17:36:58 | what the replaced binary stranded | 12 | 151 |
+
+Each one uses `reopen-stranded-questions.py` of `research/arctic-eval-reopen-r1/` unchanged, under its four bounds.
+
 ## Tests
 
 - `tests/test_phase_scoped_slots.py`: the deferring caller hears the refusal, nothing is written, the row stays `counting`, and the next attempt of the same request key runs under the same authorization; both scheduling reasons defer and every other refusal is still recorded; the default broker is unchanged.
+- `tests/test_abstention_subscription.py`: a provider refusal is an answer and never stops the arm; a harness that could not be started and one that never received its prompt record nothing and leave no ledger row or receipt; a harness that printed nothing is still a failure; the parser reads a refusal as a completed call and every other error as a failure.
 - `tests/test_abstention_plan.py`: the full slots are a pre-provider refusal, the trial is left pending and the next pass runs exactly it; one gate holds four questions under a limit of three, and without the gate the wave reaches the broker whole.
 - `tests/test_ledger_proof_cost.py`: the evaluator's own factory sets both flags.
 - Also green: `tests/test_abstention_watch.py`, `tests/test_abstention_run.py`, `tests/test_abstention_broker.py`, `tests/test_abstention_subscription.py`, `tests/test_broker_provider.py`, `tests/test_broker_operation_lock_wait.py`.
