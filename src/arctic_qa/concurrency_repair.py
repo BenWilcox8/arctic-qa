@@ -94,6 +94,48 @@ def busy_fault_call_records(db: Database, *, campaign_id: str) -> list[dict[str,
     return rows
 
 
+def clear_busy_progress_rows(
+    progress_file: Path, *, apply: bool = False
+) -> dict[str, Any]:
+    """Drop the progress row of every paper the operation lock refused.
+
+    The pipeline trace reads the progress row before the stored evidence, so a
+    row that names the refusal keeps printing it on the website after the
+    records behind it are gone. The paper has no row at all until the next start
+    reaches it, which is what a paper waiting to be analysed looks like.
+    """
+    report: dict[str, Any] = {
+        "schema": REPAIR_SCHEMA,
+        "action": "clear-busy-progress-rows",
+        "progress_file": str(progress_file),
+        "applied": bool(apply),
+        "generated_at_utc": now(),
+        "removed": 0,
+        "papers": [],
+    }
+    if not progress_file.is_file():
+        return report
+    progress = json.loads(progress_file.read_text(encoding="utf-8"))
+    rows = progress.get("recent_papers")
+    if not isinstance(rows, list):
+        return report
+    kept = [
+        row
+        for row in rows
+        if not (isinstance(row, dict) and row.get("final_reason") == BUSY_ERROR_CLASS)
+    ]
+    report["papers"] = [
+        str(row.get("paper_id"))
+        for row in rows
+        if isinstance(row, dict) and row.get("final_reason") == BUSY_ERROR_CLASS
+    ]
+    report["removed"] = len(rows) - len(kept)
+    if apply and report["removed"]:
+        progress["recent_papers"] = kept
+        atomic_json(progress_file, progress)
+    return report
+
+
 def clear_busy_faults(
     db: Database,
     *,

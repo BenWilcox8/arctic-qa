@@ -1646,6 +1646,12 @@ def _repair_concurrency_faults(args, paths: DataPaths, db: Database) -> dict[str
             campaign_id=args.campaign_id,
             apply=args.apply,
         )
+        if args.streaming_progress_file:
+            report["clear_busy_progress_rows"] = (
+                concurrency_repair.clear_busy_progress_rows(
+                    args.streaming_progress_file.resolve(), apply=args.apply
+                )
+            )
     if args.action in {"backfill-completion-dates", "both"}:
         report["backfill_completion_dates"] = (
             concurrency_repair.backfill_completion_dates(

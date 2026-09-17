@@ -301,6 +301,42 @@ def test_the_repair_clears_every_lock_refusal_and_nothing_else(
     assert record["state"] == "incomplete_infra"
 
 
+def test_the_repair_drops_the_progress_row_of_a_refused_paper(
+    tmp_path: Path,
+) -> None:
+    """The website reads the progress row first, so the row goes too."""
+    progress_file = tmp_path / "progress.json"
+    progress_file.write_text(
+        json.dumps(
+            {
+                "recent_papers": [
+                    {
+                        "paper_id": "10.1/one",
+                        "final_state": "candidate_processing_fault",
+                        "final_reason": "BrokerOperationBusyError",
+                    },
+                    {
+                        "paper_id": "10.1/two",
+                        "final_state": "rejected",
+                        "final_reason": "finding_span_unusable",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    dry = concurrency_repair.clear_busy_progress_rows(progress_file)
+    assert dry["removed"] == 1
+    assert dry["papers"] == ["10.1/one"]
+    assert len(json.loads(progress_file.read_text())["recent_papers"]) == 2
+
+    concurrency_repair.clear_busy_progress_rows(progress_file, apply=True)
+
+    rows = json.loads(progress_file.read_text(encoding="utf-8"))["recent_papers"]
+    assert [row["paper_id"] for row in rows] == ["10.1/two"]
+
+
 def test_the_repair_is_idempotent(tmp_path: Path) -> None:
     _, database = _open_database(tmp_path)
     _busy_fault(
