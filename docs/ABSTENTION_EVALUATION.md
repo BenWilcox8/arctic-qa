@@ -659,6 +659,18 @@ or charged, and the next start meets its own key and reuses it.
 
 Give the unit a `TimeoutStopSec` longer than one trial of the slowest vendor.
 
+"The calls already on the wire finish" is a property of the unit as well as of the code.
+A subscription call is a child process, so the unit must run at `KillMode=mixed`.
+At the systemd default, `KillMode=control-group`, `systemctl --user stop` sends `SIGTERM` to the whole control group and kills the Claude Code and Codex children mid-call.
+The transport reports the killed child as an exit (143, or -15), the trial is recorded as a failed response, the arm stops inside that question, and the question is closed at its partial count.
+Each stop then costs the questions in flight: two stops of the unit closed 16 questions short on 2026-09-17.
+
+Start it so:
+
+    systemd-run --user --unit=arctic-abstention-stream-r3 \
+      --property=KillMode=mixed --property=TimeoutStopSec=10min \
+      --property=Nice=10 --working-directory="$APP" <launcher>
+
 ### Paused models
 
 A model can be paused without a stop of the run.

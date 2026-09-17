@@ -103,6 +103,7 @@ The benchmark measures how often a model abstains when no listed option is corre
 | `arctic-eval-parallel-items-r1/` | Several questions scored at once: the measured rates per arm of the streaming evaluator at eight questions in flight, the captain's quota floors of 2026-09-17, and the extrapolation of the dataset to the 13:00 and 14:00 UTC deadlines. |
 | `arctic-ch3-concurrency-75-r1/` | Seventy-five papers in flight for one night: policy v15, the tranche a rate transition names once the ceiling has moved, the measured window that kept or refused the rate, and the settled stop that ends generation at 13:45 UTC. |
 | `arctic-eval-ledger-section-r1/` | The exclusive ledger section of the streaming evaluator: the receipts listing it kept exact because it said nothing about sharing the ledger, the whole-ledger proof and compaction it ran once a question, the share of every wave that keeps each arm busy, the three stops that took the Gemini arm down after each cut-over, and why the live rate windows are not paired. |
+| `arctic-eval-busy-strand-r1/` | The refusal the provider never saw: the busy exclusive lock that closed a question at its partial count while the journal still called it complete, the vanished Claude Code binary that turned an arm off for good, the bounded wait that leaves such a trial pending, the 89 questions already stranded and the shape of a bounded reopen. |
 
 ## Cost guard
 
