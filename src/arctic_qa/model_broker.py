@@ -5039,10 +5039,26 @@ class SharedGeminiBroker:
         per-minute window stays shared: a collision there is transient, and
         ``execute`` waits for it.
         """
-        evaluation_inflight = int(cls._evaluation_totals(ledger)["inflight"])
+        evaluation_inflight = cls._evaluation_inflight(ledger)
         if phase == EVALUATION_PHASE:
             return evaluation_inflight
         return max(int(ledger["inflight"]) - evaluation_inflight, 0)
+
+    @staticmethod
+    def _evaluation_inflight(ledger: dict[str, Any]) -> int:
+        """The evaluation requests on the wire.
+
+        ``_evaluation_totals`` answers this too, and parses a Decimal for every
+        evaluation row of the whole history to do it: 12 ms of the
+        reservation's exclusive section at 889 evaluation rows, growing with
+        the run. The reservation asks only how many are in flight.
+        """
+        return sum(
+            1
+            for request in ledger["requests"].values()
+            if request.get("phase") == EVALUATION_PHASE
+            and request.get("state") == "submitted"
+        )
 
     @staticmethod
     def _evaluation_totals(ledger: dict[str, Any]) -> dict[str, Any]:

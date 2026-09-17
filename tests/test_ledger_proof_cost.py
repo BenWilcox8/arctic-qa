@@ -266,6 +266,47 @@ def test_one_paid_call_takes_three_exclusive_sections(tmp_path: Path) -> None:
     assert counted == [[]], counted
 
 
+def test_the_reservation_counts_the_evaluation_calls_the_totals_count() -> None:
+    """The cheap count is the same number the full evaluation totals report.
+
+    ``_evaluation_totals`` parses a Decimal for every evaluation row of the
+    whole history, which was 12 ms of the reservation's exclusive section at
+    889 rows. The reservation asks only how many are in flight.
+    """
+    ledger = {
+        "requests": {
+            "a": {
+                "phase": "benchmark_evaluation",
+                "state": "submitted",
+                "reserved_usd": "0.01",
+            },
+            "b": {
+                "phase": "benchmark_evaluation",
+                "state": "completed",
+                "reserved_usd": "0.01",
+                "actual_cost_usd": "0.005",
+            },
+            "c": {
+                "phase": "benchmark_evaluation",
+                "state": "orphaned_no_replay",
+                "reserved_usd": "0.02",
+            },
+            "d": {
+                "phase": "away_production",
+                "state": "submitted",
+                "reserved_usd": "0.03",
+            },
+            "e": {"state": "submitted", "reserved_usd": "0.04"},
+        }
+    }
+    totals = SharedGeminiBroker._evaluation_totals(ledger)
+    assert SharedGeminiBroker._evaluation_inflight(ledger) == int(totals["inflight"])
+    assert SharedGeminiBroker._evaluation_inflight(ledger) == 1
+    ledger["inflight"] = 3
+    assert SharedGeminiBroker._phase_inflight(ledger, "away_production") == 2
+    assert SharedGeminiBroker._phase_inflight(ledger, "benchmark_evaluation") == 1
+
+
 def test_the_fifty_at_once_rate_pair_is_registered_and_nothing_between_it(
     tmp_path: Path,
 ) -> None:

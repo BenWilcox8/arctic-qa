@@ -74,9 +74,8 @@ it costs", is the contract. Four rules:
   is bounded and is far tighter than the full pass, which runs every
   `IMMUTABLE_EVENT_REVALIDATION_SECONDS` (300 s) and re-lists first.
 - Everything derived from one listing is derived once (`_listing_derived`):
-  the name filters, the request key of every paid-call receipt, and the
-  accepted item of every family with its supersession chains, which is 96 file
-  reads and their hashes.
+  the name filters and the request key of every paid-call receipt. The
+  accepted-item proof is not one of them; section 6 says why.
 - No pattern walk of the receipts directory is on the call path.
 - A row is proved against its immutable events again only when the store
   reports it moved. That is the same tracking the money proof of the delta
@@ -138,11 +137,39 @@ which the tranche rule of `_validate_immutable_events` must name in its own
 list; the parallel transition was refused at 04:53 UTC on 2026-09-17 for
 exactly that omission.
 
-## 6. The staged relaunch
+## 6. The false halt of 07:40:51
+
+The first relaunch, at 32 paper threads on `8c11af0`, ran for five minutes and
+then ended with `the shared paid-call ledger has an integrity halt`. The halt
+said `the accepted-item ledger differs from immutable events`.
+
+The ledger was consistent. The full row-by-row money proof and the full
+immutable-event pass both pass on it, at 9,089 rows. The defect was in this
+change: the accepted item of every family was derived once per receipts
+listing, and a concurrent broker re-lists on a timer. The receipt of an
+accepted family and the ledger row that names it move together, so for a few
+seconds the row was there and the receipt was not, and the comparison failed.
+
+A read that raises writes an integrity halt, which stops every caller of the
+ledger. The producer died with ten calls in flight; those ten reservations are
+orphans, which the next start recovers, and nothing was charged twice.
+
+Fixed on `3fe649d`: the accepted-item answer is derived, against a listing
+taken again, whenever the ledger's own accepted map differs from the map that
+was proved. A family is accepted a few times an hour, so the 96 receipt reads
+stay off the call path, and the listing can never be older than the row it is
+proving. The name filters and the request-key scan keep the listing cache,
+because a receipt this process wrote belongs to a row it has already
+registered.
+
+The rule this leaves: **a receipt the broker writes together with the ledger
+row that names it is never proved from a cached listing.**
+
+## 7. The staged relaunch
 
 Recorded below as each stage runs.
 
-## 7. What was not done, and why
+## 8. What was not done, and why
 
 **The hot journal and lock were not moved to the local SSD.** The brief asked
 for it, and the measurement says it is not where the serialised cost is. The
