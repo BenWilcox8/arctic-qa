@@ -358,7 +358,10 @@ about 13 papers an hour.
 
 The last window is 15 minutes from 03:00:00 to 03:15:00 UTC: 101 paid requests
 and 43 papers screened, with a median call of 8 seconds. The producer ran the
-window with no exit.
+window with no exit, and went on to run 67 minutes without one, from 02:59:45
+until another task relaunched it on its own snapshot at about 04:07. Over that
+whole stretch the ledger records 403 calls, 168 of them overlapping an earlier
+call, a peak of 3 in flight and a median call of 9 seconds.
 
 Faults in that window: one, `OperationalError: database is locked`, contained
 against one paper as designed. The state database is written by four paper
