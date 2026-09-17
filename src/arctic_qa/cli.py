@@ -473,6 +473,11 @@ def parser() -> argparse.ArgumentParser:
     # target for the chapter 3 production run; it rises only as far as the
     # observed provider limits allow, and the policy caps still bound it.
     stream.add_argument("--paper-workers", type=int, default=4)
+    stream.add_argument(
+        "--jev-ranking-file",
+        type=Path,
+        help="A live Jev prescreen ranking. The best scored paper still to be\n        analysed is picked up first, and the file is re-read as it changes.\n        Without it the frozen order is the pick-up order.",
+    )
     stream.add_argument("--option-workers", type=int, default=4)
     stream.add_argument("--resume-distractors-item-id")
     stream.add_argument("--resume-distractors-paper-id")
@@ -1705,6 +1710,7 @@ def _stream(args, paths: DataPaths, db: Database) -> dict[str, Any]:
         role_profile=args.role_profile,
         code_commit=args.code_commit,
         paper_workers=args.paper_workers,
+        jev_ranking_file=args.jev_ranking_file,
         option_workers=args.option_workers,
     )
 

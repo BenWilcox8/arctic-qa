@@ -395,6 +395,108 @@ _DEPENDENT_ROUTING_REASONS = {
 }
 
 
+# The Jev prescreen writes a ranking while it scans, so the order of the
+# papers still to analyse improves during a run. `JEV_LIVE_RANKING_SCHEMA`
+# names the file the prescreen writes; `docs/JEV_PRESCREEN.md` holds its
+# contract. Without such a file the pick-up order is the frozen order, which
+# is what every run before this one did.
+JEV_LIVE_RANKING_SCHEMA = "jev-live-ranking-v1"
+
+
+class PaperPicker:
+    """Hand out the next paper to analyse, best ranked first.
+
+    The picker owns three rules the captain asked for. A scored paper is
+    always taken before an unscored one. Among scored papers the highest score
+    wins. An unscored paper keeps its frozen position, so a run with no
+    ranking file behaves exactly as it did before.
+
+    A paper is handed out once and never again, which is why `take` holds the
+    lock over both the choice and the record of it.
+    """
+
+    def __init__(
+        self, ready: list[dict[str, Any]], *, ranking_file: Path | None = None
+    ):
+        self._items = {str(item["candidate_key"]): item for item in ready}
+        self._frozen = [str(item["candidate_key"]) for item in ready]
+        self._taken: set[str] = set()
+        self._ranking_file = ranking_file
+        self._fingerprint: tuple[float, int] | None = None
+        self._scores: dict[str, Decimal] = {}
+        self._reloads = 0
+        self._lock = threading.RLock()
+
+    @property
+    def reloads(self) -> int:
+        """How many times a changed ranking file was read."""
+        with self._lock:
+            return self._reloads
+
+    @property
+    def scored(self) -> int:
+        """How many of the papers still to analyse carry a score."""
+        with self._lock:
+            return sum(
+                1 for key in self._frozen if key not in self._taken and key in self._scores
+            )
+
+    def _reload(self) -> None:
+        """Re-read the ranking when its file changed. Cheap when it did not."""
+        if self._ranking_file is None:
+            return
+        try:
+            stat = self._ranking_file.stat()
+        except OSError:
+            return
+        fingerprint = (stat.st_mtime, stat.st_size)
+        if fingerprint == self._fingerprint:
+            return
+        try:
+            document = json.loads(self._ranking_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # The prescreen replaces this file atomically, so a read that
+            # fails is a race with a replacement and never a reason to stop.
+            # The previous scores stand until the next pick-up.
+            return
+        if document.get("schema") != JEV_LIVE_RANKING_SCHEMA:
+            return
+        scores: dict[str, Decimal] = {}
+        for row in document.get("records") or []:
+            key = str(row.get("candidate_key") or "")
+            if not key:
+                continue
+            try:
+                scores[key] = Decimal(str(row["rank_probability"]))
+            except (KeyError, TypeError, ArithmeticError):
+                continue
+        self._scores = scores
+        self._fingerprint = fingerprint
+        self._reloads += 1
+
+    def take(self) -> dict[str, Any] | None:
+        """Return the next paper to analyse, or None when none is left."""
+        with self._lock:
+            self._reload()
+            best_key: str | None = None
+            best_rank: tuple[int, Decimal, int] | None = None
+            for position, key in enumerate(self._frozen):
+                if key in self._taken:
+                    continue
+                score = self._scores.get(key)
+                rank = (
+                    (0, -score, position)
+                    if score is not None
+                    else (1, Decimal(0), position)
+                )
+                if best_rank is None or rank < best_rank:
+                    best_rank, best_key = rank, key
+            if best_key is None:
+                return None
+            self._taken.add(best_key)
+            return self._items[best_key]
+
+
 def run_stream(
     db: Database,
     namespace: Path,
@@ -416,6 +518,7 @@ def run_stream(
     paper_workers: int = 1,
     option_workers: int = 1,
     code_commit: str | None = None,
+    jev_ranking_file: Path | None = None,
 ) -> dict[str, Any]:
     if max_papers < 1:
         raise ValueError("max papers must be at least 1")
@@ -1149,15 +1252,30 @@ def run_stream(
         if access is None or access.get("access_state") != "full_text_ready":
             continue
         ready.append(selected)
+    # The pick-up is dynamic, not a queue fixed at launch: a worker asks the
+    # picker for its next paper only when it frees up, so a ranking the Jev
+    # prescreen writes while this run is walking changes what is analysed next.
+    # Without a ranking file the picker hands out the frozen order, which is
+    # what every run before this one did.
+    picker = PaperPicker(ready, ranking_file=jev_ranking_file)
+
+    def pick_and_process() -> None:
+        while not stop.is_set():
+            selected = picker.take()
+            if selected is None:
+                return
+            process_paper(selected)
+
     if paper_workers > 1 and len(ready) > 1:
         with ThreadPoolExecutor(
             max_workers=paper_workers, thread_name_prefix="paper"
         ) as pool:
-            for future in [pool.submit(process_paper, item) for item in ready]:
+            for future in [
+                pool.submit(pick_and_process) for _ in range(paper_workers)
+            ]:
                 future.result()
     else:
-        for selected in ready:
-            process_paper(selected)
+        pick_and_process()
     if fatal:
         raise fatal[0]
     order = {
@@ -1195,6 +1313,8 @@ def run_stream(
         "concurrency": {
             "paper_workers": paper_workers,
             "option_workers": option_workers,
+            "jev_ranking_file": str(jev_ranking_file) if jev_ranking_file else None,
+            "jev_ranking_reloads": picker.reloads,
         },
         "state": "completed",
         "run_id": run_id,

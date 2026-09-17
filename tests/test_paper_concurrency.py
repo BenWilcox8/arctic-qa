@@ -246,6 +246,10 @@ def test_four_papers_run_at_once_and_match_the_sequential_run(
     assert concurrent["result"]["concurrency"] == {
         "paper_workers": 4,
         "option_workers": 4,
+        # No Jev ranking was given, so the pick-up order is the frozen order
+        # and the picker never read a ranking file.
+        "jev_ranking_file": None,
+        "jev_ranking_reloads": 0,
     }
     # The calls really overlapped; the sequential run never had two in flight.
     assert concurrent["meter"].peak > 1
