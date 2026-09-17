@@ -281,6 +281,138 @@ def test_one_compactor_thread_serves_one_ledger(tmp_path: Path) -> None:
     second.stop_compactor()
 
 
+def test_a_second_broker_starts_from_what_the_process_proved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broker a question must not prove the whole history a question.
+
+    The evaluator builds one broker per question, and its start proved every
+    row against its receipts and stated the final receipt of every terminal
+    row: 2.6 s and 0.24 s at 15,347 rows on 2026-09-17, under the shared
+    ledger lock.
+    """
+    values = fixture(tmp_path, transport=Transport())
+    first = values["broker"]
+    first.concurrent_requests = True
+    first.deferred_snapshot = True
+    for paper in ("p1", "p2", "p3"):
+        execute(first, paper=paper)
+    first._validated_ledger()
+
+    proved: list[str] = []
+    real = SharedGeminiBroker._validate_request_events
+
+    def record(self, ledger, *, request_key, **kwargs):  # type: ignore[no-untyped-def]
+        proved.append(request_key)
+        return real(self, ledger, request_key=request_key, **kwargs)
+
+    monkeypatch.setattr(SharedGeminiBroker, "_validate_request_events", record)
+    second = model_broker.SharedGeminiBroker(
+        policy_file=first.policy_file,
+        price_config_file=first.price_config_file,
+        execution_gate_file=first.execution_gate_file,
+        ledger_file=first.ledger_file,
+        receipts_dir=first.receipts_dir,
+        credential_file=first.credential_file,
+        prior_construction_spend_usd=Decimal("0"),
+        concurrent_requests=True,
+    )
+    # Not one row re-proved, and the custody of the terminal receipts carried
+    # over with it.
+    assert proved == []
+    assert second._custody_proved == first._custody_proved
+    assert second._immutable_events_proved == first._immutable_events_proved
+    # The copies are its own, so one broker never writes into another's proof.
+    assert second._immutable_events_proved is not first._immutable_events_proved
+    assert second._custody_proved is not first._custody_proved
+
+
+def test_a_seeded_broker_still_proves_a_row_that_moved(tmp_path: Path) -> None:
+    """The seed is a starting point, never a pass. Every row is compared.
+
+    A seeded broker takes the signature of every row and re-proves the ones
+    whose bytes differ from the ones this process proved, which is the same
+    check a warm broker makes between two reads.
+    """
+    values = fixture(tmp_path, transport=Transport())
+    first = values["broker"]
+    first.concurrent_requests = True
+    first.deferred_snapshot = True
+    execute(first, paper="p1")
+    first._validated_ledger()
+
+    # A peer moves one row behind the process's back.
+    peer = ledger_store.LedgerStore(first.ledger_file)
+    state = peer.load()
+    moved = sorted(state["requests"])[0]
+    state["requests"][moved]["run_id"] = "another-run"
+    peer.commit(state, now="2026-09-17T12:00:00Z")
+    peer.flush()
+
+    with pytest.raises(ValueError, match="integrity"):
+        model_broker.SharedGeminiBroker(
+            policy_file=first.policy_file,
+            price_config_file=first.price_config_file,
+            execution_gate_file=first.execution_gate_file,
+            ledger_file=first.ledger_file,
+            receipts_dir=first.receipts_dir,
+            credential_file=first.credential_file,
+            prior_construction_spend_usd=Decimal("0"),
+            concurrent_requests=True,
+        )
+
+
+def test_a_seeded_broker_still_takes_the_full_pass_when_it_is_due(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The seed carries the clock of the last full pass, never resets it.
+
+    The custody of a terminal receipt is proved with the rows, and the full
+    pass every IMMUTABLE_EVENT_REVALIDATION_SECONDS is what catches a receipt
+    taken away behind this process's back. A seed that reset that clock would
+    push the bound out for ever.
+    """
+    values = fixture(tmp_path, transport=Transport())
+    first = values["broker"]
+    first.concurrent_requests = True
+    first.deferred_snapshot = True
+    execute(first, paper="p1")
+    first._validated_ledger()
+    assert first._immutable_events_proved_at is not None
+
+    second = model_broker.SharedGeminiBroker(
+        policy_file=first.policy_file,
+        price_config_file=first.price_config_file,
+        execution_gate_file=first.execution_gate_file,
+        ledger_file=first.ledger_file,
+        receipts_dir=first.receipts_dir,
+        credential_file=first.credential_file,
+        prior_construction_spend_usd=Decimal("0"),
+        concurrent_requests=True,
+    )
+    assert second._immutable_events_proved_at == first._immutable_events_proved_at
+
+    # When the bound arrives, the full pass runs over every row and clears the
+    # seeded custody set, so a receipt taken away behind this process's back is
+    # caught there exactly as it always was.
+    proved: list[str] = []
+    real = SharedGeminiBroker._validate_request_events
+
+    def record(self, ledger, *, request_key, **kwargs):  # type: ignore[no-untyped-def]
+        proved.append(request_key)
+        return real(self, ledger, request_key=request_key, **kwargs)
+
+    monkeypatch.setattr(SharedGeminiBroker, "_validate_request_events", record)
+    second._immutable_events_proved_at = None
+    second._validated_ledger()
+    assert proved == sorted(
+        ledger_store.read_ledger(second.ledger_file)["requests"]
+    ), proved
+    # The seeded custody is gone with it, so the next recovery states the final
+    # receipt of every terminal row again and a receipt taken away is caught.
+    assert second._custody_proved == set()
+
+
 def test_a_warm_read_replays_only_the_rows_that_moved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

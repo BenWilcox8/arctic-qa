@@ -55,6 +55,7 @@ from arctic_qa.abstention_watch import (
     wave_order,
 )
 from arctic_qa.cli import main as cli_main
+from arctic_qa.errors import BrokerOperationBusyError
 from arctic_qa.model_broker import (
     EVALUATION_CEILING_REASON,
     EVALUATION_ITEM_REPEAT_REASON,
@@ -2576,6 +2577,59 @@ def test_one_poll_cycle_scores_a_bounded_number_of_questions(tmp_path: Path) -> 
         item_workers=2,
     )
     assert [row["item_id"] for row in again["items_this_invocation"]] == items[8:]
+
+
+def test_a_busy_lock_around_the_plan_never_ends_the_watch(tmp_path: Path) -> None:
+    """A bounded lock wait belongs to one question, wherever it is raised.
+
+    A vendor that reports the busy lock is already item-scoped. Raised in the
+    frame around the plan instead, it was this question's error, and one such
+    error halts the wave and ends the watch non-zero. Every question of the
+    wave raised it at 12:14:20 UTC on 2026-09-17 and the unit exited 1.
+    """
+    import arctic_qa.abstention_watch as module
+
+    db = state_db(tmp_path / "db", chapter3=["aqa-a", "aqa-b"])
+    ledger_file = construction_ledger(
+        tmp_path, {"family-aqa-a": ["0.01"], "family-aqa-b": ["0.01"]}
+    )
+    auth = authorization(tmp_path, db, maximum_items=4)
+    work = tmp_path / "busy"
+    events: list[dict] = []
+    seen: list[str] = []
+
+    original = module.evaluate_item
+
+    def busy_first(*, item_id: str, **changes):  # type: ignore[no-untyped-def]
+        seen.append(item_id)
+        if len(seen) == 1:
+            raise BrokerOperationBusyError(
+                "another paid broker operation is active"
+            )
+        return original(item_id=item_id, **changes)
+
+    module.evaluate_item = busy_first  # type: ignore[assignment]
+    try:
+        result = scripted_watch(
+            db=db,
+            work_dir=work,
+            ledger_file=ledger_file,
+            authorization_file=auth,
+            item_workers=1,
+            log=events.append,
+        )
+    finally:
+        module.evaluate_item = original  # type: ignore[assignment]
+
+    # The watch did not end, and the wave took its other question.
+    assert result["errors"] == []
+    assert seen == ["aqa-a", "aqa-b"]
+    contained = [row for row in events if row["event"] == "item_lock_busy"]
+    assert [row["item_id"] for row in contained] == ["aqa-a"]
+    assert [row for row in events if row["event"] == "item_failed"] == []
+    # The question it belongs to keeps its place: it has no journal row, so a
+    # later pass takes it up and runs the whole plan on it.
+    assert "aqa-a" not in {row["item_id"] for row in CostJournal(work).item_rows()}
 
 
 def test_a_full_slot_or_minute_belongs_to_one_question() -> None:

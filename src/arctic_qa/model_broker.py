@@ -458,6 +458,76 @@ def _claim_ledger_compactor(ledger_file: Path, owner: Any) -> bool:
         return True
 
 
+class _ProcessProof:
+    """What one process has already proved about one ledger.
+
+    Every field is a pure function of the ledger bytes and the receipt files,
+    which are immutable, so a second broker of the same ledger in the same
+    process starts from them instead of proving the whole history again.
+
+    Nothing here is trusted blindly. A seeded broker still takes the signature
+    of every row and re-proves any row whose bytes differ from the ones this
+    process proved, which is the same check a warm broker makes between two
+    reads. The custody of terminal receipts keeps the bound it always had: the
+    full pass every ``IMMUTABLE_EVENT_REVALIDATION_SECONDS`` clears it, so a
+    receipt taken away behind this process's back is still caught there.
+    """
+
+    __slots__ = (
+        "proved",
+        "context",
+        "proved_at",
+        "evidence",
+        "custody",
+        "accepted",
+        "listing",
+        "derived",
+    )
+
+    def __init__(self, broker: Any) -> None:
+        self.proved = broker._immutable_events_proved
+        self.context = broker._immutable_events_context
+        self.proved_at = broker._immutable_events_proved_at
+        self.evidence = broker._ledger_evidence_proved
+        self.custody = broker._custody_proved
+        self.accepted = broker._accepted_events_proved
+        self.listing = broker._receipt_listing
+        self.derived = broker._receipt_derived
+
+
+_PROCESS_LEDGER_PROOFS: dict[Path, _ProcessProof] = {}
+
+
+def _publish_ledger_proof(ledger_file: Path, broker: Any) -> None:
+    """Offer this broker's proof to the next broker of the same ledger."""
+    with _PROCESS_LEDGER_LOCK:
+        _PROCESS_LEDGER_PROOFS[ledger_file] = _ProcessProof(broker)
+
+
+def _seed_ledger_proof(ledger_file: Path, broker: Any) -> bool:
+    """Start this broker from what the process already proved. Hold the ledger lock.
+
+    The caller holds the shared ledger lock, which is what serialises the
+    brokers of one process against each other, so the copies below are taken
+    while nothing mutates them.
+    """
+    with _PROCESS_LEDGER_LOCK:
+        held = _PROCESS_LEDGER_PROOFS.get(ledger_file)
+        if held is None:
+            return False
+        broker._immutable_events_proved = dict(held.proved)
+        broker._immutable_events_context = held.context
+        broker._immutable_events_proved_at = held.proved_at
+        broker._ledger_evidence_proved = held.evidence
+        broker._custody_proved = set(held.custody)
+        broker._accepted_events_proved = (
+            dict(held.accepted) if held.accepted is not None else None
+        )
+        broker._receipt_listing = held.listing
+        broker._receipt_derived = dict(held.derived)
+    return True
+
+
 def _release_ledger_compactor(ledger_file: Path, owner: Any) -> None:
     with _PROCESS_LEDGER_LOCK:
         if _PROCESS_LEDGER_COMPACTORS.get(ledger_file) is owner:
@@ -3181,6 +3251,10 @@ class SharedGeminiBroker:
                 # same two files: the snapshot and the journal were 60 MB on
                 # 2026-09-17 and the evaluator started a broker a question.
                 self._validate_initial_identity(identity, self._store.read())
+                # What this process already proved about this ledger, if
+                # anything. A seeded start still takes the signature of every
+                # row and re-proves the ones that moved.
+                _seed_ledger_proof(self.ledger_file, self)
                 ledger = self._validated_ledger()
                 self._authorize_active_config(identity, ledger)
                 self._publish_status(ledger)
@@ -4117,6 +4191,11 @@ class SharedGeminiBroker:
         self._orphaned_continuation_events(ledger)
 
         self._validate_accepted_item_events(ledger)
+        # The next broker of this ledger in this process starts from here
+        # instead of proving the whole history again. The evaluator builds one
+        # broker a question, and that start cost 2.6 s of row proof and 0.24 s
+        # of receipt custody at 15,347 rows, under the shared ledger lock.
+        _publish_ledger_proof(self.ledger_file, self)
 
     def _http_rejection_settlement_valid(
         self, path: Path, request: dict[str, Any], final: dict[str, Any]

@@ -502,6 +502,11 @@ A few stops are about one question only, and `abstention_watch.ITEM_SCOPED_REASO
 
 A reason belongs in that set only when the refusal reserved nothing, submitted nothing and charged nothing, and says nothing about the next question.
 
+The busy exclusive lock has a second path.
+A vendor reports it as a stop reason, which the set above covers; raised in the frame around the plan instead, it was this question's error, and one question's error halts the wave and ends the watch non-zero.
+Every question of the wave raised it at 12:14:20 UTC on 2026-09-17 and the unit exited 1.
+`run_item` now catches `BrokerOperationBusyError` there, emits an `item_lock_busy` event and leaves the question without a journal row, so a later pass runs its whole plan on it.
+
 ### A question an arm stopped inside
 
 A pause reopens a question.

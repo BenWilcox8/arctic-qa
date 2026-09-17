@@ -92,6 +92,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import db
+from .errors import BrokerOperationBusyError
 
 from .abstention_cost import (
     CostJournal,
@@ -1191,6 +1192,28 @@ def watch(
                 # invocation runs what is missing.
                 should_stop=lambda: stop["now"],
             )
+        except BrokerOperationBusyError as busy:
+            # The exclusive operation lock of the shared ledger stayed held
+            # past the bounded wait. Nothing was reserved, submitted or
+            # charged, and the producer contains the same refusal against one
+            # paper and goes on. It is already item-scoped where a vendor
+            # reports it (`ITEM_SCOPED_REASONS`); here it reached the frame
+            # around the plan instead, and it ended the whole watch: the unit
+            # exited at 12:14:20 UTC on 2026-09-17 with one such error per
+            # question of the wave. So it belongs to this question, the wave
+            # keeps its other questions, and the question keeps its place: it
+            # is not complete, and a later pass runs what is missing.
+            with gate:
+                in_flight.pop(item_id, None)
+                write_state()
+            emit(
+                {
+                    "event": "item_lock_busy",
+                    "item_id": item_id,
+                    "error": f"{type(busy).__name__}: {busy}",
+                }
+            )
+            return
         except BaseException as failure:  # noqa: BLE001 - journalled by the caller
             # `evaluate_item` journals a row for every error of the plan
             # itself. This is the frame around it: the item's own set, gates
