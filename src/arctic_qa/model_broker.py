@@ -310,6 +310,13 @@ OPERATION_LOCK_HEARTBEAT_SECONDS = 30.0
 # A section whose wait and hold are both below this is ordinary and stays out of
 # the log; the run makes thousands of them.
 OPERATION_LOCK_LOG_THRESHOLD_SECONDS = 1.0
+# The immutable-event proof of one ledger row is kept until the row moves, and
+# a full pass over every row runs again at least this often. The proof covers
+# receipts that were written immutable and never change, so replaying it on
+# every one of the seven ledger reads a paid call makes was pure cost: 2.4
+# seconds a read at 5,393 rows and 21,508 receipt files, which is what
+# serialised the four paper threads of the concurrent chapter 3 run.
+IMMUTABLE_EVENT_REVALIDATION_SECONDS = 300.0
 ALLOWED_LIVE_TEST_LIMITS = {(20, 100), (40, 100), (41, 101), (None, None)}
 STREAM_INPUT_BINDING_VERSION = "stream-input-binding-v1"
 TRANSITION_GATE_SUCCESSOR_FIELDS = {
@@ -1488,6 +1495,12 @@ class SharedGeminiBroker:
         # for the whole call.
         self._operation_lock_waits: dict[Any, tuple[str, str, float, float]] = {}
         self._whole_call_operation: dict[int, Any] = {}
+        # The immutable-event proof of each ledger row, by request key, with
+        # the context it was proved under and when the last full pass ran.
+        self._immutable_events_proved: dict[str, str] = {}
+        self._immutable_events_context: tuple[Any, ...] | None = None
+        self._immutable_events_proved_at: float | None = None
+        self._ledger_evidence_proved: tuple[Any, ...] | None = None
         evaluation_files = (
             evaluation_policy_file,
             evaluation_price_config_file,
@@ -2811,14 +2824,42 @@ class SharedGeminiBroker:
         if self._status_observer is not None:
             self._status_observer(self._status_file)
 
+    def _ledger_evidence_fingerprint(self) -> tuple[Any, ...]:
+        """Identify the bytes the immutable-event proof is a proof of.
+
+        The proof is a pure function of the ledger file and of the receipt
+        files beside it, so the same fingerprint carries the same answer. The
+        ledger is hashed, which is 7 milliseconds at 7 MB. The receipts
+        directory is stated, which names every addition and every removal; a
+        change inside an existing receipt does not move it, and that is what
+        the full pass every ``IMMUTABLE_EVENT_REVALIDATION_SECONDS`` is for.
+        """
+        try:
+            stat = os.stat(self.receipts_dir)
+            receipts = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            receipts = (0, 0)
+        return (sha256_file(self.ledger_file), receipts)
+
     def _validated_ledger(self) -> dict[str, Any]:
         if self._integrity_file.exists():
             raise ValueError("the shared paid-call ledger has an integrity halt")
         try:
+            fingerprint = self._ledger_evidence_fingerprint()
             ledger = _read(self.ledger_file)
             self._validate_ledger(ledger)
-            self._validate_immutable_events(ledger)
-            self._validate_active_transition_event(ledger)
+            # The ledger's own consistency is proved on every read, above. The
+            # proof against the receipts on disk is skipped only when nothing
+            # it reads has changed since the last time it ran.
+            stale = (
+                self._immutable_events_proved_at is None
+                or time.monotonic() - self._immutable_events_proved_at
+                >= IMMUTABLE_EVENT_REVALIDATION_SECONDS
+            )
+            if stale or fingerprint != self._ledger_evidence_proved:
+                self._validate_immutable_events(ledger)
+                self._validate_active_transition_event(ledger)
+                self._ledger_evidence_proved = fingerprint
             return ledger
         except Exception as error:
             self._record_integrity_halt(error)
@@ -2826,6 +2867,209 @@ class SharedGeminiBroker:
             raise ValueError(
                 f"the shared paid-call ledger failed integrity validation: {error}"
             ) from error
+
+    def _validate_request_events(
+        self,
+        ledger: dict[str, Any],
+        *,
+        request_key: str,
+        request: dict[str, Any],
+        base_fields: tuple[str, ...],
+        allowed_pairs: set[tuple[str, str]],
+        initial_pair: tuple[str, str],
+        transition_events_by_pair: dict[tuple[str, str], set[str]],
+        reconciliation_events: dict[str, tuple[Path, dict[str, Any]]],
+    ) -> None:
+        """Prove one ledger row against its immutable events on disk.
+
+        This is the body of the per-request pass of
+        :meth:`_validate_immutable_events`, unchanged. It is a method of its
+        own so the pass can skip a row it has already proved.
+        """
+        self._validate_count_retry_binding(request_key, request, base_fields)
+        resume_receipt_sha256 = request.get("resumed_from_not_submitted_sha256")
+        resumed = resume_receipt_sha256 is not None
+        if resumed:
+            original_path = self.receipts_dir / f"{request_key}.json"
+            if (
+                not re.fullmatch(r"[a-f0-9]{64}", str(resume_receipt_sha256 or ""))
+                or not original_path.is_file()
+                or sha256_file(original_path) != resume_receipt_sha256
+            ):
+                raise ValueError("a resumed request lost its not-submitted receipt")
+            original = _read(original_path)
+            stable_fields = tuple(
+                name
+                for name in base_fields
+                if name
+                not in {
+                    "gate_sha256",
+                    "config_transition_sha256",
+                    "price_config_sha256",
+                    "policy_sha256",
+                }
+            )
+            if (
+                any(original.get(name) != request.get(name) for name in stable_fields)
+                or original.get("state") != "not_submitted"
+                or original.get("reason") not in RESUMABLE_NOT_SUBMITTED_REASONS
+                or original.get("live_call_made") is not False
+                or original.get("config_transition_sha256")
+                != request.get("resumed_from_config_transition_sha256")
+            ):
+                raise ValueError("a resumed request changed its prior identity")
+        request_config_hash = request.get(
+            "price_config_sha256", ledger["price_config_sha256"]
+        )
+        request_policy_hash = request.get("policy_sha256", ledger["policy_sha256"])
+        request_pair = (request_config_hash, request_policy_hash)
+        if request_pair not in allowed_pairs:
+            raise ValueError("a paid-call request uses an unauthorized configuration")
+        transition_hash = request.get("config_transition_sha256")
+        if request_pair == initial_pair:
+            if transition_hash is not None:
+                raise ValueError("an initial-config request has a transition binding")
+        elif transition_hash not in transition_events_by_pair.get(request_pair, set()):
+            raise ValueError(
+                "a paid-call request lacks its authorized config transition"
+            )
+        event_stem = self._request_event_stem(request_key, request)
+        submitted_path = self.receipts_dir / f"{event_stem}.submitted.json"
+        final_path = self.receipts_dir / f"{event_stem}.json"
+        if submitted_path.is_file():
+            submitted = _read(submitted_path)
+            if any(submitted.get(name) != request.get(name) for name in base_fields):
+                raise ValueError("an immutable submitted event changed identity")
+            if request.get("state") in {
+                "submitted",
+                "orphaned_no_replay",
+                "completed",
+                "ambiguous_charge",
+            } and _money(
+                submitted.get("reserved_usd"),
+                "submitted reservation",
+                positive=True,
+            ) != _money(
+                request.get("reserved_usd"), "ledger reservation", positive=True
+            ):
+                raise ValueError("an immutable submitted reservation changed")
+        state = request.get("state")
+        if state not in {
+            "completed",
+            "ambiguous_charge",
+            "count_error",
+            "too_large_not_ready",
+            "not_submitted",
+        }:
+            # The row is not terminal, so it has no final event to prove yet.
+            return
+        if not final_path.is_file():
+            raise ValueError("a terminal paid request lacks its immutable receipt")
+        final = _read(final_path)
+        if any(final.get(name) != request.get(name) for name in base_fields):
+            raise ValueError("an immutable final event changed request identity")
+        count_error_path = (
+            self.receipts_dir / f"{request_key}.count-error-continuation.json"
+        )
+        count_error_sha256 = request.get("count_error_continuation_sha256")
+        if count_error_sha256 is not None:
+            event = _read(count_error_path) if count_error_path.is_file() else {}
+            review_path = Path(str(event.get("review_file") or ""))
+            evidence_path = Path(str(event.get("evidence_file") or ""))
+            # The event binds the count-error receipt of the request key.
+            # A reviewed continuation that authorized a retry keeps that
+            # binding while the request counts again under a later round.
+            reviewed_path = self.receipts_dir / f"{request_key}.json"
+            reviewed = _read(reviewed_path) if reviewed_path.is_file() else {}
+            if (
+                (state != "count_error" and not request.get("count_retry_round"))
+                or not re.fullmatch(r"[a-f0-9]{64}", str(count_error_sha256))
+                or not count_error_path.is_file()
+                or sha256_file(count_error_path) != count_error_sha256
+                or event.get("schema") != COUNT_ERROR_CONTINUATION_SCHEMA
+                or event.get("request_key") != request_key
+                or not reviewed_path.is_file()
+                or event.get("count_error_receipt_sha256") != sha256_file(reviewed_path)
+                or event.get("gate_sha256") != reviewed.get("gate_sha256")
+                or event.get("live_call_made") is not False
+                or event.get("replay_prohibited") is not True
+                or not review_path.is_file()
+                or event.get("review_file_sha256") != sha256_file(review_path)
+                or not evidence_path.is_file()
+                or event.get("evidence_file_sha256") != sha256_file(evidence_path)
+            ):
+                raise ValueError("a count-error continuation event changed")
+        elif count_error_path.is_file():
+            raise ValueError("an unapplied count-error continuation event exists")
+        rejection_path = (
+            self.receipts_dir / f"{request_key}.http-rejection-settlement.json"
+        )
+        rejection_sha256 = request.get("http_rejection_settlement_sha256")
+        if rejection_sha256 is not None:
+            if (
+                state != "completed"
+                or not re.fullmatch(r"[a-f0-9]{64}", str(rejection_sha256))
+                or not rejection_path.is_file()
+                or sha256_file(rejection_path) != rejection_sha256
+                or not self._http_rejection_settlement_valid(
+                    rejection_path, request, final
+                )
+            ):
+                raise ValueError("an http rejection settlement event changed")
+        elif rejection_path.is_file():
+            raise ValueError("an unapplied http rejection settlement event exists")
+        settlement_path = (
+            self.receipts_dir / f"{request_key}.pretransport-settlement.json"
+        )
+        settlement_sha256 = request.get("pretransport_settlement_sha256")
+        if settlement_sha256 is not None:
+            if (
+                state != "completed"
+                or not settlement_path.is_file()
+                or sha256_file(settlement_path) != settlement_sha256
+                or not self._pretransport_settlement_valid(
+                    settlement_path, request, final
+                )
+            ):
+                raise ValueError("a pretransport settlement event changed")
+        elif settlement_path.is_file():
+            raise ValueError("an unapplied pretransport settlement event exists")
+        reconciliation = reconciliation_events.pop(request_key, None)
+        reconciliation_sha256 = request.get("usage_reconciliation_sha256")
+        if reconciliation_sha256 is not None:
+            if state != "completed" or reconciliation is None:
+                raise ValueError("a usage reconciliation event is absent")
+            reconciliation_path, event = reconciliation
+            received_path = self.receipts_dir / f"{event_stem}.received.json"
+            if (
+                not re.fullmatch(r"[a-f0-9]{64}", reconciliation_sha256)
+                or sha256_file(reconciliation_path) != reconciliation_sha256
+                or final.get("state") != "ambiguous_charge"
+                or not received_path.is_file()
+                or event["received_receipt_sha256"] != sha256_file(received_path)
+                or event["ambiguous_receipt_sha256"] != sha256_file(final_path)
+                or event["config_transition_sha256"]
+                != request.get("config_transition_sha256")
+                or event["price_config_sha256"] != request.get("price_config_sha256")
+                or event["normalized_usage"] != request.get("usage")
+                or _money(event["actual_cost_usd"], "reconciled actual cost")
+                != _money(request.get("actual_cost_usd"), "ledger actual cost")
+            ):
+                raise ValueError("a usage reconciliation event changed")
+        elif rejection_sha256 is not None:
+            if reconciliation is not None:
+                raise ValueError("an unapplied usage reconciliation event exists")
+        else:
+            if reconciliation is not None and state != "ambiguous_charge":
+                raise ValueError("an unapplied usage reconciliation event exists")
+            if final.get("state") != state:
+                raise ValueError("an immutable final event changed request state")
+            if state == "completed" and (
+                _money(final.get("actual_cost_usd"), "final actual cost")
+                != _money(request.get("actual_cost_usd"), "ledger actual cost")
+                or final.get("usage") != request.get("usage")
+            ):
+                raise ValueError("an immutable final event changed cost or usage")
 
     def _validate_active_transition_event(self, ledger: dict[str, Any]) -> None:
         path = self._config_transition_event_path
@@ -3032,203 +3276,50 @@ class SharedGeminiBroker:
             "policy_sha256",
             "config_transition_sha256",
         )
+        # A request whose row and whose context are unchanged was proved by
+        # an earlier pass of this same process, and its evidence on disk is
+        # immutable. Re-proving all 5,000 of them on every ledger read cost
+        # about 2.4 seconds, and a paid call reads the ledger about seven
+        # times: 17 seconds of the 25-second admission that serialised the
+        # four paper threads on 2026-09-17. The proof is kept per row and
+        # replayed only for a row that moved, and a full pass runs again every
+        # ``IMMUTABLE_EVENT_REVALIDATION_SECONDS`` whatever the rows say.
+        context = (
+            sha256_file(self._identity_file),
+            initial_pair,
+            tuple(sorted(str(value) for value in transition_authorizations_by_hash)),
+        )
+        full_pass = (
+            self._immutable_events_proved_at is None
+            or time.monotonic() - self._immutable_events_proved_at
+            >= IMMUTABLE_EVENT_REVALIDATION_SECONDS
+            or self._immutable_events_context != context
+        )
+        if full_pass:
+            self._immutable_events_proved = {}
+            self._immutable_events_context = context
+            self._ledger_evidence_proved = None
+        proved = self._immutable_events_proved
         for request_key, request in ledger["requests"].items():
-            self._validate_count_retry_binding(request_key, request, base_fields)
-            resume_receipt_sha256 = request.get("resumed_from_not_submitted_sha256")
-            resumed = resume_receipt_sha256 is not None
-            if resumed:
-                original_path = self.receipts_dir / f"{request_key}.json"
-                if (
-                    not re.fullmatch(r"[a-f0-9]{64}", str(resume_receipt_sha256 or ""))
-                    or not original_path.is_file()
-                    or sha256_file(original_path) != resume_receipt_sha256
-                ):
-                    raise ValueError("a resumed request lost its not-submitted receipt")
-                original = _read(original_path)
-                stable_fields = tuple(
-                    name
-                    for name in base_fields
-                    if name
-                    not in {
-                        "gate_sha256",
-                        "config_transition_sha256",
-                        "price_config_sha256",
-                        "policy_sha256",
-                    }
-                )
-                if (
-                    any(
-                        original.get(name) != request.get(name)
-                        for name in stable_fields
-                    )
-                    or original.get("state") != "not_submitted"
-                    or original.get("reason") not in RESUMABLE_NOT_SUBMITTED_REASONS
-                    or original.get("live_call_made") is not False
-                    or original.get("config_transition_sha256")
-                    != request.get("resumed_from_config_transition_sha256")
-                ):
-                    raise ValueError("a resumed request changed its prior identity")
-            request_config_hash = request.get(
-                "price_config_sha256", ledger["price_config_sha256"]
-            )
-            request_policy_hash = request.get("policy_sha256", ledger["policy_sha256"])
-            request_pair = (request_config_hash, request_policy_hash)
-            if request_pair not in allowed_pairs:
-                raise ValueError(
-                    "a paid-call request uses an unauthorized configuration"
-                )
-            transition_hash = request.get("config_transition_sha256")
-            if request_pair == initial_pair:
-                if transition_hash is not None:
-                    raise ValueError(
-                        "an initial-config request has a transition binding"
-                    )
-            elif transition_hash not in transition_events_by_pair.get(
-                request_pair, set()
-            ):
-                raise ValueError(
-                    "a paid-call request lacks its authorized config transition"
-                )
-            event_stem = self._request_event_stem(request_key, request)
-            submitted_path = self.receipts_dir / f"{event_stem}.submitted.json"
-            final_path = self.receipts_dir / f"{event_stem}.json"
-            if submitted_path.is_file():
-                submitted = _read(submitted_path)
-                if any(
-                    submitted.get(name) != request.get(name) for name in base_fields
-                ):
-                    raise ValueError("an immutable submitted event changed identity")
-                if request.get("state") in {
-                    "submitted",
-                    "orphaned_no_replay",
-                    "completed",
-                    "ambiguous_charge",
-                } and _money(
-                    submitted.get("reserved_usd"),
-                    "submitted reservation",
-                    positive=True,
-                ) != _money(
-                    request.get("reserved_usd"), "ledger reservation", positive=True
-                ):
-                    raise ValueError("an immutable submitted reservation changed")
-            state = request.get("state")
-            if state not in {
-                "completed",
-                "ambiguous_charge",
-                "count_error",
-                "too_large_not_ready",
-                "not_submitted",
-            }:
+            signature = canonical_json(request)
+            if proved.get(request_key) == signature:
+                # The row is the row that was proved. Its reconciliation event
+                # was accounted for by that proof, so it is accounted for here.
+                reconciliation_events.pop(request_key, None)
                 continue
-            if not final_path.is_file():
-                raise ValueError("a terminal paid request lacks its immutable receipt")
-            final = _read(final_path)
-            if any(final.get(name) != request.get(name) for name in base_fields):
-                raise ValueError("an immutable final event changed request identity")
-            count_error_path = (
-                self.receipts_dir / f"{request_key}.count-error-continuation.json"
+            self._validate_request_events(
+                ledger,
+                request_key=request_key,
+                request=request,
+                base_fields=base_fields,
+                allowed_pairs=allowed_pairs,
+                initial_pair=initial_pair,
+                transition_events_by_pair=transition_events_by_pair,
+                reconciliation_events=reconciliation_events,
             )
-            count_error_sha256 = request.get("count_error_continuation_sha256")
-            if count_error_sha256 is not None:
-                event = _read(count_error_path) if count_error_path.is_file() else {}
-                review_path = Path(str(event.get("review_file") or ""))
-                evidence_path = Path(str(event.get("evidence_file") or ""))
-                # The event binds the count-error receipt of the request key.
-                # A reviewed continuation that authorized a retry keeps that
-                # binding while the request counts again under a later round.
-                reviewed_path = self.receipts_dir / f"{request_key}.json"
-                reviewed = _read(reviewed_path) if reviewed_path.is_file() else {}
-                if (
-                    (state != "count_error" and not request.get("count_retry_round"))
-                    or not re.fullmatch(r"[a-f0-9]{64}", str(count_error_sha256))
-                    or not count_error_path.is_file()
-                    or sha256_file(count_error_path) != count_error_sha256
-                    or event.get("schema") != COUNT_ERROR_CONTINUATION_SCHEMA
-                    or event.get("request_key") != request_key
-                    or not reviewed_path.is_file()
-                    or event.get("count_error_receipt_sha256")
-                    != sha256_file(reviewed_path)
-                    or event.get("gate_sha256") != reviewed.get("gate_sha256")
-                    or event.get("live_call_made") is not False
-                    or event.get("replay_prohibited") is not True
-                    or not review_path.is_file()
-                    or event.get("review_file_sha256") != sha256_file(review_path)
-                    or not evidence_path.is_file()
-                    or event.get("evidence_file_sha256") != sha256_file(evidence_path)
-                ):
-                    raise ValueError("a count-error continuation event changed")
-            elif count_error_path.is_file():
-                raise ValueError("an unapplied count-error continuation event exists")
-            rejection_path = (
-                self.receipts_dir / f"{request_key}.http-rejection-settlement.json"
-            )
-            rejection_sha256 = request.get("http_rejection_settlement_sha256")
-            if rejection_sha256 is not None:
-                if (
-                    state != "completed"
-                    or not re.fullmatch(r"[a-f0-9]{64}", str(rejection_sha256))
-                    or not rejection_path.is_file()
-                    or sha256_file(rejection_path) != rejection_sha256
-                    or not self._http_rejection_settlement_valid(
-                        rejection_path, request, final
-                    )
-                ):
-                    raise ValueError("an http rejection settlement event changed")
-            elif rejection_path.is_file():
-                raise ValueError("an unapplied http rejection settlement event exists")
-            settlement_path = (
-                self.receipts_dir / f"{request_key}.pretransport-settlement.json"
-            )
-            settlement_sha256 = request.get("pretransport_settlement_sha256")
-            if settlement_sha256 is not None:
-                if (
-                    state != "completed"
-                    or not settlement_path.is_file()
-                    or sha256_file(settlement_path) != settlement_sha256
-                    or not self._pretransport_settlement_valid(
-                        settlement_path, request, final
-                    )
-                ):
-                    raise ValueError("a pretransport settlement event changed")
-            elif settlement_path.is_file():
-                raise ValueError("an unapplied pretransport settlement event exists")
-            reconciliation = reconciliation_events.pop(request_key, None)
-            reconciliation_sha256 = request.get("usage_reconciliation_sha256")
-            if reconciliation_sha256 is not None:
-                if state != "completed" or reconciliation is None:
-                    raise ValueError("a usage reconciliation event is absent")
-                reconciliation_path, event = reconciliation
-                received_path = self.receipts_dir / f"{event_stem}.received.json"
-                if (
-                    not re.fullmatch(r"[a-f0-9]{64}", reconciliation_sha256)
-                    or sha256_file(reconciliation_path) != reconciliation_sha256
-                    or final.get("state") != "ambiguous_charge"
-                    or not received_path.is_file()
-                    or event["received_receipt_sha256"] != sha256_file(received_path)
-                    or event["ambiguous_receipt_sha256"] != sha256_file(final_path)
-                    or event["config_transition_sha256"]
-                    != request.get("config_transition_sha256")
-                    or event["price_config_sha256"]
-                    != request.get("price_config_sha256")
-                    or event["normalized_usage"] != request.get("usage")
-                    or _money(event["actual_cost_usd"], "reconciled actual cost")
-                    != _money(request.get("actual_cost_usd"), "ledger actual cost")
-                ):
-                    raise ValueError("a usage reconciliation event changed")
-            elif rejection_sha256 is not None:
-                if reconciliation is not None:
-                    raise ValueError("an unapplied usage reconciliation event exists")
-            else:
-                if reconciliation is not None and state != "ambiguous_charge":
-                    raise ValueError("an unapplied usage reconciliation event exists")
-                if final.get("state") != state:
-                    raise ValueError("an immutable final event changed request state")
-                if state == "completed" and (
-                    _money(final.get("actual_cost_usd"), "final actual cost")
-                    != _money(request.get("actual_cost_usd"), "ledger actual cost")
-                    or final.get("usage") != request.get("usage")
-                ):
-                    raise ValueError("an immutable final event changed cost or usage")
+            proved[request_key] = signature
+        if full_pass:
+            self._immutable_events_proved_at = time.monotonic()
 
         if reconciliation_events:
             raise ValueError("a usage reconciliation event lacks a ledger request")

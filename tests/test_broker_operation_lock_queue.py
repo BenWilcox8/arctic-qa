@@ -221,3 +221,94 @@ def test_a_sequential_request_keeps_one_lock_for_the_whole_call(
     assert broker._operation_lock_waits == {}
     handle = model_broker.hold_operation_lock(broker._operation_lock_file)
     handle.close()
+
+
+# The admission itself, which is what serialised the threads.
+
+
+def test_an_unchanged_ledger_is_not_proved_against_its_receipts_again(
+    tmp_path: Path,
+) -> None:
+    """The proof is a pure function of the ledger bytes and the receipts.
+
+    Re-proving 5,393 rows and 21,508 receipt files on every one of the seven
+    ledger reads a paid call makes took 17 seconds of a 25-second admission,
+    and the admission is serialised, so the four paper threads made no more
+    calls a minute than one thread did.
+    """
+    values = _concurrent(tmp_path)
+    broker = values["broker"]
+    execute(broker)
+    proofs: list[int] = [0]
+    original = broker._validate_immutable_events
+
+    def counted(ledger):
+        proofs[0] += 1
+        return original(ledger)
+
+    broker._validate_immutable_events = counted  # type: ignore[method-assign]
+
+    broker._validated_ledger()
+    broker._validated_ledger()
+    broker._validated_ledger()
+
+    assert proofs[0] == 1
+
+
+def test_a_changed_ledger_is_proved_again(tmp_path: Path) -> None:
+    values = _concurrent(tmp_path)
+    broker = values["broker"]
+    execute(broker, paper="p1")
+    broker._validated_ledger()
+    proofs: list[int] = [0]
+    original = broker._validate_immutable_events
+
+    def counted(ledger):
+        proofs[0] += 1
+        return original(ledger)
+
+    broker._validate_immutable_events = counted  # type: ignore[method-assign]
+
+    execute(broker, paper="p2")
+    broker._validated_ledger()
+
+    assert proofs[0] >= 1
+
+
+def test_a_row_that_moved_is_proved_again_and_a_still_row_is_not(
+    tmp_path: Path,
+) -> None:
+    values = _concurrent(tmp_path)
+    broker = values["broker"]
+    execute(broker, paper="p1")
+    broker._validated_ledger()
+    proved = dict(broker._immutable_events_proved)
+    assert proved
+
+    execute(broker, paper="p2")
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+
+    # Every row of the first call is unchanged and keeps its proof; the row of
+    # the second call is new and carries one of its own.
+    assert set(broker._immutable_events_proved) == set(ledger["requests"])
+    for key, signature in proved.items():
+        assert broker._immutable_events_proved[key] == signature
+
+
+def test_a_receipt_that_changes_is_still_caught(tmp_path: Path) -> None:
+    """The proof is skipped, never dropped: a changed receipt still refuses."""
+    values = _concurrent(tmp_path)
+    broker = values["broker"]
+    receipt = execute(broker)
+    broker._validated_ledger()
+    stem = broker.receipts_dir / f"{receipt['request_key']}.json"
+    stored = json.loads(stem.read_text(encoding="utf-8"))
+    stored["actual_cost_usd"] = "9.999999"
+    stem.chmod(0o644)
+    stem.write_text(json.dumps(stored), encoding="utf-8")
+
+    # The receipts directory moved, so the fingerprint no longer holds.
+    broker._immutable_events_proved = {}
+    broker._ledger_evidence_proved = None
+    with pytest.raises(ValueError, match="integrity validation"):
+        broker._validated_ledger()
