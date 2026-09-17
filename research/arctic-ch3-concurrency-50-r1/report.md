@@ -194,6 +194,14 @@ tracks the thread count: 33 at its peak against 32 paper workers, where 16
 workers reached 11. Nobody waits for the lock any more: the mean wait is one
 millisecond.
 
+### What sets the number in flight
+
+The number in flight settles at the length of one call over the serialised
+bookkeeping of one call. At the 8-second median latency and 0.206 s serialised,
+that is 39, and the 32-thread stage measured a peak of 33. The arithmetic the
+predecessor used still holds; only the second number moved, from 2.44 s to
+0.206 s.
+
 ## 8. Machine headroom
 
 Eight cores. During the 32-thread window the producer used 30 to 38 percent of
@@ -212,7 +220,45 @@ locks the journal, not the process), but a second producer process would take
 its cores from the viewer and the evaluator, which are the two that are
 actually using them.
 
-## 9. What was not done, and why
+## 9. The assessment of 100
+
+Written against the measurement, not against the hope.
+
+**50 is the honest ceiling of one producer process today.** The number in
+flight is the length of one call over the serialised bookkeeping of one call.
+The call length is the model's, 8 seconds at the median, and is not ours to
+move. The serialised cost is 0.206 s, so the ceiling is about 39, which is what
+the 32-thread stage measured. More threads past that point queue instead of
+calling, and each extra thread makes every other thread's lock hold longer,
+because the holder shares the interpreter with them.
+
+**100 needs two things, and only one of them is more code.**
+
+1. The serialised cost has to fall to about 0.08 s. What is left in it is not
+   history any more: the immutable-event proof of the rows that moved (12 ms),
+   the money proof of the delta (7 ms) and the commit (7 ms), about 26 ms of
+   real CPU per exclusive section, which 32 peer threads inflate to 120 ms.
+   There is another factor of two or three there, but it is in the money proof
+   itself and each step of it is smaller and riskier than the last.
+2. The threads have to stop starving the lock holder. That is the multiplier,
+   and it is the one worth attacking: the holder of an exclusive section
+   competes for the interpreter with every other paper thread of its process.
+   Splitting the producer into two or three processes over disjoint halves of
+   the Jev ranking does not divide the lock, which is a file lock every process
+   shares, but it does divide the peers the holder competes with. Two processes
+   of 25 threads should hold the lock for about half as long as one process of
+   50, which doubles the ceiling. The store is multi-process safe by design and
+   `arctic-ledger-parallel-r1` proved it under the evaluator.
+
+**Google is not the limit yet, and nobody has seen where it is.** No HTTP 429
+has ever been recorded on this run, at any concurrency, including the 32-thread
+window. The per-model rate at which Gemini begins to throttle is still unknown,
+so it cannot be the argument for or against 100.
+
+So: 50 now, measured. 100 is reachable, by processes rather than threads, and
+it is the next experiment rather than the next line of code.
+
+## 10. What was not done, and why
 
 **The hot journal and lock were not moved to the local SSD.** The brief asked
 for it, and the measurement says it is not where the serialised cost is. The
