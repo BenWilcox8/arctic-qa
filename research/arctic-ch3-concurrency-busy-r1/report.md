@@ -204,13 +204,84 @@ nothing about money moves. The benchmark evaluator (unit
 `arctic-abstention-stream-r3`) was therefore left running, as the start-order
 rule allows.
 
-## 5. The measured window
+## 5. The second fault: the admission, not the lock
+
+The first relaunch cleared the refusals but not the throughput: 2.8 requests a
+minute and 15 papers an hour, against a sequential baseline of about 3 and 13.
+The captain asked what serialises the four threads.
+
+### What the measurement says
+
+Every `[operation-lock]` line of the 01:22 run carries `waited_s=0.00`. No
+thread ever waited for the lock, so the lock is not the serialiser, and it is
+released before the HTTP call. The holds are the finding:
+
+| section | hold |
+| --- | --- |
+| `orphan_recovery` | 4 to 5 s |
+| `count_registration` | 11 to 20 s |
+| `reserve` | 4 to 7 s |
+
+About 25 seconds of admission per paid call, and the admission is serialised by
+design (`_admission_lock`: one admission at a time, N calls on the wire).
+`research/arctic-ch3-concurrency-busy-r1/overlap.py` on the ledger for
+01:25 to 01:58:
+
+```
+calls 97, window 32.9 min, calls_per_minute 2.95,
+peak_in_flight 1, calls_that_overlap_an_earlier_one 0,
+median_call_seconds 8
+```
+
+A call lasts 8 seconds and the admission in front of the next one lasts 25, so
+the call is always over before the next request is admitted. Zero overlap is
+the arithmetic of those two numbers, not a lock held across the call.
+
+### Where the 25 seconds went
+
+Measured against the live ledger (5,393 rows, 7.4 MB; 21,508 receipt files):
+
+| step | cost |
+| --- | --- |
+| read and parse the ledger | 0.08 s |
+| `_validate_ledger` (the ledger's own consistency) | 0.14 s |
+| `_validate_immutable_events` | 2.4 s |
+| `_validate_active_transition_event` | 0.03 s |
+
+`_validate_immutable_events` made 27,606 `stat` calls and read 11,074 receipt
+files, once for every ledger read. A paid call reads the ledger about seven
+times (orphan recovery, the count-retry open, the resume, the count event, the
+reservation, the settlement), so 17 of the 25 seconds were that one function
+proving the same 5,393 rows again.
+
+### The repair
+
+The proof is a pure function of the ledger bytes and of the receipt files
+beside them, and a receipt is written immutable (0444) and never rewritten. So:
+
+- The proof of one row is kept under a signature of that row
+  (`canonical_json` of the ledger entry) and replayed only for a row that
+  moved.
+- The whole proof is skipped while neither the ledger bytes nor the receipts
+  directory has changed (`_ledger_evidence_fingerprint`).
+- A full pass runs on broker construction and again every
+  `IMMUTABLE_EVENT_REVALIDATION_SECONDS` (300 s), so a receipt changed behind
+  the process's back is still caught, within five minutes.
+- `_validate_ledger`, the ledger's own hash and total consistency, still runs
+  on every single read. Nothing about the money is proved less often.
+
+Measured on the live ledger after the change: 1.80 s a read before, 0.75 s
+after a change to the ledger, 0.21 s with none.
+
+Relaunched at 01:58:09 UTC on commit 229d136.
+
+## 6. The measured window
 
 See `activation-state-5653055.json`, key `observation`, in the task data
 directory for the samples and the summary. The sequential baseline is about 3
 requests a minute and about 13 papers an hour.
 
-## 6. Tests
+## 7. Tests
 
 - `tests/test_broker_operation_lock_queue.py`: four paper threads queue for one
   lock and every request completes; a concurrent request waits past the
