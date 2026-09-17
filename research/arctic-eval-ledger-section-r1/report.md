@@ -152,3 +152,32 @@ producer restarted at 10:56 UTC, the ledger was compacted, and the Gemini arm
 has no work in flight.
 The bench numbers above are what this task can measure, and they are the real
 work that the exclusive sections used to do.
+
+## What is left
+
+The broker start still proves every row of the ledger against its receipts:
+2.29 s of the 3.93 s, at 13,309 rows, under the shared ledger lock, once a
+question.
+It is the largest ledger cost the evaluator still pays per question.
+
+The proof is a pure function of the ledger bytes and the receipt files, so one
+process could keep it and every broker of the same ledger could adopt it, as
+the producer's one broker already does across its 75 threads.
+Every `_validated_ledger` call sits inside `self._ledger_lock()`, and that lock
+is an `flock` taken through a new open file description each time, so it
+serializes the threads of one process exactly as it serializes two processes.
+The state to share is the store, `_immutable_events_proved`, its context and
+its clock, `_ledger_evidence_proved`, `_custody_proved`,
+`_accepted_events_proved` and the receipts listing.
+
+This task did not do it.
+Most of those are rebound rather than mutated in place, so sharing them means
+moving them onto one object and reaching them through properties, and a defect
+in that object raises a false integrity halt, which stops the producer and the
+evaluator together.
+That is not a change to make three hours before a deadline, with the producer
+live.
+The alternative that needs no shared state is to stop building a broker per
+question: the only thing that differs per question is the evaluation gate, and
+a gate passed per request rather than held on the broker would let one broker
+serve the whole run.
