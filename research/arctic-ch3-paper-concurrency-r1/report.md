@@ -102,7 +102,42 @@ paper, about 13 papers an hour, about 3 requests a minute.
 
 ### After, four papers at a time
 
-<!-- MEASUREMENT -->
+Not measured by this task. The captain's sequencing order of 23:16 UTC gave
+the single relaunch to `arctic-ch3-paper-completion-r1`, which merges this
+branch's tip and launches with the batch label applied once the ledger reads
+`integrity_valid` true (it did at 23:18:02 UTC, after the evaluator worker's
+reviewed settle of the phase-less row `52c5da75`).
+
+To measure it after that launch, from this worktree or any checkout of the
+branch:
+
+```bash
+D=/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-ch3-paper-concurrency-r1
+nix develop -c python $D/build-concurrency.py <launched-commit> observe 900
+```
+
+`observe` waits for the free replay to end (the construction submission
+count moves), then samples the shared ledger and `progress.json` every 30
+seconds for 900 seconds and prints requests a minute, paper families an hour,
+spend, accepted questions, the peak in-flight count and whether the producer
+is still alive. It reads only. Compare against the baseline table above.
+
+What to look for:
+
+- `requests_per_minute` against the 3.20 baseline, and whether it sits at or
+  below the v11 window of 40.
+- `peak_inflight` against the v11 slot count of 8: four papers with option
+  waves of four can reach it; a peak stuck at 1 means the admission is still
+  serialised somewhere.
+- Any `ambiguous_charge` receipt with `http_status` 429 in
+  `model-receipts/`: that is Google's limit, and the number of them in the
+  window says how hard it binds. None in 15 minutes means the policy caps,
+  not the provider, are the bound at this concurrency.
+- The replay time itself (`replay_seconds`): the first relaunch that runs the
+  replay on four threads.
+
+The captain's addendum asks whether four papers held steadily. `peak_inflight`
+at or above 4 across the samples, with no 429 receipts, is the yes.
 
 ## The cut of 2026-09-16
 
@@ -165,6 +200,19 @@ A quiet moment for a relaunch is any moment the shared ledger reports
 `inflight` 0: the producer is then between paid calls, and a paper boundary
 follows within one call. `build-concurrency.py launch` waits for that boundary
 itself before it stops anything.
+
+## A test time bomb, found on the way
+
+The bounded suite at `cae0172` failed five abstention pause tests that had
+passed one hour earlier on the same code. They copied the captain's standing
+pause literally, `resume_at_utc` 2026-09-16T23:00:00Z, as a hold that was
+still in the future; the suite that ran after 23:00 UTC found it expired. The
+run path reads the resume time against the wall clock, so a held-model test
+now places its resume one day ahead of the real clock
+(`future_resume_utc`, `held_fable_pause`), and the CLI status test asserts
+that the live list agrees with the rule rather than that a dated entry is
+live. `fable_pause` stays a faithful copy of the record, because one test
+asserts exactly that against the committed file.
 
 ## Tests
 

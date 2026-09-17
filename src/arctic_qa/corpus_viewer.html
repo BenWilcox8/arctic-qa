@@ -249,6 +249,14 @@
     .trace-section-note { color: var(--muted); line-height: 1.5; margin: 0 0 .7rem; }
     .trace-empty { color: var(--muted); line-height: 1.5; padding: 1.2rem; }
     .trace-error { background: var(--red-bg); color: var(--red); padding: .8rem; }
+    .live-papers-panel h3 { margin-top: 1.2rem; }
+    .live-papers-panel table { font-size: .82rem; }
+    .live-papers-paper { display: grid; gap: .2rem; min-width: 0; }
+    .live-papers-paper strong { line-height: 1.4; overflow-wrap: anywhere; }
+    .live-papers-paper span { color: var(--muted); font-size: .74rem; overflow-wrap: anywhere; }
+    .live-papers-panel td.nowrap { white-space: nowrap; }
+    .live-papers-elapsed span { white-space: nowrap; }
+    @media (max-width: 680px) { .live-papers-panel td.nowrap { white-space: normal; } }
     .benchmark-panel h3 { margin-top: 1.2rem; }
     .benchmark-panel table { font-size: .8rem; }
     .benchmark-panel td .badge { font-size: .68rem; }
@@ -447,6 +455,22 @@
         </svg>
       </div>
       <p class="method-limits">The active latitude-first policy is v3. It uses eligibility prompt v6, eligibility schema v3, and generation prompt v20. It uses actual study sites at or above 66.56° N, on land or sea. Separable Arctic components remain for scoped QA. Insufficient or inseparable evidence is unresolved. Historical decisions remain retained. Roles: the author model proposes findings, questions, and distractors. Each finding can receive up to two question revisions, with at most two findings and six candidate paths per paper family. A source-blind verifier checks only the displayed question and context before source-aware answer checks. The verifier model then reconstructs answers and checks exact options. Deterministic code enforces source locators, scope, bindings, and export rules. The read-only viewer never starts a run.</p>
+    </section>
+
+    <section class="panel live-papers-panel" id="live-papers" aria-labelledby="live-papers-title">
+      <div class="metadata-head">
+        <div>
+          <h2 id="live-papers-title">Papers in analysis now</h2>
+          <p id="live-papers-detail">Loading the papers the producer is working on...</p>
+          <div class="meta" id="live-papers-meta"></div>
+        </div>
+        <span class="badge" id="live-papers-state">Loading</span>
+      </div>
+      <p class="meta" id="live-papers-scope">The producer analyzes several papers at the same time, one thread per paper. A paper stays in this table while one of its paid calls moved inside the window, and it leaves the table when it takes a final outcome or a completion label. The table refreshes every 15 seconds. The producer gives each paper its own thread but writes no thread name and no slot number, so that column stays empty until a producer record carries one. This page reads the shared ledger, the state database and the completion labels only. It never starts, stops or signals the producer.</p>
+      <div class="table-wrap" id="live-papers-table"><div class="loading">Loading the papers in analysis...</div></div>
+      <h3>Last finished papers</h3>
+      <p class="meta" id="live-papers-finished-scope">The papers of this run that reached a final outcome, newest first. The cost is the money this run spent on that paper. A paper the run replayed from stored receipts spent nothing.</p>
+      <div class="table-wrap" id="live-papers-finished"><div class="loading">Loading the finished papers...</div></div>
     </section>
 
     <section class="panel trace-panel" id="pipeline-inspector" aria-labelledby="pipeline-inspector-title">
@@ -2340,7 +2364,8 @@
         $('process-detail').textContent = error.message;
       }
     }
-    function simpleTable(target, head, rows, emptyMessage) {
+    function simpleTable(target, head, rows, emptyMessage, nowrapColumns = []) {
+      const nowrap = new Set(nowrapColumns);
       target.replaceChildren();
       if (!rows.length) { target.append(text('div', emptyMessage, 'empty')); return; }
       const table = document.createElement('table');
@@ -2353,6 +2378,7 @@
         cells.forEach((value, index) => {
           const cell = document.createElement('td');
           cell.dataset.label = head[index];
+          if (nowrap.has(head[index])) cell.className = 'nowrap';
           if (value instanceof Node) cell.append(value); else cell.textContent = value;
           row.append(cell);
         });
@@ -2462,6 +2488,76 @@
         ['Guard errors', (guard.errors || []).join('; ') || 'none']
       ], 'The evaluator has written no watch state yet.');
     }
+    const elapsedText = (seconds) => {
+      if (seconds === null || seconds === undefined) return 'Not available';
+      const whole = Math.max(0, Math.round(Number(seconds)));
+      if (whole < 60) return `${whole} s`;
+      const minutes = Math.floor(whole / 60);
+      if (minutes < 60) return whole % 60 ? `${minutes} min ${whole % 60} s` : `${minutes} min`;
+      const hours = Math.floor(minutes / 60);
+      return minutes % 60 ? `${hours} h ${minutes % 60} min` : `${hours} h`;
+    };
+    function livePaperCell(row) {
+      const cell = document.createElement('div');
+      cell.className = 'live-papers-paper';
+      cell.append(text('strong', row.title || row.paper_id || row.family_id));
+      cell.append(text('span', [row.paper_id, row.family_id].filter(Boolean).join(' | ')));
+      return cell;
+    }
+    function livePaperElapsed(row) {
+      const cell = document.createElement('div');
+      cell.className = 'live-papers-paper live-papers-elapsed';
+      cell.append(text('strong', elapsedText(row.in_analysis_seconds)));
+      cell.append(text('span', `since ${dateText(row.started_at_utc)}`));
+      return cell;
+    }
+    function renderLivePapers(data) {
+      const producer = data.producer || {};
+      const running = data.availability === 'available' && producer.running;
+      setBadge($('live-papers-state'), data.availability === 'available' ? (running ? 'running' : 'not_running') : data.availability);
+      $('live-papers-detail').textContent = data.message || 'No live paper record is available.';
+      $('live-papers-meta').textContent = [
+        `Run ${producer.run_id || 'not selected'}`,
+        `Campaign ${producer.campaign_id || 'not selected'}`,
+        `Producer state ${label(producer.state)}`,
+        `Producer record ${dateText(producer.updated_at_utc)}`,
+        `Window ${elapsedText(data.window_seconds)}`,
+        `Page rebuilt ${dateText(data.generated_at_utc)}`
+      ].join(' | ');
+      const head = ['Paper', 'Stage', 'Calls', 'Cost', 'In analysis', 'Thread or slot'];
+      const rows = (data.in_analysis || []).map((row) => [
+        livePaperCell(row),
+        `${label(row.stage)}${row.open_calls ? ` | ${formatNumber(row.open_calls)} in flight` : ''}`,
+        formatNumber(row.calls),
+        usd(row.cost_usd),
+        livePaperElapsed(row),
+        row.slot === null || row.slot === undefined ? 'Not exposed' : String(row.slot)
+      ]);
+      simpleTable($('live-papers-table'), head, rows, running
+        ? 'No paper has moved a paid call inside the window.'
+        : 'No producer is running, so no paper is in analysis.', ['Calls', 'Cost']);
+      const finishedHead = ['Paper', 'Outcome', 'Reason', 'Questions', 'Calls', 'Cost', 'Finished'];
+      const finishedRows = (data.finished || []).map((row) => [
+        livePaperCell(row),
+        label(row.outcome),
+        row.reason_code || 'No reason code',
+        formatNumber(row.question_count),
+        formatNumber(row.calls),
+        usd(row.cost_usd),
+        dateText(row.finished_at_utc)
+      ]);
+      simpleTable($('live-papers-finished'), finishedHead, finishedRows, 'This run has finished no paper yet.', ['Questions', 'Calls', 'Cost', 'Finished']);
+    }
+    async function loadLivePapers() {
+      try {
+        renderLivePapers(await fetchJson('/api/live-papers'));
+      } catch (error) {
+        setBadge($('live-papers-state'), 'unavailable');
+        $('live-papers-detail').textContent = error.message;
+        $('live-papers-table').replaceChildren(text('div', error.message, 'trace-error'));
+        $('live-papers-finished').replaceChildren(text('div', error.message, 'trace-error'));
+      }
+    }
     async function loadLiveBenchmark() {
       try {
         renderLiveBenchmark(await fetchJson('/api/live-benchmark'));
@@ -2494,7 +2590,7 @@
     $('live-dataset-next').addEventListener('click', () => { state.dataset.page = Math.min(state.dataset.pages, state.dataset.page + 1); loadLiveDataset(); });
     $('previous').addEventListener('click', () => { state.page = Math.max(1, state.page - 1); loadCandidates(); });
     $('next').addEventListener('click', () => { state.page = Math.min(state.pages, state.page + 1); loadCandidates(); });
-    $('refresh').addEventListener('click', () => { loadState(true); loadTraceList(false); loadLiveBenchmark(); });
+    $('refresh').addEventListener('click', () => { loadState(true); loadTraceList(false); loadLivePapers(); loadLiveBenchmark(); });
     $('trace-filters').addEventListener('submit', (event) => { event.preventDefault(); loadTraceList(true); });
     $('trace-previous').addEventListener('click', () => {
       if (state.trace.page <= 1) return;
@@ -2518,8 +2614,9 @@
     });
     loadState(true);
     loadTraceList(true);
+    loadLivePapers();
     loadLiveBenchmark();
-    setInterval(() => { loadState(false); loadTraceList(false); loadLiveBenchmark(); }, 15000);
+    setInterval(() => { loadState(false); loadTraceList(false); loadLivePapers(); loadLiveBenchmark(); }, 15000);
   </script>
 </body>
 </html>

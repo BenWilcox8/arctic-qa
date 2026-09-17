@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from .benchmark_guard import benchmark_report
+from .live_papers import live_papers_report, read_shared_ledger, read_state_facts
 from .metadata_prefilter import DISPOSITIONS
 from .util import sha256_file
 
@@ -323,6 +324,15 @@ class CorpusArtifacts:
         self._lock = threading.RLock()
         self._small_fingerprint = ""
         self._last_error: str | None = None
+        # The live-papers section polls every 15 seconds, and the shared ledger
+        # is several megabytes. Both caches are keyed by the file identity, so a
+        # poll that finds no new bytes parses nothing and never holds a lock.
+        self._live_lock = threading.Lock()
+        self._ledger_cache: tuple[tuple[int, int, int], dict[str, Any]] | None = None
+        self._facts_cache: (
+            tuple[tuple[int, int, int, str, str], dict[str, Any]] | None
+        ) = None
+        self._titles_cache: tuple[tuple[int, int, int], dict[str, str]] | None = None
         self.refresh()
 
     def _screening_file(self) -> Path | None:
@@ -2646,6 +2656,129 @@ class CorpusArtifacts:
             guard_state_file=self.benchmark_guard_state_file,
         )
 
+    def _cached_ledger(self) -> dict[str, Any] | None:
+        """Return the shared paid-call ledger, parsed once per written version."""
+        path = self.shared_ledger_file
+        if path is None or not path.is_file():
+            return None
+        status = path.stat()
+        key = (status.st_mtime_ns, status.st_size, status.st_ino)
+        with self._live_lock:
+            cached = self._ledger_cache
+            if cached is not None and cached[0] == key:
+                return cached[1]
+        ledger = read_shared_ledger(path)
+        with self._live_lock:
+            self._ledger_cache = (key, ledger)
+        return ledger
+
+    def _cached_state_facts(
+        self, *, campaign_id: str, run_id: str
+    ) -> dict[str, Any] | None:
+        """Return the state-database half of the live view, cached per version."""
+        configured = getattr(self.pipeline_trace_store, "db_file", None)
+        if configured is None:
+            return None
+        path = Path(configured)
+        if not path.is_file():
+            return None
+        status = path.stat()
+        key = (
+            status.st_mtime_ns,
+            status.st_size,
+            status.st_ino,
+            campaign_id,
+            run_id,
+        )
+        with self._live_lock:
+            cached = self._facts_cache
+            if cached is not None and cached[0] == key:
+                return cached[1]
+        facts = read_state_facts(path, campaign_id=campaign_id, run_id=run_id)
+        with self._live_lock:
+            self._facts_cache = (key, facts)
+        return facts
+
+    def _corpus_titles(self) -> dict[str, str]:
+        """Return the corpus title of every candidate, keyed by folded DOI.
+
+        The title of a paper the state database has not imported yet comes from
+        this index, so a paper in its eligibility call still shows its title.
+
+        The titles come from the immutable discovery ledger, which is the base
+        of the index. No screening overlay touches them, so this reader never
+        asks for a rebuild and never waits for one.
+        """
+        if not self.database.is_file():
+            return {}
+        status = self.database.stat()
+        key = (status.st_mtime_ns, status.st_size, status.st_ino)
+        with self._live_lock:
+            cached = self._titles_cache
+            if cached is not None and cached[0] == key:
+                return cached[1]
+        connection = sqlite3.connect(f"file:{self.database}?mode=ro", uri=True)
+        try:
+            titles = {
+                str(doi).casefold(): str(title)
+                for doi, title in connection.execute(
+                    "SELECT doi,title FROM candidates WHERE doi IS NOT NULL"
+                )
+            }
+        except sqlite3.Error:
+            return {}
+        finally:
+            connection.close()
+        with self._live_lock:
+            self._titles_cache = (key, titles)
+        return titles
+
+    def live_papers(self) -> dict[str, Any]:
+        """Return the papers in analysis now and the papers that finished last.
+
+        The route reads three records and writes nothing: the shared paid-call
+        ledger under the shared form of its lock, the streaming progress record,
+        and the pipeline state database read-only. It never starts, stops or
+        signals the producer, and it never reads the evaluator.
+
+        The route does not rebuild the query index. A live producer writes the
+        eligibility run directory on every paper, so the index fingerprint moves
+        on every poll, and a rebuild of it took about 50 seconds on 2026-09-16.
+        A section that refreshes every 15 seconds must not wait for that work,
+        and it needs nothing the rebuild produces.
+        """
+        progress: dict[str, Any] | None = None
+        error: str | None = None
+        try:
+            if self.streaming_progress_file and self.streaming_progress_file.is_file():
+                value = _read_json(self.streaming_progress_file)
+                if value.get("schema") != "streaming-dataset-progress-v1":
+                    raise ValueError("the streaming progress record is invalid")
+                progress = value
+            ledger = self._cached_ledger()
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as failure:
+            return live_papers_report(
+                ledger=None,
+                progress=None,
+                error=f"The live-paper records are not readable: {failure}",
+            )
+        facts: dict[str, Any] | None = None
+        run_id = str((progress or {}).get("invocation_run_id") or "")
+        campaign_id = str((progress or {}).get("run_id") or "")
+        if run_id:
+            try:
+                facts = self._cached_state_facts(campaign_id=campaign_id, run_id=run_id)
+            except sqlite3.Error as failure:
+                error = f"The pipeline state database is not readable: {failure}"
+        return live_papers_report(
+            ledger=ledger,
+            progress=progress,
+            facts=facts,
+            titles=self._corpus_titles(),
+            process_stale_after_seconds=self.process_stale_after_seconds,
+            error=error,
+        )
+
     def candidates(self, parameters: dict[str, list[str]]) -> dict[str, Any]:
         self.refresh()
         if self._last_error or not self.database.is_file():
@@ -2818,6 +2951,8 @@ class CorpusRequestHandler(BaseHTTPRequestHandler):
                 )
             elif parsed.path == "/api/live-benchmark":
                 self._json(HTTPStatus.OK, self.artifacts.live_benchmark())
+            elif parsed.path == "/api/live-papers":
+                self._json(HTTPStatus.OK, self.artifacts.live_papers())
             elif parsed.path == "/api/pipeline-trace":
                 self._json(
                     HTTPStatus.OK,
