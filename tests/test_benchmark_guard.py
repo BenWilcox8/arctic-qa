@@ -33,6 +33,7 @@ from arctic_qa.benchmark_guard import (
     evaluation_phase_totals,
     expected_questions,
     extrapolate,
+    latest_item_rows,
     model_readings,
     plan_models,
     quota_windows,
@@ -1330,3 +1331,36 @@ def test_a_captain_pause_with_a_resume_time_survives_every_cycle(
     assert pause["paused_models"] == entries
     # The entries no longer pause anything, which is what the resume time says.
     assert state["paused_models"] == {}
+
+
+def test_a_revisited_question_is_counted_once(workspace: dict[str, Path]) -> None:
+    """One question, two passes, one count.
+
+    The evaluator appends a row per pass, and it passes again over a question
+    that a paused arm owes trials. Every number of the later row is the whole
+    record of that question, so a reader that adds both rows doubles the
+    question count, halves the cost per question and doubles the Codex
+    list-price equivalent that the attribution measures.
+    """
+    journal = workspace["journal"] / "cost-journal.jsonl"
+    before = guard_for(workspace, QUIET_QUOTA).cycle(now=NOW)
+    first = before["questions_evaluated"]
+    rows = [json.loads(line) for line in journal.read_text().splitlines() if line]
+    again = dict(rows[0])
+    again["recorded_at_utc"] = "2026-09-17T09:21:29Z"
+    with journal.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(again) + "\n")
+    after = guard_for(workspace, QUIET_QUOTA).cycle(now=NOW + CYCLE)
+    assert after["questions_evaluated"] == first
+    assert latest_item_rows(rows + [again])[0]["recorded_at_utc"] == (
+        "2026-09-17T09:21:29Z"
+    )
+    # The Codex USD of the run does not move on a second pass either, which is
+    # what the attribution measures the account's burn against.
+    memory = json.loads(
+        (workspace["guard"] / GUARD_MEMORY_FILENAME).read_text(encoding="utf-8")
+    )
+    samples = memory["codex_samples"]
+    assert len(samples) == 2
+    assert samples[0]["benchmark_codex_usd"] == samples[1]["benchmark_codex_usd"]
+    assert samples[0]["questions_evaluated"] == samples[1]["questions_evaluated"]

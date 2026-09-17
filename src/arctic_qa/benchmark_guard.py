@@ -274,6 +274,24 @@ def item_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [row for row in rows if row.get("kind", "item") == "item"]
 
 
+def latest_item_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The last row of each question, in the order the questions appeared.
+
+    The evaluator appends one row per pass, and it passes over a question
+    again whenever a paused arm owes it trials. Every number of a later row
+    is the question's whole record: its Gemini USD comes from the ledger and
+    its outcomes come from the run directory, and both are cumulative. So a
+    reader that counts every row counts a revisited question twice, and both
+    the cost per question and the Codex list-price equivalent drift. The
+    evaluator's own reader is `CostJournal.latest_item_rows`, and this is the
+    guard's half of that rule.
+    """
+    latest: dict[str, dict[str, Any]] = {}
+    for row in item_rows(rows):
+        latest[str(row["item_id"])] = row
+    return list(latest.values())
+
+
 def pause_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep the vendor-pause rows that the evaluator itself journalled."""
     return [row for row in rows if row.get("kind") == "vendor_pause"]
@@ -1521,7 +1539,7 @@ class BenchmarkGuard:
         moment = now or _utc_now()
         errors: list[str] = []
         rows = read_journal_rows(self.journal_dir)
-        items = item_rows(rows)
+        items = latest_item_rows(rows)
         watch = read_watch_state(self.journal_dir)
         activity = evaluator_activity(
             watch, now=moment, stale_after_seconds=self.evaluator_stale_seconds
@@ -2146,7 +2164,7 @@ def benchmark_report(
             "questions": [],
         }
     rows = read_journal_rows(journal_dir)
-    items = item_rows(rows)
+    items = latest_item_rows(rows)
     watch = read_watch_state(journal_dir)
     guard = _read_json(guard_state_file)
     guard_fresh = None
