@@ -223,6 +223,35 @@ on 2026-09-17. Whatever keeps the harness up to date should hold the old path
 until the new one is in place, or the evaluator should be told to pause over
 the upgrade.
 
+### The transient reservation refusal, which is the remaining strand path
+
+The paid-call concurrency slots and the minute window of the evaluation phase
+are the broker's other two refusals that "describe the moment, not the
+request". `execute` waits `TRANSIENT_RESERVATION_RETRY_SECONDS` for room and
+then writes an immutable `not_submitted` receipt. That receipt is a recorded
+response, so the vendor stops inside the question and the question is closed at
+its partial count, exactly as the busy lock did.
+
+It happened twice in the first wave of eight questions after the relaunch, at
+15:14:45 and 15:15:15 UTC. The arm was not paused either time, because the
+reason is in `ITEM_SCOPED_REASONS`, but both questions were closed short. It is
+now the dominant strand path, and it is more frequent than it was, for the
+reason the previous snapshot's record already predicted: an arm that is no
+longer losing its trials to the busy lock is fast enough to fill the slots.
+
+This one is not fixed here, and deliberately so. Unlike the busy lock it leaves
+a receipt, and `GeminiBrokerEvaluationProvider.answer` replays a receipt it
+finds, so the trial is refused again on every later pass. Re-running the request
+key instead means `_resume_not_submitted`, which requires a reviewed
+configuration transition that is the direct successor of the one the request was
+refused under. That is a money-governance path and the captain's to open, so
+this task reports it rather than automating it.
+
+The producer already carries the reader half of the same rule
+(`broker_provider.invoke` skips a receipt whose reason is in
+`RESUMABLE_NOT_SUBMITTED_REASONS`). Giving the evaluator that half is the shape
+of the fix, and it needs the reviewed transition to exist before it can work.
+
 ## Guards
 
 - `tests/test_abstention_plan.py`: the bounded wait, the trial left pending, the
