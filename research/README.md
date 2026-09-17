@@ -104,6 +104,7 @@ The benchmark measures how often a model abstains when no listed option is corre
 | `arctic-ch3-concurrency-75-r1/` | Seventy-five papers in flight for one night: policy v15, the tranche a rate transition names once the ceiling has moved, the measured window that kept or refused the rate, and the settled stop that ends generation at 13:45 UTC. |
 | `arctic-eval-ledger-section-r1/` | The exclusive ledger section of the streaming evaluator: the receipts listing it kept exact because it said nothing about sharing the ledger, the whole-ledger proof and compaction it ran once a question, the share of every wave that keeps each arm busy, the three stops that took the Gemini arm down after each cut-over, and why the live rate windows are not paired. |
 | `arctic-eval-busy-strand-r1/` | The refusal the provider never saw: the busy exclusive lock that closed a question at its partial count while the journal still called it complete, the vanished Claude Code binary that turned an arm off for good, the bounded wait that leaves such a trial pending, the 89 questions already stranded and the shape of a bounded reopen. |
+| `arctic-eval-reopen-r1/` | The bounded re-open of every stranded question, on the captain order of 15:48 UTC: the trials with no response row, the appended journal row that owes them, the harness upgrade that refused a run directory and the harness version read that ended the unit, the questions that cannot complete, and the detector of the finished evaluation. |
 
 ## Cost guard
 
