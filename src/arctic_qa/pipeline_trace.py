@@ -724,11 +724,30 @@ class PipelineTraceStore:
             for row in progress.get("recent_papers", [])
             if row.get("paper_id") and row.get("title")
         }
+        # Group the three big lists by their key once. Scanning all of them
+        # inside the loop over the families made the build quadratic: 2,098
+        # families against 16,406 receipts is 34 million comparisons, and the
+        # build took 35 seconds where the grouped one takes a few. Each group
+        # keeps the order of the list it came from, so every record below is
+        # the record it was.
+        receipts_by_family: dict[str, list[dict[str, Any]]] = {}
+        for event in receipts:
+            family_of_event = event.get("family_id")
+            if family_of_event:
+                receipts_by_family.setdefault(str(family_of_event), []).append(event)
+        # The candidate and finding groups keep each row's place in the table,
+        # because a family with several sources drew its rows in table order
+        # and some readers below take the last of them.
+        candidates_by_source: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+        for position, row in enumerate(candidates):
+            candidates_by_source.setdefault(row["source_id"], []).append((position, row))
+        findings_by_source: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+        for position, row in enumerate(findings):
+            findings_by_source.setdefault(row["source_id"], []).append((position, row))
+
         for family_id in families:
             family_sources = source_by_family.get(family_id, [])
-            family_receipts = [
-                event for event in receipts if event.get("family_id") == family_id
-            ]
+            family_receipts = receipts_by_family.get(family_id, [])
             receipt_ids = [
                 str(event.get("paper_id"))
                 for event in family_receipts
@@ -746,10 +765,20 @@ class PipelineTraceStore:
             )
             source_ids = [str(item["source_id"]) for item in family_sources]
             relevant_candidates = [
-                row for row in candidates if row["source_id"] in source_ids
+                row
+                for _, row in sorted(
+                    entry
+                    for source_id in source_ids
+                    for entry in candidates_by_source.get(source_id, ())
+                )
             ]
             relevant_findings = [
-                row for row in findings if row["source_id"] in source_ids
+                row
+                for _, row in sorted(
+                    entry
+                    for source_id in source_ids
+                    for entry in findings_by_source.get(source_id, ())
+                )
             ]
             candidate_run_ids = {
                 str(row["item_id"]): self._candidate_run_ids(row, family_receipts)
