@@ -169,7 +169,25 @@ row that names it is never proved from a cached listing.**
 
 Recorded below as each stage runs.
 
-## 8. What was not done, and why
+## 8. Machine headroom
+
+Eight cores. During the 32-thread window the producer used 30 to 38 percent of
+one core with 34 threads and 724 MB resident, so it is not CPU-bound: its
+threads wait on the wire and on the ledger, not on the interpreter. The machine
+load average was 12 to 14, and the largest single consumer was not the
+producer: the read-only website viewer (`arctic_qa corpus-view`) held 62 to 85
+percent of a core for the whole window. The streaming evaluator, the cost guard
+and several agent sessions take the rest.
+
+So the answer to "split the producer into two processes over disjoint halves of
+the Jev ranking" is: not yet, and not for CPU. The producer has a whole core of
+headroom of its own before the interpreter lock binds it. The store is
+multi-process safe by design and the migration proved it (`ledger_store`
+locks the journal, not the process), but a second producer process would take
+its cores from the viewer and the evaluator, which are the two that are
+actually using them.
+
+## 9. What was not done, and why
 
 **The hot journal and lock were not moved to the local SSD.** The brief asked
 for it, and the measurement says it is not where the serialised cost is. The
