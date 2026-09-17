@@ -8223,8 +8223,21 @@ class SharedGeminiBroker:
                 blocking = blocking_ambiguous(
                     self._ambiguous_continuation_events(ledger)
                 )
-            if self._phase_halted(ledger, phase) is not None or blocking:
-                raise ValueError("the paid-call broker is halted")
+            # The two conditions end the run the same way, and an operator
+            # cannot tell them apart from the message alone. On 2026-09-17 the
+            # producer exited twice on this line while the ledger read halted
+            # false and every ambiguous charge had its continuation event, and
+            # the message said nothing about which condition fired. Both keep
+            # the prefix `streaming.RUN_ENDING_LEDGER_STOPS` matches.
+            halt = self._phase_halted(ledger, phase)
+            if halt is not None:
+                raise ValueError(f"the paid-call broker is halted: {halt}")
+            if blocking:
+                named = ", ".join(sorted(blocking)[:3])
+                raise ValueError(
+                    "the paid-call broker is halted: unresolved ambiguous charge "
+                    f"{named}"
+                )
             evaluation_used = self._evaluation_totals(ledger)["used_usd"]
             evaluation_submissions = self._evaluation_totals(ledger)["submissions"]
             if phase == EVALUATION_PHASE:
