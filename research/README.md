@@ -82,6 +82,7 @@ Each one records a fault that stopped a run, the correction, and the live eviden
 | `arctic-broker-operation-lock-wait-r1/` | The operation lock of the shared ledger, and the wait that stops a starved producer. |
 | `arctic-ch3-count-error-retry-r1/` | A free token-count 503, its bounded retry, and the paper-level containment after retry exhaustion. |
 | `arctic-ch3-paper-concurrency-r1/` | Several papers of one run in flight at once, the v11 request-rate policy, and the measured throughput before and after. |
+| `arctic-ch3-concurrency-busy-r1/` | The exclusive operation lock as a queue under paper concurrency, the repair of the papers it refused, and the completion date of a paper. |
 | `arctic-ch3-paper-completion-r1/` | The per-paper completion label, the one-time batch that labelled the finished papers, and the startup time before and after. |
 | `arctic-geography-fix-r1/` | The geography correction, with the correction overlay and the successor gate drafts. |
 
