@@ -1,0 +1,8 @@
+sections 399  held 459.5 s  waited 1012.9 s
+  reserve                306 calls  waited  705.5 s  held  304.0 s  mean wait  2.31 s  mean hold  0.99 s
+  orphan_recovery         55 calls  waited   85.2 s  held  104.6 s  mean wait  1.55 s  mean hold  1.90 s
+  count_registration      38 calls  waited  222.2 s  held   50.8 s  mean wait  5.85 s  mean hold  1.34 s
+
+reserve sections (one per paid call): 306
+exclusive section per paid call: 1.50 s held, 3.31 s waited
+a call an hour at that hold alone: 2398 (199.8 questions an hour on the Gemini arm)

@@ -11,6 +11,11 @@ This record holds where those 22 s went and what this task removed.
 
 ## Answer first
 
+The exclusive section went from 10.56 s to 4.04 s per paid Gemini call, and
+the arm from 19.8 to 40.8 questions an hour, measured live across the
+cut-over of 11:16 UTC. The goal was under 2 s, and "What is left" says where
+the rest of it is.
+
 Two costs put the evaluator there, and neither is the money proof itself.
 
 | What | Measured | After |
@@ -110,11 +115,17 @@ test that removes a cost also shows that the thing it removed is still caught.
 
 ## The cut-over
 
-Snapshot `8477fd5`, successor authorization
-`streaming-eval-r11-authorization-8477fd5.json`, review record
-`streaming-eval-r11-review-8477fd5.md`, unit `arctic-abstention-stream-r3`,
-work directory `abstention-eval/streaming-r11`, at 10:57:36 UTC.
+Snapshot `e46dd7f`, successor authorization
+`streaming-eval-r11-authorization-e46dd7f.json`, review record
+`streaming-eval-r11-review-e46dd7f.md`, unit `arctic-abstention-stream-r3`,
+work directory `abstention-eval/streaming-r11`, at 11:16:08 UTC.
 `resnapshot-evaluator.sh` is the script.
+
+An earlier snapshot of the same branch, `8477fd5`, ran from 10:57:36 to
+11:05:32 UTC and was replaced while the two crews of the night both held the
+unit. The Gemini arm was idle for the whole of those eight minutes, so that
+snapshot measured nothing; the captain's supervisor then gave the unit to this
+task alone.
 
 The stop was settled.
 A cut-over while a Gemini call is on the wire orphans the call and halts the
@@ -132,26 +143,75 @@ The new launcher also lowers
 exclusive operation lock is in the unit's log and the hold is measurable.
 It changes what is printed and nothing else.
 
-## What the live measurement found
+## The wave that left an arm idle
 
-The Gemini arm was idle across the cut-over, and that is the finding of the
-window rather than a rate.
+The pick-up order of the evaluator is the oldest accepted question first, and
+a paused arm bends it.
+Every question the arm held stays open and keeps its place at the front of the
+queue, so when the pause lifts a wave of them fills every slot, and the arms
+that already finished those questions idle.
 
-The ledger holds no evaluation submission after 10:03 UTC.
-The evaluator that ran from 10:37:51 to 10:55 UTC on snapshot 40638fe made no
-paid Gemini call, and neither did the evaluator on 8477fd5 in its first
-minutes.
-All eight questions in flight already held their 12 Gemini trials: the arm
-owed them nothing, and the passes were there for the Claude arm, which had 39
-open questions against 23 open on the Gemini arm.
-No section of the exclusive operation lock reached even the 1.0 s threshold in
-the 17 minutes before the cut-over.
+The captain paused the Claude arm at 06:39 UTC and resumed it at 10:11 UTC.
+That left 33 questions that owed Claude alone at the front of the queue.
+All eight slots took them, and the ledger holds no paid Gemini call between
+10:03 and 11:06 UTC while 23 questions owed the Gemini arm trials.
+The slow arm idled while the fast one worked, which is the opposite of what
+eight questions in flight are for.
 
-So the 22 s of 09:55 UTC is not reproducible on the machine as it stands: the
-producer restarted at 10:56 UTC, the ledger was compacted, and the Gemini arm
-has no work in flight.
-The bench numbers above are what this task can measure, and they are the real
-work that the exclusive sections used to do.
+Each wave now keeps a share for every arm that has a question to give it:
+`ceil(item_workers / vendors)` each, the arm with the fewest open questions
+served first, and the oldest question of that arm first.
+The rest of the wave fills in the pick-up order, so no question is held back
+and the order inside every group is the pick-up order.
+The first wave after the cut-over:
+
+```
+{"event":"wave_mix","open_by_vendor":{"anthropic_claude_code":8,"google_gemini":7,"openai_codex":7},"slots":8}
+```
+
+Seven of the eight questions owed the Gemini arm trials, against none of the
+eight an hour earlier.
+
+## The live measurement
+
+The cut-over was at 11:16:08 UTC.
+The before window is the evaluator on 09314ae, which carries neither change;
+the after window is 11:20 to 11:33 UTC, which leaves out the first four
+minutes, because a process start pays one cold broker start and that is now
+once a process rather than once a question.
+
+The two windows do not share a log threshold.
+The unit on 09314ae kept the 1.00 s default, so its log holds no section under
+that; the launcher of this snapshot lowers it to 0.05 s.
+The like-for-like line reads the after window at 1.00 s as well, and the
+before number is therefore an undercount of the hold, never an overcount.
+`section-hold.txt` and `gemini-call-rate.txt` hold both readings.
+
+| | Before, 09314ae | After, e46dd7f |
+| --- | --- | --- |
+| Exclusive section held per paid Gemini call | 10.56 s | 4.04 s |
+| Waited for that section per paid call | 39.2 s | 9.5 s |
+| Paid Gemini calls a minute | 3.96 | 8.15 |
+| Questions an hour on the Gemini arm | 19.8 | 40.8 |
+
+At the 0.05 s threshold, which sees every section, the after window holds
+4.54 s per paid call.
+
+The arm is 2.1 times faster, and 3.0 times faster than the 13.7 questions an
+hour that `research/arctic-eval-parallel-items-r1/extrapolation.md` measured
+at 09:55 UTC.
+The goal of the task was under 2 s of exclusive section per call, and 4.04 s
+is not that.
+The next section says where the rest of it is.
+
+The ledger stayed valid across the cut-over and the window: not halted, no
+integrity record, and the evaluation phase running.
+At 11:31:26 UTC the Gemini arm took a vendor pause of its own kind, an
+ambiguous charge on an interrupted request, which the reviewed rule of
+54695f1 continues through and which resumes the vendor on the next poll. That
+pause is not of this change: the settled stop of the cut-over held the
+evaluation requests in flight at zero and the evaluator left at a trial
+boundary, fifteen minutes earlier.
 
 ## What is left
 

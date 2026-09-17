@@ -1,0 +1,28 @@
+=== BEFORE: snapshot 09314ae, no fix, 11:05:41 to 11:12:00 UTC ===
+(the unit's own default threshold of 1.00 s)
+sections 69  held 264.0 s  waited 978.9 s
+  reserve                 28 calls  waited  544.5 s  held  121.2 s  mean wait 19.45 s  mean hold  4.33 s
+  orphan_recovery         21 calls  waited  178.1 s  held  108.9 s  mean wait  8.48 s  mean hold  5.19 s
+  count_registration      20 calls  waited  256.2 s  held   33.9 s  mean wait 12.81 s  mean hold  1.69 s
+
+paid Gemini calls in the window: 25
+exclusive section per paid call: 264.0 / 25 = 10.56 s held
+
+=== AFTER: snapshot e46dd7f, 11:20 to 11:33 UTC, at the same 1.00 s threshold ===
+sections 168  held 428.5 s  waited 1006.0 s
+  reserve                121 calls  waited  699.8 s  held  277.6 s  mean wait  5.78 s  mean hold  2.29 s
+  orphan_recovery         28 calls  waited   88.7 s  held  101.8 s  mean wait  3.17 s  mean hold  3.64 s
+  count_registration      19 calls  waited  217.6 s  held   49.0 s  mean wait 11.45 s  mean hold  2.58 s
+
+168 sections at or above 1.00 s
+paid Gemini calls in the window: 106
+exclusive section per paid call: 428.5 / 106 = 4.04 s held
+
+=== AFTER, every section, which the before window could not see ===
+sections 414  held 481.7 s  waited 1030.7 s
+  reserve                318 calls  waited  717.7 s  held  322.2 s  mean wait  2.26 s  mean hold  1.01 s
+  orphan_recovery         57 calls  waited   90.3 s  held  108.5 s  mean wait  1.58 s  mean hold  1.90 s
+  count_registration      39 calls  waited  222.7 s  held   50.9 s  mean wait  5.71 s  mean hold  1.30 s
+
+414 sections at or above 0.00 s
+exclusive section per paid call: 481.7 / 106 = 4.54 s held

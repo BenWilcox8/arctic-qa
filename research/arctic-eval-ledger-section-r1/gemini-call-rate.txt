@@ -1,0 +1,11 @@
+=== BEFORE: snapshot 09314ae, no fix ===
+window 11:05:41Z to 11:15:18Z (9.6 minutes)
+paid Gemini calls submitted: 45
+  4.68 calls a minute, 23.4 questions an hour
+  first 11:07:29Z, last 11:14:38Z
+
+=== AFTER: snapshot e46dd7f ===
+window 11:16:08Z to 11:32:22Z (16.2 minutes)
+paid Gemini calls submitted: 124
+  7.64 calls a minute, 38.2 questions an hour
+  first 11:18:14Z, last 11:32:21Z
