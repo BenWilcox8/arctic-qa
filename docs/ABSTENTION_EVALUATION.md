@@ -502,10 +502,13 @@ A few stops are about one question only, and `abstention_watch.ITEM_SCOPED_REASO
 
 A reason belongs in that set only when the refusal reserved nothing, submitted nothing and charged nothing, and says nothing about the next question.
 
-The busy exclusive lock has a second path.
-A vendor reports it as a stop reason, which the set above covers; raised in the frame around the plan instead, it was this question's error, and one question's error halts the wave and ends the watch non-zero.
-Every question of the wave raised it at 12:14:20 UTC on 2026-09-17 and the unit exited 1.
-`run_item` now catches `BrokerOperationBusyError` there, emits an `item_lock_busy` event and leaves the question without a journal row, so a later pass runs its whole plan on it.
+The busy exclusive lock reaches the watch by three routes, and none of them ends it.
+A vendor reports it as a stop reason, which the set above covers.
+`evaluate_item` catches what the plan raises, journals the question's row and hands the text back in `result["error"]`, which is the route it actually takes.
+`start_item` raises it from the Gemini ceiling read, and the frame around the plan raises it.
+Every route was once this question's error, and one question's error halts the wave and ends the watch non-zero: the unit exited 1 at 12:14:20 UTC on 2026-09-17, and again at 12:49:45 UTC with only the frame contained.
+`is_lock_busy_error` is the one predicate over the text. Each route emits an `item_lock_busy` event and takes the next question, and the final raise drops these lines whatever route they took, so a raise stays what it is for: an authorization, an integrity or a halt error.
+The question keeps the trials it recorded, its row says it is not complete, and a later pass runs what is missing.
 
 ### A question an arm stopped inside
 

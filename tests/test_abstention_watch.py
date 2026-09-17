@@ -48,6 +48,7 @@ from arctic_qa.abstention_watch import (
     is_ambiguous_charge_reason,
     is_ceiling_reason,
     is_item_scoped_reason,
+    is_lock_busy_error,
     pending_item_ids,
     validate_authorization,
     vendor_stop_reason,
@@ -2577,6 +2578,93 @@ def test_one_poll_cycle_scores_a_bounded_number_of_questions(tmp_path: Path) -> 
         item_workers=2,
     )
     assert [row["item_id"] for row in again["items_this_invocation"]] == items[8:]
+
+
+def test_a_busy_lock_in_an_item_result_never_ends_the_watch(tmp_path: Path) -> None:
+    """The route the error really takes is a journalled item result.
+
+    `evaluate_item` catches what the plan raises, journals the question's row
+    and hands the text back in `result["error"]`. The watch collected that
+    text, halted the wave and raised, and the unit exited 1 at 12:14:20 UTC on
+    2026-09-17 and again at 12:49:45 UTC, the second time with a containment
+    written around the call to `evaluate_item`, which this path walks past.
+    """
+    import arctic_qa.abstention_watch as module
+
+    assert is_lock_busy_error(
+        "BrokerOperationBusyError: another paid broker operation is active"
+    )
+    assert is_lock_busy_error(f"not_submitted: {OPERATION_LOCK_BUSY_REASON}")
+    assert not is_lock_busy_error("RuntimeError: the harness exited with 1")
+    assert not is_lock_busy_error(None)
+
+    db = state_db(tmp_path / "db", chapter3=["aqa-a", "aqa-b"])
+    ledger_file = construction_ledger(
+        tmp_path, {"family-aqa-a": ["0.01"], "family-aqa-b": ["0.01"]}
+    )
+    auth = authorization(tmp_path, db, maximum_items=4)
+    work = tmp_path / "result-busy"
+    events: list[dict] = []
+    seen: list[str] = []
+
+    original = module.evaluate_item
+
+    def busy_result(*, item_id: str, **changes):  # type: ignore[no-untyped-def]
+        seen.append(item_id)
+        result = original(item_id=item_id, **changes)
+        if len(seen) == 1:
+            result["error"] = (
+                "BrokerOperationBusyError: another paid broker operation is active"
+            )
+        return result
+
+    module.evaluate_item = busy_result  # type: ignore[assignment]
+    try:
+        result = scripted_watch(
+            db=db,
+            work_dir=work,
+            ledger_file=ledger_file,
+            authorization_file=auth,
+            item_workers=1,
+            log=events.append,
+        )
+    finally:
+        module.evaluate_item = original  # type: ignore[assignment]
+
+    # No raise, no halted wave, and the second question was taken.
+    assert result["errors"] == []
+    assert seen == ["aqa-a", "aqa-b"]
+    assert [
+        row["item_id"] for row in events if row["event"] == "item_lock_busy"
+    ] == ["aqa-a"]
+
+
+def test_the_watch_raises_for_a_real_error(tmp_path: Path) -> None:
+    """The containment is for the busy lock alone, never for anything else."""
+    import arctic_qa.abstention_watch as module
+
+    db = state_db(tmp_path / "db", chapter3=["aqa-a"])
+    ledger_file = construction_ledger(tmp_path, {"family-aqa-a": ["0.01"]})
+    auth = authorization(tmp_path, db, maximum_items=4)
+    original = module.evaluate_item
+
+    def broken(*, item_id: str, **changes):  # type: ignore[no-untyped-def]
+        result = original(item_id=item_id, **changes)
+        result["error"] = "RuntimeError: the evaluation set is unreadable"
+        return result
+
+    module.evaluate_item = broken  # type: ignore[assignment]
+    try:
+        with pytest.raises(RuntimeError, match="unreadable"):
+            scripted_watch(
+                db=db,
+                work_dir=tmp_path / "real",
+                ledger_file=ledger_file,
+                authorization_file=auth,
+                item_workers=1,
+            )
+    finally:
+        module.evaluate_item = original  # type: ignore[assignment]
 
 
 def test_a_busy_lock_around_the_plan_never_ends_the_watch(tmp_path: Path) -> None:

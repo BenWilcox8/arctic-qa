@@ -721,6 +721,28 @@ def is_item_scoped_reason(reason: str | None) -> bool:
     )
 
 
+def is_lock_busy_error(error: str | None) -> bool:
+    """Say whether one error text is the bounded wait for the exclusive lock.
+
+    ``evaluate_item`` catches what the plan raises, journals the question's
+    row and hands the text back in ``result["error"]``, so the watch reads
+    this error as text and never as an exception. That path is why an earlier
+    containment, written around the call to ``evaluate_item``, did not hold.
+
+    The refusal reserved nothing, submitted nothing and charged nothing: the
+    exclusive operation lock of the shared paid-call ledger stayed held past
+    the bounded wait. The producer contains the same refusal against one paper
+    and goes on.
+    """
+    if not error:
+        return False
+    text = str(error)
+    return (
+        BrokerOperationBusyError.__name__ in text
+        or OPERATION_LOCK_BUSY_REASON in text
+    )
+
+
 def is_ambiguous_charge_reason(reason: str | None) -> bool:
     """Say whether one stop reason is an ambiguous shared-ledger charge.
 
@@ -1143,14 +1165,43 @@ def watch(
                         for name, record in sorted(state["paused_vendors"].items())
                     )
                 )
-            if result["error"]:
+            if result["error"] and is_lock_busy_error(result["error"]):
+                # A bounded wait for the exclusive lock belongs to this
+                # question. It ends no wave and no watch: the question keeps
+                # the trials it recorded, its row says it is not complete, and
+                # a later pass runs what is missing. One such error per
+                # question of the wave exited the unit at 12:14:20 and again
+                # at 12:49:45 UTC on 2026-09-17.
+                emit(
+                    {
+                        "event": "item_lock_busy",
+                        "item_id": item_id,
+                        "error": result["error"],
+                    }
+                )
+            elif result["error"]:
                 # run_plan raised: an error outside the recorded responses.
                 errors.append(f"{item_id}: {result['error']}")
                 halt["now"] = True
 
     def run_item(item_id: str) -> None:
         """Score one question, from its own admission to its own journal row."""
-        admitted = start_item(item_id)
+        try:
+            admitted = start_item(item_id)
+        except BrokerOperationBusyError as busy:
+            # The admission reads the shared ledger for the Gemini ceiling, so
+            # it meets the same lock.
+            with gate:
+                in_flight.pop(item_id, None)
+                write_state()
+            emit(
+                {
+                    "event": "item_lock_busy",
+                    "item_id": item_id,
+                    "error": f"{type(busy).__name__}: {busy}",
+                }
+            )
+            return
         if admitted is None:
             return
         item_vendors, pause = admitted
@@ -1389,8 +1440,14 @@ def watch(
         "errors": errors,
         "summary": summary,
     }
-    if errors:
-        raise RuntimeError("; ".join(errors))
+    # A raise ends the unit, and that is for an authorization, an integrity or
+    # a halt error. A bounded wait for the exclusive lock is none of those: it
+    # reserved nothing, submitted nothing and charged nothing, and the
+    # question it belongs to is not complete, so the next poll runs what is
+    # missing. This is the last guard on a path that has ended the unit twice.
+    fatal = [line for line in errors if not is_lock_busy_error(line)]
+    if fatal:
+        raise RuntimeError("; ".join(fatal))
     return result
 
 
