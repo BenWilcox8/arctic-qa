@@ -95,8 +95,16 @@ def completion_row(
     reason_code: str | None,
     code_commit: str,
     detail: dict[str, Any] | None = None,
+    completed_at_utc: str | None = None,
 ) -> dict[str, Any]:
-    """Render one completion label. The row is the record, not a decision."""
+    """Render one completion label. The row is the record, not a decision.
+
+    ``completed_at_utc`` is when the paper reached this outcome, which is not
+    when the label was written: a batch labels papers the run finished hours
+    before. The producer passes the paper's own completion time; the batch
+    passes the time it reads from the paper's evidence, and passes none when
+    the evidence retains no time.
+    """
     if outcome_class not in OUTCOME_CLASSES:
         raise ValueError(f"unknown paper completion outcome class: {outcome_class}")
     return {
@@ -111,6 +119,7 @@ def completion_row(
         "eligibility_decision": eligibility_decision,
         "reason_code": reason_code,
         "detail_json": canonical_json(detail or {}),
+        "completed_at_utc": completed_at_utc,
         "labelled_at_utc": now(),
         "labelled_by_commit": code_commit,
     }
@@ -119,10 +128,11 @@ def completion_row(
 _INSERT = """INSERT OR IGNORE INTO paper_completions
     (completion_id,schema,run_id,campaign_id,candidate_key,paper_family_id,
      source_id,outcome_class,eligibility_decision,reason_code,detail_json,
-     labelled_at_utc,labelled_by_commit)
+     completed_at_utc,labelled_at_utc,labelled_by_commit)
     VALUES (:completion_id,:schema,:run_id,:campaign_id,:candidate_key,
             :paper_family_id,:source_id,:outcome_class,:eligibility_decision,
-            :reason_code,:detail_json,:labelled_at_utc,:labelled_by_commit)"""
+            :reason_code,:detail_json,:completed_at_utc,:labelled_at_utc,
+            :labelled_by_commit)"""
 
 
 def record_completion(db: Database, row: dict[str, Any]) -> bool:
@@ -152,6 +162,7 @@ def label_from_disposition(
     reason_codes: list[str] | None,
     eligibility_decision: str | None,
     code_commit: str,
+    completed_at_utc: str | None = None,
 ) -> dict[str, Any] | None:
     """Render the label of a paper the producer has just finished, or none.
 
@@ -177,6 +188,7 @@ def label_from_disposition(
             "reason_codes": codes,
             "labelled_by": "producer",
         },
+        completed_at_utc=completed_at_utc,
     )
 
 

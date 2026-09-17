@@ -202,6 +202,7 @@ CREATE TABLE IF NOT EXISTS paper_completions (
     eligibility_decision TEXT,
     reason_code TEXT,
     detail_json TEXT NOT NULL,
+    completed_at_utc TEXT,
     labelled_at_utc TEXT NOT NULL,
     labelled_by_commit TEXT NOT NULL,
     UNIQUE(run_id, candidate_key)
@@ -209,6 +210,15 @@ CREATE TABLE IF NOT EXISTS paper_completions (
 CREATE INDEX IF NOT EXISTS idx_paper_completions_run
     ON paper_completions(run_id);
 """
+
+
+# A nullable column that SCHEMA declares and an existing table may lack. The
+# pair is added by ``Database._add_missing_columns`` under the current schema
+# version, because a nullable column changes nothing for an earlier reader.
+ADDED_COLUMNS = (("paper_completions", "completed_at_utc", "TEXT"),)
+
+# How long a writer waits for a lock another connection holds.
+BUSY_TIMEOUT_SECONDS = 30.0
 
 
 def now() -> str:
@@ -232,9 +242,22 @@ class Database:
     def __init__(self, path: Path):
         self.path = path
         self.lock = threading.RLock()
-        self.connection = sqlite3.connect(path, check_same_thread=False)
+        # The state database is written by several paper threads of one
+        # producer and read by the benchmark evaluator's own process, so a
+        # writer meets a held lock often. SQLite waits ``timeout`` seconds for
+        # it and then raises ``database is locked``, which the producer
+        # contains against one paper: it faulted one paper of the concurrent
+        # chapter 3 run in a 15-minute window on 2026-09-17 at the 5-second
+        # default. A write of this database takes milliseconds, so the wait is
+        # generous and still bounded well under the call it belongs to.
+        self.connection = sqlite3.connect(
+            path, check_same_thread=False, timeout=BUSY_TIMEOUT_SECONDS
+        )
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
+        self.connection.execute(
+            f"PRAGMA busy_timeout = {int(BUSY_TIMEOUT_SECONDS * 1000)}"
+        )
 
     def close(self) -> None:
         self.connection.close()
@@ -255,6 +278,7 @@ class Database:
                 # evaluator, whose pinned snapshot refuses any other version.
                 with self.transaction():
                     self.connection.executescript(SCHEMA)
+                    self._add_missing_columns()
                 return
             if self.path.stat().st_size:
                 backup_dir.mkdir(parents=True, exist_ok=True)
@@ -389,6 +413,7 @@ class Database:
                     )
         with self.transaction():
             self.connection.executescript(SCHEMA)
+            self._add_missing_columns()
             row = self.connection.execute("SELECT version FROM schema_info").fetchone()
             if row is None:
                 self.connection.execute(
@@ -396,6 +421,27 @@ class Database:
                 )
             elif row[0] != SCHEMA_VERSION:
                 raise RuntimeError(f"unsupported database schema version: {row[0]}")
+
+    def _add_missing_columns(self) -> None:
+        """Add a nullable column of SCHEMA that an older database is missing.
+
+        ``CREATE TABLE IF NOT EXISTS`` leaves an existing table as it is, so a
+        column added to SCHEMA needs this. The column is always nullable and
+        carries no default, so every earlier reader of the table, including the
+        benchmark evaluator's pinned snapshot, reads the table as before and the
+        schema version does not move. Run this inside a transaction.
+        """
+        for table, column, definition in ADDED_COLUMNS:
+            existing = {
+                item[1]
+                for item in self.connection.execute(
+                    f"PRAGMA table_info({table})"
+                ).fetchall()
+            }
+            if column not in existing:
+                self.connection.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                )
 
     @contextmanager
     def transaction(self) -> Iterator[None]:

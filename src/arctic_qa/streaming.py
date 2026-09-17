@@ -17,6 +17,7 @@ from .discovery import manual_record
 from .errors import (
     AmbiguousChargeError,
     BrokerOperationBusyError,
+    DuplicateRequestKeyError,
     BudgetError,
     CandidateRejectedError,
     CountUnavailableError,
@@ -1193,6 +1194,11 @@ def run_stream(
                     reason_codes=list(reason_codes or []),
                     eligibility_decision=decision,
                     code_commit=completion_commit,
+                    # The paper's own completion time, which the progress row
+                    # above has just recorded. It is not the time the label was
+                    # written, and under paper concurrency it is not the time
+                    # any other paper finished either.
+                    completed_at_utc=progress.paper_completed_at(source_id),
                 )
             except Exception as error:
                 if _ends_the_run(error):
@@ -1343,6 +1349,7 @@ def _label_completed_paper(
     reason_codes: list[str],
     eligibility_decision: str | None,
     code_commit: str,
+    completed_at_utc: str | None = None,
 ) -> None:
     """Label one paper the run has just finished, and hold it in this session.
 
@@ -1360,6 +1367,7 @@ def _label_completed_paper(
         reason_codes=reason_codes,
         eligibility_decision=eligibility_decision,
         code_commit=code_commit,
+        completed_at_utc=completed_at_utc,
     )
     if row is None:
         return
@@ -3640,7 +3648,13 @@ def _ends_the_run(error: BaseException) -> bool:
     it reserved nothing and submitted nothing.
     """
     if isinstance(
-        error, (PaperCostCapError, BrokerOperationBusyError, CountUnavailableError)
+        error,
+        (
+            PaperCostCapError,
+            BrokerOperationBusyError,
+            CountUnavailableError,
+            DuplicateRequestKeyError,
+        ),
     ):
         return False
     if isinstance(error, (BudgetError, AmbiguousChargeError)) or is_run_stop(error):
@@ -4431,18 +4445,45 @@ class _Progress:
         final_state: str | None = None,
         final_reason: str | None = None,
     ) -> None:
-        row = {
-            "paper_id": paper_id,
-            "title": title,
-            "current_stage": current_stage,
-            "final_state": final_state,
-            "final_reason": final_reason,
-        }
+        """Record where one paper stands, and when it reached that state.
+
+        ``state_changed_at_utc`` is the paper's own clock: the moment this
+        state was first recorded, kept across the later rows of the same state.
+        The pipeline trace reads it as the paper's completion time, so a row
+        without it makes the viewer print "Unknown" for every paper of the
+        progress window (captain report, 2026-09-17).
+        """
         with self._lock:
+            previous = next(
+                (row for row in self.recent if row.get("paper_id") == paper_id), None
+            )
+            changed_at = (
+                previous.get("state_changed_at_utc")
+                if previous is not None
+                and previous.get("final_state") == final_state
+                and previous.get("current_stage") == current_stage
+                else None
+            )
+            row = {
+                "paper_id": paper_id,
+                "title": title,
+                "current_stage": current_stage,
+                "final_state": final_state,
+                "final_reason": final_reason,
+                "state_changed_at_utc": changed_at or now(),
+            }
             self.recent = [
                 old for old in self.recent if old.get("paper_id") != paper_id
             ] + [row]
             self.write("running", current_stage, f"Processing {paper_id}.")
+
+    def paper_completed_at(self, paper_id: str) -> str | None:
+        """Return when the named paper last changed state, if it is retained."""
+        with self._lock:
+            row = next(
+                (item for item in self.recent if item.get("paper_id") == paper_id), None
+            )
+            return str(row["state_changed_at_utc"]) if row else None
 
     def error(
         self,

@@ -58,6 +58,26 @@ class BrokerOperationBusyError(ArcticQAError, ValueError):
     code = "BROKER_OPERATION_BUSY"
 
 
+class DuplicateRequestKeyError(ArcticQAError, ValueError):
+    """The paid request key is already in the ledger and cannot be reopened.
+
+    A request key names one request exactly, so meeting it again means the
+    producer walked back to a call the ledger already holds. The states that
+    can be continued are reopened where they are: a resumable ``not_submitted``
+    row resumes, a transient ``count_error`` row counts again, and a ``counting``
+    row of the same request identity is reused, because the free count reserved
+    nothing and submitted nothing. Every other state is a call that was made,
+    and replaying it could charge twice, so the request is refused.
+
+    The refusal is about one call of one paper, never about the run: nothing is
+    reserved and nothing is submitted by it. The producer records the family,
+    skips it and continues. A stop killed the chapter 3 producer at 02:32:10 UTC
+    on 2026-09-17 with a ``counting`` row of its own previous start.
+    """
+
+    code = "DUPLICATE_REQUEST_KEY"
+
+
 class CountUnavailableError(ArcticQAError, ValueError):
     """The free countTokens preflight stayed unavailable past its bounded retry.
 

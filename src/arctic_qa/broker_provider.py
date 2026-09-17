@@ -14,6 +14,7 @@ from .errors import (
     BudgetError,
     CandidateRejectedError,
     CountUnavailableError,
+    DuplicateRequestKeyError,
     PaperCostCapError,
     ProviderError,
     ProviderResponseError,
@@ -63,10 +64,16 @@ ROLE_STAGES = {
 # countTokens preflight stayed unavailable past its bounded retry. It reserved
 # nothing, submitted nothing and charged nothing, so it says nothing about the
 # money or the authorization of the run.
+#
+# ``DuplicateRequestKeyError`` belongs here because the request key is already
+# in the ledger in a state that cannot be reopened. Nothing new is reserved and
+# nothing new is submitted, and the run's money and authorization are exactly
+# as they were; only this one call of this one paper cannot be made again.
 _PAPER_LEVEL_BROKER_ERRORS = (
     BrokerOperationBusyError,
     CandidateRejectedError,
     CountUnavailableError,
+    DuplicateRequestKeyError,
     PaperCostCapError,
     ProviderResponseError,
 )

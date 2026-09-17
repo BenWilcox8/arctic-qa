@@ -1,20 +1,23 @@
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
+import os
 import random
 import re
 import stat
+import sys
 import threading
 import time
 import urllib.error
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from .errors import BrokerOperationBusyError
+from .errors import BrokerOperationBusyError, DuplicateRequestKeyError
 from .gemini_eligibility import (
     DEFAULT_CALL_TIMEOUT_SECONDS,
     MAXIMUM_CALL_TIMEOUT_SECONDS,
@@ -288,6 +291,32 @@ OPERATION_LOCK_WAIT_INTERVAL_SECONDS = 1.0
 # bound and the refusal are unchanged.
 OPERATION_LOCK_CONCURRENT_WAIT_INTERVAL_SECONDS = 0.01
 OPERATION_LOCK_BUSY_REASON = "another paid broker operation is active"
+# Under paper concurrency the exclusive operation lock is a queue, not a race.
+# Four paper threads meet it on every ledger mutation, so a thread that finds it
+# held is behind a peer that will free it, not in front of a fault. It therefore
+# waits for as long as the queue needs. The ceiling below is a sanity bound in
+# minutes: a lock still held after it means a process died with the lock or a
+# reviewed operation is stuck, and even then the request is retried under the
+# same request key before the wait gives up. 19 papers were faulted with
+# ``BrokerOperationBusyError`` in the first 40 minutes of the concurrent chapter
+# 3 run on 2026-09-16 because the bound was 120 seconds and the exclusive
+# section held the free token count and the pacing sleep.
+OPERATION_LOCK_QUEUE_CEILING_SECONDS = 600.0
+OPERATION_LOCK_QUEUE_ROUNDS = 3
+# The wait is long, so it says so. One line every 30 seconds names the section
+# and the seconds waited, and every section reports its wait and its hold when
+# it ends, which is how the lock is measured without a profiler.
+OPERATION_LOCK_HEARTBEAT_SECONDS = 30.0
+# A section whose wait and hold are both below this is ordinary and stays out of
+# the log; the run makes thousands of them.
+OPERATION_LOCK_LOG_THRESHOLD_SECONDS = 1.0
+# The immutable-event proof of one ledger row is kept until the row moves, and
+# a full pass over every row runs again at least this often. The proof covers
+# receipts that were written immutable and never change, so replaying it on
+# every one of the seven ledger reads a paid call makes was pure cost: 2.4
+# seconds a read at 5,393 rows and 21,508 receipt files, which is what
+# serialised the four paper threads of the concurrent chapter 3 run.
+IMMUTABLE_EVENT_REVALIDATION_SECONDS = 300.0
 ALLOWED_LIVE_TEST_LIMITS = {(20, 100), (40, 100), (41, 101), (None, None)}
 STREAM_INPUT_BINDING_VERSION = "stream-input-binding-v1"
 TRANSITION_GATE_SUCCESSOR_FIELDS = {
@@ -655,6 +684,8 @@ def hold_operation_lock(
     wait_seconds: float = 0.0,
     busy_error: type[ValueError] = ValueError,
     poll_seconds: float | None = None,
+    heartbeat_seconds: float | None = None,
+    heartbeat: Callable[[float], None] | None = None,
 ) -> Any:
     """Open the exclusive operation lock file and hold it, or refuse.
 
@@ -666,22 +697,36 @@ def hold_operation_lock(
     A reviewed operation takes the default of both: no wait, and a plain
     ``ValueError`` that the broker seam marks a whole-run stop. Two reviewed
     operations of one ledger must never overlap, and the second one has an
-    operator to tell. The one ordinary request path passes
-    ``OPERATION_LOCK_WAIT_SECONDS`` and :class:`BrokerOperationBusyError`
-    instead, because a reviewed operation is short and the request describes no
-    fault of its own.
+    operator to tell. The one ordinary request path passes a wait and
+    :class:`BrokerOperationBusyError` instead, because a reviewed operation is
+    short and the request describes no fault of its own.
+
+    ``heartbeat`` is called with the seconds waited so far, every
+    ``heartbeat_seconds`` of waiting. A long wait is normal under paper
+    concurrency, so it is reported while it happens rather than only when it
+    ends.
     """
     handle = path.open("a+")
-    deadline = time.monotonic() + wait_seconds
+    started = time.monotonic()
+    deadline = started + wait_seconds
+    next_heartbeat = (
+        started + heartbeat_seconds
+        if heartbeat is not None and heartbeat_seconds
+        else None
+    )
     while True:
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return handle
         except BlockingIOError as error:
-            remaining = deadline - time.monotonic()
+            now = time.monotonic()
+            remaining = deadline - now
             if remaining <= 0:
                 handle.close()
                 raise busy_error(OPERATION_LOCK_BUSY_REASON) from error
+            if next_heartbeat is not None and now >= next_heartbeat:
+                heartbeat(now - started)  # type: ignore[misc]
+                next_heartbeat = now + float(heartbeat_seconds)  # type: ignore[arg-type]
             interval = (
                 OPERATION_LOCK_WAIT_INTERVAL_SECONDS
                 if poll_seconds is None
@@ -1444,6 +1489,21 @@ class SharedGeminiBroker:
         self._admission_lock = threading.Lock()
         self.concurrent_construction = bool(concurrent_construction)
         self._pacing_state = threading.local()
+        # The wait and the hold of every exclusive section, by lock handle, and
+        # the whole-call lock of the sequential path by thread. The second one
+        # makes ``_exclusive_operation`` a no-op where one lock is already held
+        # for the whole call.
+        self._operation_lock_waits: dict[Any, tuple[str, str, float, float]] = {}
+        self._whole_call_operation: dict[int, Any] = {}
+        # The immutable-event proof of each ledger row, by request key, with
+        # the context it was proved under and when the last full pass ran.
+        self._immutable_events_proved: dict[str, str] = {}
+        self._immutable_events_context: tuple[Any, ...] | None = None
+        self._immutable_events_proved_at: float | None = None
+        self._ledger_evidence_proved: tuple[Any, ...] | None = None
+        # One held shared ledger lock and one read of the ledger, per thread,
+        # for the length of a session.
+        self._ledger_session_state = threading.local()
         evaluation_files = (
             evaluation_policy_file,
             evaluation_price_config_file,
@@ -1899,6 +1959,185 @@ class SharedGeminiBroker:
     @property
     def _operation_lock_file(self) -> Path:
         return self.ledger_file.with_name(f".{self.ledger_file.name}.operation.lock")
+
+    def _operation_lock_line(self, event: str, fields: dict[str, Any]) -> None:
+        """Write one measurement line about the exclusive operation lock.
+
+        The line goes to stderr, because stdout of the producer is one JSON
+        result. A launcher keeps both in its log, so the wait and the hold of
+        every exclusive section are measurable from that log alone.
+        """
+        parts = " ".join(f"{name}={value}" for name, value in fields.items())
+        try:
+            print(
+                f"[operation-lock] {_now()} pid={os.getpid()} "
+                f"thread={threading.current_thread().name} {event} {parts}",
+                file=sys.stderr,
+                flush=True,
+            )
+        except Exception:
+            # The measurement is never authoritative and never stops a request.
+            pass
+
+    def _acquire_operation_lock(self, section: str, request_key: str) -> Any:
+        """Queue for the exclusive operation lock and return the held handle.
+
+        A concurrent request waits for the whole queue in front of it. The wait
+        has a sanity ceiling in minutes; a ceiling that is reached retries the
+        same request key instead of faulting the paper, because the request has
+        reserved nothing and describes no fault of its own. Only a lock still
+        held after every round raises :class:`BrokerOperationBusyError`, which
+        the producer contains against one paper as it always has.
+        """
+        queued = self.concurrent_construction
+        wait_seconds = (
+            OPERATION_LOCK_QUEUE_CEILING_SECONDS
+            if queued
+            else OPERATION_LOCK_WAIT_SECONDS
+        )
+        rounds = OPERATION_LOCK_QUEUE_ROUNDS if queued else 1
+        started = time.monotonic()
+        for attempt in range(1, rounds + 1):
+            try:
+                handle = hold_operation_lock(
+                    self._operation_lock_file,
+                    wait_seconds=wait_seconds,
+                    busy_error=BrokerOperationBusyError,
+                    poll_seconds=(
+                        OPERATION_LOCK_CONCURRENT_WAIT_INTERVAL_SECONDS
+                        if queued
+                        else None
+                    ),
+                    heartbeat_seconds=OPERATION_LOCK_HEARTBEAT_SECONDS,
+                    heartbeat=lambda waited, section=section: self._operation_lock_line(
+                        "waiting",
+                        {
+                            "section": section,
+                            "request": request_key[:16],
+                            "waited_s": f"{waited:.1f}",
+                        },
+                    ),
+                )
+            except BrokerOperationBusyError:
+                if attempt == rounds:
+                    self._operation_lock_line(
+                        "gave_up",
+                        {
+                            "section": section,
+                            "request": request_key[:16],
+                            "waited_s": f"{time.monotonic() - started:.1f}",
+                            "rounds": rounds,
+                        },
+                    )
+                    raise
+                self._operation_lock_line(
+                    "ceiling_retry",
+                    {
+                        "section": section,
+                        "request": request_key[:16],
+                        "waited_s": f"{time.monotonic() - started:.1f}",
+                        "round": attempt,
+                    },
+                )
+                continue
+            self._operation_lock_waits[handle] = (
+                section,
+                request_key,
+                time.monotonic() - started,
+                time.monotonic(),
+            )
+            return handle
+        raise BrokerOperationBusyError(OPERATION_LOCK_BUSY_REASON)
+
+    def _release_operation_lock(self, handle: Any) -> None:
+        record = self._operation_lock_waits.pop(handle, None)
+        handle.close()
+        if record is None:
+            return
+        section, request_key, waited, held_from = record
+        held = time.monotonic() - held_from
+        if max(waited, held) >= OPERATION_LOCK_LOG_THRESHOLD_SECONDS:
+            self._operation_lock_line(
+                "section",
+                {
+                    "section": section,
+                    "request": request_key[:16],
+                    "waited_s": f"{waited:.2f}",
+                    "held_s": f"{held:.2f}",
+                },
+            )
+
+    @contextlib.contextmanager
+    def _ledger_session(self) -> Iterator[None]:
+        """Hold the shared ledger lock across several ledger operations.
+
+        Three operations register one counted request, and each of them took
+        the shared ledger lock on its own. That lock is shared with the
+        benchmark evaluator, whose own hold was measured at a median of 2.35
+        seconds on 2026-09-17, so three acquisitions cost about seven seconds
+        of waiting for one paid call. Inside a session the lock is taken once
+        and the validated ledger is read once: no other writer can change the
+        file while it is held, so the second read would return the same bytes.
+
+        Every ledger operation inside a session must go through
+        :meth:`_locked_ledger`. ``flock`` is held by an open file description,
+        so a second ``open`` of the lock file inside a session deadlocks.
+        """
+        state = self._ledger_session_state
+        if getattr(state, "depth", 0):
+            state.depth += 1
+            try:
+                yield
+            finally:
+                state.depth -= 1
+            return
+        with self._lock_file.open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            state.depth = 1
+            state.ledger = None
+            try:
+                yield
+            finally:
+                state.depth = 0
+                state.ledger = None
+
+    @contextlib.contextmanager
+    def _locked_ledger(self) -> Iterator[dict[str, Any]]:
+        """Yield the validated ledger under the shared ledger lock.
+
+        Outside a session this is the historical shape: take the lock, read
+        and validate, act, release. Inside one, the lock is already held and
+        the ledger already read, and a commit writes the very object that is
+        held, so the session's copy stays the file's content.
+        """
+        state = self._ledger_session_state
+        if getattr(state, "depth", 0):
+            if state.ledger is None:
+                state.ledger = self._validated_ledger()
+            yield state.ledger
+            return
+        with self._lock_file.open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield self._validated_ledger()
+
+    @contextlib.contextmanager
+    def _exclusive_operation(self, section: str, request_key: str) -> Iterator[None]:
+        """Hold the exclusive operation lock for one short ledger mutation.
+
+        The sequential path holds one lock for the whole call, so this is a
+        no-op there: ``flock`` of the same file from a second descriptor of one
+        process blocks against itself. The concurrent path holds nothing
+        between its mutations, so every section takes the lock on its own and
+        keeps only the mutation inside it.
+        """
+        if self._whole_call_operation.get(threading.get_ident()) is not None:
+            yield
+            return
+        handle = self._acquire_operation_lock(section, request_key)
+        try:
+            yield
+        finally:
+            self._release_operation_lock(handle)
 
     @property
     def _identity_file(self) -> Path:
@@ -2641,14 +2880,42 @@ class SharedGeminiBroker:
         if self._status_observer is not None:
             self._status_observer(self._status_file)
 
+    def _ledger_evidence_fingerprint(self) -> tuple[Any, ...]:
+        """Identify the bytes the immutable-event proof is a proof of.
+
+        The proof is a pure function of the ledger file and of the receipt
+        files beside it, so the same fingerprint carries the same answer. The
+        ledger is hashed, which is 7 milliseconds at 7 MB. The receipts
+        directory is stated, which names every addition and every removal; a
+        change inside an existing receipt does not move it, and that is what
+        the full pass every ``IMMUTABLE_EVENT_REVALIDATION_SECONDS`` is for.
+        """
+        try:
+            stat = os.stat(self.receipts_dir)
+            receipts = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            receipts = (0, 0)
+        return (sha256_file(self.ledger_file), receipts)
+
     def _validated_ledger(self) -> dict[str, Any]:
         if self._integrity_file.exists():
             raise ValueError("the shared paid-call ledger has an integrity halt")
         try:
+            fingerprint = self._ledger_evidence_fingerprint()
             ledger = _read(self.ledger_file)
             self._validate_ledger(ledger)
-            self._validate_immutable_events(ledger)
-            self._validate_active_transition_event(ledger)
+            # The ledger's own consistency is proved on every read, above. The
+            # proof against the receipts on disk is skipped only when nothing
+            # it reads has changed since the last time it ran.
+            stale = (
+                self._immutable_events_proved_at is None
+                or time.monotonic() - self._immutable_events_proved_at
+                >= IMMUTABLE_EVENT_REVALIDATION_SECONDS
+            )
+            if stale or fingerprint != self._ledger_evidence_proved:
+                self._validate_immutable_events(ledger)
+                self._validate_active_transition_event(ledger)
+                self._ledger_evidence_proved = fingerprint
             return ledger
         except Exception as error:
             self._record_integrity_halt(error)
@@ -2656,6 +2923,209 @@ class SharedGeminiBroker:
             raise ValueError(
                 f"the shared paid-call ledger failed integrity validation: {error}"
             ) from error
+
+    def _validate_request_events(
+        self,
+        ledger: dict[str, Any],
+        *,
+        request_key: str,
+        request: dict[str, Any],
+        base_fields: tuple[str, ...],
+        allowed_pairs: set[tuple[str, str]],
+        initial_pair: tuple[str, str],
+        transition_events_by_pair: dict[tuple[str, str], set[str]],
+        reconciliation_events: dict[str, tuple[Path, dict[str, Any]]],
+    ) -> None:
+        """Prove one ledger row against its immutable events on disk.
+
+        This is the body of the per-request pass of
+        :meth:`_validate_immutable_events`, unchanged. It is a method of its
+        own so the pass can skip a row it has already proved.
+        """
+        self._validate_count_retry_binding(request_key, request, base_fields)
+        resume_receipt_sha256 = request.get("resumed_from_not_submitted_sha256")
+        resumed = resume_receipt_sha256 is not None
+        if resumed:
+            original_path = self.receipts_dir / f"{request_key}.json"
+            if (
+                not re.fullmatch(r"[a-f0-9]{64}", str(resume_receipt_sha256 or ""))
+                or not original_path.is_file()
+                or sha256_file(original_path) != resume_receipt_sha256
+            ):
+                raise ValueError("a resumed request lost its not-submitted receipt")
+            original = _read(original_path)
+            stable_fields = tuple(
+                name
+                for name in base_fields
+                if name
+                not in {
+                    "gate_sha256",
+                    "config_transition_sha256",
+                    "price_config_sha256",
+                    "policy_sha256",
+                }
+            )
+            if (
+                any(original.get(name) != request.get(name) for name in stable_fields)
+                or original.get("state") != "not_submitted"
+                or original.get("reason") not in RESUMABLE_NOT_SUBMITTED_REASONS
+                or original.get("live_call_made") is not False
+                or original.get("config_transition_sha256")
+                != request.get("resumed_from_config_transition_sha256")
+            ):
+                raise ValueError("a resumed request changed its prior identity")
+        request_config_hash = request.get(
+            "price_config_sha256", ledger["price_config_sha256"]
+        )
+        request_policy_hash = request.get("policy_sha256", ledger["policy_sha256"])
+        request_pair = (request_config_hash, request_policy_hash)
+        if request_pair not in allowed_pairs:
+            raise ValueError("a paid-call request uses an unauthorized configuration")
+        transition_hash = request.get("config_transition_sha256")
+        if request_pair == initial_pair:
+            if transition_hash is not None:
+                raise ValueError("an initial-config request has a transition binding")
+        elif transition_hash not in transition_events_by_pair.get(request_pair, set()):
+            raise ValueError(
+                "a paid-call request lacks its authorized config transition"
+            )
+        event_stem = self._request_event_stem(request_key, request)
+        submitted_path = self.receipts_dir / f"{event_stem}.submitted.json"
+        final_path = self.receipts_dir / f"{event_stem}.json"
+        if submitted_path.is_file():
+            submitted = _read(submitted_path)
+            if any(submitted.get(name) != request.get(name) for name in base_fields):
+                raise ValueError("an immutable submitted event changed identity")
+            if request.get("state") in {
+                "submitted",
+                "orphaned_no_replay",
+                "completed",
+                "ambiguous_charge",
+            } and _money(
+                submitted.get("reserved_usd"),
+                "submitted reservation",
+                positive=True,
+            ) != _money(
+                request.get("reserved_usd"), "ledger reservation", positive=True
+            ):
+                raise ValueError("an immutable submitted reservation changed")
+        state = request.get("state")
+        if state not in {
+            "completed",
+            "ambiguous_charge",
+            "count_error",
+            "too_large_not_ready",
+            "not_submitted",
+        }:
+            # The row is not terminal, so it has no final event to prove yet.
+            return
+        if not final_path.is_file():
+            raise ValueError("a terminal paid request lacks its immutable receipt")
+        final = _read(final_path)
+        if any(final.get(name) != request.get(name) for name in base_fields):
+            raise ValueError("an immutable final event changed request identity")
+        count_error_path = (
+            self.receipts_dir / f"{request_key}.count-error-continuation.json"
+        )
+        count_error_sha256 = request.get("count_error_continuation_sha256")
+        if count_error_sha256 is not None:
+            event = _read(count_error_path) if count_error_path.is_file() else {}
+            review_path = Path(str(event.get("review_file") or ""))
+            evidence_path = Path(str(event.get("evidence_file") or ""))
+            # The event binds the count-error receipt of the request key.
+            # A reviewed continuation that authorized a retry keeps that
+            # binding while the request counts again under a later round.
+            reviewed_path = self.receipts_dir / f"{request_key}.json"
+            reviewed = _read(reviewed_path) if reviewed_path.is_file() else {}
+            if (
+                (state != "count_error" and not request.get("count_retry_round"))
+                or not re.fullmatch(r"[a-f0-9]{64}", str(count_error_sha256))
+                or not count_error_path.is_file()
+                or sha256_file(count_error_path) != count_error_sha256
+                or event.get("schema") != COUNT_ERROR_CONTINUATION_SCHEMA
+                or event.get("request_key") != request_key
+                or not reviewed_path.is_file()
+                or event.get("count_error_receipt_sha256") != sha256_file(reviewed_path)
+                or event.get("gate_sha256") != reviewed.get("gate_sha256")
+                or event.get("live_call_made") is not False
+                or event.get("replay_prohibited") is not True
+                or not review_path.is_file()
+                or event.get("review_file_sha256") != sha256_file(review_path)
+                or not evidence_path.is_file()
+                or event.get("evidence_file_sha256") != sha256_file(evidence_path)
+            ):
+                raise ValueError("a count-error continuation event changed")
+        elif count_error_path.is_file():
+            raise ValueError("an unapplied count-error continuation event exists")
+        rejection_path = (
+            self.receipts_dir / f"{request_key}.http-rejection-settlement.json"
+        )
+        rejection_sha256 = request.get("http_rejection_settlement_sha256")
+        if rejection_sha256 is not None:
+            if (
+                state != "completed"
+                or not re.fullmatch(r"[a-f0-9]{64}", str(rejection_sha256))
+                or not rejection_path.is_file()
+                or sha256_file(rejection_path) != rejection_sha256
+                or not self._http_rejection_settlement_valid(
+                    rejection_path, request, final
+                )
+            ):
+                raise ValueError("an http rejection settlement event changed")
+        elif rejection_path.is_file():
+            raise ValueError("an unapplied http rejection settlement event exists")
+        settlement_path = (
+            self.receipts_dir / f"{request_key}.pretransport-settlement.json"
+        )
+        settlement_sha256 = request.get("pretransport_settlement_sha256")
+        if settlement_sha256 is not None:
+            if (
+                state != "completed"
+                or not settlement_path.is_file()
+                or sha256_file(settlement_path) != settlement_sha256
+                or not self._pretransport_settlement_valid(
+                    settlement_path, request, final
+                )
+            ):
+                raise ValueError("a pretransport settlement event changed")
+        elif settlement_path.is_file():
+            raise ValueError("an unapplied pretransport settlement event exists")
+        reconciliation = reconciliation_events.pop(request_key, None)
+        reconciliation_sha256 = request.get("usage_reconciliation_sha256")
+        if reconciliation_sha256 is not None:
+            if state != "completed" or reconciliation is None:
+                raise ValueError("a usage reconciliation event is absent")
+            reconciliation_path, event = reconciliation
+            received_path = self.receipts_dir / f"{event_stem}.received.json"
+            if (
+                not re.fullmatch(r"[a-f0-9]{64}", reconciliation_sha256)
+                or sha256_file(reconciliation_path) != reconciliation_sha256
+                or final.get("state") != "ambiguous_charge"
+                or not received_path.is_file()
+                or event["received_receipt_sha256"] != sha256_file(received_path)
+                or event["ambiguous_receipt_sha256"] != sha256_file(final_path)
+                or event["config_transition_sha256"]
+                != request.get("config_transition_sha256")
+                or event["price_config_sha256"] != request.get("price_config_sha256")
+                or event["normalized_usage"] != request.get("usage")
+                or _money(event["actual_cost_usd"], "reconciled actual cost")
+                != _money(request.get("actual_cost_usd"), "ledger actual cost")
+            ):
+                raise ValueError("a usage reconciliation event changed")
+        elif rejection_sha256 is not None:
+            if reconciliation is not None:
+                raise ValueError("an unapplied usage reconciliation event exists")
+        else:
+            if reconciliation is not None and state != "ambiguous_charge":
+                raise ValueError("an unapplied usage reconciliation event exists")
+            if final.get("state") != state:
+                raise ValueError("an immutable final event changed request state")
+            if state == "completed" and (
+                _money(final.get("actual_cost_usd"), "final actual cost")
+                != _money(request.get("actual_cost_usd"), "ledger actual cost")
+                or final.get("usage") != request.get("usage")
+            ):
+                raise ValueError("an immutable final event changed cost or usage")
 
     def _validate_active_transition_event(self, ledger: dict[str, Any]) -> None:
         path = self._config_transition_event_path
@@ -2862,203 +3332,50 @@ class SharedGeminiBroker:
             "policy_sha256",
             "config_transition_sha256",
         )
+        # A request whose row and whose context are unchanged was proved by
+        # an earlier pass of this same process, and its evidence on disk is
+        # immutable. Re-proving all 5,000 of them on every ledger read cost
+        # about 2.4 seconds, and a paid call reads the ledger about seven
+        # times: 17 seconds of the 25-second admission that serialised the
+        # four paper threads on 2026-09-17. The proof is kept per row and
+        # replayed only for a row that moved, and a full pass runs again every
+        # ``IMMUTABLE_EVENT_REVALIDATION_SECONDS`` whatever the rows say.
+        context = (
+            sha256_file(self._identity_file),
+            initial_pair,
+            tuple(sorted(str(value) for value in transition_authorizations_by_hash)),
+        )
+        full_pass = (
+            self._immutable_events_proved_at is None
+            or time.monotonic() - self._immutable_events_proved_at
+            >= IMMUTABLE_EVENT_REVALIDATION_SECONDS
+            or self._immutable_events_context != context
+        )
+        if full_pass:
+            self._immutable_events_proved = {}
+            self._immutable_events_context = context
+            self._ledger_evidence_proved = None
+        proved = self._immutable_events_proved
         for request_key, request in ledger["requests"].items():
-            self._validate_count_retry_binding(request_key, request, base_fields)
-            resume_receipt_sha256 = request.get("resumed_from_not_submitted_sha256")
-            resumed = resume_receipt_sha256 is not None
-            if resumed:
-                original_path = self.receipts_dir / f"{request_key}.json"
-                if (
-                    not re.fullmatch(r"[a-f0-9]{64}", str(resume_receipt_sha256 or ""))
-                    or not original_path.is_file()
-                    or sha256_file(original_path) != resume_receipt_sha256
-                ):
-                    raise ValueError("a resumed request lost its not-submitted receipt")
-                original = _read(original_path)
-                stable_fields = tuple(
-                    name
-                    for name in base_fields
-                    if name
-                    not in {
-                        "gate_sha256",
-                        "config_transition_sha256",
-                        "price_config_sha256",
-                        "policy_sha256",
-                    }
-                )
-                if (
-                    any(
-                        original.get(name) != request.get(name)
-                        for name in stable_fields
-                    )
-                    or original.get("state") != "not_submitted"
-                    or original.get("reason") not in RESUMABLE_NOT_SUBMITTED_REASONS
-                    or original.get("live_call_made") is not False
-                    or original.get("config_transition_sha256")
-                    != request.get("resumed_from_config_transition_sha256")
-                ):
-                    raise ValueError("a resumed request changed its prior identity")
-            request_config_hash = request.get(
-                "price_config_sha256", ledger["price_config_sha256"]
-            )
-            request_policy_hash = request.get("policy_sha256", ledger["policy_sha256"])
-            request_pair = (request_config_hash, request_policy_hash)
-            if request_pair not in allowed_pairs:
-                raise ValueError(
-                    "a paid-call request uses an unauthorized configuration"
-                )
-            transition_hash = request.get("config_transition_sha256")
-            if request_pair == initial_pair:
-                if transition_hash is not None:
-                    raise ValueError(
-                        "an initial-config request has a transition binding"
-                    )
-            elif transition_hash not in transition_events_by_pair.get(
-                request_pair, set()
-            ):
-                raise ValueError(
-                    "a paid-call request lacks its authorized config transition"
-                )
-            event_stem = self._request_event_stem(request_key, request)
-            submitted_path = self.receipts_dir / f"{event_stem}.submitted.json"
-            final_path = self.receipts_dir / f"{event_stem}.json"
-            if submitted_path.is_file():
-                submitted = _read(submitted_path)
-                if any(
-                    submitted.get(name) != request.get(name) for name in base_fields
-                ):
-                    raise ValueError("an immutable submitted event changed identity")
-                if request.get("state") in {
-                    "submitted",
-                    "orphaned_no_replay",
-                    "completed",
-                    "ambiguous_charge",
-                } and _money(
-                    submitted.get("reserved_usd"),
-                    "submitted reservation",
-                    positive=True,
-                ) != _money(
-                    request.get("reserved_usd"), "ledger reservation", positive=True
-                ):
-                    raise ValueError("an immutable submitted reservation changed")
-            state = request.get("state")
-            if state not in {
-                "completed",
-                "ambiguous_charge",
-                "count_error",
-                "too_large_not_ready",
-                "not_submitted",
-            }:
+            signature = canonical_json(request)
+            if proved.get(request_key) == signature:
+                # The row is the row that was proved. Its reconciliation event
+                # was accounted for by that proof, so it is accounted for here.
+                reconciliation_events.pop(request_key, None)
                 continue
-            if not final_path.is_file():
-                raise ValueError("a terminal paid request lacks its immutable receipt")
-            final = _read(final_path)
-            if any(final.get(name) != request.get(name) for name in base_fields):
-                raise ValueError("an immutable final event changed request identity")
-            count_error_path = (
-                self.receipts_dir / f"{request_key}.count-error-continuation.json"
+            self._validate_request_events(
+                ledger,
+                request_key=request_key,
+                request=request,
+                base_fields=base_fields,
+                allowed_pairs=allowed_pairs,
+                initial_pair=initial_pair,
+                transition_events_by_pair=transition_events_by_pair,
+                reconciliation_events=reconciliation_events,
             )
-            count_error_sha256 = request.get("count_error_continuation_sha256")
-            if count_error_sha256 is not None:
-                event = _read(count_error_path) if count_error_path.is_file() else {}
-                review_path = Path(str(event.get("review_file") or ""))
-                evidence_path = Path(str(event.get("evidence_file") or ""))
-                # The event binds the count-error receipt of the request key.
-                # A reviewed continuation that authorized a retry keeps that
-                # binding while the request counts again under a later round.
-                reviewed_path = self.receipts_dir / f"{request_key}.json"
-                reviewed = _read(reviewed_path) if reviewed_path.is_file() else {}
-                if (
-                    (state != "count_error" and not request.get("count_retry_round"))
-                    or not re.fullmatch(r"[a-f0-9]{64}", str(count_error_sha256))
-                    or not count_error_path.is_file()
-                    or sha256_file(count_error_path) != count_error_sha256
-                    or event.get("schema") != COUNT_ERROR_CONTINUATION_SCHEMA
-                    or event.get("request_key") != request_key
-                    or not reviewed_path.is_file()
-                    or event.get("count_error_receipt_sha256")
-                    != sha256_file(reviewed_path)
-                    or event.get("gate_sha256") != reviewed.get("gate_sha256")
-                    or event.get("live_call_made") is not False
-                    or event.get("replay_prohibited") is not True
-                    or not review_path.is_file()
-                    or event.get("review_file_sha256") != sha256_file(review_path)
-                    or not evidence_path.is_file()
-                    or event.get("evidence_file_sha256") != sha256_file(evidence_path)
-                ):
-                    raise ValueError("a count-error continuation event changed")
-            elif count_error_path.is_file():
-                raise ValueError("an unapplied count-error continuation event exists")
-            rejection_path = (
-                self.receipts_dir / f"{request_key}.http-rejection-settlement.json"
-            )
-            rejection_sha256 = request.get("http_rejection_settlement_sha256")
-            if rejection_sha256 is not None:
-                if (
-                    state != "completed"
-                    or not re.fullmatch(r"[a-f0-9]{64}", str(rejection_sha256))
-                    or not rejection_path.is_file()
-                    or sha256_file(rejection_path) != rejection_sha256
-                    or not self._http_rejection_settlement_valid(
-                        rejection_path, request, final
-                    )
-                ):
-                    raise ValueError("an http rejection settlement event changed")
-            elif rejection_path.is_file():
-                raise ValueError("an unapplied http rejection settlement event exists")
-            settlement_path = (
-                self.receipts_dir / f"{request_key}.pretransport-settlement.json"
-            )
-            settlement_sha256 = request.get("pretransport_settlement_sha256")
-            if settlement_sha256 is not None:
-                if (
-                    state != "completed"
-                    or not settlement_path.is_file()
-                    or sha256_file(settlement_path) != settlement_sha256
-                    or not self._pretransport_settlement_valid(
-                        settlement_path, request, final
-                    )
-                ):
-                    raise ValueError("a pretransport settlement event changed")
-            elif settlement_path.is_file():
-                raise ValueError("an unapplied pretransport settlement event exists")
-            reconciliation = reconciliation_events.pop(request_key, None)
-            reconciliation_sha256 = request.get("usage_reconciliation_sha256")
-            if reconciliation_sha256 is not None:
-                if state != "completed" or reconciliation is None:
-                    raise ValueError("a usage reconciliation event is absent")
-                reconciliation_path, event = reconciliation
-                received_path = self.receipts_dir / f"{event_stem}.received.json"
-                if (
-                    not re.fullmatch(r"[a-f0-9]{64}", reconciliation_sha256)
-                    or sha256_file(reconciliation_path) != reconciliation_sha256
-                    or final.get("state") != "ambiguous_charge"
-                    or not received_path.is_file()
-                    or event["received_receipt_sha256"] != sha256_file(received_path)
-                    or event["ambiguous_receipt_sha256"] != sha256_file(final_path)
-                    or event["config_transition_sha256"]
-                    != request.get("config_transition_sha256")
-                    or event["price_config_sha256"]
-                    != request.get("price_config_sha256")
-                    or event["normalized_usage"] != request.get("usage")
-                    or _money(event["actual_cost_usd"], "reconciled actual cost")
-                    != _money(request.get("actual_cost_usd"), "ledger actual cost")
-                ):
-                    raise ValueError("a usage reconciliation event changed")
-            elif rejection_sha256 is not None:
-                if reconciliation is not None:
-                    raise ValueError("an unapplied usage reconciliation event exists")
-            else:
-                if reconciliation is not None and state != "ambiguous_charge":
-                    raise ValueError("an unapplied usage reconciliation event exists")
-                if final.get("state") != state:
-                    raise ValueError("an immutable final event changed request state")
-                if state == "completed" and (
-                    _money(final.get("actual_cost_usd"), "final actual cost")
-                    != _money(request.get("actual_cost_usd"), "ledger actual cost")
-                    or final.get("usage") != request.get("usage")
-                ):
-                    raise ValueError("an immutable final event changed cost or usage")
+            proved[request_key] = signature
+        if full_pass:
+            self._immutable_events_proved_at = time.monotonic()
 
         if reconciliation_events:
             raise ValueError("a usage reconciliation event lacks a ledger request")
@@ -6228,9 +6545,7 @@ class SharedGeminiBroker:
         receipts. A permanent count error still refuses the key, because the
         request or the credential is wrong until a review says otherwise.
         """
-        with self._lock_file.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            ledger = self._validated_ledger()
+        with self._locked_ledger() as ledger:
             request = ledger["requests"].get(request_key)
             if request is None or request.get("state") != "count_error":
                 return 0
@@ -6329,17 +6644,58 @@ class SharedGeminiBroker:
             self._halt(f"countTokens error: {type(error).__name__}", phase=phase)
         return receipt
 
+    # The fields that name one request, whatever the configuration bound to it
+    # was when it was registered. The gate, the policy, the price config and
+    # the transition may all move between one start and the next; the request
+    # itself does not.
+    REQUEST_IDENTITY_FIELDS = (
+        "request_key",
+        "request_sha256",
+        "run_id",
+        "phase",
+        "stage",
+        "paper_id",
+        "family_id",
+        "source_version_id",
+        "model",
+    )
+
+    def _reusable_counting_row(
+        self, existing: dict[str, Any], base: dict[str, Any]
+    ) -> bool:
+        """Say whether a ledger row may be reopened by this count event.
+
+        A ``counting`` row registered a free ``countTokens`` preflight and
+        nothing else: no reservation, no submission, no charge, no receipt. A
+        start that ends between the count event and the reservation leaves one
+        behind, and the next start walks back to that same call. Reusing the
+        row costs one more free count and keeps the identity it already has;
+        refusing it would end the producer over a call that never happened.
+
+        The identity must be the same. A row whose request key matches but
+        whose paper, family, source version, stage or model differs is not this
+        request, and is refused like every other existing key.
+        """
+        if existing.get("state") != "counting":
+            return False
+        return all(
+            existing.get(name) == base.get(name)
+            for name in self.REQUEST_IDENTITY_FIELDS
+        )
+
     def _count_event(
         self, request_key: str, base: dict[str, Any], *, phase: str | None = None
     ) -> None:
-        with self._lock_file.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            ledger = self._validated_ledger()
+        with self._locked_ledger() as ledger:
             halt = self._phase_halted(ledger, phase or base.get("phase") or "live_test")
             if halt is not None:
                 raise ValueError(f"the paid-call broker is halted: {halt}")
-            if request_key in ledger["requests"]:
-                raise ValueError("the paid request key already exists")
+            existing = ledger["requests"].get(request_key)
+            if existing is not None and not self._reusable_counting_row(existing, base):
+                # The key names a call the ledger already holds in a state that
+                # cannot be reopened. Replaying it could charge twice, so it is
+                # refused; the refusal is about this call, never about the run.
+                raise DuplicateRequestKeyError("the paid request key already exists")
             binding = {
                 "paper_id": base["paper_id"],
                 "source_version_id": base["source_version_id"],
@@ -6368,7 +6724,11 @@ class SharedGeminiBroker:
                 )
             ledger["family_bindings"].setdefault(base["family_id"], binding)
             ledger["paper_bindings"].setdefault(base["paper_id"], paper_binding)
-            ledger["count_requests"] += 1
+            if existing is None:
+                # ``count_requests`` is the count of rows, which the ledger
+                # totals check against ``len(requests)``. A reused row adds no
+                # row, so it adds no count.
+                ledger["count_requests"] += 1
             ledger["requests"][request_key] = {**base, "state": "counting"}
             ledger["updated_at_utc"] = _now()
             self._commit_ledger(ledger)
@@ -6398,9 +6758,7 @@ class SharedGeminiBroker:
     def _resume_not_submitted(
         self, request_key: str, base: dict[str, Any]
     ) -> int | None:
-        with self._lock_file.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            ledger = self._validated_ledger()
+        with self._locked_ledger() as ledger:
             request = ledger["requests"].get(request_key)
             if request is None:
                 return None
@@ -6412,12 +6770,16 @@ class SharedGeminiBroker:
                 # The cap refusal describes the family, not the moment. It is
                 # never resumed and never settled, under any transition.
                 raise ValueError("the per-paper cap refusal is never resumed")
+            if self._reusable_counting_row(request, base):
+                # A free count that never reached a reservation. There is
+                # nothing to resume, and ``_count_event`` reopens the row.
+                return None
             if (
                 request.get("state") != "not_submitted"
                 or reason not in RESUMABLE_NOT_SUBMITTED_REASONS
                 or request.get("resumed_from_not_submitted_sha256") is not None
             ):
-                raise ValueError("the paid request key already exists")
+                raise DuplicateRequestKeyError("the paid request key already exists")
             event_path = self._config_transition_event_path
             if event_path is None or not event_path.is_file():
                 if reason == AUTHORIZED_CAP_REASON:
@@ -7227,37 +7589,36 @@ class SharedGeminiBroker:
         #
         # An evaluation request never takes the exclusive operation lock. A
         # construction request takes it, because a reviewed operation of this
-        # ledger must not overlap the accounting of a paid request. A
-        # concurrent construction request releases that lock with its
-        # admission, before the live call, so one paper's call never blocks
-        # another's. Without ``concurrent_construction`` the lock is held for
-        # the whole call, as before.
+        # ledger must not overlap the accounting of a paid request.
+        #
+        # A sequential construction request holds one lock for the whole call,
+        # as it always has. A concurrent construction request holds it only for
+        # the ledger mutations themselves: the orphan recovery, the reservation
+        # and the receipt it makes durable. The free token count, its retries
+        # and the pacing wait stay outside, because none of them touches the
+        # accounting and each of them can take minutes. Holding the pacing
+        # sleep and the count inside the lock made every peer thread queue
+        # behind them and faulted 19 papers in 40 minutes on 2026-09-16.
         concurrent = phase == EVALUATION_PHASE or self.concurrent_construction
         operation = None
         inflight_lock = None
+        reserved_operation = None
         admitted = False
-        if phase != EVALUATION_PHASE:
+        if phase != EVALUATION_PHASE and not self.concurrent_construction:
             # This is the broker's one ordinary request path, so it waits for
             # a reviewed operation of this ledger rather than ending the run on
             # it. The bound raises ``BrokerOperationBusyError``, which the
             # producer contains against one family like any other fault.
-            operation = hold_operation_lock(
-                self._operation_lock_file,
-                wait_seconds=OPERATION_LOCK_WAIT_SECONDS,
-                busy_error=BrokerOperationBusyError,
-                poll_seconds=(
-                    OPERATION_LOCK_CONCURRENT_WAIT_INTERVAL_SECONDS
-                    if self.concurrent_construction
-                    else None
-                ),
-            )
+            operation = self._acquire_operation_lock("whole_call", request_key)
+            self._whole_call_operation[threading.get_ident()] = operation
         if concurrent:
             self._admission_lock.acquire()
             admitted = True
         try:
             if exclusive_batch_marker_path(self.ledger_file).exists():
                 raise ValueError("exclusive Gemini batch mode is active")
-            self._recover_orphans(active_run_id=run_id, own_run_only=concurrent)
+            with self._exclusive_operation("orphan_recovery", request_key):
+                self._recover_orphans(active_run_id=run_id, own_run_only=concurrent)
             if phase == EVALUATION_PHASE:
                 gate = _validate_evaluation_gate(self.evaluation_gate_file)  # type: ignore[arg-type]
                 self._validate_evaluation_gate_hashes(gate)
@@ -7286,17 +7647,25 @@ class SharedGeminiBroker:
             # A request whose free count failed transiently counts again here,
             # before the resume path, which knows only the states a reservation
             # can reach.
-            count_retry_round = self._open_count_retry(request_key, base, phase=phase)
-            exact_input = (
-                None
-                if count_retry_round
-                else self._resume_not_submitted(request_key, base)
-            )
-            resumed = exact_input is not None
+            # One exclusive operation, one shared ledger lock and one read of
+            # the ledger for all three steps that register a counted request.
+            with (
+                self._exclusive_operation("count_registration", request_key),
+                self._ledger_session(),
+            ):
+                count_retry_round = self._open_count_retry(
+                    request_key, base, phase=phase
+                )
+                exact_input = (
+                    None
+                    if count_retry_round
+                    else self._resume_not_submitted(request_key, base)
+                )
+                resumed = exact_input is not None
+                if exact_input is None and not count_retry_round:
+                    self._count_event(request_key, base, phase=phase)
             count_attempts: list[dict[str, Any]] = []
             if exact_input is None:
-                if not count_retry_round:
-                    self._count_event(request_key, base, phase=phase)
                 count_stem = _count_event_stem(request_key, count_retry_round)
                 for attempt in range(1, COUNT_RETRY_ATTEMPTS + 1):
                     started_at = _now()
@@ -7336,15 +7705,16 @@ class SharedGeminiBroker:
                             failure_class == PERMANENT_COUNT_FAILURE
                             or attempt == COUNT_RETRY_ATTEMPTS
                         ):
-                            return self._record_count_error(
-                                request_key,
-                                base,
-                                event_stem=count_stem,
-                                error=error,
-                                failure_class=failure_class,
-                                attempts=count_attempts,
-                                phase=phase,
-                            )
+                            with self._exclusive_operation("count_error", request_key):
+                                return self._record_count_error(
+                                    request_key,
+                                    base,
+                                    event_stem=count_stem,
+                                    error=error,
+                                    failure_class=failure_class,
+                                    attempts=count_attempts,
+                                    phase=phase,
+                                )
                         # The free count charges nothing, so waiting for the
                         # provider costs the run nothing but the wait.
                         time.sleep(_count_retry_delay(attempt))
@@ -7383,17 +7753,32 @@ class SharedGeminiBroker:
                     receipt,
                     immutable=True,
                 )
-                self._mark_not_submitted(
-                    request_key,
-                    "too_large_not_ready",
-                    "counted request exceeds the model input limit",
-                )
-                self._halt("counted request exceeds the model input limit", phase=phase)
+                with self._exclusive_operation("too_large_halt", request_key):
+                    self._mark_not_submitted(
+                        request_key,
+                        "too_large_not_ready",
+                        "counted request exceeds the model input limit",
+                    )
+                    self._halt(
+                        "counted request exceeds the model input limit", phase=phase
+                    )
                 return receipt
             output_limit = int(payload["generationConfig"]["maxOutputTokens"])
             reserved = _cost(request_config, exact_input, output_limit)
             deadline = time.monotonic() + TRANSIENT_RESERVATION_RETRY_SECONDS
+            # The reservation is the accounting itself, so the exclusive
+            # operation lock is held across it and stays held through the
+            # durable submitted receipt and the in-flight lock: a peer's orphan
+            # recovery must never meet a reserved request with no in-flight
+            # lock. The wait between two attempts is not accounting, so the
+            # lock is released for it.
             while True:
+                if operation is None and reserved_operation is None:
+                    reserved_operation = self._acquire_operation_lock(
+                        "reserve", request_key
+                    )
+                    if exclusive_batch_marker_path(self.ledger_file).exists():
+                        raise ValueError("exclusive Gemini batch mode is active")
                 try:
                     self._reserve(
                         request_key=request_key,
@@ -7411,6 +7796,9 @@ class SharedGeminiBroker:
                     ):
                         # Another request of this phase holds the slot or the
                         # window; the request is counted and waits for room.
+                        if reserved_operation is not None:
+                            self._release_operation_lock(reserved_operation)
+                            reserved_operation = None
                         time.sleep(TRANSIENT_RESERVATION_RETRY_INTERVAL_SECONDS)
                         continue
                     receipt = {
@@ -7464,8 +7852,12 @@ class SharedGeminiBroker:
                 if admitted:
                     self._admission_lock.release()
                     admitted = False
+                if reserved_operation is not None:
+                    self._release_operation_lock(reserved_operation)
+                    reserved_operation = None
                 if operation is not None:
-                    operation.close()
+                    self._whole_call_operation.pop(threading.get_ident(), None)
+                    self._release_operation_lock(operation)
                     operation = None
             try:
                 response = client.post(
@@ -7535,5 +7927,8 @@ class SharedGeminiBroker:
                 self._inflight_lock_path(request_key).unlink(missing_ok=True)
             if admitted:
                 self._admission_lock.release()
+            if reserved_operation is not None:
+                self._release_operation_lock(reserved_operation)
             if operation is not None:
-                operation.close()
+                self._whole_call_operation.pop(threading.get_ident(), None)
+                self._release_operation_lock(operation)
