@@ -374,6 +374,7 @@ def cost_row(
     wall_seconds: float,
     planned_trials: int,
     vendors_paused: list[str] | None = None,
+    vendors_excluded: list[str] | None = None,
     models_paused: list[str] | None = None,
     pending_paused_trials: int = 0,
     cumulative: dict[str, Any] | None = None,
@@ -385,6 +386,14 @@ def cost_row(
     with a held trial is not a complete item: the evaluator returns to that
     item after the resume time and appends a later row that supersedes this
     one. Read a run's totals through :meth:`CostJournal.latest_item_rows`.
+
+    ``vendors_paused`` names the vendors that stopped on an earlier item of
+    this invocation, and they owe this item their trials, so a row with one is
+    not complete either. ``vendors_excluded`` names the vendors ``--vendors``
+    left out, which owe nothing, because the operator chose the scope of the
+    run. The two were one field until 2026-09-17, and an item evaluated while
+    the Claude Code arm was paused was journalled complete with 30 of its 48
+    trials.
     """
     all_rows = [row for rows in rows_by_vendor.values() for row in rows]
     gemini = gemini_evaluation_cost(ledger, run_id=run_id, item_id=item["item_id"])
@@ -425,9 +434,10 @@ def cost_row(
             ),
             "charged_usd": gemini["usd"],
             "vendors_paused": sorted(vendors_paused or []),
+            "vendors_excluded": sorted(vendors_excluded or []),
             "models_paused": sorted(models_paused or []),
             "pending_paused_trials": int(pending_paused_trials),
-            "complete": int(pending_paused_trials) == 0,
+            "complete": int(pending_paused_trials) == 0 and not (vendors_paused or []),
             "wall_seconds": round(float(wall_seconds), 3),
         },
         "outcomes_by_model": outcome_counts(all_rows),
@@ -526,8 +536,17 @@ class CostJournal:
 
     @staticmethod
     def row_is_complete(row: dict[str, Any]) -> bool:
-        """True when no paused model held a trial of this item."""
+        """True when no paused model and no paused vendor owes this item.
+
+        The vendor half is read here and not only from the row's own
+        ``complete`` flag, because the rows a run wrote before 2026-09-17 set
+        that flag from the paused models alone. One of them, written while the
+        Claude Code arm was paused, called an item complete with 30 of its 48
+        trials.
+        """
         evaluation = row.get("evaluation") or {}
+        if evaluation.get("vendors_paused"):
+            return False
         if "complete" in evaluation:
             return bool(evaluation["complete"])
         return int(evaluation.get("pending_paused_trials", 0) or 0) == 0
@@ -568,6 +587,26 @@ class CostJournal:
                 continue
             models = (row.get("evaluation") or {}).get("models_paused") or []
             if models and all(model in paused for model in models):
+                result.add(str(row["item_id"]))
+        return result
+
+    def items_awaiting_vendors(self, paused: frozenset[str] | set[str]) -> set[str]:
+        """The items whose every missing trial belongs to a still-paused vendor.
+
+        This is the vendor half of :meth:`items_held_by`. Such an item cannot
+        advance while those vendors stay paused: a revisit records nothing and
+        calls nothing. A start clears a vendor pause, so the next invocation
+        takes the item up and runs only the trials that are missing.
+        """
+        result = set()
+        for row in self.latest_item_rows():
+            if self.row_is_complete(row):
+                continue
+            evaluation = row.get("evaluation") or {}
+            if evaluation.get("models_paused"):
+                continue
+            vendors = evaluation.get("vendors_paused") or []
+            if vendors and all(vendor in paused for vendor in vendors):
                 result.add(str(row["item_id"]))
         return result
 

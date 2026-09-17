@@ -472,6 +472,12 @@ If one more item passes a bound, the evaluator pauses the Gemini vendor, writes 
 A vendor that stops on an item is paused the same way, whatever the reason: a budget stop, a harness error, a timeout or an ambiguous charge.
 The policy forbids a retry, so the next item repeats that stop.
 
+A paused vendor owes its trials, exactly as a paused model does.
+So an item evaluated while a vendor is paused is not complete, its journal row names that vendor in `evaluation.vendors_paused`, and a later invocation runs only the trials that are missing.
+An item whose every missing trial belongs to a still-paused vendor waits instead of being revisited on every poll, because a revisit would record nothing.
+`--vendors` is a different thing: it is the scope the operator chose, it lands in `evaluation.vendors_excluded`, and it owes nothing.
+Before 2026-09-17 the two were one field and a paused vendor did not stop an item from being complete: the Claude Code arm stopped at 00:26:03Z when its binary was missing for a moment, and the next item was recorded complete with 30 of its 48 trials.
+
 One pause lifts on its own: an ambiguous charge.
 The broker keeps the reservation of a paid call whose charge it cannot prove, and it halts the evaluation phase of the shared ledger.
 A supervisor releases that charge with a reviewed continuation, which is the `authorize-ambiguous-continuation` command of `docs/SHARED_MODEL_BROKER.md`.

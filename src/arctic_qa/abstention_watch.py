@@ -360,6 +360,7 @@ def evaluate_item(
     authorization_file: Path,
     ledger_run_prefixes: tuple[str, ...],
     vendors: list[str],
+    authorized_vendors: list[str] | None = None,
     concurrency: dict[str, int] | None = None,
     scratch_root: Path | None = None,
     code_commit: str | None = None,
@@ -371,6 +372,12 @@ def evaluate_item(
     ``pause`` names the models the evaluator must not call now. Their trials
     are held, so the row records the item as not complete and a later pass
     runs the trials that are missing.
+
+    ``vendors`` are the vendors that run on this item and ``authorized_vendors``
+    are the vendors this invocation may run at all, which ``--vendors`` sets.
+    A vendor in the second list and not in the first is paused, and it owes
+    this item its trials, so the item is not complete. A vendor in neither
+    owes nothing, because the operator put it out of scope.
     """
     manifest = build_eval_set(
         state_db=state_db,
@@ -493,7 +500,14 @@ def evaluate_item(
         wall_seconds=wall,
         planned_trials=int(plan["trials_per_item"]),
         vendors_paused=[
-            vendor for vendor in plan_vendors(plan) if vendor not in vendors
+            vendor
+            for vendor in (authorized_vendors or vendors)
+            if vendor not in vendors
+        ],
+        vendors_excluded=[
+            vendor
+            for vendor in plan_vendors(plan)
+            if vendor not in (authorized_vendors or vendors)
         ],
         models_paused=held_models,
         pending_paused_trials=pending_paused,
@@ -502,7 +516,10 @@ def evaluate_item(
     row["run_dir"] = str(run_dir)
     row["gate_dir"] = str(gate_dir)
     row["complete"] = (
-        bool(summary.get("complete")) and error is None and pending_paused == 0
+        bool(summary.get("complete"))
+        and error is None
+        and pending_paused == 0
+        and not row["evaluation"]["vendors_paused"]
     )
     if error is not None:
         row["error"] = error
@@ -790,9 +807,15 @@ def watch(
         held_now = paused_models(
             merge_pause(*(load_pause(path) for path in pause_files), pause_models)
         )
+        # An item that only a paused vendor or a still-paused model owes
+        # cannot advance in this invocation: a revisit records nothing and
+        # calls nothing. A start clears the vendor pauses, so the next
+        # invocation takes those items up and runs the missing trials.
+        paused_now = {name for name in authorized_vendors if name not in vendors}
         done = (
             journal.completed_item_ids()
             | journal.items_held_by(held_now)
+            | journal.items_awaiting_vendors(paused_now)
             | set(
                 row["item_id"] for row in journal.rows() if row.get("kind") == SKIP_KIND
             )
@@ -894,6 +917,7 @@ def watch(
                 authorization_file=authorization_file,
                 ledger_run_prefixes=ledger_run_prefixes,
                 vendors=list(vendors),
+                authorized_vendors=list(authorized_vendors),
                 concurrency=concurrency,
                 scratch_root=scratch_root,
                 code_commit=code_commit,

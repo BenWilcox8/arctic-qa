@@ -414,7 +414,11 @@ def test_backfill_is_off_by_default_and_evaluates_chapter_2_when_asked(
     ]
     row = CostJournal(tmp_path / "subset").item_rows()[0]
     assert row["evaluation"]["recorded_trials"] == 36
-    assert row["evaluation"]["vendors_paused"] == [PROVIDER_GOOGLE_GEMINI]
+    # `--vendors` is a scope, not a pause: the excluded vendor owes the
+    # item nothing, so the item is complete for this run.
+    assert row["evaluation"]["vendors_paused"] == []
+    assert row["evaluation"]["vendors_excluded"] == [PROVIDER_GOOGLE_GEMINI]
+    assert row["complete"] is True
     with pytest.raises(ValueError, match="no vendor"):
         scripted_watch(
             db=db,
@@ -626,13 +630,19 @@ def test_a_vendor_that_stops_is_paused_for_the_rest_of_the_watch(
     # The first item holds the one failed Claude call plus the Codex arm.
     assert rows[0]["complete"] is False
     assert rows[0]["evaluation"]["recorded_trials"] == 19
-    # The second item runs the Codex arm only and is complete.
-    assert rows[1]["complete"] is True
+    # The second item runs the Codex arm only, so it is NOT complete: the
+    # paused Claude arm owes it eighteen trials. An item recorded complete
+    # with 30 of its 48 trials was never taken up again (2026-09-17 00:26 UTC).
+    assert rows[1]["complete"] is False
     assert rows[1]["evaluation"]["recorded_trials"] == 18
-    assert rows[1]["evaluation"]["vendors_paused"] == [
-        PROVIDER_ANTHROPIC_CLAUDE_CODE,
-        PROVIDER_GOOGLE_GEMINI,
-    ]
+    assert rows[1]["evaluation"]["vendors_paused"] == [PROVIDER_ANTHROPIC_CLAUDE_CODE]
+    # Gemini is out of scope for this invocation, not paused, so it owes
+    # nothing.
+    assert rows[1]["evaluation"]["vendors_excluded"] == [PROVIDER_GOOGLE_GEMINI]
+    # And the evaluator does not churn on it while the vendor stays paused.
+    assert journal.items_awaiting_vendors({PROVIDER_ANTHROPIC_CLAUDE_CODE}) == {
+        rows[1]["item_id"]
+    }
 
 
 def test_gemini_item_estimate_matches_the_reservation_formula() -> None:
@@ -1887,3 +1897,68 @@ def test_the_watcher_publishes_its_state_after_every_item(tmp_path: Path) -> Non
     # The watcher published a growing item list while the one cycle ran, so a
     # reader saw progress before the cycle ended.
     assert seen and max(seen) >= 2
+
+
+def test_a_paused_vendor_owes_its_trials_and_the_item_waits_for_a_start(
+    tmp_path: Path,
+) -> None:
+    """A paused vendor makes an item incomplete, as a paused model does.
+
+    The Claude Code arm stopped at 2026-09-17T00:26:03Z because its binary
+    was missing for a moment during a package upgrade. The next item ran on
+    the other two vendors and was journalled complete with 30 of its 48
+    trials, so the evaluator never took it up again and 18 trials were lost.
+    """
+    journal = CostJournal(tmp_path / "journal")
+    row = {
+        "schema": "abstention-eval-cost-row-v1",
+        "kind": "item",
+        "item_id": "aqa-truncated",
+        "run_id": "abstention-stream-test-aqa-truncated",
+        "recorded_at_utc": "2026-09-17T00:34:33Z",
+        "complete": True,
+        "evaluation": {
+            "planned_trials": 48,
+            "recorded_trials": 30,
+            "vendors_paused": [PROVIDER_ANTHROPIC_CLAUDE_CODE],
+            "models_paused": [],
+            "pending_paused_trials": 0,
+            "complete": True,
+        },
+    }
+    journal.append(row)
+    # The reader refuses the flag, so the row the old code wrote re-opens.
+    assert journal.completed_item_ids() == set()
+    assert journal.held_item_ids() == {"aqa-truncated"}
+    # While that vendor stays paused the item cannot move, so it waits.
+    assert journal.items_awaiting_vendors({PROVIDER_ANTHROPIC_CLAUDE_CODE}) == {
+        "aqa-truncated"
+    }
+    # A start clears the vendor pause, and then the item is pending again.
+    assert journal.items_awaiting_vendors(set()) == set()
+
+
+def test_an_excluded_vendor_owes_nothing(tmp_path: Path) -> None:
+    """`--vendors` is a scope the operator chose, not a stop of an arm."""
+    journal = CostJournal(tmp_path / "journal")
+    journal.append(
+        {
+            "schema": "abstention-eval-cost-row-v1",
+            "kind": "item",
+            "item_id": "aqa-scoped",
+            "run_id": "abstention-stream-test-aqa-scoped",
+            "recorded_at_utc": "2026-09-17T00:34:33Z",
+            "complete": True,
+            "evaluation": {
+                "planned_trials": 48,
+                "recorded_trials": 36,
+                "vendors_paused": [],
+                "vendors_excluded": [PROVIDER_GOOGLE_GEMINI],
+                "models_paused": [],
+                "pending_paused_trials": 0,
+                "complete": True,
+            },
+        }
+    )
+    assert journal.completed_item_ids() == {"aqa-scoped"}
+    assert journal.items_awaiting_vendors({PROVIDER_GOOGLE_GEMINI}) == set()
