@@ -123,7 +123,7 @@ So the prescreen's questions name 171 of the 255 papers that did not produce a q
 All 276 carry an `outcome_class` and a `reason_code`, and this table groups them by that code.
 Only 270 of them carry a calibration label, because the run never finished judging 6 of them.
 Those 6 sit inside the tail row of this table.
-Section 8 holds the label rule and never treats an unfinished paper as a rejection.
+Section 9 holds the label rule and never treats an unfinished paper as a rejection.
 
 `standalone_det_question_context_referent_unresolved` is the one borderline entry among the 87.
 It depends on the question the writer model produced, so it is not fully predictable from the article.
@@ -289,7 +289,29 @@ It also assumes a fetch that has not happened.
 Per paper, the median cost is about USD 0.0008.
 The pipeline's own eligibility call on the same paper costs about USD 0.0226.
 
-## 7. The order the pipeline reads
+## 7. The live order, read while the scan runs
+
+A paper the scan has scored reaches the pipeline at once, rather than waiting for the whole corpus.
+
+The scan writes `live-ranking.json` in its output directory.
+It holds one row per scored paper, best first, with the candidate key, the ranking probability and the scan position.
+The file is replaced atomically every `--live-ranking-every` papers, 25 by default, and once more at the end.
+A resumed scan seeds it from the responses it already bought, because those papers replay free and would otherwise look unscored.
+
+The producer reads it through `--jev-ranking-file`.
+`streaming.PaperPicker` hands a worker its next paper only when that worker frees up, so a ranking written during the run changes what is analysed next.
+Three rules hold the order:
+
+- A scored paper is always taken before an unscored one.
+- Among scored papers, the highest score wins.
+- An unscored paper keeps its frozen position, so a run given no ranking behaves exactly as every run before this one did.
+
+A paper is handed out once and never again.
+A ranking file that is missing, half-written or of another contract is ignored, and the scores already in hand stand.
+The membership of the paper set and the meaning of `--max-papers` do not change; only the order does.
+The run result records the ranking file and how many times it was re-read.
+
+## 8. The frozen order, for a launch that wants one
 
 The producer reads its paper order from an article-access run directory.
 `full_run_plan.materialize_frozen_access_run` builds that directory from a frozen manifest, and `streaming.run_streaming_dataset` walks `selection[*].position` in order.
@@ -310,7 +332,7 @@ The current run is untouched.
 The ranked manifest is a new set of files in the prescreen work directory.
 A future launch points at it; nothing points at it until then.
 
-## 8. The calibration, before anyone pays for 16,000 papers
+## 9. The calibration, before anyone pays for 16,000 papers
 
 The question the captain has to answer is whether the ranking predicts acceptance.
 The run has already decided 276 papers, so the answer is measurable for USD 0.23.
@@ -349,7 +371,7 @@ It is not evidence about the 11,919 papers that have no text yet.
 The AUC has a wide confidence interval at that size.
 Report it with the counts beside it, and re-run the calibration as the live run labels more papers.
 
-## 9. The credential
+## 10. The credential
 
 There is one environment variable and one file.
 `TYPESAFE_API_KEY` wins when it is set.
@@ -359,7 +381,7 @@ The key is never printed, never written to a receipt and never put in an error m
 No action but `screen` needs it.
 `build-manifest`, `labels`, `estimate`, `rank`, `write-order` and `calibrate` all run free and offline.
 
-## 10. The model id
+## 11. The model id
 
 `jev-latest` is the one model id the API reference documents, and it floats.
 A request for it is served by a concrete version, and the response names that version.
@@ -368,7 +390,7 @@ So `--model` defaults to `jev-latest`, every receipt records the model that answ
 More than one entry there means the ranking mixes two model versions, and a reviewer has to decide whether that matters before the order is used.
 Pin a concrete version with `--model` once a live key has named one.
 
-## 11. The prescreen ledger
+## 12. The prescreen ledger
 
 `CallLedger` writes `calls.jsonl` and `ledger.json` in the ledger directory.
 It is not the shared paid-call broker and never talks to it.
@@ -389,7 +411,7 @@ Any fault raised while one paper is read, chunked, sent or recorded is caught, w
 This copies the producer's own rule in `streaming._ends_the_run`.
 Without it, one unreadable file would end a screen of 4,420 papers, because `ThreadPoolExecutor.map` re-raises the first exception when its result is read.
 
-## 12. Commands
+## 13. Commands
 
 Build the manifest over the retained set.
 
@@ -433,7 +455,7 @@ python -m arctic_qa jev-prescreen --action calibrate \
   --output-dir <work>/calibration
 ```
 
-If the numbers pass the bar in section 8, screen the whole frozen corpus and write the order.
+If the numbers pass the bar in section 9, screen the whole frozen corpus and write the order.
 
 ```
 python -m arctic_qa jev-prescreen --action screen \
@@ -457,11 +479,11 @@ The provider publishes no rate limit.
 Its own cookbooks say that eight workers are enough to reach a rate limit on a shared key, so raise `--workers` slowly and watch for HTTP 429.
 The client retries 429 and 529 with exponential back-off, and obeys `retry-after` or `retry-after-ms` when the provider sends one.
 
-## 13. What is still unknown
+## 14. What is still unknown
 
 - The real price. TypeSafe publishes no price page, and the cookbook constant is disclaimed.
 - Whether the price belongs to the model that answers. The cookbook attributes `0.042` to `jev-1.12`, while the default request model is `jev-latest`, which a newer concrete version serves. The module records the answered model on every row but never compares it to the model the price was measured on, so a reviewer has to do that by hand.
-- The exact state size limit. None is published. The calibration screen measured refusals above 32,350 accepted input tokens, so 32,768 is the working figure rather than a documented one.
+- The exact state size limit. None is published. The calibration screen measured refusals above 32,350 accepted input tokens, so 32,768 is the working figure rather than a documented one. Section 5 says what the screen does with a refusal.
 - The rate limit. None is published.
 - The full model roster. `models.list()` needs a live key.
 - Whether a 429 carries a `Retry-After` header at all. The client reads one when it is there and falls back to exponential back-off when it is not.
