@@ -78,6 +78,10 @@ This is the outside half of the same guard.
 The evaluator's own `--status-file` reports a bound that ends it, and this reports a stop of any other kind: a crash, a halt of the shared ledger, or an operator who stopped the unit and forgot it.
 The unit met its item bound at 2026-09-16T19:31:44Z, exited 0, and nothing said so until the next morning.
 
+CAUTION: give the guard and the evaluator their new code together, or the evaluator first.
+An evaluator older than 2026-09-17 writes `watch-state.json` only at the end of a whole poll cycle, which is about an hour at sixteen pending items.
+A guard on the new code against such an evaluator reports a healthy evaluator as stopped, once an hour.
+
 ## The extrapolation
 
 The guard answers one question: what will the whole chapter 3 run cost at the present rate?
