@@ -80,6 +80,7 @@ Each one records a fault that stopped a run, the correction, and the live eviden
 | `arctic-ch3-settle-not-submitted-r1/` | A double settlement between two workers of one shared ledger. |
 | `arctic-ch3-candidate-fault-containment-r1/` | The rule that one faulty candidate never ends a whole run. |
 | `arctic-broker-operation-lock-wait-r1/` | The operation lock of the shared ledger, and the wait that stops a starved producer. |
+| `arctic-eval-authorization-r8/` | The evaluation bounds of the captain's allocation, the silent stop at a bound, and the phase of a refused request. |
 | `arctic-ch3-count-error-retry-r1/` | A free token-count 503, its bounded retry, and the paper-level containment after retry exhaustion. |
 | `arctic-ch3-paper-concurrency-r1/` | Several papers of one run in flight at once, the v11 request-rate policy, and the measured throughput before and after. |
 | `arctic-ch3-concurrency-busy-r1/` | The exclusive operation lock as a queue under paper concurrency, the repair of the papers it refused, and the completion date of a paper. |

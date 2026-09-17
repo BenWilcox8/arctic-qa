@@ -505,6 +505,7 @@ def run_vendor(
             trial,
             response,
             enum_output=provider.supports_enum_output(trial["model"]),
+            code_commit=code_commit,
         )
         with lock:
             with responses_path.open("a", encoding="utf-8") as handle:
@@ -561,6 +562,77 @@ def load_vendor_rows(run_dir: Path, vendor: str) -> list[dict[str, Any]]:
     ]
 
 
+PLAN_MANIFEST_IMMUTABLE_FIELDS = (
+    "schema",
+    "plan_id",
+    "run_id",
+    "eval_set_id",
+    "eval_set_dir",
+    "item_count",
+    "k",
+    "arms",
+    "repeats",
+    "gate_dir",
+)
+
+
+def extend_plan_manifest(
+    existing: dict[str, Any], current: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge one pass into the item's plan manifest, and never alter a record.
+
+    The manifest was immutable field by field, which made an item impossible
+    to finish on any later pass: a pass on another code commit, or a pass that
+    runs a vendor the first pass could not reach, writes a different manifest
+    and the run stopped with "the run directory holds a different plan
+    manifest". The Claude Code arm was paused for two items on 2026-09-17, and
+    their manifests bound two vendors, so the arm could never come back to
+    them.
+
+    The identity of the item still cannot move: the plan, the run id, the
+    evaluation set, the arms, the repeats and the gate directory are compared
+    field by field. Everything else only grows.
+
+    - ``vendors`` takes the union. A vendor in both passes must name the same
+      models, because a changed model list is a changed plan.
+    - ``trials_per_item`` is recomputed from that union.
+    - ``code_commits`` appends the commit of this pass, in order, and
+      ``code_commit`` keeps the commit that opened the item.
+
+    Nothing recorded is altered. Every trial keeps the receipt, the gate and
+    the commit of the pass that ran it, so the money evidence of each call
+    stays exactly as it was written.
+    """
+    for field in PLAN_MANIFEST_IMMUTABLE_FIELDS:
+        if existing.get(field) != current.get(field):
+            raise ValueError("the run directory holds a different plan manifest")
+    vendors = dict(existing.get("vendors") or {})
+    for vendor, entry in (current.get("vendors") or {}).items():
+        if vendor in vendors and vendors[vendor] != entry:
+            raise ValueError("the run directory holds another model list")
+        vendors[vendor] = entry
+    trials_per_model = 2 * len(current["arms"]) * int(current["repeats"])
+    commits = [
+        commit
+        for commit in (
+            list(existing.get("code_commits") or [])
+            or ([existing["code_commit"]] if existing.get("code_commit") else [])
+        )
+    ]
+    for commit in current.get("code_commits") or []:
+        if commit not in commits:
+            commits.append(commit)
+    return {
+        **current,
+        "vendors": {vendor: vendors[vendor] for vendor in sorted(vendors)},
+        "trials_per_item": sum(
+            len(entry["models"]) * trials_per_model for entry in vendors.values()
+        ),
+        "code_commit": existing.get("code_commit") or current.get("code_commit"),
+        "code_commits": commits,
+    }
+
+
 def run_plan(
     *,
     set_dir: Path,
@@ -606,13 +678,19 @@ def run_plan(
         ),
         "gate_dir": str(gate_dir.resolve()) if gate_dir else None,
         "code_commit": code_commit,
+        "code_commits": [code_commit] if code_commit else [],
     }
     manifest_path = output_dir / PLAN_MANIFEST_FILENAME
     if manifest_path.is_file():
         existing = json.loads(manifest_path.read_text(encoding="utf-8"))
-        stable = {k: v for k, v in existing.items() if k != "created_at_utc"}
-        if stable != plan_manifest:
-            raise ValueError("the run directory holds a different plan manifest")
+        plan_manifest = extend_plan_manifest(existing, plan_manifest)
+        atomic_json(
+            manifest_path,
+            {
+                **plan_manifest,
+                "created_at_utc": existing.get("created_at_utc") or _utc_now(),
+            },
+        )
     else:
         atomic_json(manifest_path, {**plan_manifest, "created_at_utc": _utc_now()})
     held = paused_models(pause)

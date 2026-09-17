@@ -319,6 +319,10 @@ TRANSITION_GATE_SUCCESSOR_FIELDS = {
     "review_record_sha256",
 }
 PRETRANSPORT_SETTLEMENT_SCHEMA = "shared-paid-call-pretransport-settlement-v1"
+PHASELESS_REFUSAL_SETTLEMENT_SCHEMA = "shared-paid-call-phaseless-refusal-settlement-v1"
+PHASELESS_REFUSAL_INTEGRITY_HALT_REASON = (
+    "ValueError: the configuration transition ledger hash changed"
+)
 # Orphan recovery read the ledger once and then settled each request it found.
 # Another worker of the same ledger can settle one of those requests inside
 # that window, so the row is no longer ``submitted`` when the settlement runs.
@@ -488,6 +492,24 @@ PRETRANSPORT_SETTLEMENT_REQUEST = {
     "family_id": "family-c44489994cd247de1375",
     "state": "submitted",
     "reserved_usd": "0.036094",
+}
+# The one refusal row that the reviewed phase settlement of 2026-09-16 may
+# repair. The streaming evaluator ran from snapshot `a0b9a82`, which predates
+# the phase-scoped ledger form of `183779b`, so its `not_submitted` refusals
+# carry no `phase`. `_only_evaluation_activity_since` reads a row without a
+# phase as construction, so this one row made every later broker start refuse
+# the applied configuration transition and write an integrity halt. The row
+# made no provider call and holds no money, and its own fields prove the
+# phase: the stage prefix, the evaluation trial and the evaluation gate.
+PHASELESS_REFUSAL_SETTLEMENT_REQUEST = {
+    "request_key": "52c5da7533e8d24f36e24e73d718cfaa06d928d64fedf6f5cfeee99a9f745ca9",
+    "run_id": "abstention-stream-r10-aqa-7f09e4bdf6bac5c50d4c",
+    "stage": "evaluation_answer:gemini-3.8-flash",
+    "paper_id": "aqa-7f09e4bdf6bac5c50d4c",
+    "family_id": "evaluation-item:aqa-7f09e4bdf6bac5c50d4c",
+    "state": "not_submitted",
+    "reason": "the evaluation repeat limit for this item is complete",
+    "completed_at_utc": "2026-09-16T23:03:53Z",
 }
 STREAM_INPUT_GATE_FIELDS = {
     "continuation_artifact",
@@ -6000,6 +6022,127 @@ class SharedGeminiBroker:
         finally:
             operation.close()
 
+    def settle_phaseless_refusal(
+        self,
+        *,
+        request_key: str,
+        expected_ledger_sha256: str,
+        review_file: Path,
+        superseded_integrity_halt_file: Path,
+    ) -> dict[str, Any]:
+        """Record the phase of one reviewed refusal row that carries none.
+
+        A `not_submitted` row made no provider call and holds no money, so
+        this settlement moves no cost. It writes the one field the row lacks,
+        `phase`, and only when the row's own evidence proves that phase: the
+        stage prefix `evaluation_answer:`, the evaluation trial, the
+        evaluation gate and the evaluation policy hash. Every other field of
+        the row stays exactly as the evaluator wrote it.
+        """
+        if request_key != PHASELESS_REFUSAL_SETTLEMENT_REQUEST["request_key"]:
+            raise ValueError("the request is not approved for phase settlement")
+        if not superseded_integrity_halt_file.is_file():
+            raise ValueError("the superseded integrity halt record is absent")
+        operation = hold_operation_lock(self._operation_lock_file)
+        try:
+            with self._lock_file.open("a+") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                ledger = self._validated_ledger()
+                request = ledger["requests"].get(request_key)
+                if request is None:
+                    raise ValueError("the reviewed refusal does not exist")
+                settlement_path = (
+                    self.receipts_dir / f"{request_key}.phase-settlement.json"
+                )
+                applied_hash = request.get("phase_settlement_sha256")
+                if applied_hash is not None:
+                    if (
+                        not settlement_path.is_file()
+                        or sha256_file(settlement_path) != applied_hash
+                    ):
+                        raise ValueError("the phase settlement record changed")
+                    return {
+                        "schema": "shared-paid-call-phase-settlement-result-v1",
+                        "request_key": request_key,
+                        "applied": False,
+                        "settlement_receipt": str(settlement_path),
+                        "settlement_receipt_sha256": applied_hash,
+                    }
+                if sha256_file(self.ledger_file) != expected_ledger_sha256:
+                    raise ValueError("the reviewed refusal ledger changed")
+                if any(
+                    request.get(field) != value
+                    for field, value in PHASELESS_REFUSAL_SETTLEMENT_REQUEST.items()
+                ):
+                    raise ValueError("the reviewed refusal identity changed")
+                if request.get("phase") is not None:
+                    raise ValueError("the reviewed refusal already carries a phase")
+                # A refusal that never reached the provider. Any of these
+                # fields would mean a call, a reservation or a charge, and
+                # this settlement must never touch one.
+                if (
+                    request.get("submitted_at_utc") is not None
+                    or request.get("usage") is not None
+                    or _money(request.get("reserved_usd") or "0", "reserved") != 0
+                    or _money(request.get("actual_cost_usd") or "0", "cost") != 0
+                ):
+                    raise ValueError("the reviewed refusal is not free of money")
+                if settlement_path.exists():
+                    raise ValueError("a phase settlement sidecar already exists")
+                if not review_file.is_file():
+                    raise ValueError("the reviewed phase evidence is absent")
+                evidence = {
+                    "stage_prefix": f"{EVALUATION_STAGE_PREFIX}",
+                    "evaluation_trial": request.get("evaluation_trial"),
+                    "evaluation_gate_sha256": request.get("evaluation_gate_sha256"),
+                    "evaluation_policy_sha256": request.get("evaluation_policy_sha256"),
+                }
+                if not str(request["stage"]).startswith(EVALUATION_STAGE_PREFIX) or any(
+                    value is None for value in evidence.values()
+                ):
+                    raise ValueError("the reviewed refusal does not prove its phase")
+                halt = _read(superseded_integrity_halt_file)
+                if halt.get("reason") != PHASELESS_REFUSAL_INTEGRITY_HALT_REASON:
+                    raise ValueError("the superseded integrity halt is another halt")
+                event = {
+                    "schema": PHASELESS_REFUSAL_SETTLEMENT_SCHEMA,
+                    "request_key": request_key,
+                    "ledger_sha256_before": expected_ledger_sha256,
+                    "request_identity": dict(PHASELESS_REFUSAL_SETTLEMENT_REQUEST),
+                    "phase_evidence": evidence,
+                    "recorded_phase": EVALUATION_PHASE,
+                    "review_file": str(review_file.resolve()),
+                    "review_file_sha256": sha256_file(review_file),
+                    "superseded_integrity_halt_file": str(
+                        superseded_integrity_halt_file.resolve()
+                    ),
+                    "superseded_integrity_halt_sha256": sha256_file(
+                        superseded_integrity_halt_file
+                    ),
+                    "actual_cost_usd": "0",
+                    "live_call_made": False,
+                    "settled_at_utc": _now(),
+                }
+                atomic_json(settlement_path, event, immutable=True)
+                settlement_sha256 = sha256_file(settlement_path)
+                request.update(
+                    {
+                        "phase": EVALUATION_PHASE,
+                        "phase_settlement_sha256": settlement_sha256,
+                    }
+                )
+                ledger["updated_at_utc"] = _now()
+                self._commit_ledger(ledger)
+                return {
+                    "schema": "shared-paid-call-phase-settlement-result-v1",
+                    "request_key": request_key,
+                    "applied": True,
+                    "settlement_receipt": str(settlement_path),
+                    "settlement_receipt_sha256": settlement_sha256,
+                }
+        finally:
+            operation.close()
+
     @staticmethod
     def _validate_count_error_evidence(
         evidence: dict[str, Any],
@@ -7197,6 +7340,13 @@ class SharedGeminiBroker:
         base = {
             "request_key": request_key,
             "request_sha256": request_hash,
+            # The phase belongs to the request from its first record, not from
+            # its reservation. A refusal that stops before the reservation used
+            # to carry no phase, and `_only_evaluation_activity_since` reads a
+            # row without a phase as a construction request. One such refusal
+            # of the evaluation phase halted the whole shared ledger on
+            # 2026-09-16 at 23:03:56 UTC.
+            "phase": phase,
             "run_id": run_id,
             "stage": stage,
             "paper_id": paper_id,

@@ -414,7 +414,11 @@ def test_backfill_is_off_by_default_and_evaluates_chapter_2_when_asked(
     ]
     row = CostJournal(tmp_path / "subset").item_rows()[0]
     assert row["evaluation"]["recorded_trials"] == 36
-    assert row["evaluation"]["vendors_paused"] == [PROVIDER_GOOGLE_GEMINI]
+    # `--vendors` is a scope, not a pause: the excluded vendor owes the
+    # item nothing, so the item is complete for this run.
+    assert row["evaluation"]["vendors_paused"] == []
+    assert row["evaluation"]["vendors_excluded"] == [PROVIDER_GOOGLE_GEMINI]
+    assert row["complete"] is True
     with pytest.raises(ValueError, match="no vendor"):
         scripted_watch(
             db=db,
@@ -626,13 +630,19 @@ def test_a_vendor_that_stops_is_paused_for_the_rest_of_the_watch(
     # The first item holds the one failed Claude call plus the Codex arm.
     assert rows[0]["complete"] is False
     assert rows[0]["evaluation"]["recorded_trials"] == 19
-    # The second item runs the Codex arm only and is complete.
-    assert rows[1]["complete"] is True
+    # The second item runs the Codex arm only, so it is NOT complete: the
+    # paused Claude arm owes it eighteen trials. An item recorded complete
+    # with 30 of its 48 trials was never taken up again (2026-09-17 00:26 UTC).
+    assert rows[1]["complete"] is False
     assert rows[1]["evaluation"]["recorded_trials"] == 18
-    assert rows[1]["evaluation"]["vendors_paused"] == [
-        PROVIDER_ANTHROPIC_CLAUDE_CODE,
-        PROVIDER_GOOGLE_GEMINI,
-    ]
+    assert rows[1]["evaluation"]["vendors_paused"] == [PROVIDER_ANTHROPIC_CLAUDE_CODE]
+    # Gemini is out of scope for this invocation, not paused, so it owes
+    # nothing.
+    assert rows[1]["evaluation"]["vendors_excluded"] == [PROVIDER_GOOGLE_GEMINI]
+    # And the evaluator does not churn on it while the vendor stays paused.
+    assert journal.items_awaiting_vendors({PROVIDER_ANTHROPIC_CLAUDE_CODE}) == {
+        rows[1]["item_id"]
+    }
 
 
 def test_gemini_item_estimate_matches_the_reservation_formula() -> None:
@@ -1801,3 +1811,154 @@ def test_the_ambiguous_charge_reason_is_read_from_the_request_state() -> None:
     assert not is_ambiguous_charge_reason(EVALUATION_CEILING_REASON)
     assert not is_ambiguous_charge_reason(None)
     assert not is_ambiguous_charge_reason("")
+
+
+def test_the_item_bound_writes_one_blocked_line_to_the_status_file(
+    tmp_path: Path,
+) -> None:
+    """A bound ends the run with exit code 0, so it must say so somewhere.
+
+    The unit met its item bound at 2026-09-16T19:31:44Z, exited 0, and no
+    operator saw it until the next morning.
+    """
+    db = state_db(tmp_path, chapter3=["aqa-a", "aqa-b", "aqa-c"])
+    ledger_file = construction_ledger(tmp_path, {"family-aqa-a": ["0.01"]})
+    auth = authorization(tmp_path, db, maximum_items=2)
+    status = tmp_path / "task.status"
+    first = scripted_watch(
+        db=db,
+        work_dir=tmp_path / "bounded",
+        ledger_file=ledger_file,
+        authorization_file=auth,
+        status_file=status,
+    )
+    # The first pass takes both items and stops inside the bound, so it has
+    # nothing to report.
+    assert len(first["items_this_invocation"]) == 2
+    assert not status.exists()
+
+    again = scripted_watch(
+        db=db,
+        work_dir=tmp_path / "bounded",
+        ledger_file=ledger_file,
+        authorization_file=auth,
+        status_file=status,
+    )
+    assert again["items_this_invocation"] == []
+    lines = status.read_text(encoding="utf-8").splitlines()
+    assert lines == [
+        "blocked: the streaming evaluator met its item bound of 2 items and "
+        "stopped; a larger run needs a new reviewed authorization"
+    ]
+
+
+def test_the_bound_needs_no_status_file(tmp_path: Path) -> None:
+    """The option is optional: a run without it still stops the same way."""
+    db = state_db(tmp_path, chapter3=["aqa-a"])
+    ledger_file = construction_ledger(tmp_path, {"family-aqa-a": ["0.01"]})
+    auth = authorization(tmp_path, db, maximum_items=1)
+    work_dir = tmp_path / "bounded"
+    scripted_watch(
+        db=db, work_dir=work_dir, ledger_file=ledger_file, authorization_file=auth
+    )
+    again = scripted_watch(
+        db=db, work_dir=work_dir, ledger_file=ledger_file, authorization_file=auth
+    )
+    assert again["items_this_invocation"] == []
+
+
+def test_the_watcher_publishes_its_state_after_every_item(tmp_path: Path) -> None:
+    """One poll cycle covers every pending item, so it must not publish once.
+
+    At sixteen pending items a cycle runs for about an hour. A watcher that
+    published only at the end of its cycle looked stopped to the cost guard,
+    whose staleness bound is 900 seconds.
+    """
+    db = state_db(tmp_path, chapter3=["aqa-a", "aqa-b", "aqa-c"])
+    ledger_file = construction_ledger(tmp_path, {"family-aqa-a": ["0.01"]})
+    auth = authorization(tmp_path, db, maximum_items=3)
+    work_dir = tmp_path / "published"
+    seen: list[int] = []
+
+    def watch_state_size(_: dict) -> None:
+        path = work_dir / WATCH_STATE_FILENAME
+        if path.is_file():
+            seen.append(
+                len(json.loads(path.read_text(encoding="utf-8"))["evaluated_items"])
+            )
+
+    scripted_watch(
+        db=db,
+        work_dir=work_dir,
+        ledger_file=ledger_file,
+        authorization_file=auth,
+        progress=watch_state_size,
+    )
+    # The watcher published a growing item list while the one cycle ran, so a
+    # reader saw progress before the cycle ended.
+    assert seen and max(seen) >= 2
+
+
+def test_a_paused_vendor_owes_its_trials_and_the_item_waits_for_a_start(
+    tmp_path: Path,
+) -> None:
+    """A paused vendor makes an item incomplete, as a paused model does.
+
+    The Claude Code arm stopped at 2026-09-17T00:26:03Z because its binary
+    was missing for a moment during a package upgrade. The next item ran on
+    the other two vendors and was journalled complete with 30 of its 48
+    trials, so the evaluator never took it up again and 18 trials were lost.
+    """
+    journal = CostJournal(tmp_path / "journal")
+    row = {
+        "schema": "abstention-eval-cost-row-v1",
+        "kind": "item",
+        "item_id": "aqa-truncated",
+        "run_id": "abstention-stream-test-aqa-truncated",
+        "recorded_at_utc": "2026-09-17T00:34:33Z",
+        "complete": True,
+        "evaluation": {
+            "planned_trials": 48,
+            "recorded_trials": 30,
+            "vendors_paused": [PROVIDER_ANTHROPIC_CLAUDE_CODE],
+            "models_paused": [],
+            "pending_paused_trials": 0,
+            "complete": True,
+        },
+    }
+    journal.append(row)
+    # The reader refuses the flag, so the row the old code wrote re-opens.
+    assert journal.completed_item_ids() == set()
+    assert journal.held_item_ids() == {"aqa-truncated"}
+    # While that vendor stays paused the item cannot move, so it waits.
+    assert journal.items_awaiting_vendors({PROVIDER_ANTHROPIC_CLAUDE_CODE}) == {
+        "aqa-truncated"
+    }
+    # A start clears the vendor pause, and then the item is pending again.
+    assert journal.items_awaiting_vendors(set()) == set()
+
+
+def test_an_excluded_vendor_owes_nothing(tmp_path: Path) -> None:
+    """`--vendors` is a scope the operator chose, not a stop of an arm."""
+    journal = CostJournal(tmp_path / "journal")
+    journal.append(
+        {
+            "schema": "abstention-eval-cost-row-v1",
+            "kind": "item",
+            "item_id": "aqa-scoped",
+            "run_id": "abstention-stream-test-aqa-scoped",
+            "recorded_at_utc": "2026-09-17T00:34:33Z",
+            "complete": True,
+            "evaluation": {
+                "planned_trials": 48,
+                "recorded_trials": 36,
+                "vendors_paused": [],
+                "vendors_excluded": [PROVIDER_GOOGLE_GEMINI],
+                "models_paused": [],
+                "pending_paused_trials": 0,
+                "complete": True,
+            },
+        }
+    )
+    assert journal.completed_item_ids() == {"aqa-scoped"}
+    assert journal.items_awaiting_vendors({PROVIDER_GOOGLE_GEMINI}) == set()

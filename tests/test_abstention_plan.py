@@ -1085,3 +1085,192 @@ def test_a_paused_model_holds_its_trials_and_runs_after_the_resume_time(
     )
     assert resumed["vendors"][PROVIDER_GOOGLE_GEMINI]["calls_this_invocation"] == 0
     assert resumed["outcomes_by_model"]["claude-fable-5-1"]["N1"] == 3
+
+
+def _manifest(**changes) -> dict:
+    base = {
+        "schema": "abstention-eval-plan-run-v1",
+        "plan_id": "arctic-abstention-plan-8-models-high-3-repeats-v1",
+        "run_id": "abstention-stream-r11-aqa-one",
+        "eval_set_id": "abstention-eval-set-one",
+        "eval_set_dir": "/sets/abstention-eval-set-one",
+        "item_count": 1,
+        "k": 4,
+        "arms": ["high"],
+        "repeats": 3,
+        "gate_dir": "/gates/aqa-one",
+        "vendors": {
+            "google_gemini": {"models": ["gemini-3.7-flash", "gemini-3.8-flash"]},
+            "openai_codex": {"models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-astra"]},
+        },
+        "trials_per_item": 30,
+        "code_commit": "a65348d",
+        "code_commits": ["a65348d"],
+    }
+    return {**base, **changes}
+
+
+def test_a_later_pass_adds_its_vendor_and_its_commit_to_the_plan_manifest() -> None:
+    """An item must be finishable by a later pass, on a later snapshot.
+
+    The Claude Code arm was paused for two items on 2026-09-17, so their plan
+    manifests bound two vendors and 30 trials. The manifest was immutable
+    field by field, so the arm could never come back to them: a three-vendor
+    pass stopped the run with "the run directory holds a different plan
+    manifest".
+    """
+    from arctic_qa.abstention_plan import extend_plan_manifest
+
+    existing = _manifest()
+    claude = {"models": ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"]}
+    later = _manifest(
+        vendors={**existing["vendors"], "anthropic_claude_code": claude},
+        trials_per_item=48,
+        code_commit="ea00336",
+        code_commits=["ea00336"],
+    )
+    merged = extend_plan_manifest(existing, later)
+
+    assert sorted(merged["vendors"]) == [
+        "anthropic_claude_code",
+        "google_gemini",
+        "openai_codex",
+    ]
+    assert merged["trials_per_item"] == 48
+    # The commit that opened the item stays, and the later one is appended.
+    assert merged["code_commit"] == "a65348d"
+    assert merged["code_commits"] == ["a65348d", "ea00336"]
+
+
+def test_a_pass_with_fewer_vendors_keeps_the_whole_plan_manifest() -> None:
+    """A vendor paused again must not shrink what the item already ran."""
+    from arctic_qa.abstention_plan import extend_plan_manifest
+
+    claude = {"models": ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"]}
+    whole = _manifest(
+        vendors={
+            **_manifest()["vendors"],
+            "anthropic_claude_code": claude,
+        },
+        trials_per_item=48,
+    )
+    merged = extend_plan_manifest(whole, _manifest())
+    assert sorted(merged["vendors"]) == [
+        "anthropic_claude_code",
+        "google_gemini",
+        "openai_codex",
+    ]
+    assert merged["trials_per_item"] == 48
+
+
+def test_the_plan_manifest_still_refuses_another_item_or_another_model_list() -> None:
+    """Only the vendor set and the commit history grow; the identity cannot."""
+    from arctic_qa.abstention_plan import extend_plan_manifest
+
+    with pytest.raises(ValueError, match="different plan manifest"):
+        extend_plan_manifest(_manifest(), _manifest(run_id="abstention-stream-r11-x"))
+    with pytest.raises(ValueError, match="different plan manifest"):
+        extend_plan_manifest(_manifest(), _manifest(repeats=1))
+    with pytest.raises(ValueError, match="another model list"):
+        extend_plan_manifest(
+            _manifest(),
+            _manifest(
+                vendors={
+                    **_manifest()["vendors"],
+                    "google_gemini": {"models": ["gemini-3.8-flash"]},
+                }
+            ),
+        )
+
+
+def test_a_later_pass_on_a_later_commit_finishes_the_item(tmp_path: Path) -> None:
+    """The whole path: two vendors, then three, on another commit.
+
+    An item evaluated while a vendor was paused kept a plan manifest that
+    bound the reduced vendor set, and a run directory was one plan for ever.
+    So the paused arm could never come back to that item.
+    """
+    plan = load_plan(PLAN_FILE)
+    set_dir = frozen_set(tmp_path, count=1)
+
+    def runs(vendors: list[str]) -> dict:
+        return {
+            vendor: VendorRun(
+                vendor=vendor,
+                provider=ScriptedEvaluationProvider(policy="gold"),
+                decoding={"scripted": True},
+                models=plan["vendors"][vendor]["models"],
+                concurrency=2,
+            )
+            for vendor in vendors
+        }
+
+    without_claude = [
+        vendor for vendor in plan["vendors"] if vendor != PROVIDER_ANTHROPIC_CLAUDE_CODE
+    ]
+    first = run_plan(
+        set_dir=set_dir,
+        output_dir=tmp_path / "run",
+        run_id="r",
+        plan=plan,
+        vendor_runs=runs(without_claude),
+        code_commit="a65348d",
+    )
+    assert first["recorded_trials"] == 30
+    manifest = json.loads(
+        (tmp_path / "run" / PLAN_MANIFEST_FILENAME).read_text(encoding="utf-8")
+    )
+    assert manifest["trials_per_item"] == 30
+    assert PROVIDER_ANTHROPIC_CLAUDE_CODE not in manifest["vendors"]
+
+    second = run_plan(
+        set_dir=set_dir,
+        output_dir=tmp_path / "run",
+        run_id="r",
+        plan=plan,
+        vendor_runs=runs(list(plan["vendors"])),
+        code_commit="ea00336",
+    )
+    # Only the eighteen missing trials ran, and the item is whole.
+    assert second["recorded_trials"] == 48 and second["complete"] is True
+    assert (
+        second["vendors"][PROVIDER_ANTHROPIC_CLAUDE_CODE]["calls_this_invocation"] == 18
+    )
+    for vendor in without_claude:
+        assert second["vendors"][vendor]["calls_this_invocation"] == 0
+
+    manifest = json.loads(
+        (tmp_path / "run" / PLAN_MANIFEST_FILENAME).read_text(encoding="utf-8")
+    )
+    assert manifest["trials_per_item"] == 48
+    assert manifest["code_commit"] == "a65348d"
+    assert manifest["code_commits"] == ["a65348d", "ea00336"]
+
+    # Every recorded trial says which commit ran it, and the first pass's own
+    # vendor manifest is untouched beside the later pass's record.
+    vendor_dir = tmp_path / "run" / PROVIDER_OPENAI_CODEX
+    rows = [
+        json.loads(line)
+        for line in (vendor_dir / RESPONSES_FILENAME)
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert {row["code_commit"] for row in rows} == {"a65348d"}
+    assert (
+        json.loads((vendor_dir / "run-manifest.json").read_text(encoding="utf-8"))[
+            "code_commit"
+        ]
+        == "a65348d"
+    )
+    later = vendor_dir / "run-manifest-ea00336.json"
+    assert later.is_file()
+    assert json.loads(later.read_text(encoding="utf-8"))["code_commit"] == "ea00336"
+    claude_rows = [
+        json.loads(line)
+        for line in (
+            tmp_path / "run" / PROVIDER_ANTHROPIC_CLAUDE_CODE / RESPONSES_FILENAME
+        )
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert {row["code_commit"] for row in claude_rows} == {"ea00336"}

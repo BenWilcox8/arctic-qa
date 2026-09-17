@@ -128,9 +128,18 @@ def _load_rows(path: Path) -> list[dict[str, Any]]:
 
 
 def response_row(
-    trial: dict[str, Any], response: Any, *, enum_output: bool
+    trial: dict[str, Any],
+    response: Any,
+    *,
+    enum_output: bool,
+    code_commit: str | None = None,
 ) -> dict[str, Any]:
-    """Build one responses.jsonl row: the trial, the raw response, the outcome."""
+    """Build one responses.jsonl row: the trial, the raw response, the outcome.
+
+    ``code_commit`` is the commit that ran this one call. An item can be
+    finished by a later pass on a later snapshot, so the commit belongs to the
+    trial and not to the run directory alone.
+    """
     record = response.as_dict()
     if record["state"] == COMPLETED:
         parsed = parse_letter(record["raw_text"], trial["letters"])
@@ -167,6 +176,7 @@ def response_row(
         "shuffle_seed": trial["shuffle_seed"],
         "stimulus_sha256": trial["stimulus_sha256"],
         "prompt_version": trial["prompt_version"],
+        "code_commit": code_commit,
         "enum_output": enum_output,
         "response": record,
         "parsed_letter": parsed["letter"],
@@ -336,10 +346,29 @@ def prepare_run(
     if manifest_path.is_file():
         existing = json.loads(manifest_path.read_text(encoding="utf-8"))
         stable = {
-            key: value for key, value in existing.items() if key != "created_at_utc"
+            key: value
+            for key, value in existing.items()
+            if key not in ("created_at_utc", "code_commit")
         }
-        if stable != run_manifest:
+        if stable != {
+            key: value for key, value in run_manifest.items() if key != "code_commit"
+        }:
             raise ValueError("the run directory holds a different run manifest")
+        # The first manifest stays exactly as it was written. A later pass on
+        # another snapshot records its own beside it, so an item can be
+        # finished after a cutover and the record of each pass is its own.
+        if existing.get("code_commit") != run_manifest["code_commit"]:
+            later = output_dir / f"run-manifest-{run_manifest['code_commit']}.json"
+            if not later.is_file():
+                atomic_json(
+                    later,
+                    {
+                        **run_manifest,
+                        "created_at_utc": _utc_now(),
+                        "continues_run_manifest_sha256": sha256_file(manifest_path),
+                    },
+                    immutable=True,
+                )
     else:
         atomic_json(
             manifest_path,
@@ -411,6 +440,7 @@ def run_evaluation(
                 trial,
                 response,
                 enum_output=provider.supports_enum_output(trial["model"]),
+                code_commit=code_commit,
             )
             handle.write(canonical_json(row) + "\n")
             handle.flush()

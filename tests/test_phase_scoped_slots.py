@@ -377,11 +377,16 @@ def test_an_applied_transition_survives_a_phase_less_evaluation_row(
 ) -> None:
     """The 23:04 UTC exit.
 
-    A request refused before its reservation never records a phase: the row is
-    created by the count event and the phase is written by the reserve. The
+    A request refused before its reservation recorded no phase: the row was
+    created by the count event and the phase was written by the reserve. The
     production ledger held thirty-one evaluation rows of that shape. Reading
     one of them as construction activity refused every start of the producer
     after an applied transition.
+
+    The writer records the phase from the first record now, so this test makes
+    the historical shape itself: it strips the phase from the refused row. The
+    reader must survive such a row whatever wrote it, because the ledger keeps
+    the rows the old writer left.
     """
     values = _applied_construction_transition(tmp_path)
     repeats = int(
@@ -395,8 +400,12 @@ def test_an_applied_transition_survives_a_phase_less_evaluation_row(
 
     ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
     row = ledger["requests"][refused["request_key"]]
-    assert "phase" not in row, row
+    # The writer records the phase now, which is the other half of the repair.
+    assert row["phase"] == model_broker.EVALUATION_PHASE
     assert str(row["stage"]).startswith("evaluation_")
+    # Make the historical shape the old writer left, and read it again.
+    del row["phase"]
+    values["ledger"].write_text(json.dumps(ledger), encoding="utf-8")
 
     restarted = _construction_broker(
         values, tmp_path, values["policy"], values["transition"]

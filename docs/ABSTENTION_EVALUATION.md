@@ -472,6 +472,12 @@ If one more item passes a bound, the evaluator pauses the Gemini vendor, writes 
 A vendor that stops on an item is paused the same way, whatever the reason: a budget stop, a harness error, a timeout or an ambiguous charge.
 The policy forbids a retry, so the next item repeats that stop.
 
+A paused vendor owes its trials, exactly as a paused model does.
+So an item evaluated while a vendor is paused is not complete, its journal row names that vendor in `evaluation.vendors_paused`, and a later invocation runs only the trials that are missing.
+An item whose every missing trial belongs to a still-paused vendor waits instead of being revisited on every poll, because a revisit would record nothing.
+`--vendors` is a different thing: it is the scope the operator chose, it lands in `evaluation.vendors_excluded`, and it owes nothing.
+Before 2026-09-17 the two were one field and a paused vendor did not stop an item from being complete: the Claude Code arm stopped at 00:26:03Z when its binary was missing for a moment, and the next item was recorded complete with 30 of its 48 trials.
+
 One pause lifts on its own: an ambiguous charge.
 The broker keeps the reservation of a paid call whose charge it cannot prove, and it halts the evaluation phase of the shared ledger.
 A supervisor releases that charge with a reviewed continuation, which is the `authorize-ambiguous-continuation` command of `docs/SHARED_MODEL_BROKER.md`.
@@ -491,6 +497,12 @@ A start clears the vendor pauses the last invocation left and logs one `vendor_p
 A model pause is not cleared by a start: it lives in the pause files, which an operator and the cost guard own.
 The evaluator stops when every vendor is paused.
 It exits non-zero only on a real error.
+
+A bound is not an error, so the exit code alone never says that the benchmark stopped.
+The unit met its item bound at 2026-09-16T19:31:44Z, exited 0, and no operator saw it until the next morning.
+So `--status-file` takes the supervisor's status file, and the evaluator appends one `blocked:` line to it in three cases: the item bound ends the run, every vendor is paused, and a budget bound pauses the Gemini vendor.
+That third case does not end the run, because the subscription vendors go on, but it turns off the arm the USD allocation pays for.
+The cost guard of `docs/BENCHMARK_GUARD.md` watches the same stop from outside: it reports an evaluator whose watch state stopped moving.
 
 ### Paused models
 
@@ -568,6 +580,7 @@ The answer has schema `abstention-eval-pause-status-v1`, with `paused_now` and t
    Add `--once` for one pass, or `--deadline-seconds` for a bounded test.
    Add `--pause-file` (repeatable) or `--pause-model` to hold one model's trials.
    Give the cost guard's own pause file as a second `--pause-file`.
+   Add `--status-file` with the supervisor's status file, so a bound that ends the run says so.
 
 3. Read the cost summary.
 
@@ -586,11 +599,19 @@ systemctl --user stop arctic-abstention-stream-r1
 
 The launcher of the first live run is `$ARCTIC_QA_DATA_ROOT/arctic-qa/abstention-eval/private/streaming-eval-r1-launcher.sh`.
 The work directory holds the sets, the derived gates, the runs, the cost journal and `watch-state.json`.
-The evaluator writes `watch-state.json` after every poll, so its poll count and its item list rise while the unit runs.
+The evaluator writes `watch-state.json` after every item and after every poll, so its item list and its poll count rise while the unit runs.
+One poll cycle covers every pending item, so at sixteen pending items a cycle runs for about an hour.
+A watcher that published only at the end of its cycle would look stopped to the cost guard, whose staleness bound is 900 seconds.
 
-A per-item plan manifest binds the run id and the code commit, and it is immutable.
-So a new commit needs a new run id prefix and a new work directory.
-Give the launcher both when the service is restarted from a new snapshot.
+A per-item plan manifest binds the identity of the item: the plan, the run id, the evaluation set, the arms, the repeats and the gate directory.
+Those cannot move, so a new run id prefix still needs a new work directory.
+Give the launcher both when the service is restarted from a new run id.
+
+The vendor set and the code commit are not identity, and they grow.
+A later pass adds a vendor the earlier pass could not reach, recomputes `trials_per_item` from that union, and appends its commit to `code_commits`; `code_commit` keeps the commit that opened the item.
+So an item can be finished after a cutover, and the trials the earlier pass recorded are not run again.
+Every response row names the commit that ran it, the first vendor run manifest stays exactly as it was written, and a later pass on another commit writes `run-manifest-<commit>.json` beside it.
+Before 2026-09-17 the manifest was immutable field by field: two items whose manifest was written while the Claude Code arm was paused could never take that arm back.
 
 ## Limits
 

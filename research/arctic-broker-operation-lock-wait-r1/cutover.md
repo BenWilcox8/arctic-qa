@@ -1,5 +1,11 @@
 # Evaluator cutover to snapshot `ea00336` and work directory `streaming-r11`
 
+**Superseded on 2026-09-16.**
+This cutover was never run.
+Snapshot `a0b9a82` halted the shared ledger at 23:03:56Z and must not run again, so the evaluator moved to a snapshot of local `main` (`a65348d`) instead of to `ea00336`.
+The performed cutover, its authorization at 2000 items and USD 200.00, and its script are in the activation directory `arctic-eval-authorization-r8`, and `research/arctic-eval-authorization-r8/report.md` is its record.
+The rest of this document stays as it was written, because it explains why the code commit, the run id prefix and the work directory move together, and that rule did not change.
+
 This is a prepared procedure, not a performed one.
 Firstmate's decision of 2026-09-16 19:10 UTC is that the running unit finishes every item it has started, including the `claude-fable-5-1` trials that resume after 23:00 UTC, and that firstmate performs the cutover after that.
 Everything the cutover needs is built and checked in.

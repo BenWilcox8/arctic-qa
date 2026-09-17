@@ -40,6 +40,12 @@ the call, and the watcher then pauses the Gemini vendor, journals the pause,
 and keeps the subscription vendors running. It exits non-zero only on a real
 error.
 
+A bound is not an error, so the exit code alone never says that the benchmark
+stopped. That silence cost a day: the unit met its item bound at
+2026-09-16T19:31:44Z, exited 0, and no operator saw it until the next
+morning. So ``status_file`` takes the supervisor's status file, and the
+watcher appends one ``blocked:`` line to it when a bound ends the run.
+
 Paused vendors. A vendor that stops on an item is paused for the rest of the
 invocation, because the policy forbids a retry, and a start clears that pause.
 One pause lifts on its own: an ambiguous charge. The broker keeps the
@@ -354,6 +360,7 @@ def evaluate_item(
     authorization_file: Path,
     ledger_run_prefixes: tuple[str, ...],
     vendors: list[str],
+    authorized_vendors: list[str] | None = None,
     concurrency: dict[str, int] | None = None,
     scratch_root: Path | None = None,
     code_commit: str | None = None,
@@ -365,6 +372,12 @@ def evaluate_item(
     ``pause`` names the models the evaluator must not call now. Their trials
     are held, so the row records the item as not complete and a later pass
     runs the trials that are missing.
+
+    ``vendors`` are the vendors that run on this item and ``authorized_vendors``
+    are the vendors this invocation may run at all, which ``--vendors`` sets.
+    A vendor in the second list and not in the first is paused, and it owes
+    this item its trials, so the item is not complete. A vendor in neither
+    owes nothing, because the operator put it out of scope.
     """
     manifest = build_eval_set(
         state_db=state_db,
@@ -487,7 +500,14 @@ def evaluate_item(
         wall_seconds=wall,
         planned_trials=int(plan["trials_per_item"]),
         vendors_paused=[
-            vendor for vendor in plan_vendors(plan) if vendor not in vendors
+            vendor
+            for vendor in (authorized_vendors or vendors)
+            if vendor not in vendors
+        ],
+        vendors_excluded=[
+            vendor
+            for vendor in plan_vendors(plan)
+            if vendor not in (authorized_vendors or vendors)
         ],
         models_paused=held_models,
         pending_paused_trials=pending_paused,
@@ -496,7 +516,10 @@ def evaluate_item(
     row["run_dir"] = str(run_dir)
     row["gate_dir"] = str(gate_dir)
     row["complete"] = (
-        bool(summary.get("complete")) and error is None and pending_paused == 0
+        bool(summary.get("complete"))
+        and error is None
+        and pending_paused == 0
+        and not row["evaluation"]["vendors_paused"]
     )
     if error is not None:
         row["error"] = error
@@ -605,6 +628,7 @@ def watch(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     deadline_seconds: float | None = None,
+    status_file: Path | None = None,
 ) -> dict[str, Any]:
     """Evaluate every accepted item as it appears, then wait for the next.
 
@@ -614,6 +638,11 @@ def watch(
     is off by default. ``vendors`` restricts the plan to a subset, for
     example the subscription vendors while the Gemini arm waits for its own
     reviewed gate; the journal then lists the rest as paused.
+
+    ``status_file`` is the supervisor's status file. A bound that ends the run
+    is not an error, so it appends one ``blocked:`` line there. Without that
+    line a bound is a silent stop: the exit code is 0 and the journal simply
+    stops growing.
 
     ``pause_files`` are the paused-model files, re-read before every item, so
     an operator or a cost guard can pause or resume a model while the watcher
@@ -689,6 +718,22 @@ def watch(
         if log is not None:
             log({**event, "at": _utc_now()})
 
+    def report_blocked(line: str) -> None:
+        """Append one ``blocked:`` line for the supervisor of this unit.
+
+        A bound ends the run with exit code 0, which no supervisor reads as a
+        stop. The line is the one signal that says the benchmark needs an
+        operator. A status file that cannot be written must not end the run,
+        because the run is over already.
+        """
+        if status_file is None:
+            return
+        try:
+            with Path(status_file).open("a", encoding="utf-8") as handle:
+                handle.write(f"blocked: {line}\n")
+        except OSError as error:  # pragma: no cover - environment
+            emit({"event": "status_file_unwritable", "error": str(error)})
+
     def write_state() -> None:
         """Publish the watcher state: the poll count and the items so far."""
         atomic_json(
@@ -762,9 +807,15 @@ def watch(
         held_now = paused_models(
             merge_pause(*(load_pause(path) for path in pause_files), pause_models)
         )
+        # An item that only a paused vendor or a still-paused model owes
+        # cannot advance in this invocation: a revisit records nothing and
+        # calls nothing. A start clears the vendor pauses, so the next
+        # invocation takes those items up and runs the missing trials.
+        paused_now = {name for name in authorized_vendors if name not in vendors}
         done = (
             journal.completed_item_ids()
             | journal.items_held_by(held_now)
+            | journal.items_awaiting_vendors(paused_now)
             | set(
                 row["item_id"] for row in journal.rows() if row.get("kind") == SKIP_KIND
             )
@@ -784,6 +835,10 @@ def watch(
         remaining_bound = bound - len(journal.latest_item_rows())
         if remaining_bound <= 0:
             emit({"event": "item_bound_reached", "bound": bound})
+            report_blocked(
+                f"the streaming evaluator met its item bound of {bound} items "
+                "and stopped; a larger run needs a new reviewed authorization"
+            )
             break
         pending = pending[:remaining_bound]
         if not pending:
@@ -835,6 +890,14 @@ def watch(
                             **ceiling_pause,
                         }
                     )
+                    # The Gemini arm is the arm the USD allocation pays for.
+                    # A budget bound turns it off while the subscription
+                    # vendors keep the run looking healthy, so the supervisor
+                    # must hear about it here and not at the exit.
+                    report_blocked(
+                        "the streaming evaluator paused the Gemini vendor on a "
+                        f"budget bound: {ceiling_pause['reason']}"
+                    )
             emit(
                 {"event": "item_started", "item_id": item_id, "vendors": list(vendors)}
             )
@@ -854,6 +917,7 @@ def watch(
                 authorization_file=authorization_file,
                 ledger_run_prefixes=ledger_run_prefixes,
                 vendors=list(vendors),
+                authorized_vendors=list(authorized_vendors),
                 concurrency=concurrency,
                 scratch_root=scratch_root,
                 code_commit=code_commit,
@@ -861,6 +925,12 @@ def watch(
                 pause=pause,
             )
             evaluated.append(result)
+            # Publish after every item, not only at the end of the poll cycle.
+            # One cycle covers every pending item, so at sixteen pending items
+            # the cycle runs for an hour, and a watcher that publishes only at
+            # its end looks stopped to the cost guard, whose staleness bound is
+            # 900 seconds.
+            write_state()
             if result["skipped"]:
                 emit(
                     {
@@ -920,15 +990,22 @@ def watch(
                 )
             if not vendors:
                 emit({"event": "every_vendor_paused"})
+                report_blocked(
+                    "the streaming evaluator stopped because every vendor is "
+                    "paused: "
+                    + ", ".join(
+                        f"{name} ({(record or {}).get('reason')})"
+                        for name, record in sorted(state["paused_vendors"].items())
+                    )
+                )
                 break
             if result["error"]:
                 # run_plan raised: an error outside the recorded responses.
                 errors.append(f"{item_id}: {result['error']}")
                 break
-        # Publish the state after every poll cycle, not only at the end. A
-        # long-running unit never reaches the end, so an operator reading
-        # `watch-state.json` must see the poll count rise and the items grow
-        # while it runs.
+        # Publish the state after every poll cycle as well as after every
+        # item, because a cycle that evaluates nothing still proves the
+        # watcher is alive.
         write_state()
         if errors or stop["now"] or once:
             break
