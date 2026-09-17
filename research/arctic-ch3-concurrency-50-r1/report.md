@@ -320,7 +320,20 @@ code, 50 screens more papers an hour and 32 makes more calls a minute with half
 the lock hold; the run is left at 50 because papers an hour is what the
 campaign counts.
 
-## 10. What was not done, and why
+## 10. The run it is left at
+
+Run `chapter3-7dc6485-r3` on snapshot `3053f65`, 50 paper workers, 4 option
+workers, policy v13 (50 concurrent, 300 a minute), with
+`ARCTIC_QA_OPERATION_LOCK_LOG_SECONDS=0` so every exclusive section stays in
+the log. The streaming evaluator, the cost guard and the website viewer run on
+the same snapshot. The activation is
+`/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-ch3-concurrency-50-r1/`;
+`build-scale.py` beside this report is the copy of the script that ran it.
+
+The evaluator's unit now carries `TimeoutStopSec=900`, because a stop lands at
+a trial boundary and one trial of the slowest vendor is minutes.
+
+## 11. What was not done, and why
 
 **The hot journal and lock were not moved to the local SSD.** The brief asked
 for it, and the measurement says it is not where the serialised cost is. The
