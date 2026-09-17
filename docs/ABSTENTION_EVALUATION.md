@@ -603,9 +603,15 @@ The evaluator writes `watch-state.json` after every item and after every poll, s
 One poll cycle covers every pending item, so at sixteen pending items a cycle runs for about an hour.
 A watcher that published only at the end of its cycle would look stopped to the cost guard, whose staleness bound is 900 seconds.
 
-A per-item plan manifest binds the run id and the code commit, and it is immutable.
-So a new commit needs a new run id prefix and a new work directory.
-Give the launcher both when the service is restarted from a new snapshot.
+A per-item plan manifest binds the identity of the item: the plan, the run id, the evaluation set, the arms, the repeats and the gate directory.
+Those cannot move, so a new run id prefix still needs a new work directory.
+Give the launcher both when the service is restarted from a new run id.
+
+The vendor set and the code commit are not identity, and they grow.
+A later pass adds a vendor the earlier pass could not reach, recomputes `trials_per_item` from that union, and appends its commit to `code_commits`; `code_commit` keeps the commit that opened the item.
+So an item can be finished after a cutover, and the trials the earlier pass recorded are not run again.
+Every response row names the commit that ran it, the first vendor run manifest stays exactly as it was written, and a later pass on another commit writes `run-manifest-<commit>.json` beside it.
+Before 2026-09-17 the manifest was immutable field by field: two items whose manifest was written while the Claude Code arm was paused could never take that arm back.
 
 ## Limits
 
