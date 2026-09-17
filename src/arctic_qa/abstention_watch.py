@@ -149,6 +149,8 @@ MAXIMUM_POLL_SECONDS = 600
 # derived gates and evaluation sets is still easy to read by hand.
 DEFAULT_ITEM_WORKERS = 8
 MAXIMUM_ITEM_WORKERS = 64
+# One poll cycle scores this many waves of questions, and then polls again.
+WAVE_CYCLES = 4
 ASSUMED_INPUT_TOKENS = 1200
 CEILING_SAFETY = Decimal("1.0")
 
@@ -1144,6 +1146,13 @@ def watch(
             )
             break
         pending = pending[:remaining_bound]
+        # One wave, not the whole backlog. The poll cycle does the work that
+        # belongs to no single question: it reads the shared ledger for a
+        # released ambiguous charge, it rebuilds the set of questions a paused
+        # arm holds, and it meets the questions the producer accepted since.
+        # A wave of every pending question would hold all of that for as long
+        # as the backlog takes, which is hours at 68 pending questions.
+        pending = pending[: int(item_workers) * WAVE_CYCLES]
         if not pending:
             emit({"event": "idle", "poll": polls, "evaluated": len(evaluated)})
         if pending:
@@ -1266,6 +1275,7 @@ def _ceiling_precheck(
 __all__ = [
     "AUTHORIZATION_SCHEMA",
     "DEFAULT_ITEM_WORKERS",
+    "WAVE_CYCLES",
     "DEFAULT_POLL_SECONDS",
     "MAXIMUM_ITEM_WORKERS",
     "GATE_FILENAME_BY_VENDOR",

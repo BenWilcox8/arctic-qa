@@ -464,6 +464,10 @@ Four rules hold the design:
 - `watch-state.json` carries `items_in_flight` and `item_workers`, and the evaluator publishes it at every admission and every finish.
   One wave can run longer than the 900-second staleness bound of the cost guard.
 
+One poll cycle scores four waves and then polls again.
+The cycle does the work that belongs to no single question: it reads the shared ledger for a released ambiguous charge, it rebuilds the set of questions a paused arm holds, and it meets the questions the producer accepted since.
+A wave of every pending question would hold all of that for as long as the backlog takes, which is hours at 68 pending questions.
+
 A paused arm leaves every question of a wave open, and a later pass finishes them all in place.
 A question is complete only when every active arm has its trials.
 

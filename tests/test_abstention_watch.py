@@ -41,6 +41,7 @@ from arctic_qa.abstention_subscription import (
 from arctic_qa.abstention_watch import (
     MAXIMUM_ITEM_WORKERS,
     WATCH_STATE_FILENAME,
+    WAVE_CYCLES,
     authorization_record,
     estimated_gemini_item_usd,
     is_ambiguous_charge_reason,
@@ -2433,3 +2434,38 @@ def test_the_item_workers_are_bounded(tmp_path: Path) -> None:
                 authorization_file=auth,
                 item_workers=workers,
             )
+
+
+def test_one_poll_cycle_scores_a_bounded_number_of_questions(tmp_path: Path) -> None:
+    """A backlog must not hold the poll cycle for hours.
+
+    The cycle does the work that belongs to no single question: it reads the
+    shared ledger for a released ambiguous charge, it rebuilds the set of
+    questions a paused arm holds, and it meets the questions the producer
+    accepted since. One wave of every pending question would hold all of that
+    for as long as the backlog takes.
+    """
+    items = [f"aqa-c{index}" for index in range(9)]
+    db = state_db(tmp_path, chapter3=items)
+    ledger_file = construction_ledger(tmp_path, {f"family-{i}": ["0.10"] for i in items})
+    auth = authorization(tmp_path, db, maximum_items=9)
+    work = tmp_path / "bounded-cycle"
+    result = scripted_watch(
+        db=db,
+        work_dir=work,
+        ledger_file=ledger_file,
+        authorization_file=auth,
+        item_workers=2,
+    )
+    # Two workers and four waves a cycle: eight of the nine questions.
+    assert len(result["items_this_invocation"]) == 2 * WAVE_CYCLES
+    assert [row["item_id"] for row in result["items_this_invocation"]] == items[:8]
+    # The ninth question is the first work of the next cycle.
+    again = scripted_watch(
+        db=db,
+        work_dir=work,
+        ledger_file=ledger_file,
+        authorization_file=auth,
+        item_workers=2,
+    )
+    assert [row["item_id"] for row in again["items_this_invocation"]] == items[8:]
