@@ -1,4 +1,4 @@
-"""Two plans for the deadline, from the rates measured on fresh questions."""
+"""The deadline, from the rates measured on fresh questions at 10:00 UTC."""
 from datetime import UTC, datetime
 
 NOW = datetime(2026, 9, 17, 10, 0, tzinfo=UTC)
@@ -11,11 +11,10 @@ ACCEPTED_NOW = 151
 ACCEPT_PER_HOUR = 40.0
 COMPLETE_NOW = {"google_gemini": 71, "anthropic_claude_code": 52, "openai_codex": 73}
 # Questions an hour. The Gemini arm is bound by the exclusive section of the
-# shared ledger while the producer writes to it, and by its own policy pace
-# after the producer stops. The subscription arms are bound by their policy
-# pace, which no other process touches.
-GEMINI_WITH_PRODUCER = 15.0
-GEMINI_ALONE = 40.0
+# shared paid-call ledger, which costs about 22 seconds of every paid call and
+# does not depend on the producer. The subscription arms are bound by their
+# own pace in the evaluation policy, which no other process touches.
+GEMINI = 13.7
 CLAUDE = 31.0
 CODEX = 31.0
 
@@ -27,21 +26,16 @@ def hours(start, end):
 def plan(label, generation_stops):
     print(f"== {label}: generation stops {generation_stops:%H:%M}Z ==")
     for name, deadline in DEADLINES:
-        pool = ACCEPTED_NOW + ACCEPT_PER_HOUR * hours(NOW, min(generation_stops, deadline))
-        gemini = (
-            COMPLETE_NOW["google_gemini"]
-            + GEMINI_WITH_PRODUCER * hours(NOW, min(generation_stops, deadline))
-            + GEMINI_ALONE * hours(max(generation_stops, NOW), deadline)
+        pool = ACCEPTED_NOW + ACCEPT_PER_HOUR * hours(
+            NOW, min(generation_stops, deadline)
         )
-        claude = COMPLETE_NOW["anthropic_claude_code"] + CLAUDE * hours(
-            max(CLAUDE_RESUMES, NOW), deadline
-        )
-        codex = COMPLETE_NOW["openai_codex"] + CODEX * hours(NOW, deadline)
         arms = {
-            "google_gemini": min(gemini, pool),
-            "anthropic_claude_code": min(claude, pool),
-            "openai_codex": min(codex, pool),
+            "google_gemini": COMPLETE_NOW["google_gemini"] + GEMINI * hours(NOW, deadline),
+            "anthropic_claude_code": COMPLETE_NOW["anthropic_claude_code"]
+            + CLAUDE * hours(max(CLAUDE_RESUMES, NOW), deadline),
+            "openai_codex": COMPLETE_NOW["openai_codex"] + CODEX * hours(NOW, deadline),
         }
+        arms = {arm: min(value, pool) for arm, value in arms.items()}
         floor = min(arms.values())
         print(f"  {name}: accepted {pool:.0f}")
         for arm, value in arms.items():
