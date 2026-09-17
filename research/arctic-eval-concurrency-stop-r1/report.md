@@ -115,6 +115,66 @@ Only a trial with no recorded response row is re-opened, so the trials the refus
 
 The projected Gemini cost of the 12 re-opened questions is USD 0.68 at this run's own measured rate of USD 0.015904 a trial.
 
+## The second defect: the exit code was read as the answer
+
+The relaunch on `c1fe938` held the Gemini arm, and 27 seconds later the Claude arm went dark:
+
+```json
+{"at":"2026-09-17T17:10:47Z","event":"vendor_paused",
+ "reason":"failed: the harness exited with 1:","vendor":"anthropic_claude_code"}
+```
+
+The same pause had closed the arm at 17:05:31 UTC on the previous snapshot.
+Firstmate's first reading of it, and mine, was the stdin race in the receipt of 17:04:51 UTC.
+The receipts say otherwise.
+
+### What the 28 failed Claude receipts hold
+
+| Shape | Receipts |
+| --- | --- |
+| The provider declined: exit 1, empty stderr, a whole result object with `stop_reason: "refusal"` | 8 |
+| The binary was not there: `FileNotFoundError` | 14 |
+| `SIGTERM` of a unit stop: exit 143 and -15 | 5 |
+| The harness started and never received its prompt | 1 |
+
+The refusal text names the cause:
+
+```
+API Error: Opus 5's safeguards flagged this message (https://www.anthropic.com/legal/aup).
+... Details: `[bio]`
+```
+
+The broad safeguard reads the Arctic biology stimulus of one question.
+
+### Why one refusal closed the arm
+
+`SubscriptionEvaluationProvider.answer` read the exit code before it read the output, so a non-zero exit discarded the result the harness had already printed and recorded `the harness exited with 1`.
+`abstention_plan.run_vendor` stops a vendor on any response that is not completed, and `abstention_watch.finish_item` pauses a vendor that stopped.
+So the arm was off for the rest of the invocation, and every question of that invocation was left short of its Claude trials.
+
+### What moves
+
+The provider saw the request and answered it, so the refusal is a response of this trial.
+It carries no letter, so it scores N0, it counts toward the 48 planned responses, and nothing asks it again.
+It says nothing about the next question, because the safeguard read the text of this one.
+
+`_parsed_answer` reads the printed output first, whatever the exit code.
+A parser that finds the harness's own result record owns the outcome; the exit code becomes the error only when no such record is there.
+`parse_claude_output` reads `stop_reason: "refusal"` as a completed call whose output is the refusal text; every other `is_error` result is still a failure.
+
+The one stdin receipt is the opposite case and is a pre-provider refusal.
+`HARNESS_PROMPT_FAILURES` names what it leaves in the transport's stderr, the trial raises `errors.HarnessUnavailableError`, which `run_vendor` already waits out and leaves pending, and `SubscriptionLedger.abandon` drops the row and frees the slot with no receipt.
+That is the one way a row leaves that ledger: nothing was asked and nothing was charged, so there is no event to receipt.
+
+### The pacing that was not needed
+
+The order asked for the subscription wave to be paced so the harness never sees 24 concurrent spawns.
+It never did.
+`SubscriptionLedger.submit` waits for one of the policy's per-vendor slots before the harness is started, and that ledger is a file-locked directory shared by every question of the process, so the bound holds however many questions are in flight.
+
+Measured over the 3,257 Claude receipts of `streaming-r11` that carry both a submitted and a completed time, the peak overlap is exactly 3, which is the policy limit.
+Only the Gemini arm needed a gate, because its limit lives in the shared paid-call ledger and `effective_concurrency` read it per question.
+
 ## Tests
 
 - `tests/test_phase_scoped_slots.py`: the deferring caller hears the refusal, nothing is written, the row stays `counting`, and the next attempt of the same request key runs under the same authorization; both scheduling reasons defer and every other refusal is still recorded; the default broker is unchanged.
