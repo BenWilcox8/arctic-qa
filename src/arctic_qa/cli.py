@@ -12,6 +12,7 @@ from typing import Any
 from . import __version__
 from . import abstention_cli
 from . import concurrency_repair
+from . import jev_prescreen
 from .access_readiness import run_access_readiness, supervise_access_readiness
 from .broker_provider import BrokerProvider
 from .corpus_viewer import serve_corpus_viewer
@@ -549,6 +550,8 @@ def parser() -> argparse.ArgumentParser:
 
     abstention_cli.add_parser(commands)
 
+    jev_prescreen.add_parser(commands)
+
     reconcile = commands.add_parser(
         "reconcile-usage",
         help="Settle one saved response that proves an omitted thought count is zero.",
@@ -850,6 +853,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.command == "abstention-eval":
             return _emit(args, abstention_cli.handle(args))
+        if args.command == "jev-prescreen":
+            return _emit(args, jev_prescreen.handle(args))
         if args.command == "reconcile-usage":
             return _emit(args, _reconcile_usage(args))
         if args.command == "settle-http-rejection":

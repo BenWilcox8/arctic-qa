@@ -54,6 +54,7 @@ None of them holds a secret value except the two API keys.
 | `ARCTIC_QA_CONFIG_DIR` | The directory that holds the local credential files. | `~/.config/arctic-qa` |
 | `GEMINI_API_KEY` | The Gemini API key. The eligibility adapter reads it, and prefers it over the credential file. The shared broker reads the credential file only. | Not set. |
 | `ANTHROPIC_API_KEY` | The Anthropic API key. Only the direct Claude transport reads it. | Not set. |
+| `TYPESAFE_API_KEY` | The TypeSafe API key, for the Jev prescreen alone. It is preferred over the credential file `typesafe-api-key`. No other stage reads it. | Not set. |
 | `ARCTIC_CH2_EVIDENCE_DIR` | The chapter 2 yield-audit evidence bundle. The chapter 2 replay tests skip without it. | The path of the machine that produced the run. |
 | `ARCTIC_REAL_CORPUS_DIR` | The corpus search run of the paper. The corpus-viewer tests over the real corpus skip without it. | The path of the machine that produced the run. |
 | `ARCTIC_REAL_CORPUS_RUN` | The run identifier inside that corpus. | `20260911T232247Z` |
