@@ -127,6 +127,7 @@ from .model_broker import (
     EVALUATION_CEILING_REASON,
     EVALUATION_ITEM_REPEAT_REASON,
     EVALUATION_PHASE,
+    OPERATION_LOCK_BUSY_REASON,
     SharedGeminiBroker,
     phase_halt_reason,
 )
@@ -604,20 +605,39 @@ def vendor_stop_reason(summary: dict[str, Any], vendor: str) -> str | None:
     return f"{state}: {detail}" if detail else state
 
 
+ITEM_SCOPED_REASONS = (
+    # The per-item repeat limit of the evaluation policy counts the calls of
+    # one item, condition, model and arm, so it says nothing about the next
+    # item. The live service met this on 2026-09-16: a re-evaluated item
+    # exhausted its Gemini repeat budget, and the Gemini vendor was then
+    # paused for every later question, which is the arm the captain most wants
+    # measured.
+    EVALUATION_ITEM_REPEAT_REASON,
+    # The exclusive operation lock of the shared ledger stayed held past the
+    # bounded wait. Nothing was reserved, submitted or charged, and the
+    # producer treats the same refusal as a paper-level one: it skips that
+    # paper and goes on. A wave meets it more often, because four Gemini
+    # threads queue on that lock, and it took the Gemini arm down at 09:58 UTC
+    # on 2026-09-17 until an operator restarted the unit.
+    OPERATION_LOCK_BUSY_REASON,
+)
+
+
 def is_item_scoped_reason(reason: str | None) -> bool:
     """Say whether one stop reason belongs to this item alone.
 
-    The per-item repeat limit of the evaluation policy counts the calls of one
-    item, condition, model and arm. It says nothing about the next item, so a
-    vendor that meets it must keep running: the evaluator records the stop on
-    this item and takes the next one. Every other stop pauses the vendor,
-    because the policy forbids a retry and the next item would repeat it.
+    Such a stop is recorded against this item, and the vendor takes the next
+    item. Every other stop pauses the vendor, because the policy forbids a
+    retry and the next item would repeat it.
 
-    The live service met this on 2026-09-16: a re-evaluated item exhausted its
-    Gemini repeat budget, and the Gemini vendor was then paused for every
-    later question, which is the arm the captain most wants measured.
+    :data:`ITEM_SCOPED_REASONS` holds the closed set and says why each one is
+    in it. A reason belongs in it only when the refusal reserved nothing,
+    submitted nothing and charged nothing, and says nothing about the next
+    item.
     """
-    return bool(reason) and EVALUATION_ITEM_REPEAT_REASON in str(reason)
+    return bool(reason) and any(
+        text in str(reason) for text in ITEM_SCOPED_REASONS
+    )
 
 
 def is_ambiguous_charge_reason(reason: str | None) -> bool:
@@ -1282,8 +1302,10 @@ __all__ = [
     "SKIP_KIND",
     "WATCH_STATE_FILENAME",
     "authorization_record",
+    "ITEM_SCOPED_REASONS",
     "is_ambiguous_charge_reason",
     "is_ceiling_reason",
+    "is_item_scoped_reason",
     "estimated_gemini_item_usd",
     "evaluate_item",
     "pending_item_ids",

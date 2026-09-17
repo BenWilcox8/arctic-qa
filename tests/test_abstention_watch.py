@@ -39,6 +39,7 @@ from arctic_qa.abstention_subscription import (
     PROVIDER_OPENAI_CODEX,
 )
 from arctic_qa.abstention_watch import (
+    ITEM_SCOPED_REASONS,
     MAXIMUM_ITEM_WORKERS,
     WATCH_STATE_FILENAME,
     WAVE_CYCLES,
@@ -57,6 +58,7 @@ from arctic_qa.model_broker import (
     EVALUATION_CEILING_REASON,
     EVALUATION_ITEM_REPEAT_REASON,
     EVALUATION_PHASE,
+    OPERATION_LOCK_BUSY_REASON,
 )
 from arctic_qa.util import atomic_json
 from test_abstention_render import _candidate, _state_db, DISTRACTORS
@@ -2469,3 +2471,59 @@ def test_one_poll_cycle_scores_a_bounded_number_of_questions(tmp_path: Path) -> 
         item_workers=2,
     )
     assert [row["item_id"] for row in again["items_this_invocation"]] == items[8:]
+
+
+def test_a_busy_operation_lock_belongs_to_one_question(tmp_path: Path) -> None:
+    """The exclusive lock of the shared ledger must not take an arm down.
+
+    A `BrokerOperationBusyError` reserves nothing, submits nothing and charges
+    nothing: the producer skips that paper and goes on. A wave meets it more
+    often, because four Gemini threads queue on that lock, and it paused the
+    Gemini arm of the live evaluator at 09:58 UTC on 2026-09-17 until an
+    operator restarted the unit.
+    """
+    busy = f"not_submitted: {OPERATION_LOCK_BUSY_REASON}"
+    assert is_item_scoped_reason(busy) is True
+    assert OPERATION_LOCK_BUSY_REASON in ITEM_SCOPED_REASONS
+    assert EVALUATION_ITEM_REPEAT_REASON in ITEM_SCOPED_REASONS
+    # A budget wall, a harness fault and an ambiguous charge still pause it.
+    assert is_item_scoped_reason(f"not_submitted: {EVALUATION_CEILING_REASON}") is False
+    assert is_item_scoped_reason("failed: the harness exited with 1") is False
+    assert is_item_scoped_reason("ambiguous_charge") is False
+
+    db = state_db(tmp_path, chapter3=["aqa-busy1", "aqa-busy2"])
+    ledger_file = construction_ledger(tmp_path, {"family-aqa-busy1": ["0.01"]})
+    auth = authorization(tmp_path, db, maximum_items=2)
+    work = tmp_path / "busy-lock"
+
+    import arctic_qa.abstention_watch as module
+
+    stops = {"count": 0}
+    original_reason = module.vendor_stop_reason
+
+    def fake_reason(summary: dict, vendor: str) -> str | None:
+        # The first question meets the busy lock on its Gemini arm.
+        if vendor == PROVIDER_GOOGLE_GEMINI and stops["count"] < 1:
+            stops["count"] += 1
+            return busy
+        return None
+
+    module.vendor_stop_reason = fake_reason  # type: ignore[assignment]
+    try:
+        result = scripted_watch(
+            db=db,
+            work_dir=work,
+            ledger_file=ledger_file,
+            authorization_file=auth,
+            item_workers=1,
+        )
+    finally:
+        module.vendor_stop_reason = original_reason  # type: ignore[assignment]
+    # The arm kept its place for the second question, and no pause was
+    # journalled.
+    assert result["paused_vendors"] == {}
+    assert PROVIDER_GOOGLE_GEMINI in result["active_vendors"]
+    assert [
+        row for row in CostJournal(work).rows() if row.get("kind") == "vendor_pause"
+    ] == []
+    assert len(result["items_this_invocation"]) == 2

@@ -471,6 +471,18 @@ A wave of every pending question would hold all of that for as long as the backl
 A paused arm leaves every question of a wave open, and a later pass finishes them all in place.
 A question is complete only when every active arm has its trials.
 
+### A stop that belongs to one question
+
+A vendor that stops is paused for the rest of the invocation, because the policy forbids a retry.
+Two stops are about one question only, and `abstention_watch.ITEM_SCOPED_REASONS` is that closed set:
+
+- the per-item repeat limit of the evaluation policy, which counts the calls of one item, condition, model and arm;
+- a busy exclusive operation lock of the shared paid-call ledger, which reserved nothing, submitted nothing and charged nothing.
+  The producer treats the same refusal as a paper-level one and skips that paper.
+  A wave meets it more often, because four Gemini threads queue on that lock, and it took the Gemini arm of the live evaluator down at 09:58 UTC on 2026-09-17 until an operator restarted the unit.
+
+A reason belongs in that set only when the refusal reserved nothing, submitted nothing and charged nothing, and says nothing about the next question.
+
 ### A question an arm stopped inside
 
 A pause reopens a question.
