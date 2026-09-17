@@ -816,9 +816,13 @@ class Activation:
             "successor_of_applied_transition"
         ), "apply the transition first"
         assert self.live_producer() is None, "a producer of this run is already live"
-        assert unit_state(EVAL_UNIT) != "active", (
-            "the evaluator must stay stopped until the first paid construction call"
-        )
+        if not state.get("successor_of_applied_transition"):
+            # A start that applies a transition is revalidated until its first
+            # construction request and needs inflight 0, so a live evaluator
+            # must wait for that call. A successor start applies none.
+            assert unit_state(EVAL_UNIT) != "active", (
+                "the evaluator must stay stopped until the first paid construction call"
+            )
         ledger = read_ledger()
         assert not ledger["halted"], "the ledger is halted"
         subprocess.run(["tmux", "kill-session", "-t", TMUX_SESSION], check=False)

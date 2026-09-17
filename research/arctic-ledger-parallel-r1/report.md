@@ -168,7 +168,37 @@ The producer of run `chapter3-7dc6485-r3` is left on `b7f4e77` with sixteen pape
 
 ## 5. The measured window
 
-See "The measured window" below, filled from `activation-state-b7f4e77.json` `observations` when the fifteen minutes end.
+Fifteen minutes on `b7f4e77`, 05:12:10 to 05:27:11 UTC, sixteen paper workers, policy v12, read through the store (`activation-state-b7f4e77.json`, `observations`):
+
+| measure | before (03:00 window, 4 workers, one-file ledger) | after |
+| --- | --- | --- |
+| requests a minute | 6.73 (sequential baseline about 3) | 20.8 |
+| paid requests in the window | 101 | 312 |
+| peak in flight | 3 | 11 |
+| questions accepted in the window | - | 9 (33 to 42) |
+| HTTP 429 / 503 | 0 / 0 | 0 / 0 |
+| ambiguous charges | 0 | 0 |
+| candidate processing faults | 1 | 0 |
+| lock give-ups | 0 | 0 |
+| journal records appended | - | 983 (seq 413 to 1396), 1.7 MB; the snapshot rewritten every 30 s off the hot path |
+
+Papers screened in the window: 30 (120 an hour), against 43 in the 03:00 window.
+The count is not comparable: the Jev live order now hands the workers the papers most likely to be eligible, so far more of them go through the whole generation chain instead of one screening call, which is what the request and the acceptance counts show.
+
+The sixteenth slot was not reached.
+The number in flight settled around 11 at its peak and 3 to 5 on average, with 20.8 calls a minute of 8 seconds.
+The ledger is no longer what serialises the workers: every lock hold in the window was under a second and the store's own cost per call is about 100 ms.
+What is left is the producer's own work between two calls, under one interpreter lock: the process ran at 60 to 75 percent of one core for the whole window, with one thread busy at any instant.
+A proven Google limit was not reached: no 429 and no 503 in 312 calls at up to 11 in flight.
+
+## 8. The exit at 05:25
+
+At 05:25:40 UTC the `b7f4e77` producer ended with `{"code":"VALUEERROR","message":"the source version is already bound to another paper family"}`: a plain `ValueError` from the family-binding check of `_count_event`, which `broker_provider.broker_boundary` marks a whole-run stop, exactly as the duplicate-key `ValueError` did at 02:32 UTC.
+The refusal reserved nothing and charged nothing; the ledger holds no source version bound to two families, because the check fires before the binding is written.
+The identity of the refused request is not in the ledger (no row is written before the refusal) and the producer's stop line names no paper; with the new error class the next such refusal is recorded against its paper in the routing ledger, which names it.
+
+Fixed on `7d42bbf`: the three binding refusals raise `errors.PaperBindingConflictError`, which is in `broker_provider._PAPER_LEVEL_BROKER_ERRORS` and in the non-stop set of `streaming._ends_the_run`, so the family is recorded and skipped and the run continues.
+The producer was relaunched at 05:29:22 UTC on `7d42bbf` with sixteen paper workers, as a successor of the applied v12 transition, with the evaluator live (a successor start applies no transition, so the start-order rule does not hold it).
 
 ## 6. The adversarial audit
 
