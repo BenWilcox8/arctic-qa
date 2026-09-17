@@ -14,6 +14,7 @@ from arctic_qa.db import Database
 from arctic_qa.discovery import manual_record
 from arctic_qa.exporting import export_run
 from arctic_qa import generation as generation_contract
+from arctic_qa import ledger_store
 from arctic_qa.gemini_batch import (
     AUTHORIZATION_SCHEMA,
     BatchPendingError,
@@ -551,7 +552,9 @@ def test_continuation_selector_preserves_ranked_order_and_logs_processed_ids(
         "source_version_id": "2" * 64,
         "state": "completed",
     }
-    write_json(ledger_path, ledger)
+    ledger_store.write_snapshot(
+        ledger_path, ledger, ledger_store.snapshot_applied_seq(ledger_path)
+    )
     eligibility = tmp_path / "eligibility"
     write_json(
         eligibility / "jobs" / "paper-2.json",
@@ -1114,7 +1117,9 @@ def test_batch_allocation_is_separate_from_shared_live_spend(tmp_path: Path) -> 
     _, ledger_path = shared_ledger(tmp_path)
     ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
     ledger["prior_construction_spend_usd"] = "24.99"
-    write_json(ledger_path, ledger)
+    ledger_store.write_snapshot(
+        ledger_path, ledger, ledger_store.snapshot_applied_seq(ledger_path)
+    )
     store = batch_store(tmp_path, ledger_path, ceiling="25")
     provider = BatchProvider(
         store=store,
@@ -1215,7 +1220,9 @@ def test_batch_rejects_an_uncovered_retained_liability(tmp_path: Path) -> None:
     _, ledger_path = shared_ledger(tmp_path)
     ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
     ledger["reserved_usd"] = "0.010000"
-    write_json(ledger_path, ledger)
+    ledger_store.write_snapshot(
+        ledger_path, ledger, ledger_store.snapshot_applied_seq(ledger_path)
+    )
     with pytest.raises(ValueError, match="no-replay|recovery|liability"):
         batch_store(tmp_path, ledger_path, ceiling="25").budget_preview([])
 

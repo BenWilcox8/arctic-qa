@@ -336,7 +336,7 @@ OPERATION_LOCK_QUEUE_ROUNDS = 3
 OPERATION_LOCK_HEARTBEAT_SECONDS = 30.0
 # A section whose wait and hold are both below this is ordinary and stays out of
 # the log; the run makes thousands of them.
-OPERATION_LOCK_LOG_THRESHOLD_SECONDS = 0.0
+OPERATION_LOCK_LOG_THRESHOLD_SECONDS = 1.0
 # The immutable-event proof of one ledger row is kept until the row moves, and
 # a full pass over every row runs again at least this often. The proof covers
 # receipts that were written immutable and never change, so replaying it on
@@ -2052,11 +2052,13 @@ class SharedGeminiBroker:
                     self._operation_lock_file,
                     wait_seconds=wait_seconds,
                     busy_error=BrokerOperationBusyError,
-                    poll_seconds=(
-                        OPERATION_LOCK_CONCURRENT_WAIT_INTERVAL_SECONDS
-                        if queued
-                        else None
-                    ),
+                    # Every broker polls at the short interval. A hold lasts
+                    # milliseconds, so a one-second poll of the sequential
+                    # path paid a whole second per collision: the
+                    # evaluation pacing test measured 1.5 s for 1.2 s of
+                    # calls under load on 2026-09-17. The bound and the
+                    # rounds of each path are unchanged.
+                    poll_seconds=OPERATION_LOCK_CONCURRENT_WAIT_INTERVAL_SECONDS,
                     heartbeat_seconds=OPERATION_LOCK_HEARTBEAT_SECONDS,
                     heartbeat=lambda waited, section=section: self._operation_lock_line(
                         "waiting",

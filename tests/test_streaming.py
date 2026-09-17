@@ -31,6 +31,7 @@ from arctic_qa.providers import FakeProvider
 from arctic_qa.streaming import BENCHMARK_CANDIDATE_PREDICATE, run_stream
 from arctic_qa.util import canonical_json, sha256_file, stable_id
 from arctic_qa import validation as validation_module
+from test_model_broker import rewrite_ledger  # noqa: E402
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -2586,7 +2587,7 @@ def test_short_answer_without_three_distractors_is_not_counted_as_accepted(
     def clear_test_rate_window(broker: SharedGeminiBroker) -> None:
         ledger = json.loads(broker.ledger_file.read_text(encoding="utf-8"))
         ledger["recent_submission_times_utc"] = []
-        write_json(broker.ledger_file, ledger)
+        rewrite_ledger(broker.ledger_file, ledger)
 
     monkeypatch.setattr(SharedGeminiBroker, "_pace", clear_test_rate_window)
     access, eligibility = streaming_fixture(tmp_path)

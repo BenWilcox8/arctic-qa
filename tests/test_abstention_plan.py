@@ -47,7 +47,7 @@ from arctic_qa.abstention_subscription import (
 )
 from arctic_qa.abstention_run import plan_trials
 from arctic_qa.cli import main as cli_main
-from arctic_qa.model_broker import SharedGeminiBroker
+from arctic_qa.model_broker import OPERATION_LOCK_WAIT_INTERVAL_SECONDS, SharedGeminiBroker
 from arctic_qa.util import atomic_json
 from arctic_qa import ledger_store  # noqa: E402
 from test_abstention_broker import LetterTransport, bind, evaluation_fixture, execute
@@ -359,7 +359,10 @@ def test_ledger_accepts_concurrent_evaluation_calls_and_keeps_construction_pacin
     assert [r["state"] for r in receipts] == ["completed"] * 8
     assert len({r["request_key"] for r in receipts}) == 8
     assert 2 <= transport.peak <= 4
-    assert wall < 8 * 0.15
+    # A sequential broker polls the operation lock every second, so one
+    # collision under load costs one poll; the peak above is the proof of the
+    # concurrency, this is a sanity bound.
+    assert wall < 8 * 0.15 + OPERATION_LOCK_WAIT_INTERVAL_SECONDS
     status = broker.status()
     assert status["evaluation"]["submissions"] == 8
     assert status["evaluation"]["inflight"] == 0
