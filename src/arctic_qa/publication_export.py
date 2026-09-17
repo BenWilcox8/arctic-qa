@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from . import db
+
 from .distractor_order import apply_order, resolve_order
 from .util import atomic_json, atomic_write, canonical_json, jsonl_bytes, stable_id
 
@@ -304,7 +306,7 @@ def _live_reviewer_row(
 def _live_rows(
     state_db: Path, selection: dict[str, Any], seed: str
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    connection = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
+    connection = db.connect_read_only(state_db)
     connection.row_factory = sqlite3.Row
     exclusions = {
         "incomplete_or_rejected": 0,
@@ -1198,7 +1200,7 @@ def _write_manifest_package(
     items = load_authoritative_mcqs(export_manifest, source_root)
     connection = None
     if state_db:
-        connection = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
+        connection = db.connect_read_only(state_db)
         connection.row_factory = sqlite3.Row
     try:
         records = [_manifest_row(connection, item) for item in items]
@@ -1391,7 +1393,7 @@ def export_publication_package(
         raise ValueError(
             "--state-db and --run-id are required without --export-manifest"
         )
-    connection = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
+    connection = db.connect_read_only(state_db)
     connection.row_factory = sqlite3.Row
     rows = connection.execute(
         "SELECT c.*,s.* FROM candidates c JOIN sources s ON s.source_id=c.source_id "

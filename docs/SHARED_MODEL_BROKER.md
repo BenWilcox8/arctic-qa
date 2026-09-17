@@ -29,7 +29,7 @@ The broker also validates ledger totals against immutable request receipts.
 
 An integrity mismatch creates an adjacent halt record and blocks more paid work.
 
-The broker publishes an adjacent `shared-gemini-broker-status-v2` record after each ledger change.
+The broker publishes an adjacent `shared-gemini-broker-status-v2` record with each snapshot of the ledger: with every commit of a broker that runs one operation at a time, and every `COMPACTION_INTERVAL_SECONDS` for a concurrent one (see "Parallel bookkeeping").
 
 This record contains verified limits, use, remaining capacity, stage totals, and paper totals.
 
@@ -599,8 +599,22 @@ Every reader in this repository reads the store, never `json.load` of the ledger
 - `ledger_store.read_ledger(path)` materializes the snapshot and the journal,
 - `ledger_store.apply_journal(path, snapshot)` finishes a snapshot a reader already read under the shared lock.
 
-The migrated readers are `live_papers.read_shared_ledger` (the website), `benchmark_guard.read_ledger` (the cost guard), `corpus_viewer` (whose cache is keyed on the journal as well as the snapshot) and `gemini_batch`.
-A reader that still reads the plain file sees the ledger as of the last compaction, which on a concurrent run is at most `COMPACTION_INTERVAL_SECONDS` old.
+The migrated readers are `live_papers.read_shared_ledger` (the website), `benchmark_guard.read_ledger` (the cost guard, and through it the streaming evaluator), `abstention_cost.read_ledger` (the evaluator's cost summary), `corpus_viewer` (whose cache is keyed on the journal as well as the snapshot), `concurrency_repair`, `gemini_batch` (both reads) and `activate_exclusive_batch_mode`.
+A reader that still reads the plain file, such as a `status.sh` of an older activation, sees the ledger as of the last compaction: at most `COMPACTION_INTERVAL_SECONDS` old on a concurrent run, and current after a process exits, because a process compacts once more at exit.
+A process killed by a signal writes no such snapshot; the activation's `stop` compacts for it.
+
+### What a reviewed operation binds
+
+`expected_ledger_sha256` in a transition or a release binds the snapshot file.
+Every broker start compacts a snapshot that lags its journal before it validates anything, and waits for the compaction lock rather than skip, so the file a reviewed command hashes is the state at that start.
+Compute the hash after the writers are stopped, as the activation scripts do.
+
+### What a stop leaves
+
+A stop at any instant leaves a store that reconstructs.
+A torn last line of the journal is not a record; the next process to append cuts it first, under the shared ledger lock.
+A base record written before its snapshot names the snapshot it supersedes, which is still bound.
+A failed `fsync` marks nothing durable, and the waiters run their own.
 
 ### What did not change
 
@@ -614,11 +628,13 @@ A reader that still reads the plain file sees the ledger as of the last compacti
 
 ### The migration
 
-`arctic-qa migrate-ledger-store --shared-ledger-file <path>` converts a one-file ledger into the store.
+`arctic-qa migrate-ledger-store --shared-ledger-file <path> --apply` converts a one-file ledger into the store; without `--apply` it proves and writes nothing.
 
 It runs with the producer and the evaluator stopped, at a settled boundary.
-It copies the ledger to `<name>.pre-store-archive-<utc>.json`, writes the empty journal and the base record, materializes the store again and proves that every field of the result is identical to the archive, byte for byte after canonical serialization.
-`--check` proves an existing store against its archive without writing anything.
+It copies the ledger to `<name>.pre-store-archive-<utc>.json` (frozen, mode 0444), writes the base record and the empty journal, materializes the store again and proves that every field of the result is identical to the archive, byte for byte after canonical serialization.
+`--action check [--archive-file <path>]` proves an existing store against its archive without writing anything.
+A broker started on a ledger with no store beside it refuses and names this command.
+The live ledger was converted at 04:53 UTC on 2026-09-17: 6,406 rows, 8 seconds, identical.
 
 ### The one-file ledger, until 2026-09-17
 

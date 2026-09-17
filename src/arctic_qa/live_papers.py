@@ -37,6 +37,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from . import db
+
 from . import ledger_store
 
 
@@ -203,7 +205,7 @@ def read_state_facts(
     }
     if db_file is None or not db_file.is_file():
         return empty
-    connection = sqlite3.connect(f"file:{db_file}?mode=ro", uri=True)
+    connection = db.connect_read_only(db_file)
     connection.row_factory = sqlite3.Row
     try:
         families: dict[str, dict[str, Any]] = {}

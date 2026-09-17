@@ -67,6 +67,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
 
+from . import db
+
 from .abstention_cost import (
     CostJournal,
     DEFAULT_LIST_PRICE_FILE,
@@ -256,23 +258,27 @@ def pending_item_ids(
     contract belongs to an earlier campaign, so it passes None and every
     campaign is searched.
     """
-    connection = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
-    connection.row_factory = sqlite3.Row
-    try:
-        if campaign_id:
-            rows = connection.execute(
-                "SELECT item_id,candidate_json FROM candidates "
-                "WHERE run_id=? AND status=? ORDER BY updated_at,item_id",
-                (campaign_id, ACCEPTED_STATUS),
-            ).fetchall()
-        else:
-            rows = connection.execute(
+    def query() -> list[Any]:
+        connection = db.connect_read_only(state_db)
+        connection.row_factory = sqlite3.Row
+        try:
+            if campaign_id:
+                return connection.execute(
+                    "SELECT item_id,candidate_json FROM candidates "
+                    "WHERE run_id=? AND status=? ORDER BY updated_at,item_id",
+                    (campaign_id, ACCEPTED_STATUS),
+                ).fetchall()
+            return connection.execute(
                 "SELECT item_id,candidate_json FROM candidates "
                 "WHERE status=? ORDER BY updated_at,item_id",
                 (ACCEPTED_STATUS,),
             ).fetchall()
-    finally:
-        connection.close()
+        finally:
+            connection.close()
+
+    # Sixteen producer threads write this database. A locked read is a
+    # retry, never an exit: the unit died on one at 05:17 UTC on 2026-09-17.
+    rows = db.retry_locked_read(query)
     pending: list[str] = []
     for row in rows:
         item_id = str(row["item_id"])

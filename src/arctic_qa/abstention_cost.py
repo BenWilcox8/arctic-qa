@@ -31,6 +31,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from . import db
+
 from . import ledger_store
 
 from .abstention_providers import COMPLETED
@@ -225,14 +227,17 @@ def family_generation_cost(
 
 def accepted_item_count(state_db: Path, campaign_id: str) -> int:
     """Count the accepted candidates of one campaign in the state database."""
-    connection = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
-    try:
-        row = connection.execute(
-            "SELECT COUNT(*) FROM candidates WHERE run_id=? AND status=?",
-            (campaign_id, ACCEPTED_STATUS),
-        ).fetchone()
-    finally:
-        connection.close()
+    def query() -> Any:
+        connection = db.connect_read_only(state_db)
+        try:
+            return connection.execute(
+                "SELECT COUNT(*) FROM candidates WHERE run_id=? AND status=?",
+                (campaign_id, ACCEPTED_STATUS),
+            ).fetchone()
+        finally:
+            connection.close()
+
+    row = db.retry_locked_read(query)
     return int(row[0]) if row else 0
 
 

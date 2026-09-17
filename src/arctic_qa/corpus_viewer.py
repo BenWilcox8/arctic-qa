@@ -14,6 +14,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from . import db
+
 from . import ledger_store
 from urllib.parse import parse_qs, urlsplit
 
@@ -435,7 +437,7 @@ class CorpusArtifacts:
         if not self.database.is_file():
             return None
         try:
-            with sqlite3.connect(self.database) as connection:
+            with sqlite3.connect(self.database, timeout=db.BUSY_TIMEOUT_SECONDS) as connection:
                 row = connection.execute(
                     "SELECT value FROM cache_meta WHERE key='base_fingerprint'"
                 ).fetchone()
@@ -603,7 +605,7 @@ class CorpusArtifacts:
         screening_file = self._screening_file()
         screening = _read_json(screening_file) if screening_file else []
         links = self._zotero_links()
-        with sqlite3.connect(self.database) as connection:
+        with sqlite3.connect(self.database, timeout=db.BUSY_TIMEOUT_SECONDS) as connection:
             connection.execute(
                 """UPDATE candidates SET decision='pending', eligibility='unreviewed',
                 pending_reason='unreviewed', selected=0, evidence_locator=NULL,
@@ -2527,7 +2529,7 @@ class CorpusArtifacts:
             payload["protocol"] = None
             payload["stages"] = []
             return payload
-        with sqlite3.connect(self.database) as connection:
+        with sqlite3.connect(self.database, timeout=db.BUSY_TIMEOUT_SECONDS) as connection:
             connection.row_factory = sqlite3.Row
             counts = connection.execute(
                 """SELECT COUNT(*) discovered,
@@ -2727,7 +2729,7 @@ class CorpusArtifacts:
             cached = self._titles_cache
             if cached is not None and cached[0] == key:
                 return cached[1]
-        connection = sqlite3.connect(f"file:{self.database}?mode=ro", uri=True)
+        connection = db.connect_read_only(self.database)
         try:
             titles = {
                 str(doi).casefold(): str(title)
@@ -2847,7 +2849,7 @@ class CorpusArtifacts:
             where.append("gemini_status=?")
             values.append(gemini_status)
         clause = " WHERE " + " AND ".join(where) if where else ""
-        with self._lock, sqlite3.connect(self.database) as connection:
+        with self._lock, sqlite3.connect(self.database, timeout=db.BUSY_TIMEOUT_SECONDS) as connection:
             connection.row_factory = sqlite3.Row
             total = connection.execute(
                 f"SELECT COUNT(*) FROM candidates{clause}", values

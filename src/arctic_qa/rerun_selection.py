@@ -9,6 +9,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from . import db
+
 from .full_run_plan import materialize_frozen_access_run
 from .generation import (
     CANDIDATE_SCHEMA_VERSION,
@@ -49,7 +51,7 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 def _candidate_history(
     state_db_file: Path, family_to_paper: dict[str, str]
 ) -> dict[str, list[dict[str, Any]]]:
-    connection = sqlite3.connect(f"file:{state_db_file.resolve()}?mode=ro", uri=True)
+    connection = db.connect_read_only(state_db_file.resolve())
     connection.row_factory = sqlite3.Row
     result: dict[str, list[dict[str, Any]]] = defaultdict(list)
     try:

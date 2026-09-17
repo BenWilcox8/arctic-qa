@@ -591,3 +591,47 @@ def test_a_leftover_store_beside_a_ledger_is_refused(tmp_path: Path) -> None:
     ledger_store.initialize_store(ledger)
     with pytest.raises(ValueError, match="already has a store"):
         ledger_store.initialize_store(ledger)
+
+
+# -- the state database under sixteen writers ---------------------------------
+
+
+def test_a_read_only_reader_never_dies_on_a_writer(tmp_path: Path) -> None:
+    """The evaluator exited on "database is locked" at 05:17 UTC on 2026-09-17.
+
+    Every opener of the state database now shares the producer's busy
+    timeout, the database runs in WAL mode, and a locked read is a retry.
+    """
+    import sqlite3
+
+    from arctic_qa import db as state_db
+    from arctic_qa.db import Database
+
+    path = tmp_path / "state.sqlite3"
+    writer = Database(path)
+    writer.connection.execute("CREATE TABLE t (n INTEGER)")
+    writer.connection.commit()
+    assert writer.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    writer.connection.execute("BEGIN IMMEDIATE")
+    writer.connection.execute("INSERT INTO t VALUES (1)")
+    # The writer holds its transaction open; a reader still reads.
+    reader = state_db.connect_read_only(path)
+    assert reader.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 0
+    reader.close()
+    writer.connection.commit()
+    assert state_db.connect_read_only(path).execute(
+        "SELECT COUNT(*) FROM t"
+    ).fetchone()[0] == 1
+    writer.close()
+
+    calls = []
+
+    def flaky() -> int:
+        calls.append(1)
+        if len(calls) < 3:
+            raise sqlite3.OperationalError("database is locked")
+        return 7
+
+    state_db.LOCKED_READ_RETRY_SECONDS = 0.0
+    assert state_db.retry_locked_read(flaky) == 7
+    assert len(calls) == 3

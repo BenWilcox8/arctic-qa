@@ -24,6 +24,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from . import db
+
 from .abstention_render import (
     DEFAULT_CONTENT_OPTION_COUNT,
     PROMPT_VERSION,
@@ -253,7 +255,7 @@ def build_eval_set(
     if population == "list":
         population_record["item_ids"] = sorted(wanted)
 
-    connection = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
+    connection = db.connect_read_only(state_db)
     connection.row_factory = sqlite3.Row
     items: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []

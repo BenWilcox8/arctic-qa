@@ -1843,8 +1843,9 @@ def build_labels(
     """
     import sqlite3
 
-    uri = f"file:{database_file.resolve()}?mode=ro"
-    connection = sqlite3.connect(uri, uri=True)
+    from . import db as _db
+
+    connection = _db.connect_read_only(database_file)
     try:
         connection.execute("PRAGMA query_only = ON")
         rows = connection.execute(

@@ -17,6 +17,7 @@ from typing import Any, Protocol
 
 from . import ledger_store
 from .broker_provider import ROLE_STAGES, _provider_result, _request_payload
+from . import db
 from .db import Database, now
 from .errors import CandidateRejectedError, ProviderError
 from .exporting import export_run
@@ -1025,9 +1026,7 @@ class _BatchProgress:
 def _terminal_dispositions(
     db_file: Path, campaign_id: str
 ) -> dict[str, dict[str, str]]:
-    connection = sqlite3.connect(
-        f"file:{db_file.resolve()}?mode=ro", uri=True, isolation_level=None
-    )
+    connection = db.connect_read_only(db_file.resolve(), isolation_level=None)
     connection.row_factory = sqlite3.Row
     try:
         rows = connection.execute(

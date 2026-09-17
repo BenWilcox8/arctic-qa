@@ -332,7 +332,7 @@ OPERATION_LOCK_QUEUE_ROUNDS = 3
 OPERATION_LOCK_HEARTBEAT_SECONDS = 30.0
 # A section whose wait and hold are both below this is ordinary and stays out of
 # the log; the run makes thousands of them.
-OPERATION_LOCK_LOG_THRESHOLD_SECONDS = 1.0
+OPERATION_LOCK_LOG_THRESHOLD_SECONDS = 0.0
 # The immutable-event proof of one ledger row is kept until the row moves, and
 # a full pass over every row runs again at least this often. The proof covers
 # receipts that were written immutable and never change, so replaying it on

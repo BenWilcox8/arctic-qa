@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from . import db
+
 from .util import atomic_json, canonical_json, stable_id
 
 
@@ -619,7 +621,7 @@ class PipelineTraceStore:
     def _connect(self) -> sqlite3.Connection:
         if not self.db_file.is_file():
             raise FileNotFoundError("pipeline state database is unavailable")
-        connection = sqlite3.connect(f"file:{self.db_file}?mode=ro", uri=True)
+        connection = db.connect_read_only(self.db_file)
         connection.row_factory = sqlite3.Row
         return connection
 

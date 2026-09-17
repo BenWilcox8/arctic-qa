@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+import time
 import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator, TypeVar
 
 from .util import canonical_json
 
@@ -217,8 +218,47 @@ CREATE INDEX IF NOT EXISTS idx_paper_completions_run
 # version, because a nullable column changes nothing for an earlier reader.
 ADDED_COLUMNS = (("paper_completions", "completed_at_utc", "TEXT"),)
 
-# How long a writer waits for a lock another connection holds.
+# How long a connection waits for a lock another connection holds. Every
+# opener of the state database uses it, writer and reader alike: the streaming
+# evaluator's read-only connection had the 5-second default and exited with
+# "database is locked" at 05:17 UTC on 2026-09-17 under sixteen producer
+# threads.
 BUSY_TIMEOUT_SECONDS = 30.0
+T = TypeVar("T")
+# A locked read is retried this many times, this far apart, before it is an
+# error. With WAL a reader never waits for a writer, so this is for the
+# checkpoint and the rare exclusive lock.
+LOCKED_READ_RETRIES = 5
+LOCKED_READ_RETRY_SECONDS = 2.0
+
+
+def connect_read_only(path: Path, **kwargs: Any) -> sqlite3.Connection:
+    """Open the state database read-only, with the shared busy timeout."""
+    connection = sqlite3.connect(
+        f"file:{Path(path).resolve()}?mode=ro",
+        uri=True,
+        timeout=kwargs.pop("timeout", BUSY_TIMEOUT_SECONDS),
+        **kwargs,
+    )
+    connection.execute(f"PRAGMA busy_timeout = {int(BUSY_TIMEOUT_SECONDS * 1000)}")
+    return connection
+
+
+def is_locked_error(error: BaseException) -> bool:
+    return isinstance(error, sqlite3.OperationalError) and "locked" in str(error)
+
+
+def retry_locked_read(operation: Callable[[], T]) -> T:
+    """Run a read again while the database is locked, then give up."""
+    attempt = 0
+    while True:
+        try:
+            return operation()
+        except sqlite3.OperationalError as error:
+            attempt += 1
+            if not is_locked_error(error) or attempt > LOCKED_READ_RETRIES:
+                raise
+            time.sleep(LOCKED_READ_RETRY_SECONDS)
 
 
 def now() -> str:
@@ -258,6 +298,15 @@ class Database:
         self.connection.execute(
             f"PRAGMA busy_timeout = {int(BUSY_TIMEOUT_SECONDS * 1000)}"
         )
+        # Write-ahead logging: a reader never waits for a writer and a writer
+        # never waits for a reader. The mode is a property of the database
+        # file, set once and kept; a switch needs a moment with no other
+        # connection inside a transaction, so a busy database keeps the mode
+        # it has and the next opener tries again.
+        try:
+            self.connection.execute("PRAGMA journal_mode = WAL")
+        except sqlite3.OperationalError:
+            pass
 
     def close(self) -> None:
         self.connection.close()
