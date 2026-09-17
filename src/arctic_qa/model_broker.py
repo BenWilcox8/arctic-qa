@@ -2583,9 +2583,12 @@ class SharedGeminiBroker:
                     expected_tranche = CHAPTER3_CUMULATIVE_CEILING_USD
                 elif changed_policy_fields in (
                     CHAPTER3_EXPANSION_CHANGE,
-                    # The concurrency transition moves no money, so it names
-                    # the ceiling the expansion already authorized.
+                    # The two request-rate transitions move no money, so each
+                    # names the ceiling the expansion already authorized. The
+                    # parallel one was refused at 04:53 UTC on 2026-09-17 for
+                    # the USD 5 default until it was named here.
                     CHAPTER3_CONCURRENCY_CHANGE,
+                    CHAPTER3_PARALLEL_CHANGE,
                 ):
                     expected_tranche = CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD
                 else:

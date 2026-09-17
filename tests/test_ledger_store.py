@@ -375,3 +375,23 @@ def test_the_parallel_rate_pair_is_registered_and_nothing_between_it(
         write_json(path, refused)
         with pytest.raises(ValueError, match="streaming budget value changed"):
             model_broker._validate_policy(path)
+
+
+def test_the_parallel_transition_names_the_expansion_tranche() -> None:
+    """A rate transition moves no money, so its tranche is the expansion ceiling.
+
+    The live apply of 2026-09-17 04:53 UTC was refused with "the policy
+    transition identity changed" because the tranche rule did not name the
+    parallel change. The rule is read from the source here, so a third rate
+    pair cannot forget it silently.
+    """
+    import inspect
+
+    from arctic_qa import model_broker
+
+    source = inspect.getsource(model_broker.SharedGeminiBroker._validate_transition_authorization)
+    tuple_start = source.index("CHAPTER3_EXPANSION_CHANGE,")
+    tuple_end = source.index("expected_tranche = CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD")
+    named = source[tuple_start:tuple_end]
+    assert "CHAPTER3_CONCURRENCY_CHANGE" in named
+    assert "CHAPTER3_PARALLEL_CHANGE" in named
