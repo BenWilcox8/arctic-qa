@@ -2704,8 +2704,12 @@ class CorpusArtifacts:
 
         The title of a paper the state database has not imported yet comes from
         this index, so a paper in its eligibility call still shows its title.
+
+        The titles come from the immutable discovery ledger, which is the base
+        of the index. No screening overlay touches them, so this reader never
+        asks for a rebuild and never waits for one.
         """
-        if self._last_error or not self.database.is_file():
+        if not self.database.is_file():
             return {}
         status = self.database.stat()
         key = (status.st_mtime_ns, status.st_size, status.st_ino)
@@ -2736,8 +2740,13 @@ class CorpusArtifacts:
         ledger under the shared form of its lock, the streaming progress record,
         and the pipeline state database read-only. It never starts, stops or
         signals the producer, and it never reads the evaluator.
+
+        The route does not rebuild the query index. A live producer writes the
+        eligibility run directory on every paper, so the index fingerprint moves
+        on every poll, and a rebuild of it took about 50 seconds on 2026-09-16.
+        A section that refreshes every 15 seconds must not wait for that work,
+        and it needs nothing the rebuild produces.
         """
-        self.refresh()
         progress: dict[str, Any] | None = None
         error: str | None = None
         try:
