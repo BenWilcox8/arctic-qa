@@ -357,8 +357,13 @@ OPERATION_LOCK_QUEUE_ROUNDS = 3
 # it ends, which is how the lock is measured without a profiler.
 OPERATION_LOCK_HEARTBEAT_SECONDS = 30.0
 # A section whose wait and hold are both below this is ordinary and stays out of
-# the log; the run makes thousands of them.
-OPERATION_LOCK_LOG_THRESHOLD_SECONDS = 1.0
+# the log; the run makes thousands of them. A measured window wants every one of
+# them, because the serialised cost of one paid call is the sum of the holds, so
+# ``ARCTIC_QA_OPERATION_LOCK_LOG_SECONDS`` sets the threshold for a run. Zero
+# logs every section.
+OPERATION_LOCK_LOG_THRESHOLD_SECONDS = float(
+    os.environ.get("ARCTIC_QA_OPERATION_LOCK_LOG_SECONDS", "1.0")
+)
 # The immutable-event proof of one ledger row is kept until the row moves, and
 # a full pass over every row runs again at least this often. The proof covers
 # receipts that were written immutable and never change, so replaying it on

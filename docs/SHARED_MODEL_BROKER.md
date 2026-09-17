@@ -275,6 +275,11 @@ Do not give a new reviewed operation the wait.
 Do not make the bound-exceeded case a run stop.
 The immediate refusal ended the chapter 3 producer on 2026-09-16 at 18:26 UTC while another task released the evaluation phase.
 
+Every section prints its wait and its hold on stderr when either passes
+`OPERATION_LOCK_LOG_THRESHOLD_SECONDS`, which is one second by default and is
+set for a run by `ARCTIC_QA_OPERATION_LOCK_LOG_SECONDS`. A measured window sets
+it to 0, because the serialised cost of one paid call is the sum of the holds.
+
 ### The free token count and its errors
 
 The broker counts the exact input tokens of each request before it reserves anything.
