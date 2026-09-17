@@ -83,6 +83,7 @@ Each one records a fault that stopped a run, the correction, and the live eviden
 | `arctic-eval-authorization-r8/` | The evaluation bounds of the captain's allocation, the silent stop at a bound, and the phase of a refused request. |
 | `arctic-ch3-count-error-retry-r1/` | A free token-count 503, its bounded retry, and the paper-level containment after retry exhaustion. |
 | `arctic-ch3-paper-concurrency-r1/` | Several papers of one run in flight at once, the v11 request-rate policy, and the measured throughput before and after. |
+| `arctic-ch3-paper-completion-r1/` | The per-paper completion label, the one-time batch that labelled the finished papers, and the startup time before and after. |
 | `arctic-geography-fix-r1/` | The geography correction, with the correction overlay and the successor gate drafts. |
 
 ## Abstention benchmark

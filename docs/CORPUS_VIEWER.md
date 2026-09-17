@@ -67,6 +67,68 @@ Without the guard state file the section still shows the journal, and marks the 
 
 `docs/BENCHMARK_GUARD.md` describes the guard, its rules, and how to operate it.
 
+## Papers in analysis now
+
+The section "Papers in analysis now" stands above the per-paper pipeline inspector.
+It uses `/api/live-papers`.
+The table refreshes every 15 seconds without a page reload, together with the rest of the page.
+The route reads records only.
+It never writes to the shared ledger, the state database, or a completion label.
+It never touches the producer, a launcher, or the evaluator.
+
+The upper table holds the papers the producer analyzes at this moment.
+A paper is in that table when three conditions are true.
+Its paid calls carry the invocation run id of the current producer.
+One of those calls was submitted or completed inside the active window of 420 seconds.
+The paper has no completion label of that run and no final state in the progress record.
+
+Each row gives the paper title and identity.
+It also gives the stage of the most recent call, the number of calls, and the money this run spent on them.
+The last column gives the time the paper has been in analysis.
+That time starts at the first call of the current burst of work.
+A relaunched producer replays the receipts of a paper it visited before.
+More than one window separates such a replay from live work, so the replayed calls stay out of the count.
+
+The "Thread or slot" column stays empty.
+The producer runs one thread per paper, but it writes no thread name and no slot number into any record.
+The column takes a value when a producer record carries one.
+
+The lower table holds the last 10 papers of the run that reached a final outcome, newest first.
+An accepted paper shows its accepted question count.
+A rejected paper shows its final reason code.
+A screened-out paper, an unresolved paper and a paper that reached the per-paper cost cap show the same reason field.
+The outcome comes from the completion label of the run when the paper has one.
+It comes from the progress record when the paper has none.
+
+The finish time of a paper is the time of its last paid call, not the time of its label.
+A batch catch-up labels every finished paper of one run in one transaction.
+Such a batch gives every label the same minute, and that minute holds no order.
+A paper this run replayed and never called keeps the label time, because the label is its only timestamp.
+
+The section names the producer state when no producer is running.
+It shows the message of the progress record instead of an empty table.
+A progress record that says running but is older than `--process-stale-after-seconds` is not a running producer.
+
+One paid call of the run outranks that staleness rule.
+The producer writes the progress record when it finishes a paper.
+A run that skips its labelled papers and then works one slow paper leaves that record quiet.
+A call of the run inside the window proves the producer is up.
+Such a call carries the run id, so an evaluation call can never be read as producer work.
+A record that reports an error or a stop is never overruled.
+A call was in flight when the producer died, and the producer did die.
+
+The route does not rebuild the query index.
+A live producer writes its eligibility run directory on every paper, so the index fingerprint moves on every poll.
+A rebuild of that index took about 50 seconds on 2026-09-16, and this section polls every 15 seconds.
+The titles the section reads come from the immutable discovery ledger, which no overlay touches.
+Keep every new poll of this page off `refresh` unless it needs an overlay.
+
+Three inputs select the section.
+`--shared-ledger-file` gives the paid calls.
+`--streaming-progress-file` gives the producer state and the recent papers.
+`--pipeline-db-file` gives the titles, the accepted question counts and the completion labels.
+Without the ledger and the progress record the section says that no live paper can be named.
+
 ## Per-paper pipeline inspector
 
 The optional pipeline trace adapter reads retained artifacts from explicit roots.
