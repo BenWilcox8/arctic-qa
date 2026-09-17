@@ -333,6 +333,11 @@ class PipelineTraceStore:
             raise ValueError("pipeline trace inputs must stay inside the namespace")
         self._receipt_cache_fingerprint: tuple[tuple[str, int, int], ...] = ()
         self._receipt_cache: list[dict[str, Any]] = []
+        self._receipt_listing: dict[str, tuple[int, int]] = {}
+        # One parsed event per receipt stem, kept while that file is unchanged.
+        self._receipt_derived: dict[
+            str, tuple[tuple[Any, ...], dict[str, Any] | None]
+        ] = {}
         self._job_cache_fingerprint: tuple[tuple[str, int, int], ...] = ()
         self._job_cache: list[tuple[Path, dict[str, Any]]] = []
         # One entry each, replaced whole when an input moves. `_paper_records`
@@ -1017,21 +1022,32 @@ class PipelineTraceStore:
         return projected
 
     def _receipt_events(self) -> list[dict[str, Any]]:
+        """Every receipt of the run, reading only the ones that moved.
+
+        A receipt is immutable once written, and the directory holds tens of
+        thousands of them. Re-reading all of them because one arrived cost 77
+        seconds against the 48,938 receipts of 2026-09-17, and the shared
+        ledger has two live writers, so one arrives every few seconds: the
+        whole history was re-read on almost every request. The rule is the one
+        the broker already keeps, in "The immutable-event proof, and what one
+        read of it costs" in docs/SHARED_MODEL_BROKER.md: list the directory,
+        and derive again only what the listing says moved.
+        """
         if not self.receipts_dir.is_dir():
             return []
         paths: dict[str, dict[str, Path]] = {}
-        fingerprint_rows = []
-        for path in sorted(self.receipts_dir.glob("*.json")):
+        seen: dict[str, tuple[int, int]] = {}
+        for path in self.receipts_dir.glob("*.json"):
             match = _RECEIPT_EVENT.fullmatch(path.name)
             if not match:
                 continue
             event = match.group("event") or "final"
             paths.setdefault(match.group("stem"), {})[event] = path
-            stat = path.stat()
-            fingerprint_rows.append((path.name, stat.st_size, stat.st_mtime_ns))
-        fingerprint = tuple(fingerprint_rows)
-        if fingerprint == self._receipt_cache_fingerprint:
+            status = path.stat()
+            seen[path.name] = (status.st_size, status.st_mtime_ns)
+        if seen == self._receipt_listing:
             return self._receipt_cache
+        derived = self._receipt_derived
         events = []
         for stem, candidates in sorted(paths.items()):
             event_name = next(
@@ -1039,11 +1055,27 @@ class PipelineTraceStore:
                 for name in ("final", "received", "submitted")
                 if name in candidates
             )
-            value = self._read_json(candidates[event_name])
-            if not isinstance(value, dict) or not value.get("request_key"):
+            path = candidates[event_name]
+            identity = (event_name, *seen[path.name])
+            kept = derived.get(stem)
+            if kept is not None and kept[0] == identity:
+                if kept[1] is not None:
+                    events.append(kept[1])
                 continue
-            events.append({**value, "receipt_stem": stem, "receipt_event": event_name})
-        self._receipt_cache_fingerprint = fingerprint
+            value = self._read_json(path)
+            if not isinstance(value, dict) or not value.get("request_key"):
+                derived[stem] = (identity, None)
+                continue
+            event = {**value, "receipt_stem": stem, "receipt_event": event_name}
+            derived[stem] = (identity, event)
+            events.append(event)
+        # A receipt that left the directory leaves the derived map with it.
+        for stem in set(derived) - set(paths):
+            del derived[stem]
+        self._receipt_listing = seen
+        self._receipt_cache_fingerprint = tuple(
+            (name, size, moved) for name, (size, moved) in sorted(seen.items())
+        )
         self._receipt_cache = events
         return self._receipt_cache
 

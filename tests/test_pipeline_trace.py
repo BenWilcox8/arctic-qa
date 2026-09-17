@@ -325,6 +325,72 @@ def set_active_invocation(
     write_json(progress_path, progress)
 
 
+def test_a_new_receipt_rereads_itself_and_not_the_whole_directory(
+    tmp_path: Path,
+) -> None:
+    """One receipt arriving must not cost the reader every other receipt.
+
+    A receipt is immutable once written, and the shared ledger has two live
+    writers, so one lands every few seconds. Re-deriving all of them each time
+    cost 77 seconds against the 48,938 receipts of 2026-09-17 and put that on
+    every request of the viewer.
+    """
+    namespace, _, _ = fixture_namespace(tmp_path)
+    store = PipelineTraceStore(namespace)
+    first = store._receipt_events()
+    assert first
+    reads: list[Path] = []
+    original = store._read_json
+    store._read_json = lambda path: (  # type: ignore[method-assign]
+        reads.append(Path(path)),
+        original(path),
+    )[1]
+
+    # Nothing moved: the listing alone answers, and nothing is read again.
+    assert store._receipt_events() == first
+    assert reads == []
+
+    arrival = store.receipts_dir / f"{'b' * 64}.json"
+    write_json(
+        arrival,
+        {
+            "request_key": "b" * 64,
+            "run_id": "run-new",
+            "family_id": "family-fixture",
+            "stage": "question_generation",
+        },
+    )
+    after = store._receipt_events()
+
+    assert len(after) == len(first) + 1
+    # Only the receipt that arrived was opened.
+    assert reads == [arrival]
+
+
+def test_a_removed_receipt_leaves_the_derived_events(tmp_path: Path) -> None:
+    """A receipt that leaves the directory leaves the reader's map with it."""
+    namespace, _, _ = fixture_namespace(tmp_path)
+    store = PipelineTraceStore(namespace)
+    arrival = store.receipts_dir / f"{'c' * 64}.json"
+    write_json(
+        arrival,
+        {
+            "request_key": "c" * 64,
+            "run_id": "run-new",
+            "family_id": "family-fixture",
+            "stage": "question_generation",
+        },
+    )
+    with_arrival = store._receipt_events()
+    assert any(row["request_key"] == "c" * 64 for row in with_arrival)
+
+    arrival.unlink()
+    without = store._receipt_events()
+
+    assert not any(row["request_key"] == "c" * 64 for row in without)
+    assert "c" * 64 not in store._receipt_derived
+
+
 def test_trace_list_filters_and_pages_without_exposing_paths(tmp_path: Path) -> None:
     namespace, _, _ = fixture_namespace(tmp_path)
     store = PipelineTraceStore(namespace)
