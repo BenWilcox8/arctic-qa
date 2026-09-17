@@ -117,6 +117,12 @@ Such a call carries the run id, so an evaluation call can never be read as produ
 A record that reports an error or a stop is never overruled.
 A call was in flight when the producer died, and the producer did die.
 
+The route does not rebuild the query index.
+A live producer writes its eligibility run directory on every paper, so the index fingerprint moves on every poll.
+A rebuild of that index took about 50 seconds on 2026-09-16, and this section polls every 15 seconds.
+The titles the section reads come from the immutable discovery ledger, which no overlay touches.
+Keep every new poll of this page off `refresh` unless it needs an overlay.
+
 Three inputs select the section.
 `--shared-ledger-file` gives the paid calls.
 `--streaming-progress-file` gives the producer state and the recent papers.
