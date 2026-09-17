@@ -341,6 +341,11 @@ def test_two_threads_that_miss_together_build_once(tmp_path: Path) -> None:
     store._records_cache = None
     builds = 0
     original = store._build_paper_records
+    # The version is frozen, so only the lock can hold the build to one. An
+    # input that moves while the threads run is a real second build and would
+    # otherwise make this test say the lock failed when it held.
+    store._path_version = staticmethod(lambda path: ("frozen",))  # type: ignore[assignment]
+    store._receipt_events = lambda: []  # type: ignore[method-assign]
 
     def counted(eligibility_jobs: object) -> object:
         nonlocal builds
@@ -350,21 +355,15 @@ def test_two_threads_that_miss_together_build_once(tmp_path: Path) -> None:
         return original(eligibility_jobs)
 
     store._build_paper_records = counted  # type: ignore[method-assign]
-    versions: list[object] = []
     threads = [
-        threading.Thread(
-            target=lambda: versions.append(
-                (store._paper_records(jobs), store._records_version)[1]
-            )
-        )
-        for _ in range(4)
+        threading.Thread(target=lambda: store._paper_records(jobs)) for _ in range(4)
     ]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join(timeout=10)
 
-    assert builds == 1, f"versions seen: {len(set(map(str, versions)))} distinct"
+    assert builds == 1
     assert store._records_cache is not None
 
 
