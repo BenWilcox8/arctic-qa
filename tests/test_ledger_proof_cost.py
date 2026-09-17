@@ -325,6 +325,48 @@ def test_the_fifty_at_once_rate_pair_is_registered_and_nothing_between_it(
             )
 
 
+def test_the_seventy_five_at_once_rate_pair_is_registered_and_nothing_between_it(
+    tmp_path: Path,
+) -> None:
+    """Policy v15 moves the two request-rate limits together and nothing else.
+
+    Captain order 2026-09-17 09:14 UTC: "Also raise concurrency for the night
+    to 75 instead of 50. If this gives problems, lower it to 50 again." The
+    fall back needs no transition, so the fifty pair stays registered.
+    """
+    assert (75, 450) in model_broker.ALLOWED_REQUEST_RATES
+    assert (50, 300) in model_broker.ALLOWED_REQUEST_RATES
+    assert model_broker.CHAPTER3_NIGHT_CHANGE in model_broker.POLICY_TRANSITION_CHANGES
+    assert model_broker.CHAPTER3_NIGHT_CHANGE == {
+        "maximum_concurrent_generation_requests": {"from": 50, "to": 75},
+        "maximum_generation_requests_per_minute": {"from": 300, "to": 450},
+    }
+    model_broker._validate_policy(_scaled_policy(tmp_path, slots=75, per_minute=450))
+    for slots, per_minute in ((75, 300), (50, 450), (64, 450), (75, 400)):
+        with pytest.raises(ValueError, match="streaming budget value changed"):
+            model_broker._validate_policy(
+                _scaled_policy(tmp_path, slots=slots, per_minute=per_minute)
+            )
+
+
+def test_the_seventy_five_at_once_transition_names_the_six_hundred_tranche() -> None:
+    """A rate transition names the construction ceiling already authorized.
+
+    The USD 600 allocation moved that ceiling on 2026-09-17, so a rate
+    transition applied after it names the six-hundred tranche and not the
+    expansion one. The rule is read from the source, as the fifty pair's is.
+    """
+    source = Path(model_broker.__file__).read_text(encoding="utf-8")
+    rule = source[source.index("elif changed_policy_fields in (") :]
+    rule = rule[: rule.index('expected_tranche = Decimal("5")')]
+    assert "CHAPTER3_NIGHT_CHANGE" in rule
+    assert "CHAPTER3_SIX_HUNDRED_CUMULATIVE_CEILING_USD" in rule
+    assert (
+        model_broker.CHAPTER3_SIX_HUNDRED_CUMULATIVE_CEILING_USD
+        != model_broker.CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD
+    )
+
+
 def test_the_fifty_at_once_transition_names_the_expansion_tranche() -> None:
     """A rate transition moves no money, so its tranche is the expansion ceiling.
 

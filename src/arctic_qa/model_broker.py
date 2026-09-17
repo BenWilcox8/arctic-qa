@@ -294,12 +294,34 @@ CHAPTER3_SCALE_CHANGE = {
         "to": CHAPTER3_SCALE_REQUESTS_PER_MINUTE,
     },
 }
+# Chapter 3 seventy-five in flight (captain order 2026-09-17 09:14 UTC,
+# verbatim: "Also raise concurrency for the night to 75 instead of 50. If this
+# gives problems, lower it to 50 again"). Fifty papers in flight held a peak of
+# 43 calls on the wire, 564 papers an hour and no provider refusal, so the two
+# request-rate limits move together once more: the concurrency slots from 50 to
+# 75 and the minute window from 300 to 450. Nothing else moves: the money
+# ceilings, the per-request cap, the paper cost cap and every project design
+# count stay exactly as the USD 600 allocation left them. A fall back to fifty
+# papers in flight needs no transition, because this policy admits that rate.
+CHAPTER3_NIGHT_REQUESTS = 75
+CHAPTER3_NIGHT_REQUESTS_PER_MINUTE = 450
+CHAPTER3_NIGHT_CHANGE = {
+    "maximum_concurrent_generation_requests": {
+        "from": CHAPTER3_SCALE_REQUESTS,
+        "to": CHAPTER3_NIGHT_REQUESTS,
+    },
+    "maximum_generation_requests_per_minute": {
+        "from": CHAPTER3_SCALE_REQUESTS_PER_MINUTE,
+        "to": CHAPTER3_NIGHT_REQUESTS_PER_MINUTE,
+    },
+}
 # The registered request-rate pairs, in the order they were authorized.
 ALLOWED_REQUEST_RATES = (
     (2, 10),
     (CHAPTER3_CONCURRENCY_REQUESTS, CHAPTER3_CONCURRENCY_REQUESTS_PER_MINUTE),
     (CHAPTER3_PARALLEL_REQUESTS, CHAPTER3_PARALLEL_REQUESTS_PER_MINUTE),
     (CHAPTER3_SCALE_REQUESTS, CHAPTER3_SCALE_REQUESTS_PER_MINUTE),
+    (CHAPTER3_NIGHT_REQUESTS, CHAPTER3_NIGHT_REQUESTS_PER_MINUTE),
 )
 POLICY_TRANSITION_CHANGES = (
     {"live_test_maximum_papers": {"from": 20, "to": 40}},
@@ -317,6 +339,7 @@ POLICY_TRANSITION_CHANGES = (
     CHAPTER3_PARALLEL_CHANGE,
     CHAPTER3_SCALE_CHANGE,
     CHAPTER3_SIX_HUNDRED_CHANGE,
+    CHAPTER3_NIGHT_CHANGE,
 )
 # The policy transitions that move the construction ceiling. Each one binds a
 # complete stream-input gate and names its own cumulative ceiling as the tranche.
@@ -2700,6 +2723,12 @@ class SharedGeminiBroker:
                     CHAPTER3_SCALE_CHANGE,
                 ):
                     expected_tranche = CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD
+                elif changed_policy_fields == CHAPTER3_NIGHT_CHANGE:
+                    # A rate transition names the ceiling that is already
+                    # authorized, and the USD 600 allocation moved that ceiling
+                    # on 2026-09-17. A rate transition applied after it names
+                    # the six-hundred tranche, never the expansion one.
+                    expected_tranche = CHAPTER3_SIX_HUNDRED_CUMULATIVE_CEILING_USD
                 else:
                     expected_tranche = Decimal("5")
                 if from_pair[1] == to_pair[1] or tranche != expected_tranche:
