@@ -1044,6 +1044,7 @@ def test_streaming_cli_moves_one_eligible_paper_to_validated_export(
     assert result["counts"] == {
         "accepted_base_questions": 1,
         "candidate_processing_fault": 0,
+        "completion_labelled_skipped": 0,
         "count_tokens_unavailable": 0,
         "eligibility_rejected": 0,
         "eligibility_unresolved": 0,
@@ -1368,10 +1369,27 @@ def test_streaming_revalidates_brokered_eligibility_on_resume(tmp_path: Path) ->
         "resolved_evidence": [],
     }
     write_json(job_path, job)
+    # The first run labelled the paper as finished. A labelled paper is skipped
+    # before its receipt is read, so the re-validation guard below runs on the
+    # unlabelled paper: remove the label first.
+    with database.transaction():
+        database.connection.execute("DELETE FROM paper_completions")
 
     resumed = run_stream(**arguments)
 
     assert resumed["paper_results"] == result["paper_results"]
+    assert transport.methods.count("generateContent") == 1
+    assert broker.status()["generation_submissions"] == 1
+
+    # The re-validated run labelled the paper again, so the next start skips
+    # it: the tampered job is not read at all, and nothing is submitted.
+    skipped = run_stream(**arguments)
+
+    assert skipped["counts"]["completion_labelled_skipped"] == 1
+    assert skipped["paper_results"][0]["disposition"] == "eligibility_unresolved"
+    assert skipped["paper_results"][0]["completion_label"]["outcome_class"] == (
+        "eligibility_unresolved"
+    )
     assert transport.methods.count("generateContent") == 1
     assert broker.status()["generation_submissions"] == 1
 
@@ -1410,6 +1428,10 @@ def test_unresolved_eligibility_resume_rejects_changed_source(tmp_path: Path) ->
     )
     source_path = Path(access_item["source_path"])
     source_path.write_bytes(source_path.read_bytes() + b"\nchanged after receipt\n")
+    # The integrity check runs on an unlabelled paper; a labelled paper is
+    # finished and is skipped before its source is read again.
+    with database.transaction():
+        database.connection.execute("DELETE FROM paper_completions")
 
     with pytest.raises(ValueError, match="ready source object is missing or changed"):
         run_stream(**arguments)
@@ -1513,9 +1535,12 @@ def test_streaming_advances_after_uncertain_brokered_eligibility(
     result = run_stream(**arguments)
 
     assert result["state"] == "completed"
+    # The first run labelled the first paper as finished, so this run skips
+    # it before it reads one receipt of it and advances to the second.
     assert result["counts"] == {
         "accepted_base_questions": 0,
         "candidate_processing_fault": 0,
+        "completion_labelled_skipped": 1,
         "count_tokens_unavailable": 0,
         "eligibility_rejected": 1,
         "eligibility_unresolved": 1,
@@ -1524,12 +1549,19 @@ def test_streaming_advances_after_uncertain_brokered_eligibility(
         "paper_cost_cap_reached": 0,
         "processed": 2,
     }
-    assert result["paper_results"][0] == {
+    assert {
+        key: value
+        for key, value in result["paper_results"][0].items()
+        if key != "completion_label"
+    } == {
         "candidate_key": "test-only:streaming-paper",
         "disposition": "eligibility_unresolved",
         "reason_codes": ["evidence_unmatched_or_ambiguous:study_geography"],
         "source_id": None,
     }
+    assert result["paper_results"][0]["completion_label"]["outcome_class"] == (
+        "eligibility_unresolved"
+    )
     assert result["paper_results"][1]["candidate_key"] == second_item["candidate_key"]
     assert result["paper_results"][1]["disposition"] == "eligibility_rejected"
     progress = json.loads(
@@ -1583,7 +1615,16 @@ def test_streaming_advances_after_uncertain_brokered_eligibility(
 
     resumed = run_stream(**arguments)
 
-    assert resumed["paper_results"] == result["paper_results"]
+    # Both papers are labelled now, so this run skips both and reaches the
+    # same dispositions without reading one receipt.
+    assert resumed["counts"]["completion_labelled_skipped"] == 2
+    assert [
+        {key: value for key, value in row.items() if key != "completion_label"}
+        for row in resumed["paper_results"]
+    ] == [
+        {key: value for key, value in row.items() if key != "completion_label"}
+        for row in result["paper_results"]
+    ]
     resumed_status = broker.status()
     assert resumed_status["generation_submissions"] == 2
     assert (
@@ -1835,7 +1876,11 @@ def test_streaming_uses_one_shared_broker_for_all_eleven_calls(
         **eligibility_inputs,
     )
 
-    assert resumed["resumed_papers"] == 1
+    # The first run labelled the paper as finished, so this run skips it
+    # before it reads one receipt of it: nothing is resumed, the broker is
+    # not asked, and the counts are the counts of the finished paper.
+    assert resumed["resumed_papers"] == 0
+    assert resumed["counts"]["completion_labelled_skipped"] == 1
     assert resumed["counts"]["accepted_base_questions"] == 1
     assert broker.status()["generation_submissions"] == 12
     assert transport.methods.count("generateContent") == 12
@@ -2714,6 +2759,7 @@ def test_streaming_cli_stops_after_eligibility_rejection(tmp_path: Path) -> None
     assert result["counts"] == {
         "accepted_base_questions": 0,
         "candidate_processing_fault": 0,
+        "completion_labelled_skipped": 0,
         "count_tokens_unavailable": 0,
         "eligibility_rejected": 1,
         "eligibility_unresolved": 0,
@@ -3228,7 +3274,14 @@ def test_streaming_cli_resumes_without_a_duplicate_model_call(tmp_path: Path) ->
 
     assert first["counts"]["accepted_base_questions"] == 1
     assert second["counts"]["accepted_base_questions"] == 1
-    assert second["resumed_papers"] == 1
+    # The first run labelled the paper as finished, so the second run skips
+    # it before it reads one call record of it: nothing is resumed, and
+    # nothing is called.
+    assert second["resumed_papers"] == 0
+    assert second["counts"]["completion_labelled_skipped"] == 1
+    assert second["paper_results"][0]["completion_label"]["outcome_class"] == (
+        "generation_accepted"
+    )
     status = run_cli(tmp_path, "status", "--run-id", "stream-resume")
     assert status["calls"] == [{"count": 11, "status": "completed"}]
 

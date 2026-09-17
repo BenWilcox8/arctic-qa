@@ -1,0 +1,1937 @@
+{
+  "schema": "streaming-paper-completion-v1",
+  "run_id": "chapter3-7dc6485-r3",
+  "campaign_id": "arctic-qa-production-campaign-003",
+  "code_commit": "dryrun-copy",
+  "dry_run": true,
+  "written": 0,
+  "counts": {
+    "already_labelled": 0,
+    "complete": 208,
+    "incomplete": 4212,
+    "per_incomplete_reason": {
+      "candidate_unvalidated": 0,
+      "eligibility_incomplete": 0,
+      "generation_pending": 0,
+      "incomplete_infra_call": 1,
+      "not_full_text_ready": 0,
+      "not_screened": 4208,
+      "operational_unresolved": 3,
+      "slot_lookup_pending": 0,
+      "source_not_imported": 0
+    },
+    "per_outcome_class": {
+      "eligibility_excluded": 42,
+      "eligibility_unresolved": 43,
+      "generation_accepted": 16,
+      "generation_rejected": 102,
+      "incomplete_non_mcq": 4,
+      "paper_cost_cap_reached": 1
+    },
+    "to_label": 208,
+    "walked": 4420
+  },
+  "complete_papers": [
+    {
+      "candidate_key": "10.37482/issn2221-2698.2025.59.44",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-4a182d987f95fb00f5ed",
+      "reason_code": "criterion_failed:published_primary_findings",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1038/s41467-018-03756-1",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-f05fd80ef3aac8a6856c",
+      "reason_code": "finding_scope_value_unsourced",
+      "source_id": "src-f05fd80ef3aac8a6856c"
+    },
+    {
+      "candidate_key": "10.1007/s00484-018-1648-6",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_accepted",
+      "paper_family_id": "family-b1a8778edee7540f6917",
+      "reason_code": null,
+      "source_id": "src-b1a8778edee7540f6917"
+    },
+    {
+      "candidate_key": "10.2481/dsj.ifoda-13",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-207bcfbbaef5941a9897",
+      "reason_code": "criterion_failed:published_primary_findings",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.47148/1609-364x-2024-4-29-38",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-a4a1c25ecfd5e608036d",
+      "reason_code": "criterion_unresolved:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1038/s41522-017-0024-3",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_accepted",
+      "paper_family_id": "family-e1db30b5126fd3244fa4",
+      "reason_code": null,
+      "source_id": "src-e1db30b5126fd3244fa4"
+    },
+    {
+      "candidate_key": "10.1038/s41467-026-69584-w",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-0f13764faca80859d755",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.22328/2413-5747-2024-10-1-119-122",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-c0e6084cbdfb918f26b7",
+      "reason_code": "criterion_unresolved:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1038/s41598-024-66124-8",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-0b1d1d41fbf5e2e26e75",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-0b1d1d41fbf5e2e26e75"
+    },
+    {
+      "candidate_key": "10.1038/s43247-024-01902-w",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-16abc4aa02db1813c2f0",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-16abc4aa02db1813c2f0"
+    },
+    {
+      "candidate_key": "10.1038/s41467-023-38806-w",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-55c12122ebfef216828b",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-55c12122ebfef216828b"
+    },
+    {
+      "candidate_key": "10.1038/s41467-023-37387-y",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-b1fbe1f06a83f66866bf",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-b1fbe1f06a83f66866bf"
+    },
+    {
+      "candidate_key": "10.17073/2500-0632-2023-12-188",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-ac0a47449e0f8c5a5557",
+      "reason_code": "criterion_unresolved:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1007/s10661-021-09090-2",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_accepted",
+      "paper_family_id": "family-06d60efea3fd5a6dcccf",
+      "reason_code": null,
+      "source_id": "src-06d60efea3fd5a6dcccf"
+    },
+    {
+      "candidate_key": "10.5194/tc-19-1757-2025",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-903174194f24b0ccb703",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1038/s41467-024-54990-9",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-8e37646ec313b4d33d92",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-8e37646ec313b4d33d92"
+    },
+    {
+      "candidate_key": "10.25283/2223-4594-2024-3-350-359",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_accepted",
+      "paper_family_id": "family-b10717277aa94842586e",
+      "reason_code": null,
+      "source_id": "src-b10717277aa94842586e"
+    },
+    {
+      "candidate_key": "10.1017/s0950268820003003",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-8596614c6d6c504fb0be",
+      "reason_code": "criterion_evidence_missing:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1038/nature10283",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-3480407b85193c34d507",
+      "reason_code": "extractor_response_invalid",
+      "source_id": "src-3480407b85193c34d507"
+    },
+    {
+      "candidate_key": "10.5194/tc-20-4585-2026",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_accepted",
+      "paper_family_id": "family-804ec5b55f0163428452",
+      "reason_code": null,
+      "source_id": "src-804ec5b55f0163428452"
+    },
+    {
+      "candidate_key": "10.1371/journal.pone.0287960",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-ce90a5d02446d870e390",
+      "reason_code": "finding_evidence_quote_excludes_finding",
+      "source_id": "src-ce90a5d02446d870e390"
+    },
+    {
+      "candidate_key": "10.1038/s41598-017-15486-3",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-a7f057b24abd2110c66b",
+      "reason_code": "scope_qualifier_missing",
+      "source_id": "src-a7f057b24abd2110c66b"
+    },
+    {
+      "candidate_key": "10.1371/journal.pone.0088199",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-47715b8f6bdf75e12bf0",
+      "reason_code": "criterion_unresolved:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1109/jstars.2020.2977506",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-6e2942ca400e16e37c6e",
+      "reason_code": "criterion_unresolved:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1038/s43247-025-01997-9",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-0c8a2bb32808e9d1b93b",
+      "reason_code": "alternative_finding_not_distinct",
+      "source_id": "src-0c8a2bb32808e9d1b93b"
+    },
+    {
+      "candidate_key": "10.1021/acs.est.6b01108",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-2d1bdbbb706bf10c36fc",
+      "reason_code": "slot_evidence_unavailable",
+      "source_id": "src-2d1bdbbb706bf10c36fc"
+    },
+    {
+      "candidate_key": "10.1038/s41598-022-24373-5",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-f4fcce836623e4341809",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1038/s43247-026-03181-z",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-8c4f1f42253ffbc393a0",
+      "reason_code": "eligible_arctic_scope_finding_unbound",
+      "source_id": "src-8c4f1f42253ffbc393a0"
+    },
+    {
+      "candidate_key": "10.36368/jns.v17i1.1233",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-964a49390e9b9deff837",
+      "reason_code": "criterion_evidence_missing:access_rights_evidence",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1371/journal.pone.0259921",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-2928e0b12a132d659eea",
+      "reason_code": "eligible_arctic_scope_invalid",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.5194/bg-23-5901-2026",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-df6a38392cc6c989c792",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-df6a38392cc6c989c792"
+    },
+    {
+      "candidate_key": "10.3389/fmicb.2026.1809037",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-78d5f212f144f5aa5eb6",
+      "reason_code": "criterion_unresolved:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1038/s41467-020-20470-z",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-12a16685549de1048e27",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-12a16685549de1048e27"
+    },
+    {
+      "candidate_key": "10.1007/s00216-024-05131-0",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-b477aebf6760eb686872",
+      "reason_code": "standalone_source_dependent_locator",
+      "source_id": "src-b477aebf6760eb686872"
+    },
+    {
+      "candidate_key": "10.1038/s41598-026-57926-z",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_accepted",
+      "paper_family_id": "family-7e8e66a7244e0f11a560",
+      "reason_code": null,
+      "source_id": "src-7e8e66a7244e0f11a560"
+    },
+    {
+      "candidate_key": "10.1038/s42003-021-02415-4",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-0104e9235f94fa9bdaff",
+      "reason_code": "finding_scope_value_unsourced",
+      "source_id": "src-0104e9235f94fa9bdaff"
+    },
+    {
+      "candidate_key": "10.1038/ncomms12821",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-09c5559a66e90b172434",
+      "reason_code": "scope_qualifier_missing",
+      "source_id": "src-09c5559a66e90b172434"
+    },
+    {
+      "candidate_key": "10.5817/cpr2025-s-9",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-2cfc27495127754e283f",
+      "reason_code": "finding_scope_value_unsourced",
+      "source_id": "src-2cfc27495127754e283f"
+    },
+    {
+      "candidate_key": "10.5194/essd-17-2035-2025",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-ecbf2c76d4bf76eabc36",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-ecbf2c76d4bf76eabc36"
+    },
+    {
+      "candidate_key": "10.14324/fej.08.1.03",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-f020cf3bb3de48bbbd4f",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.7557/7.8033",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "paper_cost_cap_reached",
+      "paper_family_id": "family-e3d2c9790e5499a69728",
+      "reason_code": "paper_cost_cap_reached",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.17816/humeco624200",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-c9f02bcbbd4355d0d9fe",
+      "reason_code": "criterion_failed:published_primary_findings",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1038/srep06775",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-67b44db17ad37479ce45",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-67b44db17ad37479ce45"
+    },
+    {
+      "candidate_key": "10.5194/acp-23-4931-2023",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-7ad42191e4ec5c7eb2fe",
+      "reason_code": "eligible_arctic_scope_finding_unbound",
+      "source_id": "src-7ad42191e4ec5c7eb2fe"
+    },
+    {
+      "candidate_key": "10.25283/2223-4594-2025-3-127-136",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-bde45f77a538d9f5bc2d",
+      "reason_code": "answer_scope_not_source_bound",
+      "source_id": "src-bde45f77a538d9f5bc2d"
+    },
+    {
+      "candidate_key": "10.1038/srep34123",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-2f609e69a7c6c86474fb",
+      "reason_code": "finding_evidence_quote_excludes_finding",
+      "source_id": "src-2f609e69a7c6c86474fb"
+    },
+    {
+      "candidate_key": "10.5194/essd-16-5009-2024",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-81857490f4015f9b06c8",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.31857/s0016675823110036",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-0cbaf778c91a5a853bcb",
+      "reason_code": "eligible_arctic_scope_missing_from_finding",
+      "source_id": "src-0cbaf778c91a5a853bcb"
+    },
+    {
+      "candidate_key": "10.26428/1606-9919-2025-205-407-422.",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-c476ee2f2bfb2b44fdb4",
+      "reason_code": "criterion_failed:published_primary_findings",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.47119/ijrp100401112019789",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-a818cd9110573cd62306",
+      "reason_code": "criterion_failed:published_primary_findings",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1186/s12931-018-0868-y",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-3e3dbef53783ab827932",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.14529/ctcr230402",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-c5014e0d95ce939820e2",
+      "reason_code": "criterion_unresolved:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1186/s12862-024-02274-7",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-67059df2addaf50935c1",
+      "reason_code": "eligible_arctic_scope_missing_from_finding",
+      "source_id": "src-67059df2addaf50935c1"
+    },
+    {
+      "candidate_key": "10.1038/s43247-025-02834-9",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-2d541ec73d7604ed9df2",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-2d541ec73d7604ed9df2"
+    },
+    {
+      "candidate_key": "10.34753/hs.2021.3.4.333",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-35686001f158ea540cda",
+      "reason_code": "criterion_unresolved:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1017/jog.2026.10167",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-e24985aa9a05b12acc86",
+      "reason_code": "extractor_response_invalid",
+      "source_id": "src-e24985aa9a05b12acc86"
+    },
+    {
+      "candidate_key": "10.1038/s41467-022-29523-x",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-64f3c5cce0b4fc2c29a1",
+      "reason_code": "no_admissible_finding",
+      "source_id": "src-64f3c5cce0b4fc2c29a1"
+    },
+    {
+      "candidate_key": "10.3389/fmicb.2018.03243",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-eab1cf788c3d3f8c0175",
+      "reason_code": "answer_scope_not_source_bound",
+      "source_id": "src-eab1cf788c3d3f8c0175"
+    },
+    {
+      "candidate_key": "10.1109/i2mtc53148.2023.10176076",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-3e5633fb7d9e6e73f126",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-3e5633fb7d9e6e73f126"
+    },
+    {
+      "candidate_key": "10.1126/science.1161910",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-223547882ea88f408f76",
+      "reason_code": "eligible_arctic_scope_finding_unbound",
+      "source_id": "src-223547882ea88f408f76"
+    },
+    {
+      "candidate_key": "10.3389/fmars.2025.1587557",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-acc7444b56ed77709ffc",
+      "reason_code": "criterion_failed:published_primary_findings",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.5194/bg-23-3675-2026",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-3ef4f7428c1cb00eedad",
+      "reason_code": "eligible_arctic_scope_invalid",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.5817/cpr2025-s-6",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-fa5345cf07d4b352c8c4",
+      "reason_code": "criterion_failed:published_primary_findings",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.3389/fvets.2025.1527550",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-507b14506894a7a98dcb",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1371/journal.pntd.0004534",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-e08a9dfe79168f8d5d7b",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.36253/rv-16769",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-507e99b0f04a78409a67",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1371/journal.pone.0089531",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-c0a8dbe98a533370e226",
+      "reason_code": "extractor_response_invalid",
+      "source_id": "src-c0a8dbe98a533370e226"
+    },
+    {
+      "candidate_key": "10.5194/tc-19-4701-2025",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-6c00355fd4db100a572d",
+      "reason_code": "extractor_response_invalid",
+      "source_id": "src-6c00355fd4db100a572d"
+    },
+    {
+      "candidate_key": "10.31833/uav/2024.24.2.004",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-eec2493ba768425f8f89",
+      "reason_code": "criterion_unresolved:access_rights_evidence",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.3389/fmars.2023.996380",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-14f1fcfb922df526c913",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.3389/fmars.2026.1866986",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-090f35262b162b20eeb2",
+      "reason_code": "eligible_arctic_scope_invalid",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1186/2193-1801-3-157",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_accepted",
+      "paper_family_id": "family-e1feb7d761732e133cfc",
+      "reason_code": null,
+      "source_id": "src-e1feb7d761732e133cfc"
+    },
+    {
+      "candidate_key": "10.1007/s00253-023-12991-6",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-254e6ef82125decce952",
+      "reason_code": "eligible_arctic_scope_invalid",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.5194/bg-20-1405-2023",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-8e9171b2d325e92ef15b",
+      "reason_code": "no_admissible_finding",
+      "source_id": "src-8e9171b2d325e92ef15b"
+    },
+    {
+      "candidate_key": "10.1371/journal.pone.0287346",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-a690fc9d9aa57b6b01dd",
+      "reason_code": "eligible_arctic_scope_invalid",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1038/s41598-020-76371-0",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-739b71f630e77f1f5628",
+      "reason_code": "criterion_unresolved:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.31857/s0030157424030087",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-866f05aa385ae431bee7",
+      "reason_code": "slot_evidence_unavailable",
+      "source_id": "src-866f05aa385ae431bee7"
+    },
+    {
+      "candidate_key": "10.1038/s41597-023-02492-6",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-c2f433d3265b3ea081c5",
+      "reason_code": "eligible_arctic_scope_invalid",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1038/s41598-026-53787-8",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-5422adc4af54756dc909",
+      "reason_code": "standalone_det_question_context_referent_unresolved",
+      "source_id": "src-5422adc4af54756dc909"
+    },
+    {
+      "candidate_key": "10.1109/tgrs.2022.3155051",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-a2f950a4b054a049c984",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-a2f950a4b054a049c984"
+    },
+    {
+      "candidate_key": "10.30758/0555-2648-2023-69-3-331-342",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_accepted",
+      "paper_family_id": "family-05ae5befc08cf0c7bb1a",
+      "reason_code": null,
+      "source_id": "src-05ae5befc08cf0c7bb1a"
+    },
+    {
+      "candidate_key": "10.3389/fclim.2024.1345763",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-8bf9171dc5f6a84f4069",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-8bf9171dc5f6a84f4069"
+    },
+    {
+      "candidate_key": "10.1038/s43247-025-01994-y",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-152729fb0987e73d6659",
+      "reason_code": "extractor_response_invalid",
+      "source_id": "src-152729fb0987e73d6659"
+    },
+    {
+      "candidate_key": "10.1371/journal.pone.0285826",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-a95f77f53b9e373c0e49",
+      "reason_code": "alternative_finding_not_distinct",
+      "source_id": "src-a95f77f53b9e373c0e49"
+    },
+    {
+      "candidate_key": "10.14302/issn.2643-0282.imsj-25-5590",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-62cf5e6d84f041f28131",
+      "reason_code": "eligible_arctic_scope_phrase_unbound",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.5194/tc-18-1597-2024",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-5b32b6222b3eaaadb49e",
+      "reason_code": "extractor_response_invalid",
+      "source_id": "src-5b32b6222b3eaaadb49e"
+    },
+    {
+      "candidate_key": "10.1038/s41467-018-03176-1",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-efcc5fc478271f63b0ee",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-efcc5fc478271f63b0ee"
+    },
+    {
+      "candidate_key": "10.1038/s41598-020-61067-2",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-3a36c5165244b87124d2",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1038/srep06091",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-c512faf62fa3f22ffe0b",
+      "reason_code": "eligible_arctic_scope_missing_from_finding",
+      "source_id": "src-c512faf62fa3f22ffe0b"
+    },
+    {
+      "candidate_key": "10.1038/sdata.2019.37",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-b008b9bed1ed2c200507",
+      "reason_code": "eligible_arctic_scope_invalid",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.54254/2753-8818/2026.bh32614",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-c0f8d9a419382efc0736",
+      "reason_code": "extractor_response_invalid",
+      "source_id": "src-c0f8d9a419382efc0736"
+    },
+    {
+      "candidate_key": "10.13075/ijomeh.1896.00975",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-04995e5209047a935a71",
+      "reason_code": "slot_evidence_unavailable",
+      "source_id": "src-04995e5209047a935a71"
+    },
+    {
+      "candidate_key": "10.3389/fmars.2024.1385797",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-6df9247ff67435bd022f",
+      "reason_code": "criterion_failed:published_primary_findings",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.5194/acp-24-7899-2024",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-997f01dbba0115b76ac6",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-997f01dbba0115b76ac6"
+    },
+    {
+      "candidate_key": "10.1038/s41612-024-00605-5",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-9a13cf5b8c29ddf40fe7",
+      "reason_code": "eligible_arctic_scope_invalid",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.53584/wiadchem.2023.03.2",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-d72142610cecc74e1f85",
+      "reason_code": "criterion_failed:published_primary_findings",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1038/ncomms15681",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-a5ef3f101b609f9f8829",
+      "reason_code": "eligible_arctic_scope_missing_from_finding",
+      "source_id": "src-a5ef3f101b609f9f8829"
+    },
+    {
+      "candidate_key": "10.1007/s00300-024-03235-y",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-1910924261906b84a462",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-1910924261906b84a462"
+    },
+    {
+      "candidate_key": "10.1134/s0016702926290021",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-30555a8e70c40786f9eb",
+      "reason_code": "criterion_failed:published_primary_findings",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1186/s40462-023-00374-5",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-069b565ca533494211b9",
+      "reason_code": "finding_evidence_quote_excludes_finding",
+      "source_id": "src-069b565ca533494211b9"
+    },
+    {
+      "candidate_key": "10.5194/tc-19-3915-2025",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-83012beb037a41680de6",
+      "reason_code": "scope_qualifier_not_source_bound",
+      "source_id": "src-83012beb037a41680de6"
+    },
+    {
+      "candidate_key": "10.33036/ejas.2023.93",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-6a6fc77dc9e4da6d00a4",
+      "reason_code": "criterion_failed:published_primary_findings",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1186/s13071-018-3106-z",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-089d0421d4851eafdc00",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.31111/vegrus/2023.46.63",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-573c12763eed218b74b5",
+      "reason_code": "finding_context_over_budget",
+      "source_id": "src-573c12763eed218b74b5"
+    },
+    {
+      "candidate_key": "10.1038/s41598-021-82228-x",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-8f8f202d35815f3dca96",
+      "reason_code": "eligible_arctic_scope_missing_from_finding",
+      "source_id": "src-8f8f202d35815f3dca96"
+    },
+    {
+      "candidate_key": "10.3389/fclim.2026.1814299",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-7463aec0b248dcc8224f",
+      "reason_code": "distractor_writer_response_invalid",
+      "source_id": "src-7463aec0b248dcc8224f"
+    },
+    {
+      "candidate_key": "10.1007/s00227-016-3029-1",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-fdb38096b42d5e1949a1",
+      "reason_code": "finding_evidence_quote_excludes_finding",
+      "source_id": "src-fdb38096b42d5e1949a1"
+    },
+    {
+      "candidate_key": "10.1371/journal.pntd.0004140",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-fc987c67d78feb350e27",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1038/s43247-024-01877-8",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-731b70c8cb0bd134a616",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-731b70c8cb0bd134a616"
+    },
+    {
+      "candidate_key": "10.1038/s41598-020-65210-x",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-e02e286adb8a20bd3817",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-e02e286adb8a20bd3817"
+    },
+    {
+      "candidate_key": "10.1186/s43591-026-00215-3",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-56c972c1de706360a78d",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1038/s41612-025-01168-9",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-cf2ca4117f1f01a0f2d1",
+      "reason_code": "extractor_response_invalid",
+      "source_id": "src-cf2ca4117f1f01a0f2d1"
+    },
+    {
+      "candidate_key": "10.1038/s43247-024-01304-y",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-2027979d38d61844bdb9",
+      "reason_code": "standalone_det_question_context_referent_unresolved",
+      "source_id": "src-2027979d38d61844bdb9"
+    },
+    {
+      "candidate_key": "10.1038/s41598-022-12783-4",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-fe612777c3c58e1ceae3",
+      "reason_code": "distractor_evidence_span_not_found",
+      "source_id": "src-fe612777c3c58e1ceae3"
+    },
+    {
+      "candidate_key": "10.5194/tc-12-145-2018",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-582ec03ef7a21406758e",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-582ec03ef7a21406758e"
+    },
+    {
+      "candidate_key": "10.1038/s41467-025-59486-8",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-0c89a1021edeebe00b7a",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.3389/fmars.2023.1130898",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_accepted",
+      "paper_family_id": "family-12e129e4958ff41ac4cc",
+      "reason_code": null,
+      "source_id": "src-12e129e4958ff41ac4cc"
+    },
+    {
+      "candidate_key": "10.1017/aju.2026.10074",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-39edbd37648e30038522",
+      "reason_code": "criterion_failed:published_primary_findings",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.3389/fmicb.2016.01170",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-618998a4c7fc32ea6fbf",
+      "reason_code": "frozen_scope_rebind_invalid",
+      "source_id": "src-618998a4c7fc32ea6fbf"
+    },
+    {
+      "candidate_key": "10.5194/acp-26-4019-2026",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-25319dc6a09ace871401",
+      "reason_code": "eligible_arctic_scope_invalid",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1371/journal.pone.0241095",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-0b29d27bf56e77ced9bf",
+      "reason_code": "slot_evidence_unavailable",
+      "source_id": "src-0b29d27bf56e77ced9bf"
+    },
+    {
+      "candidate_key": "10.69571/sspu.2025.99.6.002",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-fa0d3dbea955589d0642",
+      "reason_code": "criterion_unresolved:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.5194/tc-17-2871-2023",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-ff3adaa2940f5a4ce75d",
+      "reason_code": "eligible_arctic_scope_invalid",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1007/s42797-024-00101-2",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-2b24ee3901be6c77e467",
+      "reason_code": "extractor_response_invalid",
+      "source_id": "src-2b24ee3901be6c77e467"
+    },
+    {
+      "candidate_key": "10.21046/2070-7401-2024-21-5-263-274",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-167382adc28f24b2f398",
+      "reason_code": "criterion_unresolved:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1007/s00300-018-2283-8",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-afeeab31b5046173d8b5",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-afeeab31b5046173d8b5"
+    },
+    {
+      "candidate_key": "10.1186/2193-1801-2-567",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-071db7454b1f7e571565",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1007/s00300-024-03251-y",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-8097618bfadff9564174",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-8097618bfadff9564174"
+    },
+    {
+      "candidate_key": "10.3389/fmars.2025.1642506",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-0ff36955e3b7b92f2f41",
+      "reason_code": "eligible_arctic_scope_invalid",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1371/journal.pone.0059152",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-ddf8abd78861d1ee03cf",
+      "reason_code": "eligible_arctic_scope_missing_from_finding",
+      "source_id": "src-ddf8abd78861d1ee03cf"
+    },
+    {
+      "candidate_key": "10.1126/science.291.5502.300",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-9c8ed5bd4621078e7814",
+      "reason_code": "eligible_arctic_scope_missing_from_finding",
+      "source_id": "src-9c8ed5bd4621078e7814"
+    },
+    {
+      "candidate_key": "10.1186/1743-7075-9-51",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_accepted",
+      "paper_family_id": "family-a5bcbcf9a3aff33d55ed",
+      "reason_code": null,
+      "source_id": "src-a5bcbcf9a3aff33d55ed"
+    },
+    {
+      "candidate_key": "10.1038/s41598-020-72440-6",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-1667dfa137a730903fa1",
+      "reason_code": "eligible_arctic_scope_invalid",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1038/s41598-026-66670-3",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-26517776254dfa044259",
+      "reason_code": "criterion_unresolved:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1007/s13280-024-02012-9",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-fffa18d17b44e31534cd",
+      "reason_code": "answer_scope_not_source_bound",
+      "source_id": "src-fffa18d17b44e31534cd"
+    },
+    {
+      "candidate_key": "10.18357/anthropologica67120252704",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-564b967b64f6e2b681d2",
+      "reason_code": "criterion_unresolved:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.17816/humeco624184",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-0cca3301960b4f6043e1",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1007/s13280-019-01277-9",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-2a807d1d58c8d18db153",
+      "reason_code": "criterion_failed:published_primary_findings",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.5194/bg-23-1477-2026",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "incomplete_non_mcq",
+      "paper_family_id": "family-4e86162fd6a677f7c3f7",
+      "reason_code": "option_set_not_mutually_exclusive",
+      "source_id": "src-4e86162fd6a677f7c3f7"
+    },
+    {
+      "candidate_key": "10.1038/ncomms10365",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "incomplete_non_mcq",
+      "paper_family_id": "family-3d2c6406d4fadf877005",
+      "reason_code": "option_set_not_mutually_exclusive",
+      "source_id": "src-3d2c6406d4fadf877005"
+    },
+    {
+      "candidate_key": "10.1038/s41467-025-58027-7",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-d20a21191b46e4b7776c",
+      "reason_code": "criterion_failed:published_primary_findings",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.5194/polf-93-29-2025",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-89874ca3d6abee4229e7",
+      "reason_code": "criterion_failed:published_primary_findings",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.5194/bg-22-6651-2025",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-936df6991d0e84dc94b9",
+      "reason_code": "eligible_arctic_scope_invalid",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.24425/ppr.2019.128368",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-bf61d27035a9fbe0c72e",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-bf61d27035a9fbe0c72e"
+    },
+    {
+      "candidate_key": "10.3389/fmicb.2024.1473822",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_accepted",
+      "paper_family_id": "family-99e7737c3f1db8797fae",
+      "reason_code": null,
+      "source_id": "src-99e7737c3f1db8797fae"
+    },
+    {
+      "candidate_key": "10.5194/acp-25-143-2025",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-77ca12a8d6cf3a1ab01a",
+      "reason_code": "eligible_arctic_scope_missing_from_finding",
+      "source_id": "src-77ca12a8d6cf3a1ab01a"
+    },
+    {
+      "candidate_key": "10.1109/mcg.2019.2908271",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-8a3883501656acfd99a2",
+      "reason_code": "criterion_failed:published_primary_findings",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.5817/cpr2024-2-14",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-abc7e5041e61e779207d",
+      "reason_code": "extractor_response_invalid",
+      "source_id": "src-abc7e5041e61e779207d"
+    },
+    {
+      "candidate_key": "10.5194/tc-10-1161-2016",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-c8952c3512980569192b",
+      "reason_code": "extractor_response_invalid",
+      "source_id": "src-c8952c3512980569192b"
+    },
+    {
+      "candidate_key": "10.1007/s00376-026-6256-5",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-6db30d71f4058010a463",
+      "reason_code": "criterion_failed:published_primary_findings",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1371/journal.pone.0253929",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-7edb49fb4704319feb7b",
+      "reason_code": "extractor_response_invalid",
+      "source_id": "src-7edb49fb4704319feb7b"
+    },
+    {
+      "candidate_key": "10.1038/s41598-026-40878-9",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-b74c263f68aa08957890",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1134/s1028334x23600780",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-9fb56aaa2875ce86e186",
+      "reason_code": "eligible_arctic_scope_missing_from_finding",
+      "source_id": "src-9fb56aaa2875ce86e186"
+    },
+    {
+      "candidate_key": "10.1038/nature10089",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_accepted",
+      "paper_family_id": "family-97bdccd6f8a2ad7c6585",
+      "reason_code": null,
+      "source_id": "src-97bdccd6f8a2ad7c6585"
+    },
+    {
+      "candidate_key": "10.5194/acp-26-295-2026",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-b0a9366f607b2204a122",
+      "reason_code": "alternative_finding_not_distinct",
+      "source_id": "src-b0a9366f607b2204a122"
+    },
+    {
+      "candidate_key": "10.5194/acp-26-7141-2026",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-46dc170738e8831fb23d",
+      "reason_code": "extractor_response_invalid",
+      "source_id": "src-46dc170738e8831fb23d"
+    },
+    {
+      "candidate_key": "10.3389/fmolb.2022.931946",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-89562eb88429482d24c2",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1093/aob/mch200",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-0eb5c5c90bf1579a8867",
+      "reason_code": "criterion_unresolved:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.31857/s0030157424020045",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-5aee76ea9e921def7c66",
+      "reason_code": "finding_scope_value_unsourced",
+      "source_id": "src-5aee76ea9e921def7c66"
+    },
+    {
+      "candidate_key": "10.1038/s41467-017-02550-9",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-8c8c59d2d5f84b90b2bd",
+      "reason_code": "eligible_arctic_scope_invalid",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.3389/fther.2023.1354265",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "incomplete_non_mcq",
+      "paper_family_id": "family-d72dc2b16750c1df65d0",
+      "reason_code": "option_set_not_mutually_exclusive",
+      "source_id": "src-d72dc2b16750c1df65d0"
+    },
+    {
+      "candidate_key": "10.1186/s40645-025-00785-5",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-c0d0f4f903fd8f05120a",
+      "reason_code": "eligible_arctic_scope_invalid",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1038/s41598-024-67947-1",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-1bb7d35c79bd7b956716",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-1bb7d35c79bd7b956716"
+    },
+    {
+      "candidate_key": "10.24833/0869-0049-2025-2-71-85",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-17c359268b9b7d994c3a",
+      "reason_code": "criterion_unresolved:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.31857/s2686739723601102",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_accepted",
+      "paper_family_id": "family-2012e31888a1b5d13cd3",
+      "reason_code": null,
+      "source_id": "src-2012e31888a1b5d13cd3"
+    },
+    {
+      "candidate_key": "10.1038/srep45804",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-5bec03039e884fa70224",
+      "reason_code": "standalone_det_question_context_referent_unresolved",
+      "source_id": "src-5bec03039e884fa70224"
+    },
+    {
+      "candidate_key": "10.22363/2313-2310-2024-32-3-274-285",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-c4aa016e2a8502772c9c",
+      "reason_code": "extractor_response_invalid",
+      "source_id": "src-c4aa016e2a8502772c9c"
+    },
+    {
+      "candidate_key": "10.1038/s41558-025-02376-0",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-391a6279a9286da299fd",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-391a6279a9286da299fd"
+    },
+    {
+      "candidate_key": "10.1038/s41467-018-05824-y",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-6d4fb53eca0cdbff4239",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-6d4fb53eca0cdbff4239"
+    },
+    {
+      "candidate_key": "10.1109/tgrs.2018.2809504",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-e2c4df1b5d9ea05fef8e",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-e2c4df1b5d9ea05fef8e"
+    },
+    {
+      "candidate_key": "10.21046/2070-7401-2025-22-5-322-336",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "incomplete_non_mcq",
+      "paper_family_id": "family-8af95223d81945915218",
+      "reason_code": "option_set_not_mutually_exclusive",
+      "source_id": "src-8af95223d81945915218"
+    },
+    {
+      "candidate_key": "10.1371/journal.pone.0212668",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-119110d788a0b9c507af",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-119110d788a0b9c507af"
+    },
+    {
+      "candidate_key": "10.1017/jfm.2024.224",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-d9d7ac26158fa02bb071",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-d9d7ac26158fa02bb071"
+    },
+    {
+      "candidate_key": "10.1038/s41612-025-01270-y",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-960130965c2eaa7e1aa4",
+      "reason_code": "reconstruction_alternative_answer_present",
+      "source_id": "src-960130965c2eaa7e1aa4"
+    },
+    {
+      "candidate_key": "10.25283/2223-4594-2024-4-522-535",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-8312b76f01ce27180673",
+      "reason_code": "slot_evidence_unavailable",
+      "source_id": "src-8312b76f01ce27180673"
+    },
+    {
+      "candidate_key": "10.26748/ksoe.2023.028",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-a87921bc16e22f10e8a9",
+      "reason_code": "criterion_evidence_missing:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.5324/fn.v43i0.5840",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-2fa3406ea1d88974c8f9",
+      "reason_code": "eligible_arctic_scope_invalid",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.3389/fmolb.2021.778383",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-bf19cb0524f1755b3720",
+      "reason_code": "criterion_unresolved:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.24833/0869-0049-2023-4-60-72",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-b698ed3baabcb3444c0f",
+      "reason_code": "no_admissible_finding",
+      "source_id": "src-b698ed3baabcb3444c0f"
+    },
+    {
+      "candidate_key": "10.1038/s41598-018-23377-4",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-252fc6ef540a9c96e2eb",
+      "reason_code": "eligible_arctic_scope_phrase_unbound",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1264/jsme2.me16180",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-52b13a4c03423266ecc3",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1007/s00382-023-06766-y",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-e38d6e150cef2565afed",
+      "reason_code": "eligible_arctic_scope_missing_from_finding",
+      "source_id": "src-e38d6e150cef2565afed"
+    },
+    {
+      "candidate_key": "10.1109/icip.2017.8296299",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-dfaf2f0fa76fd006ea3b",
+      "reason_code": "criterion_unresolved:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.3389/fmicb.2012.00380",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-8dabb956fe5f662d2daf",
+      "reason_code": "extractor_response_invalid",
+      "source_id": "src-8dabb956fe5f662d2daf"
+    },
+    {
+      "candidate_key": "10.1186/1471-2180-10-10",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_accepted",
+      "paper_family_id": "family-0e6af4a9c010f8887b81",
+      "reason_code": null,
+      "source_id": "src-0e6af4a9c010f8887b81"
+    },
+    {
+      "candidate_key": "10.1109/access.2020.3028544",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-7832d7063df4b4fcdd57",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1038/s41467-024-47051-8",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-3185c3a737fce48b66c6",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-3185c3a737fce48b66c6"
+    },
+    {
+      "candidate_key": "10.5194/acp-26-4917-2026",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-2de2f12ae2c3266c1923",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.26425/2309-3633-2024-12-3-102-110",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-1837620bcabf7bec3a60",
+      "reason_code": "criterion_evidence_missing:published_primary_findings",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.30758/0555-2648-2023-69-3-290-309",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-eb3fdf61da10aaf6280a",
+      "reason_code": "reconstruction_alternative_answer_present",
+      "source_id": "src-eb3fdf61da10aaf6280a"
+    },
+    {
+      "candidate_key": "10.1186/1472-6785-8-17",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-39bedaa1dd2f9145c072",
+      "reason_code": "finding_scope_value_unsourced",
+      "source_id": "src-39bedaa1dd2f9145c072"
+    },
+    {
+      "candidate_key": "10.1186/s40562-026-00503-z",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-330081a5da7afac4819b",
+      "reason_code": "finding_span_figure_defined_referent",
+      "source_id": "src-330081a5da7afac4819b"
+    },
+    {
+      "candidate_key": "10.1371/journal.pone.0092942",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-a2bb181fa382d479c5c5",
+      "reason_code": "answer_scope_not_source_bound",
+      "source_id": "src-a2bb181fa382d479c5c5"
+    },
+    {
+      "candidate_key": "10.1109/tgrs.2018.2813061",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-baca973dfa988a4f9d43",
+      "reason_code": "extractor_response_invalid",
+      "source_id": "src-baca973dfa988a4f9d43"
+    },
+    {
+      "candidate_key": "10.3389/fmars.2026.1727387",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-c8abd43cea92d529ff3e",
+      "reason_code": "eligible_arctic_scope_invalid",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1038/s41467-019-14074-5",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-0d3b153ad64f4f3434ad",
+      "reason_code": "extractor_response_invalid",
+      "source_id": "src-0d3b153ad64f4f3434ad"
+    },
+    {
+      "candidate_key": "10.17816/humeco630140",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-8e5e32cb3c7d100ef312",
+      "reason_code": "criterion_evidence_missing:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.3389/fmars.2023.1275320",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-e17115d88087b5ecf0c7",
+      "reason_code": "eligible_arctic_scope_missing_from_finding",
+      "source_id": "src-e17115d88087b5ecf0c7"
+    },
+    {
+      "candidate_key": "10.5194/npg-30-299-2023",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-c335990f251297dea92d",
+      "reason_code": "reconstruction_scope_not_source_bound",
+      "source_id": "src-c335990f251297dea92d"
+    },
+    {
+      "candidate_key": "10.1038/s41396-017-0026-4",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-c4d74620769128b501f5",
+      "reason_code": "extractor_response_invalid",
+      "source_id": "src-c4d74620769128b501f5"
+    },
+    {
+      "candidate_key": "10.30758/0555-2648-2026-72-1-19-34",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-6bd0e7d82151e1e05349",
+      "reason_code": "slot_evidence_unavailable",
+      "source_id": "src-6bd0e7d82151e1e05349"
+    },
+    {
+      "candidate_key": "10.1007/s13280-019-01218-6",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-8a368b4e32093d9e7be8",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1101/2024.03.22.586348",
+      "complete": true,
+      "eligibility_decision": "uncertain",
+      "outcome_class": "eligibility_unresolved",
+      "paper_family_id": "family-18b1863e620619122634",
+      "reason_code": "eligible_arctic_scope_invalid",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1007/s00382-024-07105-5",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_accepted",
+      "paper_family_id": "family-4481938203e27ba2e8e8",
+      "reason_code": null,
+      "source_id": "src-4481938203e27ba2e8e8"
+    },
+    {
+      "candidate_key": "10.5194/cp-21-719-2025",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_rejected",
+      "paper_family_id": "family-1806b2d40745852ae96f",
+      "reason_code": "eligible_arctic_scope_finding_unbound",
+      "source_id": "src-1806b2d40745852ae96f"
+    },
+    {
+      "candidate_key": "10.24975/2313-8920-202411-3-212-221",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-f453f7cf02536dc8324a",
+      "reason_code": "criterion_failed:published_primary_findings",
+      "source_id": null
+    },
+    {
+      "candidate_key": "10.1007/s10641-025-01733-4",
+      "complete": true,
+      "eligibility_decision": "eligible",
+      "outcome_class": "generation_accepted",
+      "paper_family_id": "family-4f4afc2876000d683ffb",
+      "reason_code": null,
+      "source_id": "src-4f4afc2876000d683ffb"
+    },
+    {
+      "candidate_key": "10.1371/journal.pone.0248763",
+      "complete": true,
+      "eligibility_decision": "excluded",
+      "outcome_class": "eligibility_excluded",
+      "paper_family_id": "family-2b6b00fe2fc3037d580a",
+      "reason_code": "criterion_failed:study_geography",
+      "source_id": null
+    }
+  ],
+  "mid_family_papers": [
+    {
+      "candidate_key": "10.48550/arxiv.2406.18417",
+      "complete": false,
+      "incomplete_reason": "operational_unresolved",
+      "paper_family_id": "family-446bb3c2880626b78b81",
+      "reason_code": "operational_ambiguous_charge_http_500"
+    },
+    {
+      "candidate_key": "10.16993/tellusb.1880",
+      "complete": false,
+      "incomplete_reason": "operational_unresolved",
+      "paper_family_id": "family-e2951d2947b61bb2e910",
+      "reason_code": "operational_ambiguous_charge_http_500"
+    },
+    {
+      "candidate_key": "10.1371/journal.pone.0096079",
+      "complete": false,
+      "incomplete_reason": "operational_unresolved",
+      "paper_family_id": "family-aeed4bfe62a1e1028954",
+      "reason_code": "operational_ambiguous_charge_provider_timeout"
+    },
+    {
+      "candidate_key": "10.31857/s0030157424030103",
+      "complete": false,
+      "incomplete_reason": "incomplete_infra_call",
+      "paper_family_id": "family-c106963d4bb480edc9f1"
+    }
+  ]
+}
