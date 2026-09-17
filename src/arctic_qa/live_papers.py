@@ -33,6 +33,7 @@ import json
 import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -94,6 +95,10 @@ EVALUATION_PHASE = "benchmark_evaluation"
 _LOCK_WAIT_SECONDS = 2.0
 _LOCK_POLL_SECONDS = 0.01
 
+# The ledger writes every cost with six decimal places.
+_USD_SCALE = Decimal("0.000001")
+_ZERO_USD = Decimal("0.000000")
+
 
 def _instant(value: Any) -> datetime | None:
     """Return one UTC instant from a ledger or progress timestamp."""
@@ -110,15 +115,23 @@ def _text(value: Any) -> str:
     return value.strip() if isinstance(value, str) and value.strip() else ""
 
 
-def _decimal_text(total: float) -> str:
-    return f"{total:.6f}"
+def _decimal_text(total: Decimal) -> str:
+    return f"{total:f}"
 
 
-def _money(value: Any) -> float:
+def _money(value: Any) -> Decimal:
+    """Read one stored cost. The ledger writes money as a decimal string.
+
+    The section only adds and shows these numbers, but it adds them in the
+    scale the ledger wrote, so a column of this page and a column of the
+    ledger can never differ by a rounded binary fraction.
+    """
+    if value is None:
+        return _ZERO_USD
     try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
+        return Decimal(str(value)).quantize(_USD_SCALE)
+    except (ArithmeticError, InvalidOperation, ValueError):
+        return _ZERO_USD
 
 
 def read_shared_ledger(path: Path) -> dict[str, Any]:
@@ -263,8 +276,8 @@ def _empty_family(family_id: str) -> dict[str, Any]:
         "paper_id": "",
         "calls": 0,
         "open_calls": 0,
-        "cost_usd": 0.0,
-        "reserved_usd": 0.0,
+        "cost_usd": _ZERO_USD,
+        "reserved_usd": _ZERO_USD,
         "events": [],
         "latest": None,
         "latest_stage": "",
