@@ -18,7 +18,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from .errors import BrokerOperationBusyError, DuplicateRequestKeyError
+from .errors import (
+    BrokerOperationBusyError,
+    DuplicateRequestKeyError,
+    PaperBindingConflictError,
+)
 from .gemini_eligibility import (
     DEFAULT_CALL_TIMEOUT_SECONDS,
     MAXIMUM_CALL_TIMEOUT_SECONDS,
@@ -7093,7 +7097,7 @@ class SharedGeminiBroker:
             }
             old_binding = ledger["family_bindings"].get(base["family_id"])
             if old_binding is not None and old_binding != binding:
-                raise ValueError(
+                raise PaperBindingConflictError(
                     "the paper family is already bound to another paper or source version"
                 )
             for family_id, item in ledger["family_bindings"].items():
@@ -7101,7 +7105,7 @@ class SharedGeminiBroker:
                     item["source_version_id"] == base["source_version_id"]
                     and family_id != base["family_id"]
                 ):
-                    raise ValueError(
+                    raise PaperBindingConflictError(
                         "the source version is already bound to another paper family"
                     )
             paper_binding = {
@@ -7110,7 +7114,7 @@ class SharedGeminiBroker:
             }
             old_paper_binding = ledger["paper_bindings"].get(base["paper_id"])
             if old_paper_binding is not None and old_paper_binding != paper_binding:
-                raise ValueError(
+                raise PaperBindingConflictError(
                     "the paper ID is already bound to another family or source version"
                 )
             ledger["family_bindings"].setdefault(base["family_id"], binding)

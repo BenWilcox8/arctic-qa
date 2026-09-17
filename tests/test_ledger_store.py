@@ -635,3 +635,19 @@ def test_a_read_only_reader_never_dies_on_a_writer(tmp_path: Path) -> None:
     state_db.LOCKED_READ_RETRY_SECONDS = 0.0
     assert state_db.retry_locked_read(flaky) == 7
     assert len(calls) == 3
+
+
+def test_a_binding_conflict_is_a_paper_refusal_not_a_run_stop(tmp_path: Path) -> None:
+    """The producer exited at 05:25 UTC on 2026-09-17 on a plain ValueError here."""
+    from arctic_qa import broker_provider, streaming
+    from arctic_qa.errors import PaperBindingConflictError
+
+    values = fixture(tmp_path, transport=Transport())
+    execute(values["broker"], paper="paper-1", family="family-1", source="source-1")
+    with pytest.raises(PaperBindingConflictError):
+        execute(values["broker"], paper="paper-2", family="family-2", source="source-1")
+    assert PaperBindingConflictError in broker_provider._PAPER_LEVEL_BROKER_ERRORS
+    assert not streaming._ends_the_run(PaperBindingConflictError("x"))
+    state = _state(values)
+    assert len(state["requests"]) == 1
+    assert state["inflight"] == 0

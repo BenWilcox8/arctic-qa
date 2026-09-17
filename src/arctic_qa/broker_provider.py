@@ -15,6 +15,7 @@ from .errors import (
     CandidateRejectedError,
     CountUnavailableError,
     DuplicateRequestKeyError,
+    PaperBindingConflictError,
     PaperCostCapError,
     ProviderError,
     ProviderResponseError,
@@ -74,6 +75,7 @@ _PAPER_LEVEL_BROKER_ERRORS = (
     CandidateRejectedError,
     CountUnavailableError,
     DuplicateRequestKeyError,
+    PaperBindingConflictError,
     PaperCostCapError,
     ProviderResponseError,
 )

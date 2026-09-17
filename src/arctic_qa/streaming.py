@@ -18,6 +18,7 @@ from .errors import (
     AmbiguousChargeError,
     BrokerOperationBusyError,
     DuplicateRequestKeyError,
+    PaperBindingConflictError,
     BudgetError,
     CandidateRejectedError,
     CountUnavailableError,
@@ -3654,6 +3655,7 @@ def _ends_the_run(error: BaseException) -> bool:
             BrokerOperationBusyError,
             CountUnavailableError,
             DuplicateRequestKeyError,
+            PaperBindingConflictError,
         ),
     ):
         return False

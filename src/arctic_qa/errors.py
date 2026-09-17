@@ -58,6 +58,18 @@ class BrokerOperationBusyError(ArcticQAError, ValueError):
     code = "BROKER_OPERATION_BUSY"
 
 
+class PaperBindingConflictError(ArcticQAError, ValueError):
+    """The paper, its family or its source version is already bound elsewhere.
+
+    The ledger binds one family to one paper and one source version, and one
+    source version to one family. A request whose identity crosses those
+    bindings reserves nothing, submits nothing and is charged nothing, so the
+    refusal is about this paper and never about the run. A plain
+    ``ValueError`` here ended the sixteen-worker producer at 05:25 UTC on
+    2026-09-17 while it had nine papers in flight.
+    """
+
+
 class DuplicateRequestKeyError(ArcticQAError, ValueError):
     """The paid request key is already in the ledger and cannot be reopened.
 
