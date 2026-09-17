@@ -191,6 +191,11 @@ The cost guard runs its own older snapshot too.
 Both halves reach their units at their next re-snapshot, after this branch merges.
 Until then the bounds are 2000 items and USD 200.00, so a bound stop is far away, and the cost guard's extrapolation is the live control.
 
+Re-snapshot the evaluator before the guard, or both together.
+The running evaluator still writes `watch-state.json` only at the end of a poll cycle, so that file is hours old while the unit works: at 00:23Z it still held the state of the invocation that stopped at 23:40Z.
+The old guard reads it and says `running` false without acting.
+A guard on the new code against an evaluator on the old code would read the same thing and append a `blocked:` line for a healthy evaluator, every hour.
+
 The cutover receipt is `cutover-receipt-20260916T232243Z.json` of the activation directory.
 It was written by hand from the evidence, because the script timed out waiting for `watch-state.json`, which the watcher writes only at the end of a whole poll cycle.
 The script now waits for a new journal row as well, which is the earlier proof.
