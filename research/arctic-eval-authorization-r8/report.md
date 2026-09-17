@@ -110,8 +110,16 @@ A broker starting on the new policy pair refused because the evaluator had one G
 While an applied transition waits for its first construction request, its validation needs `inflight` to be 0, and a live evaluator breaks that at any moment.
 The producer start and the evaluator therefore cannot overlap until the producer has made one paid construction call, which closes that validation for good.
 
-The order that resolves it: supersede the halt, settle the orphaned evaluation request, start the producer alone, let it make one construction call, then start the evaluator.
-That sequence belongs to the owner of the construction phase.
+A broker start on the new policy pair needs a settled ledger, and only the producer's first paid construction call ends that condition.
+So until that call lands, the two starts are serialized, in this order:
+
+1. Stop the evaluator, so nothing of the evaluation phase is in flight.
+2. Supersede the integrity halt record and settle every interrupted request, until `inflight` is 0 and `integrity_valid` is true.
+3. Start the producer alone and wait for its first paid construction call.
+4. Start the evaluator again.
+
+That is the order this task and the completion worker ran on 2026-09-16 between 23:46Z and 2026-09-17T00:07Z, and it worked: the producer made its first construction call at 23:53Z and the evaluator returned at 00:07:40Z.
+After that first construction call the condition is closed for this transition, and the two run together again, as they did all day.
 
 ## 7. What the ledger repair actually took
 
