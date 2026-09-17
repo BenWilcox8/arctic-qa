@@ -1001,9 +1001,9 @@ def _broker(
             if args.evaluation_policy_transition_file
             else None
         ),
+        concurrent_requests=bool(concurrent),
     )
     broker.deferred_snapshot = bool(concurrent)
-    broker.concurrent_requests = bool(concurrent)
     return broker
 
 

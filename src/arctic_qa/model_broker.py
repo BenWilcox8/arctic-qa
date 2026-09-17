@@ -428,6 +428,40 @@ TERMINAL_REQUEST_STATES = frozenset({"completed", "ambiguous_charge"})
 # nearly every ledger read. A sequential broker keeps the exact fingerprint and
 # passes 0.0 here.
 RECEIPT_LISTING_REFRESH_SECONDS = 10.0
+# One process, one start of each shared ledger, and one compactor thread for
+# it. The streaming evaluator builds a broker per question on the same ledger,
+# because the derived evaluation gate belongs to the question. Every one of
+# them compacted the whole ledger at its start and left a compactor thread and
+# an ``atexit`` compaction of its own behind. Read "Parallel bookkeeping" in
+# ``docs/SHARED_MODEL_BROKER.md``.
+_PROCESS_LEDGER_LOCK = threading.Lock()
+_PROCESS_LEDGER_STARTS: set[Path] = set()
+_PROCESS_LEDGER_COMPACTORS: dict[Path, Any] = {}
+
+
+def _claim_ledger_start(ledger_file: Path) -> bool:
+    """Say whether this is the first start of this ledger in this process."""
+    with _PROCESS_LEDGER_LOCK:
+        if ledger_file in _PROCESS_LEDGER_STARTS:
+            return False
+        _PROCESS_LEDGER_STARTS.add(ledger_file)
+        return True
+
+
+def _claim_ledger_compactor(ledger_file: Path, owner: Any) -> bool:
+    """Say whether this broker owns the compactor thread of this ledger."""
+    with _PROCESS_LEDGER_LOCK:
+        held = _PROCESS_LEDGER_COMPACTORS.get(ledger_file)
+        if held is not None and held is not owner:
+            return False
+        _PROCESS_LEDGER_COMPACTORS[ledger_file] = owner
+        return True
+
+
+def _release_ledger_compactor(ledger_file: Path, owner: Any) -> None:
+    with _PROCESS_LEDGER_LOCK:
+        if _PROCESS_LEDGER_COMPACTORS.get(ledger_file) is owner:
+            _PROCESS_LEDGER_COMPACTORS.pop(ledger_file, None)
 # The name of an immutable paid-call receipt: the request key, an optional
 # resume or count-retry qualifier, and an optional stage.
 PAID_CALL_RECEIPT_NAME = re.compile(
@@ -1719,6 +1753,7 @@ class SharedGeminiBroker:
         evaluation_gate_file: Path | None = None,
         evaluation_policy_transition_file: Path | None = None,
         concurrent_construction: bool = False,
+        concurrent_requests: bool = False,
     ) -> None:
         self.policy_file = policy_file.resolve()
         self.price_config_file = price_config_file.resolve()
@@ -1767,7 +1802,9 @@ class SharedGeminiBroker:
         # of its ledger reads cost 0.25 s of pure listing work against 0.026 s
         # kept, measured on the live ledger at 13,309 rows and 52,716 receipts
         # on 2026-09-17.
-        self._concurrent_requests = False
+        # The start of this broker reads it, so it is a parameter and never
+        # an attribute a caller sets afterwards.
+        self._concurrent_requests = bool(concurrent_requests)
         self._pacing_state = threading.local()
         # The wait and the hold of every exclusive section, by lock handle, and
         # the whole-call lock of the sequential path by thread. The second one
@@ -3119,6 +3156,10 @@ class SharedGeminiBroker:
     def _initialize(self) -> None:
         self.ledger_file.parent.mkdir(parents=True, exist_ok=True)
         self.receipts_dir.mkdir(parents=True, exist_ok=True)
+        # One process starts one ledger once, whether it created it or found
+        # it. A broker that creates the ledger writes the first snapshot
+        # itself, so it needs no compaction of its own.
+        first_start = _claim_ledger_start(self.ledger_file)
         with self._ledger_lock():
             if self.ledger_file.is_file():
                 if self._integrity_file.exists():
@@ -3136,9 +3177,10 @@ class SharedGeminiBroker:
                         "arctic-qa migrate-ledger-store --apply with every writer "
                         "stopped (docs/SHARED_MODEL_BROKER.md, Parallel bookkeeping)"
                     )
-                self._validate_initial_identity(
-                    identity, ledger_store.read_ledger(self.ledger_file)
-                )
+                # The store's own read, not a second materialization of the
+                # same two files: the snapshot and the journal were 60 MB on
+                # 2026-09-17 and the evaluator started a broker a question.
+                self._validate_initial_identity(identity, self._store.read())
                 ledger = self._validated_ledger()
                 self._authorize_active_config(identity, ledger)
                 self._publish_status(ledger)
@@ -3146,10 +3188,22 @@ class SharedGeminiBroker:
                 # reviewed authorization always binds the state and never a
                 # stale file, and an outside reader of the plain file starts
                 # from the truth.
+                #
+                # The process starts once. The streaming evaluator builds a
+                # broker a question on the same ledger, so this ran once a
+                # question: a 60 MB materialization, a proof of every row and
+                # an 18 MB durable write, 1.16 s measured on an idle machine
+                # on 2026-09-17, all of it under the shared ledger lock that
+                # each of the producer's 75 workers takes for every paid call.
+                # A later broker of a ledger this process already started
+                # skips it, because the compactor thread of that start keeps
+                # the snapshot current within COMPACTION_INTERVAL_SECONDS. A
+                # reviewed operation is its own process and always compacts.
                 self._compacted_seq = ledger_store.snapshot_applied_seq(
                     self.ledger_file
                 )
-                self.compact(wait=True)
+                if first_start or not self.concurrent_requests:
+                    self.compact(wait=True)
                 return
             if self._identity_file.exists():
                 raise ValueError(
@@ -5943,8 +5997,16 @@ class SharedGeminiBroker:
         }
 
     def _start_compactor(self) -> None:
-        """Start the one background thread that keeps the snapshot current."""
+        """Start the one background thread that keeps the snapshot current.
+
+        One thread per ledger per process. The snapshot is derived, so one
+        writer of it is enough, and the streaming evaluator's broker a
+        question left a thread, a whole copy of the ledger and an ``atexit``
+        compaction behind for every question it scored.
+        """
         if self._compaction_thread is not None:
+            return
+        if not _claim_ledger_compactor(self.ledger_file, self):
             return
         # A process that exits writes the snapshot one last time, so a plain
         # reader of the file after the exit sees the state and not the last
@@ -6008,6 +6070,7 @@ class SharedGeminiBroker:
         if thread is not None:
             thread.join(timeout=30.0)
             self._compaction_thread = None
+        _release_ledger_compactor(self.ledger_file, self)
         with self._ledger_lock():
             pass
         self.compact(wait=True)

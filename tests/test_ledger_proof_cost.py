@@ -167,7 +167,7 @@ def test_the_evaluator_broker_says_it_shares_the_ledger() -> None:
     source = (ROOT / "src" / "arctic_qa" / "abstention_cli.py").read_text(
         encoding="utf-8"
     )
-    assert "broker.concurrent_requests = bool(concurrent)" in source
+    assert "concurrent_requests=bool(concurrent)," in source
     assert source.count("evaluation_gate_file=gate, concurrent=True") == 2
     assert "deferred_snapshot=True" not in source
 
@@ -185,6 +185,100 @@ def test_a_concurrent_construction_broker_still_shares_the_ledger(
     assert broker.concurrent_requests is True
     broker.concurrent_construction = False
     assert broker.concurrent_requests is False
+
+
+def test_a_second_broker_of_one_ledger_does_not_start_it_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The process starts a ledger once, not once a question.
+
+    The streaming evaluator builds a broker a question, because the derived
+    evaluation gate belongs to the question. Every one of them compacted the
+    whole ledger at its start: a 60 MB materialization, a proof of every row
+    and an 18 MB durable write, 1.16 s measured on an idle machine on
+    2026-09-17, all of it under the shared ledger lock that each of the
+    producer's 75 workers takes for every paid call.
+    """
+    values = fixture(tmp_path, transport=Transport())
+    first = values["broker"]
+    first.concurrent_requests = True
+    first.deferred_snapshot = True
+    execute(first, paper="p1")
+
+    compactions: list[bool] = []
+    real = SharedGeminiBroker.compact
+
+    def record(self, *, wait: bool = False):  # type: ignore[no-untyped-def]
+        compactions.append(wait)
+        return real(self, wait=wait)
+
+    monkeypatch.setattr(SharedGeminiBroker, "compact", record)
+    second = model_broker.SharedGeminiBroker(
+        policy_file=first.policy_file,
+        price_config_file=first.price_config_file,
+        execution_gate_file=first.execution_gate_file,
+        ledger_file=first.ledger_file,
+        receipts_dir=first.receipts_dir,
+        credential_file=first.credential_file,
+        prior_construction_spend_usd=Decimal("0"),
+        concurrent_requests=True,
+    )
+    assert compactions == []
+    # The state is the same one: the second broker reads every row the first
+    # one wrote, and proves it.
+    assert sorted(second._validated_ledger()["requests"]) == sorted(
+        first._validated_ledger()["requests"]
+    )
+
+    # A reviewed operation runs one at a time and binds the snapshot file, so
+    # it compacts whatever another broker of this process did.
+    third = model_broker.SharedGeminiBroker(
+        policy_file=first.policy_file,
+        price_config_file=first.price_config_file,
+        execution_gate_file=first.execution_gate_file,
+        ledger_file=first.ledger_file,
+        receipts_dir=first.receipts_dir,
+        credential_file=first.credential_file,
+        prior_construction_spend_usd=Decimal("0"),
+    )
+    assert third.concurrent_requests is False
+    assert compactions == [True]
+
+
+def test_one_compactor_thread_serves_one_ledger(tmp_path: Path) -> None:
+    """A broker a question left a compactor thread a question behind it.
+
+    Each held a whole copy of the ledger and registered an ``atexit``
+    compaction of its own. The snapshot is derived, so one writer of it is
+    enough.
+    """
+    values = fixture(tmp_path, transport=Transport())
+    first = values["broker"]
+    first.concurrent_requests = True
+    first.deferred_snapshot = True
+    execute(first, paper="p1")
+    assert first._compaction_thread is not None
+
+    second = model_broker.SharedGeminiBroker(
+        policy_file=first.policy_file,
+        price_config_file=first.price_config_file,
+        execution_gate_file=first.execution_gate_file,
+        ledger_file=first.ledger_file,
+        receipts_dir=first.receipts_dir,
+        credential_file=first.credential_file,
+        prior_construction_spend_usd=Decimal("0"),
+        concurrent_requests=True,
+    )
+    second.deferred_snapshot = True
+    second._start_compactor()
+    assert second._compaction_thread is None
+
+    # The owner gives the ledger back when it stops, so the next broker of it
+    # keeps the snapshot current.
+    first.stop_compactor()
+    second._start_compactor()
+    assert second._compaction_thread is not None
+    second.stop_compactor()
 
 
 def test_a_warm_read_replays_only_the_rows_that_moved(

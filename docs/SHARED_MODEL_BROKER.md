@@ -601,11 +601,12 @@ held the run at about 21 requests a minute whatever the thread count was.
 
 Four rules now keep a warm read at about 12 ms.
 
-- The receipts directory is listed once. A concurrent broker re-lists it at
-  most every `RECEIPT_LISTING_REFRESH_SECONDS`, because the directory moves on
-  every paid call of every worker and the fingerprint alone made a 32,251-entry
-  `scandir` part of nearly every read. A sequential broker, which is every
-  reviewed operation, keeps the exact fingerprint.
+- The receipts directory is listed once. A broker that shares the ledger with
+  another live writer re-lists it at most every
+  `RECEIPT_LISTING_REFRESH_SECONDS`, because the directory moves on every paid
+  call of every worker and the fingerprint alone made a 32,251-entry `scandir`
+  part of nearly every read. A sequential broker, which is every reviewed
+  operation, keeps the exact fingerprint.
 - Everything derived from one listing is derived once (`_listing_derived`):
   the name filters and the request key of every paid-call receipt. Both are
   safe to read from a listing a few seconds old, because a receipt this process
@@ -626,6 +627,45 @@ Four rules now keep a warm read at about 12 ms.
 
 A full pass over every row and every receipt still runs every
 `IMMUTABLE_EVENT_REVALIDATION_SECONDS`, and it re-lists the directory first.
+
+`concurrent_requests` is the flag that says another live writer shares this
+ledger, and it is a parameter of the broker, never an attribute a caller sets
+afterwards, because the start of the broker reads it.
+A concurrent construction run is such a writer by definition, so
+`concurrent_construction` still implies it.
+The streaming evaluator is the other one and sets it itself.
+
+The evaluator did not say so until 2026-09-17.
+It holds no construction request, so the flag it hung on said nothing about it,
+and it kept the exact fingerprint of a directory that the producer moved on
+every paid call of every one of its 75 workers.
+Every ledger read of the evaluator was therefore a full listing of 52,716
+entries and a re-derivation of everything read out of it: 0.25 s a read against
+0.026 s with the listing kept, measured on the live ledger at 13,309 rows.
+Three exclusive sections of one paid Gemini call held the operation lock about
+22 s in total, which held the Gemini arm at 13.7 questions an hour.
+
+### One process starts one ledger once
+
+A broker start compacts a snapshot that lags its journal, so a reviewed
+authorization always binds the state and never a stale file.
+The start also materializes the store, proves every row of it against the
+receipts, and publishes the status record.
+All of that runs under the shared ledger lock.
+
+The streaming evaluator builds one broker per question, because the derived
+evaluation gate belongs to the question.
+So the start ran once a question: a 60 MB materialization, a proof of every
+row and an 18 MB durable write, 1.16 s measured on an idle machine, under the
+lock that each of the producer's 75 workers takes for every paid call.
+
+A broker of a ledger that this process already started, and that says it
+shares the ledger, skips the compaction of the start.
+The compactor thread of that first start keeps the snapshot current within
+`COMPACTION_INTERVAL_SECONDS`.
+A reviewed operation is its own process, so it always compacts.
+The start also reads the store once instead of materializing the same two
+files a second time for the identity check.
 
 ### A mutation that was never committed
 
@@ -648,7 +688,8 @@ to undo.
 
 ### The compactor
 
-One background thread per broker of a concurrent run rewrites the snapshot, every `COMPACTION_INTERVAL_SECONDS`.
+One background thread per ledger per process rewrites the snapshot, every `COMPACTION_INTERVAL_SECONDS`.
+The evaluator's broker per question left a thread, a whole copy of the ledger and an `atexit` compaction behind for every question it scored, so the owner of the thread is now recorded per ledger and a later broker of the same ledger starts none of its own.
 It never takes the shared ledger lock, so it never delays a paid call.
 It materializes the store from the snapshot and the journal, runs the **full row-by-row proof**, writes the snapshot and the base record under the compaction lock, and publishes the status record.
 
