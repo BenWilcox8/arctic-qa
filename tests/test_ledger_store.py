@@ -413,3 +413,56 @@ def test_the_no_replay_probe_reads_the_receipts_listing(tmp_path: Path) -> None:
     assert SharedGeminiBroker.validate_no_replay_liabilities(
         ledger=ledger, receipts_dir=receipts
     ) == {}
+
+
+def test_a_flush_after_reading_a_peer_record_returns(tmp_path: Path) -> None:
+    """The flush covers this process's own writes; a peer's are the peer's.
+
+    The adversarial audit of 2026-09-17 found that a flush after ``read``
+    tailed another process's record waited for an offset this process never
+    wrote, and could only end when a peer thread committed. In the streaming
+    evaluator, which admits one call at a time, it would never have ended.
+    """
+    ledger = tmp_path / "ledger.json"
+    write_json(ledger, {"spent_usd": "0", "requests": {}})
+    ledger_store.initialize_store(ledger)
+    ours = ledger_store.LedgerStore(ledger)
+    state = ours.load()
+    state["spent_usd"] = "1"
+    ours.commit(state, now="2026-09-17T00:00:00Z")
+    ours.flush()
+    peer = ledger_store.LedgerStore(ledger)
+    peer_state = peer.load()
+    peer_state["spent_usd"] = "2"
+    peer.commit(peer_state, now="2026-09-17T00:00:01Z")
+    peer.flush()
+    assert ours.read()["spent_usd"] == "2"
+    done = threading.Event()
+
+    def flush() -> None:
+        ours.flush()
+        done.set()
+
+    threading.Thread(target=flush, daemon=True).start()
+    assert done.wait(5.0), "the flush spun on a peer's record"
+
+
+def test_the_snapshot_is_bound_by_the_bytes_that_were_read(tmp_path: Path) -> None:
+    """A compaction between the read and the binding must not skip records."""
+    ledger = tmp_path / "ledger.json"
+    write_json(ledger, {"spent_usd": "0", "requests": {}})
+    ledger_store.initialize_store(ledger)
+    store = ledger_store.LedgerStore(ledger)
+    state = store.load()
+    state["spent_usd"] = "1"
+    store.commit(state, now="2026-09-17T00:00:00Z")
+    store.flush()
+    old_bytes = ledger.read_bytes()
+    # The compaction lands after a reader took its bytes.
+    ledger_store.write_snapshot(ledger, state, store.sequence)
+    stale = json.loads(old_bytes.decode())
+    assert ledger_store.apply_journal(ledger, stale, old_bytes)["spent_usd"] == "1"
+    fresh_bytes = ledger.read_bytes()
+    assert ledger_store.apply_journal(
+        ledger, json.loads(fresh_bytes.decode()), fresh_bytes
+    )["spent_usd"] == "1"

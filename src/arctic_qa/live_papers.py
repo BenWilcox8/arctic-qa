@@ -156,7 +156,7 @@ def read_shared_ledger(path: Path) -> dict[str, Any]:
     # The file is the compacted snapshot of the parallel bookkeeping store,
     # and the journal beside it holds everything committed since. Read
     # "Parallel bookkeeping" in docs/SHARED_MODEL_BROKER.md.
-    value = ledger_store.apply_journal(path, value)
+    value = ledger_store.apply_journal(path, value, raw)
     if not isinstance(value, dict) or value.get("schema") != LEDGER_SCHEMA:
         raise ValueError("the shared paid-call ledger schema is invalid")
     if not isinstance(value.get("requests"), dict):

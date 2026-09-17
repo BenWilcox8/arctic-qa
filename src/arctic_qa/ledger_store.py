@@ -308,7 +308,9 @@ def _complete_bytes(data: bytes) -> tuple[bytes, int]:
     return data[: end + 1], end + 1
 
 
-def apply_journal(ledger_file: Path, snapshot: dict[str, Any]) -> dict[str, Any]:
+def apply_journal(
+    ledger_file: Path, snapshot: dict[str, Any], snapshot_bytes: bytes | None = None
+) -> dict[str, Any]:
     """Apply the journal to a snapshot a reader already has in hand.
 
     A reader that took its own bytes of the snapshot file uses this, so the
@@ -316,7 +318,9 @@ def apply_journal(ledger_file: Path, snapshot: dict[str, Any]) -> dict[str, Any]
     state.
     """
     ledger_file = Path(ledger_file)
-    applied_seq = snapshot_applied_seq(ledger_file)
+    if snapshot_bytes is None:
+        raise ValueError("apply_journal needs the bytes the snapshot was read from")
+    applied_seq = snapshot_applied_seq(ledger_file, snapshot_bytes)
     path = journal_file(ledger_file)
     if not path.is_file():
         return snapshot
@@ -339,45 +343,63 @@ def read_ledger(ledger_file: Path) -> dict[str, Any]:
     return state
 
 
-def snapshot_applied_seq(ledger_file: Path) -> int:
+def snapshot_applied_seq(ledger_file: Path, data: bytes | None = None) -> int:
     """Say which journal records the snapshot on disk already holds.
 
     The base record binds the snapshot by its hash. A snapshot that matches
     neither the base record nor the one it superseded was changed outside the
     store, which is an integrity failure: replaying the journal over it would
     quietly repair whatever a hand edit did to a field no record names.
+
+    ``data`` is the bytes a reader already took from the file. The binding is
+    of those bytes, never of a second read of the file: a compaction between
+    the two reads would bind the old bytes to the new record and skip the
+    records between them. Found by the adversarial audit of 2026-09-17.
     """
     base_path = journal_base_file(ledger_file)
     journal = journal_file(ledger_file)
     has_journal = journal.is_file() and journal.stat().st_size > 0
-    if not base_path.is_file():
-        if has_journal:
-            raise ValueError("the shared paid-call ledger journal has no base record")
-        return 0
-    base = _read_json(base_path)
-    if (
-        not isinstance(base, dict)
-        or base.get("schema") != JOURNAL_BASE_SCHEMA
-        or not isinstance(base.get("applied_seq"), int)
-    ):
-        raise ValueError("the shared paid-call ledger base record is invalid")
-    digest = sha256_file(ledger_file)
-    if digest == base.get("snapshot_sha256"):
-        return int(base["applied_seq"])
-    superseded = base.get("supersedes")
-    if isinstance(superseded, dict) and digest == superseded.get("snapshot_sha256"):
-        # The base record is written before the snapshot it names, so a stop
-        # between the two leaves the snapshot it superseded. That one is
-        # bound too, and the records after it replay onto it.
-        return int(superseded["applied_seq"])
+    digest = sha256_bytes(data) if data is not None else sha256_file(ledger_file)
+    for attempt in range(2):
+        if not base_path.is_file():
+            if has_journal:
+                raise ValueError(
+                    "the shared paid-call ledger journal has no base record"
+                )
+            return 0
+        base = _read_json(base_path)
+        if (
+            not isinstance(base, dict)
+            or base.get("schema") != JOURNAL_BASE_SCHEMA
+            or not isinstance(base.get("applied_seq"), int)
+        ):
+            raise ValueError("the shared paid-call ledger base record is invalid")
+        if digest == base.get("snapshot_sha256"):
+            return int(base["applied_seq"])
+        superseded = base.get("supersedes")
+        if isinstance(superseded, dict) and digest == superseded.get(
+            "snapshot_sha256"
+        ):
+            # The base record is written before the snapshot it names, so a
+            # stop between the two leaves the snapshot it superseded. That
+            # one is bound too, and the records after it replay onto it.
+            return int(superseded["applied_seq"])
+        if attempt == 0:
+            # A compactor may have written a newer base record since these
+            # bytes were read. The record it wrote names the bytes it
+            # superseded, so one more read of it settles the question.
+            time.sleep(0.05)
+            continue
     raise ValueError("the shared paid-call ledger snapshot changed outside the store")
 
 
 def materialize(ledger_file: Path) -> tuple[dict[str, Any], int, int]:
-    state = _read_json(ledger_file)
+    with Path(ledger_file).open("rb") as handle:
+        data = handle.read()
+    state = json.loads(data.decode())
     if not isinstance(state, dict):
         raise ValueError("the shared paid-call ledger snapshot is invalid")
-    applied_seq = snapshot_applied_seq(ledger_file)
+    applied_seq = snapshot_applied_seq(ledger_file, data)
     path = journal_file(ledger_file)
     if not path.is_file():
         return state, applied_seq, 0
@@ -609,8 +631,17 @@ class LedgerStore:
         handle = self._handle
         if handle is None:
             return
-        want = self._offset if target is None else target
+        # The target is this process's own last write, never the read offset:
+        # ``read`` moves the read offset past the records another process
+        # appended, and a flush of those is that process's own duty. A wait
+        # for the read offset could only end when a peer of this process
+        # committed, and in a process with one admission it never ended.
+        # Found by the adversarial audit of 2026-09-17 before it hung a live
+        # evaluator.
         with self._durability:
+            want = self._written_offset if target is None else min(
+                target, self._written_offset
+            )
             while self._durable_offset < want:
                 if self._flushing:
                     self._durability.wait()
