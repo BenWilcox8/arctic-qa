@@ -223,29 +223,43 @@ throughput claim is not.
 
 The captain's order stops generation at 13:45 UTC. After that the producer
 makes no paid call, and a producer-idle window costs nothing. Take twenty
-minutes of it and compare against `before-09314ae.txt`, which is the only
-window with the old code:
+minutes of it, 14:00 to 14:20 UTC, and compare against `before-09314ae.txt`,
+which is the only window this task has with the old code.
+
+The commands are ready to run. `journalctl --since` takes local time, which is
+UTC-5 on this machine, and the ledger takes UTC, which is why the two differ:
 
 ```
-cd <the arctic-qa worktree>
-nix develop -c python research/arctic-eval-ledger-section-r1/measure-locks.py \
-  "<HH:MM local start>" "<HH:MM local end>" 1.0
+R=/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-eval-authorization-r8
+L=/mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json
+cd $R/runtime/app-88d2384-arctic-eval-authorization-r8
+
+# 1. The control. It must report no away_production row in the window.
 nix develop -c env PYTHONPATH=src python \
-  research/arctic-eval-ledger-section-r1/measure-gemini-calls.py \
-  /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
-  <START>Z <END>Z
+  research/arctic-eval-ledger-section-r1/measure-phase-rate.py "$L" \
+  2026-09-17T14:00:00Z 2026-09-17T14:20:00Z
+
+# 2. The paid Gemini calls of the window, which is the arm's rate.
 nix develop -c env PYTHONPATH=src python \
-  research/arctic-eval-ledger-section-r1/measure-phase-rate.py \
-  /mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json \
-  <START>Z <END>Z
+  research/arctic-eval-ledger-section-r1/measure-gemini-calls.py "$L" \
+  2026-09-17T14:00:00Z 2026-09-17T14:20:00Z
+
+# 3. The exclusive sections, at the 1.0 s threshold the old unit logged at.
+nix develop -c python \
+  research/arctic-eval-ledger-section-r1/measure-locks.py "09:00:00" "09:20:00" 1.0
 ```
 
-`journalctl --since` takes local time and the ledger takes UTC, which is why
-the two differ above. The third command is the control: it must report no
-`away_production` row in the window, and the before window's 6.65 a minute is
-what the old reading carried. The hold per paid call is the total held of the
-first command over the call count of the second, at the same 1.0 s threshold
-the old unit logged at.
+The hold per paid call is the `held` total of command 3 over the call count of
+command 2. The before reading is 264.0 s over 25 calls, which is 10.56 s, and
+it carried a producer at 6.65 paid calls a minute; command 1 says whether the
+new window carries one at all. Only if command 1 reports nothing for
+`away_production` is the pair worth comparing, and even then the two windows
+differ in the size of the ledger, which grew from 14,298 rows at 11:05 UTC to
+15,786 at 13:14 UTC.
+
+A snapshot without this task's code is not available to run again, so the
+comparison stays one-sided: it can show what the arm does now, and it cannot
+attribute the difference to the code alone.
 
 ## What the night cost the arm, and what it did not
 
