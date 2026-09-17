@@ -200,12 +200,78 @@ the relaunch at 50.
 
 ### What the fifty-thread window after the fall back can and cannot say
 
-The window from 10:20 to 10:40 UTC ran with the evaluator down, because an
-unrelated ambiguous charge had halted the evaluation phase at 10:03:34 UTC. Its
-lock numbers are therefore producer-only and are not comparable with the two rows
-above. Its value is the fault and paper counts.
+The first attempt at a window after the fall back, 10:20 to 10:40 UTC, is
+worthless: the evaluator was down on a halt for the first half of it and the
+ledger halted for the second. The measured window at 50 with both callers up is
+the one recorded below, 10:44 to 11:04 UTC.
 
 FIFTY_WINDOW
+
+## 6. Three halts, and the rule that answers them
+
+The night was interrupted three times by one class of stop: an ambiguous charge,
+a paid call whose cost the broker cannot prove. The reviewed release of one takes
+a person about ten minutes to write, and the caller is down for all of it.
+
+| time (UTC) | charge | phase | what it stopped |
+| --- | --- | --- | --- |
+| 10:03:34 | `2fe6757b`, an interrupted orphan | evaluation | the evaluator, until 10:39 |
+| 10:23:02 | `4be16d5d`, an HTTP 503 | construction | the producer, until 10:29 |
+| 10:30:48 | an integrity halt, not an ambiguous charge | both | the producer, until 10:35 |
+
+### The interrupted orphan, and the case that did not exist
+
+The first was not a provider error. The evaluator was cut over from snapshot
+`82612f5` to `c6f1767` while a Gemini call was on the wire. Orphan recovery found
+neither a final nor a received receipt and wrote the receipt itself, with the
+error `interrupted request has no durable provider response`.
+
+The reviewed release admitted three bounded cases: an HTTP 5xx answer, a received
+response cut off at `MAX_TOKENS`, and a provider timeout. This was a fourth. The
+fourth case now admits exactly that receipt, retains the full reservation as
+charged, and never settles, retries or replays it.
+
+The same cut-over rewrote the derived per-item evaluation gate seven seconds after
+the call was submitted, so the digest the ledger row binds no longer exists on
+disk. Reconstructing those bytes and proving them by the recorded digest would
+have been evidence rather than forgery, and it was tried over every second of a
+25-minute window with and without a trailing newline; nothing matched. For the
+interrupted-orphan case alone the release may now prove a later authorized
+successor of the same gate instead, and record both digests. The ledger row is
+never edited.
+
+### The deadlock between two phases
+
+The release also required that every other outstanding ambiguous charge already be
+in reviewed custody, and that check never read a phase. When the construction 503
+arrived at 10:23 the two charges blocked each other: neither could be released
+while the other had no continuation event, so neither halt could ever lift. Both
+callers were down.
+
+The check now reads the phase whose halt the release lifts, which is what the
+phase-scoped halt already intended. The safety property is unchanged: a phase's
+halt lifts only when every ambiguous charge of that phase is in reviewed custody.
+
+### A new event schema stops every older reader
+
+The interrupted-orphan release writes a continuation event of a schema only the
+new code reads. The producer was still running the previous snapshot, refused the
+event and recorded an integrity halt on the shared ledger at 10:30:48 UTC, which
+stopped it. The halt was superseded once the ledger validated under the code that
+knows the schema, and both callers were moved to that code.
+
+A new receipt schema on a shared ledger is a cut-over of every reader, not a
+change to one writer. Write the reader first, ship it everywhere, then write the
+record.
+
+### The rule: one unknown charge stops nobody
+
+For every bounded ambiguous case the broker now writes the same release record the
+reviewed release writes, keeps the whole reservation, and continues. The bound is
+five automatic releases per phase per hour; beyond it the charge halts its phase
+exactly as before, because a run that books unknown charges faster than that has a
+fault an operator must read. A construction charge never spends the evaluation
+phase's bound, and no other money rule moves.
 
 ## 5. Stopping generation at 13:45 UTC
 
