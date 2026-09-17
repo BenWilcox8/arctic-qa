@@ -11,6 +11,7 @@ from typing import Any
 
 from . import __version__
 from . import abstention_cli
+from . import concurrency_repair
 from .access_readiness import run_access_readiness, supervise_access_readiness
 from .broker_provider import BrokerProvider
 from .corpus_viewer import serve_corpus_viewer
@@ -524,6 +525,27 @@ def parser() -> argparse.ArgumentParser:
         help="Write the labels. Without it the command prints and writes nothing.",
     )
     label.add_argument("--output-file", type=Path)
+
+    repair = commands.add_parser(
+        "repair-concurrency-faults",
+        help="Clear the papers one broker operation-lock refusal hurt, and "
+        "fill the completion dates their labels lack.",
+    )
+    repair.add_argument("--run-id", required=True)
+    repair.add_argument("--campaign-id", required=True)
+    repair.add_argument(
+        "--action",
+        required=True,
+        choices=("clear-busy-faults", "backfill-completion-dates", "both"),
+    )
+    repair.add_argument("--shared-ledger-file", type=Path)
+    repair.add_argument("--streaming-progress-file", type=Path)
+    repair.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write the repair. Without it the command prints and writes nothing.",
+    )
+    repair.add_argument("--output-file", type=Path)
 
     abstention_cli.add_parser(commands)
 
@@ -1603,6 +1625,56 @@ def _label_completed_papers(args, paths: DataPaths, db: Database) -> dict[str, A
         args.output_file.write_text(canonical_json(report), encoding="utf-8")
         report = {**report, "output_file": str(args.output_file)}
     return {key: value for key, value in report.items() if key != "papers"}
+
+
+def _repair_concurrency_faults(args, paths: DataPaths, db: Database) -> dict[str, Any]:
+    """Repair the papers the exclusive operation lock refused, and their dates.
+
+    The command reads and writes stored state only: it makes no provider call,
+    reads no receipt and alters nothing in the shared ledger. The ledger is
+    opened read-only, for the completion time of a paper family.
+    """
+    report: dict[str, Any] = {
+        "run_id": args.run_id,
+        "campaign_id": args.campaign_id,
+        "state_database": str(paths.database),
+    }
+    if args.action in {"clear-busy-faults", "both"}:
+        report["clear_busy_faults"] = concurrency_repair.clear_busy_faults(
+            db,
+            run_id=args.run_id,
+            campaign_id=args.campaign_id,
+            apply=args.apply,
+        )
+    if args.action in {"backfill-completion-dates", "both"}:
+        report["backfill_completion_dates"] = (
+            concurrency_repair.backfill_completion_dates(
+                db,
+                run_id=args.run_id,
+                campaign_id=args.campaign_id,
+                ledger_file=(
+                    args.shared_ledger_file.resolve()
+                    if args.shared_ledger_file
+                    else None
+                ),
+                apply=args.apply,
+            )
+        )
+        if args.streaming_progress_file:
+            report["backfill_progress_dates"] = (
+                concurrency_repair.backfill_progress_dates(
+                    args.streaming_progress_file.resolve(),
+                    completion_times=concurrency_repair.progress_times_by_paper(
+                        db, run_id=args.run_id
+                    ),
+                    apply=args.apply,
+                )
+            )
+    if args.output_file:
+        args.output_file.parent.mkdir(parents=True, exist_ok=True)
+        args.output_file.write_text(canonical_json(report), encoding="utf-8")
+        report = {**report, "output_file": str(args.output_file)}
+    return report
 
 
 def _smoke(args, paths: DataPaths, db: Database) -> dict[str, Any]:

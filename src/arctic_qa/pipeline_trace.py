@@ -592,6 +592,30 @@ class PipelineTraceStore:
     def _inside_namespace(self, path: Path) -> bool:
         return path == self.namespace or self.namespace in path.parents
 
+    @staticmethod
+    def _completion_times(connection: sqlite3.Connection) -> dict[str, str]:
+        """Return when each labelled paper finished, by paper family.
+
+        The completion label is the run's own durable record of a finished
+        paper, so it answers the paper's completion time long after the
+        progress window has moved past it. An older database has no such column
+        and answers nothing, which is the behaviour before the label carried a
+        time.
+        """
+        columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(paper_completions)")
+        }
+        if "completed_at_utc" not in columns:
+            return {}
+        times: dict[str, str] = {}
+        for row in connection.execute(
+            """SELECT paper_family_id,completed_at_utc FROM paper_completions
+            WHERE completed_at_utc IS NOT NULL ORDER BY completed_at_utc"""
+        ):
+            times[str(row["paper_family_id"])] = str(row["completed_at_utc"])
+        return times
+
     def _connect(self) -> sqlite3.Connection:
         if not self.db_file.is_file():
             raise FileNotFoundError("pipeline state database is unavailable")
@@ -603,8 +627,10 @@ class PipelineTraceStore:
         self, eligibility_jobs: list[tuple[Path, dict[str, Any]]]
     ) -> dict[str, dict[str, Any]]:
         groups: dict[str, dict[str, Any]] = {}
+        completion_times: dict[str, str] = {}
         with self._connect() as connection:
             sources = [dict(row) for row in connection.execute("SELECT * FROM sources")]
+            completion_times = self._completion_times(connection)
             candidates = [
                 dict(row)
                 for row in connection.execute(
@@ -721,17 +747,21 @@ class PipelineTraceStore:
                     eligibility_jobs,
                 ),
             )
-            state_entered_at_utc = self._state_entered_at(
-                state,
-                relevant_candidates,
-                family_receipts,
-                {
-                    str(item.get("request_key"))
-                    for item in family_receipts
-                    if item.get("request_key")
-                },
-                {str(value) for value in (*receipt_ids, *source_ids) if value},
-                eligibility_jobs,
+            completed_at_utc = completion_times.get(family_id)
+            state_entered_at_utc = (
+                self._state_entered_at(
+                    state,
+                    relevant_candidates,
+                    family_receipts,
+                    {
+                        str(item.get("request_key"))
+                        for item in family_receipts
+                        if item.get("request_key")
+                    },
+                    {str(value) for value in (*receipt_ids, *source_ids) if value},
+                    eligibility_jobs,
+                )
+                or completed_at_utc
             )
             title = source.get("title")
             if not title:
@@ -770,6 +800,7 @@ class PipelineTraceStore:
                 "finding_attempt_count": len(finding_ids),
                 "latest_at_utc": max(latest_values, default=None),
                 "state_entered_at_utc": state_entered_at_utc,
+                "completed_at_utc": completed_at_utc,
                 "receipts": family_receipts,
                 "candidate_rows": relevant_candidates,
                 "finding_rows": relevant_findings,
@@ -789,14 +820,19 @@ class PipelineTraceStore:
                     "invocation_run_id": progress.get("invocation_run_id"),
                 }
                 projection = self._progress_projection(progress_row)
-                if projection["state"] != record["state"]:
-                    projection["state_entered_at_utc"] = progress_row.get(
-                        "state_changed_at_utc"
-                    )
-                elif progress_row.get("state_changed_at_utc"):
+                # The progress row answers the time of the state it names. A
+                # row that retains no time leaves the time already computed in
+                # place: overwriting it with nothing printed "Unknown" for
+                # every paper of the progress window (captain report,
+                # 2026-09-17).
+                if progress_row.get("state_changed_at_utc"):
                     projection["state_entered_at_utc"] = progress_row[
                         "state_changed_at_utc"
                     ]
+                elif projection["state"] != record["state"]:
+                    projection["state_entered_at_utc"] = (
+                        record["state_entered_at_utc"] or completed_at_utc
+                    )
                 record.update(projection)
             groups[key] = record
         return groups
@@ -899,7 +935,8 @@ class PipelineTraceStore:
                 candidate_ids,
                 eligibility_jobs,
                 run_id=run_id,
-            ),
+            )
+            or record.get("completed_at_utc"),
             "receipts": receipts,
             "candidate_rows": candidates,
             "finding_rows": findings,
@@ -913,14 +950,16 @@ class PipelineTraceStore:
             projection = self._progress_projection(progress)
             if projected["state"] != "machine_accepted_unverified":
                 if projection["state"] != "machine_accepted_unverified":
-                    if projection["state"] != projected["state"]:
-                        projection["state_entered_at_utc"] = progress.get(
-                            "state_changed_at_utc"
-                        )
-                    elif progress.get("state_changed_at_utc"):
+                    # A progress row with no time of its own keeps the time the
+                    # receipts and the completion label already answered.
+                    if progress.get("state_changed_at_utc"):
                         projection["state_entered_at_utc"] = progress[
                             "state_changed_at_utc"
                         ]
+                    elif projection["state"] != projected["state"]:
+                        projection["state_entered_at_utc"] = projected[
+                            "state_entered_at_utc"
+                        ] or record.get("completed_at_utc")
                     projected.update(projection)
             else:
                 projected.pop("final_reason", None)
@@ -1952,6 +1991,7 @@ class PipelineTraceStore:
                 "finding_attempt_count",
                 "latest_at_utc",
                 "state_entered_at_utc",
+                "completed_at_utc",
                 "final_reason",
                 "reason",
             )
