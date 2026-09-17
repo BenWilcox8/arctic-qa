@@ -93,9 +93,10 @@ GATE_FILENAME_BY_VENDOR = {vendor: f"{vendor}.json" for vendor in VENDOR_NAMES}
 #
 # The evaluation policy forbids a retry of a call the provider answered. It
 # says nothing about a call the provider never saw, and treating the two alike
-# is what stranded 73 of the 155 closed questions of the streaming-r11 work
-# directory: the busy lock closed each question with its Gemini trials
-# unrecorded and the journal still called the question complete.
+# is what stranded the closed questions of the streaming-r11 work directory:
+# the busy lock closed each one with its Gemini trials unrecorded and the
+# journal still called the question complete. The settled count is in
+# research/arctic-eval-busy-strand-r1/report.md.
 PRE_PROVIDER_REFUSALS = (BrokerOperationBusyError, HarnessUnavailableError)
 # The bounded wait inside the trial. The broker's own queue for the exclusive
 # lock is already minutes long, so these rounds are the last word before the

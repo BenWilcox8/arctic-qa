@@ -411,9 +411,10 @@ def cost_row(
     wait, or a harness binary could not be started. Such a trial reserved
     nothing, submitted nothing and charged nothing, so it is owed exactly as a
     paused model's trial is owed, and a row that holds one is not complete.
-    Without this field the busy lock closed 73 of the 155 closed questions of
-    the streaming-r11 work directory short of their 48 trials, and the journal
-    called every one of them complete.
+    Without this field the busy lock closed question after question of the
+    streaming-r11 work directory short of their 48 trials, and the journal
+    called every one of them complete. The settled count is in
+    ``research/arctic-eval-busy-strand-r1/report.md``.
     """
     all_rows = [row for rows in rows_by_vendor.values() for row in rows]
     gemini = gemini_evaluation_cost(ledger, run_id=run_id, item_id=item["item_id"])
