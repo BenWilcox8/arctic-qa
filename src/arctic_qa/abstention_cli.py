@@ -658,11 +658,7 @@ def _watch(args: argparse.Namespace) -> dict[str, Any]:
         work_dir=args.work_dir,
         shared_ledger_file=args.shared_ledger_file,
         broker_factory=(
-            (
-                lambda gate: _broker(
-                    args, evaluation_gate_file=gate, concurrent=True
-                )
-            )
+            (lambda gate: _broker(args, evaluation_gate_file=gate, concurrent=True))
             if needs_broker
             else None
         ),
@@ -878,11 +874,7 @@ def _run_plan(args: argparse.Namespace) -> dict[str, Any]:
         evaluation_policy_file=args.evaluation_policy_file,
         subscription_models_file=args.subscription_models_file.resolve(),
         broker_factory=(
-            (
-                lambda gate: _broker(
-                    args, evaluation_gate_file=gate, concurrent=True
-                )
-            )
+            (lambda gate: _broker(args, evaluation_gate_file=gate, concurrent=True))
             if needs_broker
             else None
         ),
