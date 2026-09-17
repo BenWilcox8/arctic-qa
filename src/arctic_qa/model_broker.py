@@ -1586,6 +1586,8 @@ class SharedGeminiBroker:
         # A set is what the store reported moved, which is the same tracking
         # the money proof of the delta already trusts.
         self._immutable_events_pending: set[str] | None = None
+        # The accepted-item map that was proved against the immutable events.
+        self._accepted_events_proved: dict[str, str] | None = None
         self._receipt_listing: tuple[tuple[int, int], list[str], float] | None = None
         # Everything derived from one receipts listing, thrown away with it.
         self._receipt_derived: dict[Any, Any] = {}
@@ -3494,14 +3496,33 @@ class SharedGeminiBroker:
         ):
             raise ValueError("the applied price configuration transition changed")
 
-    def _accepted_item_events(self) -> dict[str, str]:
-        """The accepted item of each family, from the immutable events alone.
+    def _validate_accepted_item_events(self, ledger: dict[str, Any]) -> None:
+        """Prove the accepted-item ledger against the immutable events.
 
         Every accepted-item receipt is read and every supersession chain is
-        walked, which is 96 file reads and their hashes on the live ledger.
-        The receipts are immutable, so the answer is a pure function of the
-        listing and is derived once per listing, not once per ledger read.
+        walked, which is 96 file reads and their hashes on the live ledger, so
+        the answer is derived only when the ledger's own accepted map differs
+        from the one that was proved. A family is accepted a few times an hour
+        and the map is what the proof compares, so nothing is skipped.
+
+        The derivation lists the receipts directory again first. The receipt
+        of an accepted family and its ledger row move together, and a listing
+        that is a few seconds old does not hold the receipt yet: caching the
+        answer against the listing alone raised a false integrity halt at
+        07:40:51 UTC on 2026-09-17 and stopped the chapter 3 producer.
         """
+        accepted = ledger["accepted_families"]
+        if getattr(self, "_accepted_events_proved", None) == accepted:
+            return
+        if self._accepted_item_events() != accepted:
+            raise ValueError("the accepted-item ledger differs from immutable events")
+        self._accepted_events_proved = dict(accepted)
+
+    def _accepted_item_events(self) -> dict[str, str]:
+        """The accepted item of each family, from the immutable events alone."""
+        # The listing is taken again, so a receipt this process wrote a moment
+        # ago is in it whatever the refresh timer says.
+        self._receipt_listing = None
 
         def build() -> dict[str, str]:
             accepted_roots: dict[str, tuple[str, Path]] = {}
@@ -3749,6 +3770,7 @@ class SharedGeminiBroker:
             # same full pass, within IMMUTABLE_EVENT_REVALIDATION_SECONDS.
             self._custody_proved = set()
             self._receipt_listing = None
+            self._accepted_events_proved = None
         proved = self._immutable_events_proved
         requests = ledger["requests"]
         # Which rows owe the proof. A signature of each of the 8,230 rows cost
@@ -3806,8 +3828,7 @@ class SharedGeminiBroker:
         self._ambiguous_continuation_events(ledger)
         self._orphaned_continuation_events(ledger)
 
-        if self._accepted_item_events() != ledger["accepted_families"]:
-            raise ValueError("the accepted-item ledger differs from immutable events")
+        self._validate_accepted_item_events(ledger)
 
     def _http_rejection_settlement_valid(
         self, path: Path, request: dict[str, Any], final: dict[str, Any]

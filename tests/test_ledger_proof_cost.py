@@ -192,6 +192,37 @@ def test_a_receipt_absent_from_the_ledger_is_still_caught(tmp_path: Path) -> Non
         broker._validated_ledger()
 
 
+def test_an_accepted_item_is_proved_against_the_receipt_it_just_wrote(
+    tmp_path: Path,
+) -> None:
+    """A receipt and its ledger row move together, so a stale listing is not a proof.
+
+    The accepted-item answer was derived once per listing. A concurrent broker
+    re-lists on a timer, so for a few seconds the listing did not hold the
+    receipt the ledger row named, and the next read raised "the accepted-item
+    ledger differs from immutable events". That false halt stopped the chapter
+    3 producer at 07:40:51 UTC on 2026-09-17.
+    """
+    values = _concurrent(tmp_path)
+    broker = values["broker"]
+    execute(broker, paper="p1")
+    broker._validated_ledger()
+    broker.record_accepted(family_id="family-p1", item_id="item-1")
+    # No wait for the refresh timer: the read that follows the write proves it.
+    broker._validated_ledger()
+    assert broker.status()["integrity_valid"] is True
+    ledger = ledger_store.read_ledger(broker.ledger_file)
+    assert ledger["accepted_families"] == {"family-p1": "item-1"}
+    # A receipt taken away behind this process's back is caught by the full
+    # pass, which is the bound the custody of a terminal receipt already has.
+    for path in broker.receipts_dir.glob("accepted-*.json"):
+        path.chmod(0o600)
+        path.unlink()
+    broker._immutable_events_proved_at = None
+    with pytest.raises(ValueError, match="integrity"):
+        broker._validated_ledger()
+
+
 def test_one_paid_call_takes_three_exclusive_sections(tmp_path: Path) -> None:
     """The mutations are inside the lock and the free count is outside it.
 

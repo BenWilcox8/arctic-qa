@@ -603,8 +603,16 @@ Four rules now keep a warm read at about 12 ms.
   `scandir` part of nearly every read. A sequential broker, which is every
   reviewed operation, keeps the exact fingerprint.
 - Everything derived from one listing is derived once (`_listing_derived`):
-  the name filters, the request key of every paid-call receipt, and the
-  accepted item of each family with its supersession chains.
+  the name filters and the request key of every paid-call receipt. Both are
+  safe to read from a listing a few seconds old, because a receipt this process
+  wrote belongs to a row it has already registered.
+- The accepted-item proof is **not** one of them. The receipt of an accepted
+  family and its ledger row move together, so a listing a few seconds old does
+  not hold the receipt the row names; caching that answer against the listing
+  raised a false integrity halt at 07:40:51 UTC on 2026-09-17 and stopped the
+  chapter 3 producer. It is derived, against a listing taken again, whenever
+  the ledger's accepted map differs from the map that was proved, which is a
+  few times an hour.
 - No pattern walk of the directory is on the call path. A glob for one usage
   reconciliation receipt cost 44 ms of every read that proved it.
 - A row is proved again only when the store reports it moved, which is the
