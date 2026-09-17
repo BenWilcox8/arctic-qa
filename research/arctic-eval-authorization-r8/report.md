@@ -84,6 +84,11 @@ The cost guard reports an evaluator whose watch state is absent or has not moved
 It reports the change of state and not the state, so a long stop adds one line and not one per cycle.
 This half catches a stop of any kind: a crash, a halt of the shared ledger, or an operator who stopped the unit and forgot it.
 
+The guard reads `watch-state.json`, and the evaluator wrote that file only at the end of a whole poll cycle.
+One cycle covers every pending item, so at sixteen pending items it runs for about an hour, and the guard's bound is 900 seconds.
+A guard that read the old behaviour would have called a healthy evaluator stopped, every hour.
+The evaluator now publishes after every item as well, so the file moves while the cycle runs and the two halves agree.
+
 ## 5. The 12 items of `streaming-r10`
 
 The cutover copies `cost-journal.jsonl` forward, so no question is evaluated or paid for twice, and `remaining_bound` subtracts the 12 carried rows from the bound of 2000.
