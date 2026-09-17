@@ -44,6 +44,7 @@ from test_model_broker import (  # noqa: E402
     policy_with_limits,
     reviewed_policy_transition,
     write_json,
+    rewrite_ledger,
 )
 
 
@@ -405,7 +406,7 @@ def test_an_applied_transition_survives_a_phase_less_evaluation_row(
     assert str(row["stage"]).startswith("evaluation_")
     # Make the historical shape the old writer left, and read it again.
     del row["phase"]
-    values["ledger"].write_text(json.dumps(ledger), encoding="utf-8")
+    rewrite_ledger(values["ledger"], ledger)
 
     restarted = _construction_broker(
         values, tmp_path, values["policy"], values["transition"]

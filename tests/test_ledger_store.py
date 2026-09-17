@@ -343,3 +343,35 @@ def test_a_migrated_ledger_keeps_taking_paid_calls(tmp_path: Path) -> None:
     state = _state(values)
     assert len(state["requests"]) == 2
     assert Decimal(state["spent_usd"]) > spent_before
+
+
+# -- the sixteen-at-once rate pair -------------------------------------------
+
+
+def test_the_parallel_rate_pair_is_registered_and_nothing_between_it(
+    tmp_path: Path,
+) -> None:
+    """Policy v12 moves the two request-rate limits together and nothing else."""
+    from arctic_qa import model_broker
+
+    assert (16, 100) in model_broker.ALLOWED_REQUEST_RATES
+    assert model_broker.CHAPTER3_PARALLEL_CHANGE in model_broker.POLICY_TRANSITION_CHANGES
+    assert model_broker.CHAPTER3_PARALLEL_CHANGE == {
+        "maximum_concurrent_generation_requests": {"from": 8, "to": 16},
+        "maximum_generation_requests_per_minute": {"from": 40, "to": 100},
+    }
+    source = ROOT / "config" / "streaming-dataset-budget-policy-v1.json"
+    base = json.loads(source.read_text(encoding="utf-8"))
+    accepted = dict(base)
+    accepted["maximum_concurrent_generation_requests"] = 16
+    accepted["maximum_generation_requests_per_minute"] = 100
+    path = tmp_path / "v12.json"
+    write_json(path, accepted)
+    model_broker._validate_policy(path)
+    for slots, per_minute in ((16, 40), (8, 100), (12, 100), (16, 60)):
+        refused = dict(base)
+        refused["maximum_concurrent_generation_requests"] = slots
+        refused["maximum_generation_requests_per_minute"] = per_minute
+        write_json(path, refused)
+        with pytest.raises(ValueError, match="streaming budget value changed"):
+            model_broker._validate_policy(path)

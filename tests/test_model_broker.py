@@ -22,6 +22,7 @@ from arctic_qa.model_broker import (
 )
 from arctic_qa.providers import GeminiProvider, ProviderError, make_provider
 from arctic_qa.util import canonical_json, sha256_bytes, sha256_file
+from arctic_qa import ledger_store  # noqa: E402
 
 
 ROOT = Path(__file__).parents[1]
@@ -30,6 +31,19 @@ ROOT = Path(__file__).parents[1]
 def write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
+
+
+def rewrite_ledger(path: Path, value: object) -> None:
+    """Put an edited ledger on disk as the store's bound snapshot.
+
+    A test that hands the broker a historical or a tampered ledger writes the
+    snapshot and its base record together, exactly as a compaction does. A
+    plain write of the file is refused as a snapshot changed outside the
+    store, which `tests/test_ledger_store.py` covers on its own.
+    """
+    ledger_store.write_snapshot(
+        Path(path), value, ledger_store.snapshot_applied_seq(Path(path))
+    )
 
 
 def payload() -> dict:
@@ -818,7 +832,7 @@ def test_inconsistent_ledger_totals_fail_closed_on_restart(tmp_path: Path):
     assert execute(values["broker"])["state"] == "completed"
     ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
     ledger["spent_usd"] = "0"
-    write_json(values["ledger"], ledger)
+    rewrite_ledger(values["ledger"], ledger)
     with pytest.raises(ValueError, match="spent_usd total is inconsistent"):
         fixture(tmp_path, transport=transport)
     assert (tmp_path / ".shared-ledger.json.integrity-halt.json").is_file()
@@ -836,7 +850,7 @@ def test_consistently_lowered_ledger_spend_conflicts_with_immutable_receipt(
     ledger["stages"]["eligibility"]["spent_usd"] = "0"
     ledger["papers"]["family-p1"]["spent_usd"] = "0"
     ledger["live_test_papers"]["family-p1"]["spent_usd"] = "0"
-    write_json(values["ledger"], ledger)
+    rewrite_ledger(values["ledger"], ledger)
     with pytest.raises(ValueError, match="immutable final event changed cost"):
         fixture(tmp_path, transport=Transport())
 
@@ -1449,7 +1463,7 @@ def test_deleted_request_cannot_orphan_immutable_spend_events(tmp_path: Path):
     ledger["generation_submissions"] = 0
     ledger["count_requests"] = 0
     ledger["recent_submission_times_utc"] = []
-    write_json(values["ledger"], ledger)
+    rewrite_ledger(values["ledger"], ledger)
     with pytest.raises(ValueError, match="immutable paid-call event"):
         fixture(tmp_path, transport=Transport())
 
@@ -2269,7 +2283,7 @@ def test_family_and_submission_extension_stops_new_forty_second_family(
         assert execute(broker, paper=f"p{position}")["state"] == "completed"
         ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
         ledger["recent_submission_times_utc"] = []
-        write_json(values["ledger"], ledger)
+        rewrite_ledger(values["ledger"], ledger)
 
     assert broker.status()["remaining"]["live_test_papers"] == 0
     transport.methods.clear()
@@ -2306,7 +2320,7 @@ def test_budget_bounded_transition_stops_at_cumulative_trial_amount(
         )
         ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
         ledger["recent_submission_times_utc"] = []
-        write_json(values["ledger"], ledger)
+        rewrite_ledger(values["ledger"], ledger)
 
     status = broker.status()
     assert Decimal(status["spent_usd"]) < Decimal("5.00")
@@ -2350,7 +2364,7 @@ def test_reviewed_ceiling_extension_resumes_one_not_submitted_request_and_restar
         )
         ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
         ledger["recent_submission_times_utc"] = []
-        write_json(values["ledger"], ledger)
+        rewrite_ledger(values["ledger"], ledger)
 
     transport.methods.clear()
     blocked = execute(broker, paper="p22", body=body)
@@ -2452,7 +2466,7 @@ def test_reviewed_ceiling_extension_resumes_one_not_submitted_request_and_restar
         )
         ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
         ledger["recent_submission_times_utc"] = []
-        write_json(values["ledger"], ledger)
+        rewrite_ledger(values["ledger"], ledger)
     assert Decimal(restarted.status()["spent_usd"]) < Decimal("10.00")
     assert Decimal(restarted.status()["live_test_remaining_usd"]) < Decimal("0.25")
     transport.methods.clear()
@@ -2659,7 +2673,7 @@ def test_reviewed_production_budget_transition_binds_new_run_and_cumulative_cap(
             break
         ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
         ledger["recent_submission_times_utc"] = []
-        write_json(values["ledger"], ledger)
+        rewrite_ledger(values["ledger"], ledger)
 
     assert blocked is not None
     assert blocked["reason"] == "the paid request exceeds the authorized away cap"
@@ -3089,7 +3103,7 @@ def test_family_and_submission_extension_stops_after_101_submissions(
         assert execute(broker, paper="p1", body=body)["state"] == "completed"
         ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
         ledger["recent_submission_times_utc"] = []
-        write_json(values["ledger"], ledger)
+        rewrite_ledger(values["ledger"], ledger)
 
     status = broker.status()
     assert status["generation_submissions"] == 101
@@ -3331,7 +3345,7 @@ def test_expanded_policy_stops_new_forty_first_family_but_allows_downstream(
         assert execute(broker, paper=f"p{position}")["state"] == "completed"
         ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
         ledger["recent_submission_times_utc"] = []
-        write_json(values["ledger"], ledger)
+        rewrite_ledger(values["ledger"], ledger)
 
     status = broker.status()
     assert status["usage"]["live_test_papers"] == 40
@@ -3550,7 +3564,7 @@ def test_phase_settlement_records_the_phase_of_a_free_refusal_and_lifts_the_halt
     request_key = "52c5da7533e8d24f36e24e73d718cfaa06d928d64fedf6f5cfeee99a9f745ca9"
     row = _phaseless_refusal_row(request_key, template)
     _bind_phaseless_refusal(ledger, request_key, row, tmp_path / "receipts")
-    write_json(ledger_file, ledger)
+    rewrite_ledger(ledger_file, ledger)
     # This was the fault: the refusal has no phase, and the transition check
     # read a row without one as a construction request. The reader now falls
     # back to the stage family, and the settlement below repairs the row
@@ -3653,7 +3667,7 @@ def test_phase_settlement_refuses_a_row_that_holds_money(
     request_key = "52c5da7533e8d24f36e24e73d718cfaa06d928d64fedf6f5cfeee99a9f745ca9"
     row = {**_phaseless_refusal_row(request_key, template), "reserved_usd": "0.02"}
     _bind_phaseless_refusal(ledger, request_key, row, tmp_path / "receipts")
-    write_json(ledger_file, ledger)
+    rewrite_ledger(ledger_file, ledger)
     reviewed = {
         key: row[key]
         for key in (

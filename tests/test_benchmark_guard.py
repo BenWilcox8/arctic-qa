@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from arctic_qa import ledger_store
 from arctic_qa.benchmark_guard import (
     CODEX_ATTRIBUTION_WINDOW_SECONDS,
     CODEX_WEEKLY_FLOOR_PERCENT,
@@ -817,7 +818,9 @@ def test_a_runaway_gemini_cost_pauses_the_costlier_gemini_model(
 ) -> None:
     ledger = json.loads(workspace["ledger"].read_text(encoding="utf-8"))
     ledger["requests"]["a"]["actual_cost_usd"] = "40.000000"
-    workspace["ledger"].write_text(json.dumps(ledger), encoding="utf-8")
+    ledger_store.write_snapshot(
+        workspace["ledger"], ledger, ledger_store.snapshot_applied_seq(workspace["ledger"])
+    )
     state = guard_for(workspace, RECORDED_QUOTA).cycle(now=NOW)
     assert [action["model"] for action in state["actions"]] == ["gemini-3.8-flash"]
     assert state["actions"][0]["rule"] == "gemini_extrapolated_over_budget"

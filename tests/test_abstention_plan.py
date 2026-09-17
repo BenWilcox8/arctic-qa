@@ -49,6 +49,7 @@ from arctic_qa.abstention_run import plan_trials
 from arctic_qa.cli import main as cli_main
 from arctic_qa.model_broker import SharedGeminiBroker
 from arctic_qa.util import atomic_json
+from arctic_qa import ledger_store  # noqa: E402
 from test_abstention_broker import LetterTransport, bind, evaluation_fixture, execute
 from test_abstention_run import frozen_set
 from test_model_broker import payload as construction_payload, write_json
@@ -798,7 +799,9 @@ def test_evaluation_admission_never_settles_another_live_run(tmp_path: Path) -> 
         "family_id": "family-x",
         "source_version_id": "source-x",
     }
-    write_json(values["ledger"], ledger)
+    ledger_store.write_snapshot(
+        values["ledger"], ledger, ledger_store.snapshot_applied_seq(values["ledger"])
+    )
     receipts = tmp_path / "receipts"
     write_json(
         receipts / f"{key}.received.json",

@@ -409,6 +409,11 @@ class LedgerStore:
         self._seq = 0
         self._offset = 0
         self._journal_identity: tuple[int, int] | None = None
+        # The snapshot file this view was loaded from. A compaction, a
+        # reviewed repair or a test rewrites the snapshot behind a live
+        # process, and the next read must see it, exactly as every read of
+        # the one-file ledger did.
+        self._snapshot_identity: tuple[int, int, int] | None = None
         self._handle: Any = None
         self._records_since_compaction = 0
         self._compacted_at = 0.0
@@ -440,11 +445,19 @@ class LedgerStore:
         self._seq = seq
         self._offset = offset
         self._journal_identity = self._identity()
+        self._snapshot_identity = self._snapshot_stat()
         self.reload_count += 1
         self._pending_full = True
         self._pending_requests = set()
         self._compacted_at = self._compacted_at or time.monotonic()
         return self._state
+
+    def _snapshot_stat(self) -> tuple[int, int, int] | None:
+        try:
+            stat = os.stat(self.ledger_file)
+        except FileNotFoundError:
+            return None
+        return (stat.st_ino, stat.st_size, stat.st_mtime_ns)
 
     def _identity(self) -> tuple[int, int] | None:
         try:
@@ -459,9 +472,13 @@ class LedgerStore:
         if state is None:
             return self.load()
         identity = self._identity()
-        if identity != self._journal_identity:
-            # The journal was rotated or created by another process. The
-            # snapshot it left is the cheapest truth.
+        if identity != self._journal_identity or self._snapshot_stat() != (
+            self._snapshot_identity
+        ):
+            # The journal was rotated or created by another process, or the
+            # snapshot was rewritten: by a compaction, which changes nothing,
+            # or by a reviewed repair, which must be seen. The snapshot and
+            # the journal together are the cheapest truth.
             return self.load()
         if identity is None:
             state.clear_dirty()

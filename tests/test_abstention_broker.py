@@ -30,6 +30,7 @@ from arctic_qa.model_broker import (
 )
 from arctic_qa.cli import main as cli_main
 from arctic_qa.util import canonical_json, sha256_bytes, sha256_file
+from arctic_qa import ledger_store  # noqa: E402
 from test_abstention_render import item
 from test_model_broker import Transport, payload, write_json
 
@@ -771,7 +772,9 @@ def test_reconciliation_settles_a_recorded_omitted_candidates_charge(
     stale["halt_reason"] = "ambiguous_generation_charge"
     stale["evaluation_halted"] = True
     stale["evaluation_halt_reason"] = "ambiguous_generation_charge"
-    write_json(values["ledger"], stale)
+    ledger_store.write_snapshot(
+        values["ledger"], stale, ledger_store.snapshot_applied_seq(values["ledger"])
+    )
     repeat = broker.reconcile_omitted_thought_usage(request_key)
     assert repeat["applied"] is False
     lifted = json.loads(values["ledger"].read_text())
