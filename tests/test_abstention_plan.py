@@ -1100,6 +1100,40 @@ def test_a_paused_model_holds_its_trials_and_runs_after_the_resume_time(
     assert resumed["outcomes_by_model"]["claude-fable-5-1"]["N1"] == 3
 
 
+def test_an_operator_stop_lands_at_a_trial_boundary(tmp_path: Path) -> None:
+    """A stop of the unit holds the rest of an item's trials, like a pause.
+
+    ``stop["now"]`` was read only between two whole items, so a SIGTERM could
+    not land inside one and systemd killed the evaluator at its 90-second stop
+    bound on 2026-09-17 at 07:25:55 UTC. The held trials stay pending, the item
+    is not complete, and a later invocation runs what is missing.
+    """
+    plan = load_plan(PLAN_FILE)
+    set_dir = frozen_set(tmp_path, count=1)
+    run = tmp_path / "stopped"
+    common = dict(
+        plan=plan,
+        set_dir=set_dir,
+        output_dir=run,
+        run_id="plan-stop",
+        evaluation_policy_file=POLICY_V2,
+        evaluation_price_config_file=PRICES,
+        subscription_models_file=MODELS_FILE,
+        policy="gold",
+        code_commit="test-commit",
+        **CONSTRUCTION,
+    )
+    stopped = dry_run_plan(**common, should_stop=lambda: True)
+    assert stopped["recorded_trials"] == 0, stopped["recorded_trials"]
+    assert stopped["planned_trials"] == 48
+    assert stopped["complete"] is False
+    assert stopped["invalid_count"] == 0
+    # Nothing was charged and nothing was recorded, so a later invocation runs
+    # every trial of the item.
+    resumed = dry_run_plan(**common)
+    assert resumed["recorded_trials"] == 48 and resumed["complete"] is True
+
+
 def _manifest(**changes) -> dict:
     base = {
         "schema": "abstention-eval-plan-run-v1",

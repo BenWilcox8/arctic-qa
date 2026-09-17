@@ -504,6 +504,21 @@ So `--status-file` takes the supervisor's status file, and the evaluator appends
 That third case does not end the run, because the subscription vendors go on, but it turns off the arm the USD allocation pays for.
 The cost guard of `docs/BENCHMARK_GUARD.md` watches the same stop from outside: it reports an evaluator whose watch state stopped moving.
 
+### Stopping the unit
+
+`SIGTERM` and `SIGINT` set the stop flag, which is read before every trial is
+dispatched. The trials it holds are held exactly as a paused model's are: not
+dispatched, not recorded, so the item is not complete and a later invocation
+runs what is missing. The calls already on the wire finish and are recorded.
+
+The bound of a stop is therefore one trial, not one item. Before 2026-09-17 the
+flag was read only between two whole items, which is minutes of trials, and
+systemd killed the unit at its 90-second stop bound at 07:25:55 UTC. The kill
+left one free `counting` row in the shared ledger: nothing reserved, submitted
+or charged, and the next start meets its own key and reuses it.
+
+Give the unit a `TimeoutStopSec` longer than one trial of the slowest vendor.
+
 ### Paused models
 
 A model can be paused without a stop of the run.

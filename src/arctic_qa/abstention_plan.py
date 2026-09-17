@@ -443,6 +443,7 @@ def run_vendor(
     progress: Callable[[dict[str, Any]], None] | None = None,
     serial: bool = False,
     paused: frozenset[str] = frozenset(),
+    should_stop: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Run or resume one vendor of a plan with N calls in flight.
 
@@ -453,6 +454,13 @@ def run_vendor(
 
     A trial of a paused model is not dispatched and not recorded, so it stays
     pending for a later invocation.
+
+    ``should_stop`` is the same door from outside: an operator stop of the
+    unit. Its trials are held exactly as a paused model's are, so the item is
+    not complete and a later invocation runs what is missing. Without it a
+    stop could only land between two whole items, which is minutes of trials,
+    and systemd killed the evaluator at its 90-second stop bound on
+    2026-09-17 at 07:25:55 UTC.
     """
     provider = vendor_run.provider
     prepared = prepare_run(
@@ -487,7 +495,7 @@ def run_vendor(
     started = time.monotonic()
 
     def work(trial: dict[str, Any]) -> None:
-        if stop.is_set():
+        if stop.is_set() or (should_stop is not None and should_stop()):
             return
         request = EvaluationRequest(
             trial=trial,
@@ -647,12 +655,15 @@ def run_plan(
     serial: bool = False,
     gate_dir: Path | None = None,
     pause: dict[str, Any] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Run or resume every vendor of a plan on one set, vendors in parallel.
 
     With ``serial`` the vendors run one after another with one call in
     flight each: the baseline of the wall-time comparison. ``pause`` holds the
-    models the evaluator must not call now; their trials stay pending.
+    models the evaluator must not call now; their trials stay pending, and
+    ``should_stop`` holds the rest the same way when an operator stops the
+    unit.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest, items = load_eval_set(set_dir)
@@ -713,6 +724,7 @@ def run_plan(
                 progress=progress,
                 serial=serial,
                 paused=held,
+                should_stop=should_stop,
             )
         except BaseException as error:  # noqa: BLE001 - reported per vendor
             failures[vendor] = error
@@ -897,6 +909,7 @@ def dry_run_plan(
     concurrency: dict[str, int] | None = None,
     vendors: list[str] | None = None,
     pause: dict[str, Any] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Run the whole plan offline: private ledgers, scripted transports.
 
@@ -991,6 +1004,7 @@ def dry_run_plan(
         code_commit=code_commit,
         serial=serial,
         pause=pause,
+        should_stop=should_stop,
     )
     summary["dry_run"] = {
         "scripted_policy": policy,

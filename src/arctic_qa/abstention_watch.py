@@ -372,12 +372,15 @@ def evaluate_item(
     code_commit: str | None = None,
     progress: Callable[[dict[str, Any]], None] | None = None,
     pause: dict[str, Any] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Freeze one item, run the whole plan on it, and journal its cost row.
 
     ``pause`` names the models the evaluator must not call now. Their trials
     are held, so the row records the item as not complete and a later pass
-    runs the trials that are missing.
+    runs the trials that are missing. ``should_stop`` holds the rest the same
+    way, so an operator stop lands at a trial boundary and not only between
+    two whole items.
 
     ``vendors`` are the vendors that run on this item and ``authorized_vendors``
     are the vendors this invocation may run at all, which ``--vendors`` sets.
@@ -458,6 +461,7 @@ def evaluate_item(
             progress=progress,
             gate_dir=gate_dir,
             pause=pause,
+            should_stop=should_stop,
         )
     except Exception as failure:  # noqa: BLE001 - journalled, then reported
         error = f"{type(failure).__name__}: {failure}"
@@ -929,6 +933,10 @@ def watch(
                 code_commit=code_commit,
                 progress=progress,
                 pause=pause,
+                # An operator stop lands at a trial boundary. The trials it
+                # holds stay pending, the item is not complete, and a later
+                # invocation runs what is missing.
+                should_stop=lambda: stop["now"],
             )
             evaluated.append(result)
             # Publish after every item, not only at the end of the poll cycle.
