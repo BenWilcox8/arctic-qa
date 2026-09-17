@@ -424,6 +424,14 @@ the same snapshot. The activation is
 The evaluator's unit now carries `TimeoutStopSec=900`, because a stop lands at
 a trial boundary and one trial of the slowest vendor is minutes.
 
+One caution about reading the lock log of this run without a controlled window.
+At 09:04 UTC the serialised cost read 0.589 s a call, not the 0.319 s of the
+stage 2 window, with the machine load average at 22 on 8 cores because the
+1,650-test release suite and other work were sharing it. The hold of an
+exclusive section is scheduling, so it moves with whatever else the machine is
+doing. The two staged windows are the measurement; a reading taken while the
+machine is busy is not comparable to them.
+
 ## 11. The release suite
 
 `nix develop -c bash -c 'PYTHONPATH=src pytest tests/ -q'` on the branch head,
