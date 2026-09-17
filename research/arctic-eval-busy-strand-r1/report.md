@@ -171,6 +171,8 @@ question is closed short again the first time the lock is busy.
 
 ## What this task did not fix
 
+### The stop that kills the harness mid-call
+
 `systemctl --user stop` sends SIGTERM to the whole control group, because the
 transient unit ran at the systemd default `KillMode=control-group`. That reaches
 the Claude Code and Codex child processes. The transport reports the killed
@@ -193,6 +195,33 @@ is an operator property and not a code change.
 The rule underneath it is the captain's: a question an arm stopped inside is
 closed at its partial count, and `evaluation.complete` is true although
 `recorded_trials` is below `planned_trials`. That predates this task.
+
+### The gap between the probe and the spawn
+
+The probe runs before the trial reserves its row; the child process is started a
+moment later, after the invocation is built and the row is submitted. A
+reinstall that lands inside that window still takes the path away, the spawn
+still fails, and the trial is still recorded as a failed response.
+
+It happened once under this snapshot. The Claude Code binary was reinstalled
+again at 15:06 UTC, and at 15:09:55 UTC the arm was paused on a fresh spawn
+failure: the response row carries `resumed: false` and `code_commit: 7aca1b4`,
+so it is not an old receipt replayed.
+
+The containment held, which is the point of the second half of the fix. The
+`vendor_resumed` event is stamped the same second, 15:09:55 UTC, and the next
+question started at 15:09:56 UTC with all three arms. What was a dead arm for
+two hours is now a pause of under a second and one burnt trial.
+
+Closing the window itself needs the spawn failure to unwind the reserved
+subscription-ledger row, which is a change to that ledger's contract rather
+than to the evaluator, so it is reported and not made here.
+
+The reinstalls themselves are outside this repository. The binary at
+`/home/ben/.npm-global/bin/claude` was replaced at 09:31, 12:06 and 15:06 UTC
+on 2026-09-17. Whatever keeps the harness up to date should hold the old path
+until the new one is in place, or the evaluator should be told to pause over
+the upgrade.
 
 ## Guards
 
