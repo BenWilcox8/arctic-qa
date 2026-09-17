@@ -246,6 +246,18 @@ Each one uses `reopen-stranded-questions.py` of `research/arctic-eval-reopen-r1/
 - `tests/test_ledger_proof_cost.py`: the evaluator's own factory sets both flags.
 - Also green: `tests/test_abstention_watch.py`, `tests/test_abstention_run.py`, `tests/test_abstention_broker.py`, `tests/test_abstention_subscription.py`, `tests/test_broker_provider.py`, `tests/test_broker_operation_lock_wait.py`.
 
+## The snapshot commits and this branch
+
+The three snapshots were cut from this branch while it stood on `main` cdb302e, and the branch was then rebased onto `main` 179355f for the landing, which gave every commit a new hash.
+
+| Snapshot the unit ran | Commit on the landed branch |
+| --- | --- |
+| `c1fe938` | `23776fe` |
+| `f160074` | `5d8f1aa` |
+| `45e1769` | `0ba6a29` |
+
+The record of what actually ran is not the hash: `source-<snapshot>-arctic-eval-authorization-r8.tar` in the authorization directory is the exact source of each run, and each authorization binds its own snapshot by name, which is what the running unit passes as `--code-commit`.
+
 ## Artifacts
 
 The reviewed successor authorization, its review record and the launcher are `streaming-eval-r11-{authorization,review,launcher}-c1fe938.*` under `/home/ben/.treehouse/firstmate-c40011/6/firstmate/data/arctic-eval-authorization-r8/`.
