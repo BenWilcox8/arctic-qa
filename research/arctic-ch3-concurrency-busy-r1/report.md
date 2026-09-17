@@ -310,13 +310,46 @@ Two answers, both applied:
 Measured after the evaluator restarted: the shared ledger lock wait fell from a
 median of 2.35 s to 0.21 s.
 
-## 7. The measured window
+## 7. The fourth fault: a counting row of a stopped start
+
+The 02:29 relaunch ended at 02:32:10 UTC, three minutes in, with
+
+```
+{"code":"VALUEERROR","message":"the paid request key already exists"}
+```
+
+The stop before it waited for a boundary with none of the run's calls
+*submitted*, which is the right boundary for money: nothing was on the wire.
+But a thread can also be between the free count event and the reservation, and
+that leaves a `counting` row: registered, not reserved, not submitted, not
+charged, with no receipt. Row `d74d534e...`, stage `standalone_verification`,
+paper `10.5194/acp-23-10451-2023`, was exactly that. The next start walked back
+to the same call, built the same request key, met its own row and raised a plain
+`ValueError`, which `broker_provider.broker_boundary` marks a whole-run stop.
+
+Three changes:
+
+- A `counting` row of the same request identity is reused. The free count runs
+  again and nothing is charged; `count_requests` is not incremented, because it
+  counts rows and the ledger totals check it against `len(requests)`. The
+  identity fields are `SharedGeminiBroker.REQUEST_IDENTITY_FIELDS`; a row whose
+  key matches but whose paper, family, source version, stage, phase or model
+  differs is not this request and is still refused.
+- Every other existing key raises `errors.DuplicateRequestKeyError`, which
+  reserves nothing and submits nothing and is therefore in
+  `broker_provider._PAPER_LEVEL_BROKER_ERRORS` and in the non-stop set of
+  `streaming._ends_the_run`. The family is recorded and skipped, and the run
+  continues.
+- The activation script's stop now also waits out a `counting` row of the run,
+  so a graceful stop leaves none behind.
+
+## 8. The measured window
 
 See `activation-state-5653055.json`, key `observation`, in the task data
 directory for the samples and the summary. The sequential baseline is about 3
 requests a minute and about 13 papers an hour.
 
-## 8. Tests
+## 9. Tests
 
 - `tests/test_broker_operation_lock_queue.py`: four paper threads queue for one
   lock and every request completes; a concurrent request waits past the
