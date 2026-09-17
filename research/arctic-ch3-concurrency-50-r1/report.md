@@ -1,0 +1,165 @@
+# Fifty papers in flight
+
+Captain's ask, 2026-09-17 06:25 UTC: "How far do you think you can reasonably
+raise the concurrency? I would like to raise it to something like 50/100."
+
+Run `chapter3-7dc6485-r3`, campaign `arctic-qa-production-campaign-003`,
+shared ledger
+`/mnt/crdata/research-abstention/arctic-qa/streaming-dataset-r1/shared-paid-call-ledger.json`.
+The predecessor is `research/arctic-ledger-parallel-r1/report.md`, which made
+the ledger a snapshot and a journal and took the run from 6.7 to 20.8 requests
+a minute.
+
+## 1. What actually held the run at 21 requests a minute
+
+The predecessor left the run at 16 paper threads and read the cap as the
+producer's own work under one interpreter lock. That reading was wrong.
+
+The producer logs the wait and the hold of every exclusive section. Over the
+1,023 paid calls of run `chapter3-7dc6485-r3` up to 06:41 UTC:
+
+| section | calls | mean wait | mean hold | longest hold |
+| --- | --- | --- | --- | --- |
+| `orphan_recovery` | 1,023 | 0.00 s | 0.82 s | 9.36 s |
+| `count_registration` | 1,023 | 0.55 s | 0.56 s | 6.52 s |
+| `reserve` | 1,011 | 0.01 s | 1.06 s | 7.58 s |
+
+That is **2.44 seconds of serialised bookkeeping per paid call**. A run whose
+calls are serialised for 2.44 s admits about 25 a minute whatever the thread
+count is, and the run was measured at 20.8. The threads were not waiting for
+the interpreter; they were waiting for the lock.
+
+## 2. Where the 2.44 seconds went
+
+Measured read-only against the live ledger (8,230 request rows, 11.3 MB
+snapshot, 32,251 receipt files) on the live data disk, single-threaded, so the
+numbers are the work itself and not the contention:
+
+| step of one ledger read | before |
+| --- | --- |
+| immutable-event proof, warm, nothing moved | 371 ms |
+| ... of which `scandir` of the receipts directory | 56 ms |
+| ... of which the six name filters over 32,251 names | 31 ms |
+| ... of which the name-to-request-key scan | 33 ms |
+| ... of which `canonical_json` of all 8,230 rows | 136 ms |
+| ... of which one `glob` for a usage reconciliation receipt | 44 ms |
+| money proof of one moved row (`_validate_ledger_delta`) | 19.6 ms |
+| first touch of the requests map, per commit | 89.5 ms |
+| orphan recovery's copy of every row and its two receipt paths | 50 ms |
+| immutable-event proof, cold full pass | 2.4 s |
+
+A paid call reads the ledger five to seven times and commits two to three
+times, so the first two rows alone are 2.0 to 2.7 s of CPU. The parallel store
+had made the *money* proof cost the change; the proof against the receipts on
+disk still cost the whole history, and so did the rollback record the store
+kept in case a mutation was abandoned.
+
+Two things defeated the caches the predecessor added:
+
+- The evidence fingerprint is the receipts directory's `mtime` and size. Under
+  paper concurrency every worker writes receipts, so the directory moves on
+  nearly every call and the fingerprint never matched.
+- The per-row proof was kept against `canonical_json(row)`, so deciding that
+  nothing had moved cost a JSON serialisation of the whole ledger.
+
+## 3. What changed
+
+`docs/SHARED_MODEL_BROKER.md`, "The immutable-event proof, and what one read of
+it costs", is the contract. Four rules:
+
+- The receipts directory is listed once, and a **concurrent** broker re-lists
+  it at most every `RECEIPT_LISTING_REFRESH_SECONDS` (10 s) rather than on the
+  fingerprint. A sequential broker, which is every reviewed operation, keeps
+  the exact fingerprint and sees a receipt the moment it lands. The staleness
+  is bounded and is far tighter than the full pass, which runs every
+  `IMMUTABLE_EVENT_REVALIDATION_SECONDS` (300 s) and re-lists first.
+- Everything derived from one listing is derived once (`_listing_derived`):
+  the name filters, the request key of every paid-call receipt, and the
+  accepted item of every family with its supersession chains, which is 96 file
+  reads and their hashes.
+- No pattern walk of the receipts directory is on the call path.
+- A row is proved against its immutable events again only when the store
+  reports it moved. That is the same tracking the money proof of the delta
+  already trusts. Where the report is absent, which is a reload of the
+  snapshot or a reviewed repair, every row is checked by its signature as
+  before.
+
+Two smaller ones on the money proof: `_money` resolves its import once, and
+the row comparison skips the two `Decimal` parses where the stored string and
+the expected string are equal. Orphan recovery skips a terminal row whose
+custody it already proved before it builds that row's receipt paths.
+
+| step of one ledger read | before | after |
+| --- | --- | --- |
+| immutable-event proof, warm, nothing moved | 371 ms | 12 ms |
+| immutable-event proof, warm, one row moved | 371 ms | 12 ms |
+| immutable-event proof, warm, receipts re-listed | 417 ms | 130 ms |
+| money proof of one moved row | 19.6 ms | 6.8 ms |
+| first touch of the requests map, per commit | 89.5 ms | 0 ms |
+| orphan recovery's row copy | 50 ms | 4 ms |
+
+The amortised extras are small at six calls a second: the re-listing is 130 ms
+every 10 s, the reload after each compaction is about 490 ms every 30 s, and
+the full pass is 2.4 s every 300 s.
+
+## 4. The bug the fifty-thread test found
+
+A fifty-thread admission test failed with
+`the shared paid-call papers total is inconsistent`, transiently and with a
+different total each run. It reproduces on the parent commit, so it is not a
+defect of this change; it is a defect of the parallel store as it landed.
+
+`LedgerStore.rollback` put the keys a refused reservation touched back by
+**replacing** each one with the plain copy the parent had kept. The ledger root
+does not wrap its rows, so a restored map came back an ordinary `dict`: it was
+no longer a tracked container, every later change to it went unreported, the
+journal record lost those changes, the delta proved totals it had not been told
+about, and the read raised. A raise there writes an integrity halt on the
+shared ledger, which stops the producer and the evaluator both.
+
+A refused reservation is what rolls back, and the concurrency slots refuse one
+whenever the threads outnumber them. At 16 threads and 16 slots it was rare
+enough not to have fired in the live run; at 50 it fired within a minute.
+
+A tracked container now rolls itself back, key by key, and stays the same
+object. For the same reason a parent keeps a **reference** to a tracked child
+instead of a copy of it, which is where the 89.5 ms first touch went.
+
+`tests/test_ledger_store.py::test_a_rollback_leaves_every_container_tracked`
+and `::test_a_rollback_undoes_a_row_edited_in_place` are the guards.
+
+## 5. Policy v13
+
+`CHAPTER3_SCALE_CHANGE`: the concurrency slots from 16 to 50 and the minute
+window from 100 to 300, together and registered as one pair in
+`ALLOWED_REQUEST_RATES`. The transition moves no money, so it names the
+cumulative tranche the USD 200 expansion already authorized, USD 253.990121,
+which the tranche rule of `_validate_immutable_events` must name in its own
+list; the parallel transition was refused at 04:53 UTC on 2026-09-17 for
+exactly that omission.
+
+## 6. The staged relaunch
+
+Recorded below as each stage runs.
+
+## 7. What was not done, and why
+
+**The hot journal and lock were not moved to the local SSD.** The brief asked
+for it, and the measurement says it is not where the serialised cost is. The
+flush is already outside the ledger lock and is shared: one thread's `fsync`
+covers every record its peers appended, which the predecessor measured at 57 ms
+per commit across sixteen threads. Moving the journal to the SSD would take
+that to about 10 ms of **per-thread** latency out of an eight-second call, buy
+nothing serialised, and in exchange make the authoritative store live on a
+different device from the ledger it belongs to, with a mirror that can lag it.
+The money rule wants the reservation durable before the provider call on one
+filesystem; the measurement says the price of that is now small. The serialised
+cost fell from 2.44 s to well under 0.2 s without touching it.
+
+**The three exclusive sections were not merged into one.** Merging orphan
+recovery into the count registration would mean holding the lock across the
+pacing wait, which `AGENTS.md` pins outside it after 19 papers faulted in 40
+minutes on 2026-09-16, or running the per-paper cost cap before recovery, which
+would let an unsettled orphan's reservation cap a family early and skip it for
+good. Each section now costs milliseconds, so the merge buys a few of them
+against a money-path change.

@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import sys
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from pathlib import Path
@@ -186,11 +185,7 @@ def test_sixteen_threads_admit_settle_and_prove_exact_totals(
     broker = values["broker"]
     # Sixteen papers, four calls each: the live-test policy admits at most
     # twenty papers, and the point is the sixteen threads, not the papers.
-    work = [
-        (f"paper-{paper}", index)
-        for paper in range(16)
-        for index in range(4)
-    ]
+    work = [(f"paper-{paper}", index) for paper in range(16) for index in range(4)]
     count = len(work)
 
     with ThreadPoolExecutor(max_workers=16) as pool:
@@ -198,9 +193,7 @@ def test_sixteen_threads_admit_settle_and_prove_exact_totals(
             future.result()
             for future in [
                 pool.submit(execute, broker, paper=paper, stage=stage)
-                for paper, stage in [
-                    (paper, _STAGES[index]) for paper, index in work
-                ]
+                for paper, stage in [(paper, _STAGES[index]) for paper, index in work]
             ]
         ]
 
@@ -210,9 +203,7 @@ def test_sixteen_threads_admit_settle_and_prove_exact_totals(
     assert state["inflight"] == 0
     assert state["halted"] is False
     assert state["generation_submissions"] == count
-    expected = sum(
-        Decimal(receipt["actual_cost_usd"]) for receipt in receipts
-    )
+    expected = sum(Decimal(receipt["actual_cost_usd"]) for receipt in receipts)
     assert Decimal(state["spent_usd"]) == expected
     assert Decimal(state["reserved_usd"]) == Decimal("0")
     assert len(state["papers"]) == 16
@@ -355,7 +346,9 @@ def test_the_parallel_rate_pair_is_registered_and_nothing_between_it(
     from arctic_qa import model_broker
 
     assert (16, 100) in model_broker.ALLOWED_REQUEST_RATES
-    assert model_broker.CHAPTER3_PARALLEL_CHANGE in model_broker.POLICY_TRANSITION_CHANGES
+    assert (
+        model_broker.CHAPTER3_PARALLEL_CHANGE in model_broker.POLICY_TRANSITION_CHANGES
+    )
     assert model_broker.CHAPTER3_PARALLEL_CHANGE == {
         "maximum_concurrent_generation_requests": {"from": 8, "to": 16},
         "maximum_generation_requests_per_minute": {"from": 40, "to": 100},
@@ -389,9 +382,13 @@ def test_the_parallel_transition_names_the_expansion_tranche() -> None:
 
     from arctic_qa import model_broker
 
-    source = inspect.getsource(model_broker.SharedGeminiBroker._validate_transition_authorization)
+    source = inspect.getsource(
+        model_broker.SharedGeminiBroker._validate_transition_authorization
+    )
     tuple_start = source.index("CHAPTER3_EXPANSION_CHANGE,")
-    tuple_end = source.index("expected_tranche = CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD")
+    tuple_end = source.index(
+        "expected_tranche = CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD"
+    )
     named = source[tuple_start:tuple_end]
     assert "CHAPTER3_CONCURRENCY_CHANGE" in named
     assert "CHAPTER3_PARALLEL_CHANGE" in named
@@ -410,9 +407,12 @@ def test_the_no_replay_probe_reads_the_receipts_listing(tmp_path: Path) -> None:
     receipts = tmp_path / "receipts"
     receipts.mkdir()
     ledger = {"requests": {}, "ambiguous_reserved_usd": "0.1", "reserved_usd": "0.02"}
-    assert SharedGeminiBroker.validate_no_replay_liabilities(
-        ledger=ledger, receipts_dir=receipts
-    ) == {}
+    assert (
+        SharedGeminiBroker.validate_no_replay_liabilities(
+            ledger=ledger, receipts_dir=receipts
+        )
+        == {}
+    )
 
 
 def test_a_flush_after_reading_a_peer_record_returns(tmp_path: Path) -> None:
@@ -463,9 +463,12 @@ def test_the_snapshot_is_bound_by_the_bytes_that_were_read(tmp_path: Path) -> No
     stale = json.loads(old_bytes.decode())
     assert ledger_store.apply_journal(ledger, stale, old_bytes)["spent_usd"] == "1"
     fresh_bytes = ledger.read_bytes()
-    assert ledger_store.apply_journal(
-        ledger, json.loads(fresh_bytes.decode()), fresh_bytes
-    )["spent_usd"] == "1"
+    assert (
+        ledger_store.apply_journal(
+            ledger, json.loads(fresh_bytes.decode()), fresh_bytes
+        )["spent_usd"]
+        == "1"
+    )
 
 
 # -- the rest of the adversarial audit of 2026-09-17 --------------------------
@@ -513,7 +516,9 @@ def test_a_record_that_moves_only_a_paper_row_is_proved_on_read(
         "schema": ledger_store.JOURNAL_RECORD_SCHEMA,
         "seq": broker._store.sequence + 1,
         "at": "2026-09-17T00:00:00Z",
-        "delta": {"papers": {"set": {family: {**state["papers"][family], "spent_usd": "0"}}}},
+        "delta": {
+            "papers": {"set": {family: {**state["papers"][family], "spent_usd": "0"}}}
+        },
     }
     with ledger_store.journal_file(values["ledger"]).open("ab") as handle:
         handle.write((canonical_json(record) + "\n").encode())
@@ -537,6 +542,56 @@ def test_a_refused_reservation_rolls_back_without_a_reload(tmp_path: Path) -> No
     reloads = store.reload_count
     assert store.read() is state
     assert store.reload_count == reloads
+
+
+def test_a_rollback_leaves_every_container_tracked(tmp_path: Path) -> None:
+    """A rolled-back map still reports the next change made to it.
+
+    The rollback replaced the map with a plain copy of what it held. The
+    ledger root does not wrap its rows, so the map came back an ordinary
+    ``dict`` and every later change to it went unreported: the journal record
+    lost it, the delta proved totals it had not been told about, and the read
+    raised, which writes an integrity halt on the shared ledger. A refused
+    reservation is what rolls back, and at sixteen threads the concurrency
+    slots refuse one often. Found at fifty threads on 2026-09-17.
+    """
+    ledger = tmp_path / "ledger.json"
+    write_json(ledger, {"spent_usd": "0", "requests": {}, "papers": {}})
+    ledger_store.initialize_store(ledger)
+    store = ledger_store.LedgerStore(ledger)
+    state = store.load()
+    state["papers"]["family-x"] = {"spent_usd": "0"}
+    store.rollback()
+
+    state["papers"]["family-y"] = {"spent_usd": "1"}
+    assert ledger_store._delta(state) == {
+        "papers": {"set": {"family-y": {"spent_usd": "1"}}}
+    }
+    assert store.commit(state, now="2026-09-17T07:00:00Z")
+    store.flush()
+    assert ledger_store.read_ledger(ledger)["papers"] == {
+        "family-y": {"spent_usd": "1"}
+    }
+
+
+def test_a_rollback_undoes_a_row_edited_in_place(tmp_path: Path) -> None:
+    """The row the broker edited deep inside the accounting goes back."""
+    ledger = tmp_path / "ledger.json"
+    key = "a" * 64
+    write_json(
+        ledger,
+        {"spent_usd": "0", "requests": {key: {"state": "counting"}}, "papers": {}},
+    )
+    ledger_store.initialize_store(ledger)
+    store = ledger_store.LedgerStore(ledger)
+    state = store.load()
+    state["requests"][key]["state"] = "submitted"
+    state["requests"][key]["reserved_usd"] = "0.01"
+    assert store.is_dirty()
+    store.rollback()
+    assert not store.is_dirty()
+    assert state["requests"][key] == {"state": "counting"}
+    assert ledger_store._delta(state) == {}
 
 
 def test_a_reader_seeks_past_the_records_the_snapshot_holds(tmp_path: Path) -> None:
@@ -619,9 +674,10 @@ def test_a_read_only_reader_never_dies_on_a_writer(tmp_path: Path) -> None:
     assert reader.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 0
     reader.close()
     writer.connection.commit()
-    assert state_db.connect_read_only(path).execute(
-        "SELECT COUNT(*) FROM t"
-    ).fetchone()[0] == 1
+    assert (
+        state_db.connect_read_only(path).execute("SELECT COUNT(*) FROM t").fetchone()[0]
+        == 1
+    )
     writer.close()
 
     calls = []

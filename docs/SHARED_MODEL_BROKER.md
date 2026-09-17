@@ -580,6 +580,55 @@ Group commit is the whole answer to that number, and it is why the journal lives
 `_validate_ledger_delta` subtracts the contribution of each row that moved, proves the row again and adds it back.
 Everything `_compare_ledger` compares is compared on every read and every commit; only the summing is incremental.
 
+### The immutable-event proof, and what one read of it costs
+
+The proof against the receipts on disk sits on top of the money proof, and it
+used to cost the whole history on every read.
+Measured on the live ledger on 2026-09-17 at 8,230 request rows and 32,251
+receipt files: one warm read cost 371 ms, and a paid call makes five to seven
+of them.
+That is what held the exclusive operation lock a mean 2.4 s per paid call and
+held the run at about 21 requests a minute whatever the thread count was.
+
+Four rules now keep a warm read at about 12 ms.
+
+- The receipts directory is listed once. A concurrent broker re-lists it at
+  most every `RECEIPT_LISTING_REFRESH_SECONDS`, because the directory moves on
+  every paid call of every worker and the fingerprint alone made a 32,251-entry
+  `scandir` part of nearly every read. A sequential broker, which is every
+  reviewed operation, keeps the exact fingerprint.
+- Everything derived from one listing is derived once (`_listing_derived`):
+  the name filters, the request key of every paid-call receipt, and the
+  accepted item of each family with its supersession chains.
+- No pattern walk of the directory is on the call path. A glob for one usage
+  reconciliation receipt cost 44 ms of every read that proved it.
+- A row is proved again only when the store reports it moved, which is the
+  same tracking the money proof of the delta already trusts. Where that report
+  is absent, which is a reload of the snapshot, a reviewed repair or a full
+  pass, every row is checked by its signature as before.
+
+A full pass over every row and every receipt still runs every
+`IMMUTABLE_EVENT_REVALIDATION_SECONDS`, and it re-lists the directory first.
+
+### A mutation that was never committed
+
+`LedgerStore.rollback` puts the keys a refused reservation touched back to
+their committed values, in place.
+A tracked container rolls **itself** back and stays the same object.
+Replacing it with a plain copy of what it held untracked it: the ledger root
+does not wrap its rows, so the restored map came back an ordinary `dict`, every
+later change to it went unreported, the delta proved totals it had not been
+told about, and the read raised, which writes an integrity halt on the shared
+ledger and stops every caller of it.
+A refused reservation is what rolls back, and the concurrency slots refuse one
+often once the threads outnumber them.
+Found at fifty threads on 2026-09-17; `tests/test_ledger_store.py` is the guard.
+
+For the same reason a parent keeps a reference to a tracked child and never a
+copy of it: copying the whole requests map on the first touch of every commit
+cost 90 ms a commit at 8,631 rows, which is more than the commit it was there
+to undo.
+
 ### The compactor
 
 One background thread per broker of a concurrent run rewrites the snapshot, every `COMPACTION_INTERVAL_SECONDS`.

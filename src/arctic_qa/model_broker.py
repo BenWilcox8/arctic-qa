@@ -29,6 +29,7 @@ from .gemini_eligibility import (
     GeminiTransport,
     _config,
     _cost,
+    _decimal,
     call_timeout_seconds,
     model_config_for_stage,
 )
@@ -251,11 +252,31 @@ CHAPTER3_PARALLEL_CHANGE = {
         "to": CHAPTER3_PARALLEL_REQUESTS_PER_MINUTE,
     },
 }
+# Chapter 3 fifty in flight (captain order 2026-09-17 06:25 UTC). The warm
+# ledger proof no longer walks the whole history, so the serialised
+# bookkeeping of one paid call fell from about 2.4 s to under 0.2 s and the
+# request rate the run can reach moves with it. The two request-rate limits
+# move together and nothing else moves: the money ceilings, the per-request
+# cap, the paper cost cap and every project design count stay exactly as the
+# expansion left them.
+CHAPTER3_SCALE_REQUESTS = 50
+CHAPTER3_SCALE_REQUESTS_PER_MINUTE = 300
+CHAPTER3_SCALE_CHANGE = {
+    "maximum_concurrent_generation_requests": {
+        "from": CHAPTER3_PARALLEL_REQUESTS,
+        "to": CHAPTER3_SCALE_REQUESTS,
+    },
+    "maximum_generation_requests_per_minute": {
+        "from": CHAPTER3_PARALLEL_REQUESTS_PER_MINUTE,
+        "to": CHAPTER3_SCALE_REQUESTS_PER_MINUTE,
+    },
+}
 # The registered request-rate pairs, in the order they were authorized.
 ALLOWED_REQUEST_RATES = (
     (2, 10),
     (CHAPTER3_CONCURRENCY_REQUESTS, CHAPTER3_CONCURRENCY_REQUESTS_PER_MINUTE),
     (CHAPTER3_PARALLEL_REQUESTS, CHAPTER3_PARALLEL_REQUESTS_PER_MINUTE),
+    (CHAPTER3_SCALE_REQUESTS, CHAPTER3_SCALE_REQUESTS_PER_MINUTE),
 )
 POLICY_TRANSITION_CHANGES = (
     {"live_test_maximum_papers": {"from": 20, "to": 40}},
@@ -271,6 +292,7 @@ POLICY_TRANSITION_CHANGES = (
     CHAPTER3_EXPANSION_CHANGE,
     CHAPTER3_CONCURRENCY_CHANGE,
     CHAPTER3_PARALLEL_CHANGE,
+    CHAPTER3_SCALE_CHANGE,
 )
 # The policy transitions that move the construction ceiling. Each one binds a
 # complete stream-input gate and names its own cumulative ceiling as the tranche.
@@ -344,6 +366,22 @@ OPERATION_LOCK_LOG_THRESHOLD_SECONDS = 1.0
 # seconds a read at 5,393 rows and 21,508 receipt files, which is what
 # serialised the four paper threads of the concurrent chapter 3 run.
 IMMUTABLE_EVENT_REVALIDATION_SECONDS = 300.0
+# A request that reached the end of its life: nothing is owed but custody of
+# its immutable final receipt.
+TERMINAL_REQUEST_STATES = frozenset({"completed", "ambiguous_charge"})
+# A concurrent broker re-lists the receipts directory at most this often. Under
+# paper concurrency the directory moves on every paid call of every worker, so
+# the directory fingerprint alone made a 32,251-entry ``scandir`` part of
+# nearly every ledger read. A sequential broker keeps the exact fingerprint and
+# passes 0.0 here.
+RECEIPT_LISTING_REFRESH_SECONDS = 10.0
+# The name of an immutable paid-call receipt: the request key, an optional
+# resume or count-retry qualifier, and an optional stage.
+PAID_CALL_RECEIPT_NAME = re.compile(
+    r"([a-f0-9]{64})"
+    r"(?:\.resume-[a-f0-9]{64}|\.count-retry-[1-9][0-9]*)?"
+    r"(?:\.(?:submitted|received))?\.json"
+)
 ALLOWED_LIVE_TEST_LIMITS = {(20, 100), (40, 100), (41, 101), (None, None)}
 STREAM_INPUT_BINDING_VERSION = "stream-input-binding-v1"
 TRANSITION_GATE_SUCCESSOR_FIELDS = {
@@ -896,8 +934,9 @@ def _normalized_usage(response: Any) -> dict[str, Any]:
 
 
 def _money(value: Any, name: str, *, positive: bool = False) -> Decimal:
-    from .gemini_eligibility import _decimal
-
+    # The import is resolved once, not on every call. The ledger comparison
+    # calls this about 6,200 times per proof of one moved row, and the
+    # function-local import was 17 percent of that comparison on 2026-09-17.
     return _decimal(value, name, positive=positive)
 
 
@@ -1536,7 +1575,15 @@ class SharedGeminiBroker:
         self._immutable_events_context: tuple[Any, ...] | None = None
         self._immutable_events_proved_at: float | None = None
         self._ledger_evidence_proved: tuple[Any, ...] | None = None
-        self._receipt_listing: tuple[tuple[int, int], list[str]] | None = None
+        # The rows whose immutable-event proof is owed. ``None`` means the
+        # requests map was replaced whole, by a reload of the snapshot or by a
+        # reviewed repair, and every row is checked by its signature again.
+        # A set is what the store reported moved, which is the same tracking
+        # the money proof of the delta already trusts.
+        self._immutable_events_pending: set[str] | None = None
+        self._receipt_listing: tuple[tuple[int, int], list[str], float] | None = None
+        # Everything derived from one receipts listing, thrown away with it.
+        self._receipt_derived: dict[Any, Any] = {}
         # A terminal row's final receipt is immutable, so its custody is
         # proved once and never stated again.
         self._custody_proved: set[str] = set()
@@ -2269,6 +2316,7 @@ class SharedGeminiBroker:
         validator = cls.__new__(cls)
         validator.receipts_dir = receipts_dir.resolve()
         validator._receipt_listing = None
+        validator._receipt_derived = {}
         validator._custody_proved = set()
         ambiguous = validator._ambiguous_continuation_events(ledger)
         orphaned = validator._orphaned_continuation_events(ledger)
@@ -2520,7 +2568,9 @@ class SharedGeminiBroker:
             ):
                 raise ValueError("the price configuration transition identity changed")
             matching_predecessors = []
-            for path in self._receipt_paths(prefix="config-transition-", suffix=".json"):
+            for path in self._receipt_paths(
+                prefix="config-transition-", suffix=".json"
+            ):
                 if sha256_file(path) != predecessor:
                     continue
                 event = self._read_transition_event(path)
@@ -2564,7 +2614,9 @@ class SharedGeminiBroker:
                 ):
                     raise ValueError("the policy transition identity changed")
                 matching_predecessors = []
-                for path in self._receipt_paths(prefix="config-transition-", suffix=".json"):
+                for path in self._receipt_paths(
+                    prefix="config-transition-", suffix=".json"
+                ):
                     if sha256_file(path) != predecessor:
                         continue
                     event = self._read_transition_event(path)
@@ -2593,12 +2645,13 @@ class SharedGeminiBroker:
                     expected_tranche = CHAPTER3_CUMULATIVE_CEILING_USD
                 elif changed_policy_fields in (
                     CHAPTER3_EXPANSION_CHANGE,
-                    # The two request-rate transitions move no money, so each
+                    # The request-rate transitions move no money, so each
                     # names the ceiling the expansion already authorized. The
                     # parallel one was refused at 04:53 UTC on 2026-09-17 for
                     # the USD 5 default until it was named here.
                     CHAPTER3_CONCURRENCY_CHANGE,
                     CHAPTER3_PARALLEL_CHANGE,
+                    CHAPTER3_SCALE_CHANGE,
                 ):
                     expected_tranche = CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD
                 else:
@@ -2619,7 +2672,9 @@ class SharedGeminiBroker:
                         raise ValueError("the policy transition predecessor changed")
                 else:
                     matching_predecessors = []
-                    for path in self._receipt_paths(prefix="config-transition-", suffix=".json"):
+                    for path in self._receipt_paths(
+                        prefix="config-transition-", suffix=".json"
+                    ):
                         if sha256_file(path) != predecessor:
                             continue
                         event = self._read_transition_event(path)
@@ -3003,7 +3058,26 @@ class SharedGeminiBroker:
         prove. A receipt is immutable, so the listing is a pure function of
         the directory, and a directory whose modification time and size have
         not moved has the same entries.
+
+        Under paper concurrency the directory moves on every paid call of
+        every worker, so the fingerprint alone made the listing a full
+        ``scandir`` of 32,251 entries on nearly every ledger read: 56 ms of
+        the 371 ms that one warm proof cost on 2026-09-17. A concurrent
+        broker therefore re-lists at most every
+        ``RECEIPT_LISTING_REFRESH_SECONDS``. The staleness is bounded and is
+        far tighter than the full immutable-event pass, which runs every
+        ``IMMUTABLE_EVENT_REVALIDATION_SECONDS`` and re-lists first. A
+        sequential broker, which is every reviewed operation, keeps the exact
+        fingerprint and sees a receipt the moment it lands.
         """
+        listing = getattr(self, "_receipt_listing", None)
+        refresh = (
+            RECEIPT_LISTING_REFRESH_SECONDS
+            if getattr(self, "concurrent_construction", False)
+            else 0.0
+        )
+        if listing is not None and refresh and time.monotonic() - listing[2] < refresh:
+            return listing[1]
         try:
             status = os.stat(self.receipts_dir)
             fingerprint = (status.st_mtime_ns, status.st_size)
@@ -3013,7 +3087,6 @@ class SharedGeminiBroker:
         # has no listing yet. The live v12 transition was refused at 04:58 UTC
         # on 2026-09-17 because this read an attribute the probe lacked, and
         # the refusal was read as an unsettled ledger.
-        listing = getattr(self, "_receipt_listing", None)
         if listing is not None and listing[0] == fingerprint:
             return listing[1]
         names = sorted(
@@ -3021,16 +3094,63 @@ class SharedGeminiBroker:
             for entry in os.scandir(self.receipts_dir)
             if entry.is_file(follow_symlinks=False)
         )
-        self._receipt_listing = (fingerprint, names)
+        self._receipt_listing = (fingerprint, names, time.monotonic())
+        # Everything derived from the listing alone is derived again.
+        self._receipt_derived = {}
         return names
 
+    def _listing_derived(self, key: Any, build: Any) -> Any:
+        """Return a value derived from the receipts listing alone, once.
+
+        The listing is a pure function of the directory and a receipt is
+        immutable, so anything read out of the names, or out of the files the
+        names point at, is a pure function of the same listing. Deriving it
+        again on every ledger read cost 64 ms of a warm proof for the six
+        name filters and the name-to-request-key scan alone.
+        """
+        self._receipt_names()
+        derived = getattr(self, "_receipt_derived", None)
+        if derived is None:
+            derived = {}
+            self._receipt_derived = derived
+        if key not in derived:
+            derived[key] = build()
+        return derived[key]
+
     def _receipt_paths(self, *, prefix: str = "", suffix: str = "") -> list[Path]:
-        """The receipts whose name has this prefix and this suffix."""
-        return [
-            self.receipts_dir / name
-            for name in self._receipt_names()
-            if name.startswith(prefix) and name.endswith(suffix)
-        ]
+        """The receipts whose name has this prefix and this suffix.
+
+        The list is cached against the listing it came from, so a caller reads
+        it and never changes it.
+        """
+        return self._listing_derived(
+            ("paths", prefix, suffix),
+            lambda: [
+                self.receipts_dir / name
+                for name in self._receipt_names()
+                if name.startswith(prefix) and name.endswith(suffix)
+            ],
+        )
+
+    def _receipt_request_keys(self) -> set[str]:
+        """The request key of every immutable paid-call receipt on disk.
+
+        The proof that no such receipt is absent from the ledger used to match
+        the pattern against all 32,251 names on every read, which was 33 ms.
+        The names are immutable, so the keys they carry are derived once per
+        listing and the proof itself is a subset test.
+        """
+        return self._listing_derived(
+            "request_keys",
+            lambda: {
+                match.group(1)
+                for match in (
+                    PAID_CALL_RECEIPT_NAME.fullmatch(name)
+                    for name in self._receipt_names()
+                )
+                if match
+            },
+        )
 
     def _ledger_evidence_fingerprint(self) -> tuple[Any, ...]:
         """Identify the bytes the immutable-event proof is a proof of.
@@ -3063,8 +3183,14 @@ class SharedGeminiBroker:
             full, changed = self._store.take_changes()
             if full:
                 self._validate_ledger(ledger)
+                # The requests map was replaced whole. Which rows moved is not
+                # known, so the immutable-event proof checks every signature
+                # again rather than trust a list it was never given.
+                self._immutable_events_pending = None
             elif changed is not None:
                 self._validate_ledger_delta(ledger, changed)
+                if self._immutable_events_pending is not None:
+                    self._immutable_events_pending.update(changed)
             fingerprint = self._ledger_evidence_fingerprint()
             # The ledger's own consistency is proved on every read, above. The
             # proof against the receipts on disk is skipped only when nothing
@@ -3309,7 +3435,9 @@ class SharedGeminiBroker:
             sha256_file(self.policy_file),
         )
         matching_paths = []
-        for candidate_path in self._receipt_paths(prefix="config-transition-", suffix=".json"):
+        for candidate_path in self._receipt_paths(
+            prefix="config-transition-", suffix=".json"
+        ):
             candidate = self._read_transition_event(candidate_path)
             candidate_authorization = candidate["authorization"]
             if (
@@ -3360,6 +3488,109 @@ class SharedGeminiBroker:
             != sha256_file(self._identity_file)
         ):
             raise ValueError("the applied price configuration transition changed")
+
+    def _accepted_item_events(self) -> dict[str, str]:
+        """The accepted item of each family, from the immutable events alone.
+
+        Every accepted-item receipt is read and every supersession chain is
+        walked, which is 96 file reads and their hashes on the live ledger.
+        The receipts are immutable, so the answer is a pure function of the
+        listing and is derived once per listing, not once per ledger read.
+        """
+
+        def build() -> dict[str, str]:
+            accepted_roots: dict[str, tuple[str, Path]] = {}
+            accepted_successors: dict[
+                tuple[str, str], tuple[str, Path, dict[str, Any]]
+            ] = {}
+            for path in self._receipt_paths(prefix="accepted-", suffix=".json"):
+                value = _read(path)
+                family_id = value.get("family_id")
+                item_id = value.get("item_id")
+                if value.get("schema") == ACCEPTED_ITEM_V1_SCHEMA:
+                    expected_name = (
+                        f"accepted-{sha256_bytes(str(family_id).encode())}.json"
+                    )
+                    if (
+                        set(value)
+                        != {"schema", "family_id", "item_id", "recorded_at_utc"}
+                        or not isinstance(family_id, str)
+                        or not family_id
+                        or not isinstance(item_id, str)
+                        or not item_id
+                        or path.name != expected_name
+                        or family_id in accepted_roots
+                    ):
+                        raise ValueError(
+                            "an accepted-item event has an invalid identity"
+                        )
+                    accepted_roots[family_id] = (item_id, path)
+                    continue
+                if value.get("schema") != ACCEPTED_ITEM_V2_SCHEMA:
+                    raise ValueError("an accepted-item event has an invalid schema")
+                predecessor_item_id = value.get("predecessor_item_id")
+                expected_name = (
+                    f"accepted-{sha256_bytes(str(family_id).encode())}-"
+                    f"{sha256_bytes(str(item_id).encode())}.json"
+                )
+                successor_key = (str(family_id), str(predecessor_item_id))
+                if (
+                    set(value)
+                    != {
+                        "schema",
+                        "family_id",
+                        "item_id",
+                        "predecessor_item_id",
+                        "predecessor_event_sha256",
+                        "invocation_run_id",
+                        "gate_sha256",
+                        "recorded_at_utc",
+                    }
+                    or not isinstance(family_id, str)
+                    or not family_id
+                    or not isinstance(item_id, str)
+                    or not item_id
+                    or not isinstance(predecessor_item_id, str)
+                    or not predecessor_item_id
+                    or predecessor_item_id == item_id
+                    or not re.fullmatch(
+                        r"[a-f0-9]{64}",
+                        str(value.get("predecessor_event_sha256") or ""),
+                    )
+                    or not re.fullmatch(
+                        r"[a-f0-9]{64}", str(value.get("gate_sha256") or "")
+                    )
+                    or not str(value.get("invocation_run_id") or "").strip()
+                    or path.name != expected_name
+                    or successor_key in accepted_successors
+                ):
+                    raise ValueError("an accepted-item event has an invalid identity")
+                accepted_successors[successor_key] = (item_id, path, value)
+
+            accepted_events: dict[str, str] = {}
+            visited_successors: set[tuple[str, str]] = set()
+            for family_id, (root_item_id, root_path) in accepted_roots.items():
+                item_id = root_item_id
+                event_path = root_path
+                chain_items = {item_id}
+                while (family_id, item_id) in accepted_successors:
+                    key = (family_id, item_id)
+                    next_item_id, next_path, event = accepted_successors[key]
+                    if (
+                        event["predecessor_event_sha256"] != sha256_file(event_path)
+                        or next_item_id in chain_items
+                    ):
+                        raise ValueError("an accepted-item supersession chain changed")
+                    visited_successors.add(key)
+                    chain_items.add(next_item_id)
+                    item_id = next_item_id
+                    event_path = next_path
+                accepted_events[family_id] = item_id
+            if len(visited_successors) != len(accepted_successors):
+                raise ValueError("an accepted-item supersession lacks its predecessor")
+            return accepted_events
+
+        return self._listing_derived("accepted_events", build)
 
     def _validate_immutable_events(self, ledger: dict[str, Any]) -> None:
         identity = _read(self._identity_file)
@@ -3469,17 +3700,8 @@ class SharedGeminiBroker:
             if request_key in reconciliation_events:
                 raise ValueError("multiple usage reconciliation events exist")
             reconciliation_events[request_key] = (path, event)
-        for name in self._receipt_names():
-            match = re.fullmatch(
-                r"([a-f0-9]{64})"
-                r"(?:\.resume-[a-f0-9]{64}|\.count-retry-[1-9][0-9]*)?"
-                r"(?:\.(?:submitted|received))?\.json",
-                name,
-            )
-            if match and match.group(1) not in ledger["requests"]:
-                raise ValueError(
-                    "an immutable paid-call event is absent from the ledger"
-                )
+        if not self._receipt_request_keys() <= ledger["requests"].keys():
+            raise ValueError("an immutable paid-call event is absent from the ledger")
         base_fields = (
             "request_key",
             "request_sha256",
@@ -3523,13 +3745,33 @@ class SharedGeminiBroker:
             self._custody_proved = set()
             self._receipt_listing = None
         proved = self._immutable_events_proved
-        for request_key, request in ledger["requests"].items():
-            signature = canonical_json(request)
-            if proved.get(request_key) == signature:
-                # The row is the row that was proved. Its reconciliation event
-                # was accounted for by that proof, so it is accounted for here.
-                reconciliation_events.pop(request_key, None)
-                continue
+        requests = ledger["requests"]
+        # Which rows owe the proof. A signature of each of the 8,230 rows cost
+        # 136 ms of the 371 ms one warm proof took on 2026-09-17, and a paid
+        # call reads the ledger five to seven times. The store already reports
+        # the rows a record moved, which is the same tracking the money proof
+        # of the delta trusts, so a signature is taken only where that report
+        # is absent: a reload of the snapshot, a reviewed repair, a full pass.
+        pending = None if full_pass else self._immutable_events_pending
+        signatures: dict[str, str] = {}
+        targets: list[str] = []
+        if pending is None:
+            for request_key, request in requests.items():
+                signature = canonical_json(request)
+                if proved.get(request_key) != signature:
+                    signatures[request_key] = signature
+                    targets.append(request_key)
+        else:
+            targets = [
+                request_key for request_key in requests if request_key not in proved
+            ]
+            targets.extend(
+                request_key
+                for request_key in pending
+                if request_key in requests and request_key in proved
+            )
+        for request_key in targets:
+            request = requests[request_key]
             self._validate_request_events(
                 ledger,
                 request_key=request_key,
@@ -3540,100 +3782,26 @@ class SharedGeminiBroker:
                 transition_events_by_pair=transition_events_by_pair,
                 reconciliation_events=reconciliation_events,
             )
-            proved[request_key] = signature
+            signature = signatures.get(request_key)
+            proved[request_key] = (
+                canonical_json(request) if signature is None else signature
+            )
+        self._immutable_events_pending = set()
         if full_pass:
             self._immutable_events_proved_at = time.monotonic()
 
+        for request_key in list(reconciliation_events):
+            if request_key in proved:
+                # The row this event belongs to was proved, by this pass or by
+                # an earlier one, and that proof accounted for the event.
+                reconciliation_events.pop(request_key)
         if reconciliation_events:
             raise ValueError("a usage reconciliation event lacks a ledger request")
 
         self._ambiguous_continuation_events(ledger)
         self._orphaned_continuation_events(ledger)
 
-        accepted_roots: dict[str, tuple[str, Path]] = {}
-        accepted_successors: dict[
-            tuple[str, str], tuple[str, Path, dict[str, Any]]
-        ] = {}
-        for path in self._receipt_paths(prefix="accepted-", suffix=".json"):
-            value = _read(path)
-            family_id = value.get("family_id")
-            item_id = value.get("item_id")
-            if value.get("schema") == ACCEPTED_ITEM_V1_SCHEMA:
-                expected_name = f"accepted-{sha256_bytes(str(family_id).encode())}.json"
-                if (
-                    set(value) != {"schema", "family_id", "item_id", "recorded_at_utc"}
-                    or not isinstance(family_id, str)
-                    or not family_id
-                    or not isinstance(item_id, str)
-                    or not item_id
-                    or path.name != expected_name
-                    or family_id in accepted_roots
-                ):
-                    raise ValueError("an accepted-item event has an invalid identity")
-                accepted_roots[family_id] = (item_id, path)
-                continue
-            if value.get("schema") != ACCEPTED_ITEM_V2_SCHEMA:
-                raise ValueError("an accepted-item event has an invalid schema")
-            predecessor_item_id = value.get("predecessor_item_id")
-            expected_name = (
-                f"accepted-{sha256_bytes(str(family_id).encode())}-"
-                f"{sha256_bytes(str(item_id).encode())}.json"
-            )
-            successor_key = (str(family_id), str(predecessor_item_id))
-            if (
-                set(value)
-                != {
-                    "schema",
-                    "family_id",
-                    "item_id",
-                    "predecessor_item_id",
-                    "predecessor_event_sha256",
-                    "invocation_run_id",
-                    "gate_sha256",
-                    "recorded_at_utc",
-                }
-                or not isinstance(family_id, str)
-                or not family_id
-                or not isinstance(item_id, str)
-                or not item_id
-                or not isinstance(predecessor_item_id, str)
-                or not predecessor_item_id
-                or predecessor_item_id == item_id
-                or not re.fullmatch(
-                    r"[a-f0-9]{64}", str(value.get("predecessor_event_sha256") or "")
-                )
-                or not re.fullmatch(
-                    r"[a-f0-9]{64}", str(value.get("gate_sha256") or "")
-                )
-                or not str(value.get("invocation_run_id") or "").strip()
-                or path.name != expected_name
-                or successor_key in accepted_successors
-            ):
-                raise ValueError("an accepted-item event has an invalid identity")
-            accepted_successors[successor_key] = (item_id, path, value)
-
-        accepted_events: dict[str, str] = {}
-        visited_successors: set[tuple[str, str]] = set()
-        for family_id, (root_item_id, root_path) in accepted_roots.items():
-            item_id = root_item_id
-            event_path = root_path
-            chain_items = {item_id}
-            while (family_id, item_id) in accepted_successors:
-                key = (family_id, item_id)
-                next_item_id, next_path, event = accepted_successors[key]
-                if (
-                    event["predecessor_event_sha256"] != sha256_file(event_path)
-                    or next_item_id in chain_items
-                ):
-                    raise ValueError("an accepted-item supersession chain changed")
-                visited_successors.add(key)
-                chain_items.add(next_item_id)
-                item_id = next_item_id
-                event_path = next_path
-            accepted_events[family_id] = item_id
-        if len(visited_successors) != len(accepted_successors):
-            raise ValueError("an accepted-item supersession lacks its predecessor")
-        if accepted_events != ledger["accepted_families"]:
+        if self._accepted_item_events() != ledger["accepted_families"]:
             raise ValueError("the accepted-item ledger differs from immutable events")
 
     def _http_rejection_settlement_valid(
@@ -3808,9 +3976,11 @@ class SharedGeminiBroker:
             or usage[omitted] != 0
         ):
             raise ValueError("a usage reconciliation event changed")
+        # The listing, not a glob: a glob walks all 32,251 receipt names
+        # again, which was 44 ms of every ledger read that proved this event.
         matching_receipts = [
             candidate
-            for candidate in self.receipts_dir.glob(f"{request_key}*.json")
+            for candidate in self._receipt_paths(prefix=request_key, suffix=".json")
             if sha256_file(candidate) == event["ambiguous_receipt_sha256"]
         ]
         if len(matching_receipts) != 1:
@@ -4167,7 +4337,9 @@ class SharedGeminiBroker:
         self, ledger: dict[str, Any]
     ) -> dict[str, dict[str, Any]]:
         events: dict[str, dict[str, Any]] = {}
-        for path in self._receipt_paths(prefix="ambiguous-continuation-", suffix=".json"):
+        for path in self._receipt_paths(
+            prefix="ambiguous-continuation-", suffix=".json"
+        ):
             event = self._read_ambiguous_continuation(path)
             request_key = event["request_key"]
             if request_key in events or request_key not in ledger["requests"]:
@@ -4299,7 +4471,9 @@ class SharedGeminiBroker:
         self, ledger: dict[str, Any]
     ) -> dict[str, dict[str, Any]]:
         events: dict[str, dict[str, Any]] = {}
-        for path in self._receipt_paths(prefix="orphaned-continuation-", suffix=".json"):
+        for path in self._receipt_paths(
+            prefix="orphaned-continuation-", suffix=".json"
+        ):
             event = self._read_orphaned_continuation(path)
             request_key = event["request_key"]
             request = ledger["requests"].get(request_key)
@@ -4453,7 +4627,9 @@ class SharedGeminiBroker:
             not isinstance(transition_hash, str)
             or not re.fullmatch(r"[a-f0-9]{64}", transition_hash)
         ):
-            raise ValueError("a paid-call request has an invalid config transition hash")
+            raise ValueError(
+                "a paid-call request has an invalid config transition hash"
+            )
         resume_receipt_sha256 = request.get("resumed_from_not_submitted_sha256")
         resume_transition_sha256 = request.get("resumed_from_config_transition_sha256")
         if (resume_receipt_sha256 is None) != (resume_transition_sha256 is None):
@@ -4676,10 +4852,17 @@ class SharedGeminiBroker:
                 ):
                     return False
                 for name, value in expected_row.items():
-                    if name.endswith("_usd"):
-                        if _money(actual_row.get(name), name) != _money(value, name):
-                            return False
-                    elif actual_row.get(name) != value:
+                    actual_value = actual_row.get(name)
+                    if actual_value == value:
+                        # The expected money is ``str`` of the Decimal the rows
+                        # add up to, so equal strings are equal money. The
+                        # comparison walks every stage, family and live-test
+                        # row on every proof of one moved row, and parsing two
+                        # Decimals for each unchanged field was most of it.
+                        continue
+                    if not name.endswith("_usd"):
+                        return False
+                    if _money(actual_value, name) != _money(value, name):
                         return False
             return True
 
@@ -5140,9 +5323,7 @@ class SharedGeminiBroker:
         thread.start()
 
     def _compaction_loop(self) -> None:
-        while not self._compaction_stop.wait(
-            ledger_store.COMPACTION_INTERVAL_SECONDS
-        ):
+        while not self._compaction_stop.wait(ledger_store.COMPACTION_INTERVAL_SECONDS):
             try:
                 self.compact()
             except Exception as error:  # pragma: no cover - defensive
@@ -5329,6 +5510,11 @@ class SharedGeminiBroker:
         self._validate_ledger_delta(ledger, changed)
         if not self._store.commit(ledger, now=_now()):
             return
+        # This process's own mutation owes the same proof a peer's record
+        # owes. A read clears the tracked keys, so they are collected here,
+        # where the mutation is known, and not at the next read.
+        if self._immutable_events_pending is not None:
+            self._immutable_events_pending.update(changed)
         if self.deferred_snapshot:
             # A concurrent run defers the snapshot to the compactor. The
             # journal is the authority and every reader of this repository
@@ -7757,20 +7943,29 @@ class SharedGeminiBroker:
         that request would settle it twice. The evaluation path therefore
         recovers only its own run, whose in-flight locks it can see.
         """
+        proved = self._custody_proved
         with self._ledger_lock():
             ledger = self._validated_ledger()
-            requests = {key: dict(row) for key, row in ledger["requests"].items()}
+            # Only the rows this pass can act on are copied. A terminal row
+            # whose custody was proved needs nothing more, and copying all
+            # 8,230 of them, with the two receipt paths of each, cost 50 ms of
+            # every paid call under the exclusive operation lock.
+            requests = {
+                key: dict(row)
+                for key, row in ledger["requests"].items()
+                if key not in proved or row["state"] not in TERMINAL_REQUEST_STATES
+            }
         for request_key, request in requests.items():
             event_stem = self._request_event_stem(request_key, request)
             final_path = self.receipts_dir / f"{event_stem}.json"
             received_path = self.receipts_dir / f"{event_stem}.received.json"
-            if request["state"] in {"completed", "ambiguous_charge"}:
+            if request["state"] in TERMINAL_REQUEST_STATES:
                 # Every terminal request keeps its custody check, whichever
                 # run wrote it. A final receipt is immutable and is never
                 # removed, so a row that was proved to have one still has
                 # one; stating all 6,000 of them again on every paid call
                 # cost 95 ms a call and proved nothing new.
-                if request_key in self._custody_proved:
+                if request_key in proved:
                     continue
                 if not final_path.is_file():
                     error = ValueError(
@@ -7778,7 +7973,7 @@ class SharedGeminiBroker:
                     )
                     self._record_integrity_halt(error)
                     raise error
-                self._custody_proved.add(request_key)
+                proved.add(request_key)
                 continue
             if request["state"] != "submitted":
                 continue

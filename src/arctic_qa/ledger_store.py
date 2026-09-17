@@ -64,6 +64,19 @@ COMPACTION_RECORDS = 400
 JOURNAL_ROTATION_BYTES = 64 * 1024 * 1024
 
 
+class _TrackedRef:
+    """A parent's note that one of its keys holds a tracked container.
+
+    The container reports and undoes its own changes, so the parent needs its
+    identity and never a copy of it.
+    """
+
+    __slots__ = ("child",)
+
+    def __init__(self, child: "_Tracked") -> None:
+        self.child = child
+
+
 class _Tracked(dict):
     """A dict that reports the keys a caller changed.
 
@@ -112,21 +125,47 @@ class _Tracked(dict):
         self._previous = {}
 
     def rollback(self) -> None:
-        """Put every touched key back to the value it had at the last commit."""
+        """Put every touched key back to the value it had at the last commit.
+
+        A tracked container rolls itself back, key by key, and stays the same
+        object. Replacing it with a plain copy of what it held untracked it:
+        the ledger root has ``wrap_rows`` off, so the restored map came back
+        as an ordinary ``dict`` and every later change to it went unreported.
+        The delta then proved a mutation it had not been told about and the
+        read raised, which writes an integrity halt on the shared ledger. A
+        refused reservation is what rolls back, and at sixteen threads the
+        concurrency slots refuse one often.
+        """
         for key in list(self._dirty):
-            if key in self._previous:
-                previous = self._previous[key]
-                if previous is _ABSENT:
-                    dict.pop(self, key, None)
-                else:
-                    dict.__setitem__(self, key, self._prepare(key, previous))
+            if key not in self._previous:
+                continue
+            previous = self._previous[key]
+            if isinstance(previous, _TrackedRef):
+                child = previous.child
+                child.rollback()
+                if dict.get(self, key, None) is not child:
+                    dict.__setitem__(self, key, self._prepare(key, child))
+                continue
+            if previous is _ABSENT:
+                dict.pop(self, key, None)
+            else:
+                dict.__setitem__(self, key, self._prepare(key, previous))
         self._dirty = set()
         self._previous = {}
 
     def _touch(self, key: Any) -> None:
         name = str(key)
         if name not in self._previous:
-            self._previous[name] = plain(dict.get(self, key, _ABSENT))
+            current = dict.get(self, key, _ABSENT)
+            # A tracked child keeps its own record of what it changed, so the
+            # parent keeps a reference to it and not a copy. Copying the whole
+            # requests map on the first touch of every commit cost more than
+            # the commit it was there to undo.
+            self._previous[name] = (
+                _TrackedRef(current)
+                if isinstance(current, _Tracked)
+                else plain(current)
+            )
         self._dirty.add(name)
         parent = self._parent
         if parent is not None and self._parent_key is not None:
@@ -492,9 +531,7 @@ def _bound_base(
         if digest == base.get("snapshot_sha256"):
             return int(base["applied_seq"]), base
         superseded = base.get("supersedes")
-        if isinstance(superseded, dict) and digest == superseded.get(
-            "snapshot_sha256"
-        ):
+        if isinstance(superseded, dict) and digest == superseded.get("snapshot_sha256"):
             # The base record is written before the snapshot it names, so a
             # stop between the two leaves the snapshot it superseded. That
             # one is bound too, and the records after it replay onto it.
@@ -776,8 +813,10 @@ class LedgerStore:
         # Found by the adversarial audit of 2026-09-17 before it hung a live
         # evaluator.
         with self._durability:
-            want = self._written_offset if target is None else min(
-                target, self._written_offset
+            want = (
+                self._written_offset
+                if target is None
+                else min(target, self._written_offset)
             )
             while self._durable_offset < want:
                 if self._flushing:
@@ -803,12 +842,9 @@ class LedgerStore:
 
     # -- the compacted snapshot ------------------------------------------
     def compaction_due(self) -> bool:
-        return (
-            self._records_since_compaction >= COMPACTION_RECORDS
-            or (
-                self._records_since_compaction > 0
-                and time.monotonic() - self._compacted_at >= COMPACTION_INTERVAL_SECONDS
-            )
+        return self._records_since_compaction >= COMPACTION_RECORDS or (
+            self._records_since_compaction > 0
+            and time.monotonic() - self._compacted_at >= COMPACTION_INTERVAL_SECONDS
         )
 
     def compact(self) -> bool:

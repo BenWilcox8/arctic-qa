@@ -1841,7 +1841,6 @@ def build_labels(
     this runs beside a live producer. A paper the run did not finish judging is
     counted and left unlabelled rather than called a rejection.
     """
-    import sqlite3
 
     from . import db as _db
 

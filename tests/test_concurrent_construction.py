@@ -9,7 +9,6 @@ the shape the evaluation phase already had.
 
 from __future__ import annotations
 
-import json
 import sys
 import threading
 import time
@@ -21,7 +20,7 @@ ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from arctic_qa import ledger_store
+from arctic_qa import ledger_store  # noqa: E402
 from arctic_qa.model_broker import (  # noqa: E402
     SharedGeminiBroker,
     broker_request_key,
