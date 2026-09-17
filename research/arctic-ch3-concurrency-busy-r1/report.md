@@ -358,7 +358,10 @@ about 13 papers an hour.
 
 The last window is 15 minutes from 03:00:00 to 03:15:00 UTC: 101 paid requests
 and 43 papers screened, with a median call of 8 seconds. The producer ran the
-window with no exit.
+window with no exit, and went on to run 67 minutes without one, from 02:59:45
+until another task relaunched it on its own snapshot at about 04:07. Over that
+whole stretch the ledger records 403 calls, 168 of them overlapping an earlier
+call, a peak of 3 in flight and a median call of 9 seconds.
 
 Faults in that window: one, `OperationalError: database is locked`, contained
 against one paper as designed. The state database is written by four paper
@@ -384,6 +387,18 @@ Between the 01:22 relaunch and 02:00 it completed 51 calls across
 `option_verification` and `standalone_verification`, beside 49 of
 `gemini-3.8-flash`, with no error.
 
+### A flake to know about
+
+A whole-suite run that overlaps a live producer can fail eight timing-sensitive
+tests of `tests/test_abstention_watch.py`, and one wall-clock assertion of
+`tests/test_abstention_plan.py`
+(`test_ledger_accepts_concurrent_evaluation_calls_and_keeps_construction_pacing`,
+which asserts eight concurrent calls finish inside 1.2 s and measured 1.53 s).
+Every one of them passes on its own, in its module and in its neighbourhood,
+and the whole suite passed twice on the same commit while the producer was
+quieter. They are assertions about wall-clock time on a machine that is also
+running the paid producer and the evaluator, not failures of this change.
+
 ## 9. Tests
 
 - `tests/test_broker_operation_lock_queue.py`: four paper threads queue for one
@@ -400,4 +415,13 @@ Between the 01:22 relaunch and 02:00 it completed 51 calls across
   hides the known one; the repair clears every refusal and nothing else, drops
   the progress row, is idempotent, and the backfill fills a label written
   without a time; the label table takes the new column without a version bump.
+- `tests/test_broker_operation_lock_queue.py` also pins the admission: an
+  unchanged ledger is not proved against its receipts again, a changed one is,
+  a row that moved is proved again while a still row is not, a changed receipt
+  is still caught, the count registration takes the shared ledger lock once, a
+  session reads the ledger once and is reentrant, a `counting` row of a dead
+  start is reused while one of another request is refused, and a duplicate key
+  never ends the run.
+- `tests/test_completion_dates_and_repair.py` also pins the state database's
+  wait for a lock another connection holds.
 - `tests/test_broker_operation_lock_wait.py` keeps the sequential bound.

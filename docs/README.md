@@ -47,6 +47,7 @@ The other documents explain one stage or one safety boundary in detail.
 | [METADATA_PREFILTER.md](METADATA_PREFILTER.md) | The metadata-only reduction of a discovery ledger before download or eligibility decisions. |
 | [SOURCE_SCREENING_PASS.md](SOURCE_SCREENING_PASS.md) | The bounded screening pass over one fixed candidate set. |
 | [CHAPTER2_CORPUS.md](CHAPTER2_CORPUS.md) | The column-aware re-extraction and the freeze of the chapter 2 corpus. |
+| [JEV_PRESCREEN.md](JEV_PRESCREEN.md) | The full-text prescreen that ranks the retained papers before the pipeline opens them. |
 
 ## Run the pipeline
 
