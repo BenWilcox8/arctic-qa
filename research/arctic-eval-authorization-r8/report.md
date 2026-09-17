@@ -220,23 +220,45 @@ The first vendor run manifest of an item stays byte for byte as it was written, 
 This is also what a cutover needs: an item can now be finished by a later snapshot, in the same work directory and under the same run id.
 The rule that a new run id prefix needs a new work directory does not change, because the run id is identity.
 
-## 11. The state at the end of this task
+## 11. Putting the change on the running unit
+
+The change of section 10 had to reach the unit before the two held items could be finished, and no landed snapshot carried it.
+So the evaluator moved to a snapshot of this branch, in the same work directory and under the same run id prefix, which is exactly the move the change makes possible.
+
+| Binding | Value |
+|---|---|
+| Code commit | `5535f28`, the branch tip at the time of the cutover |
+| Runtime snapshot | `runtime/app-5535f28-arctic-eval-authorization-r8` |
+| Authorization | `streaming-eval-r11-authorization.json`, 2000 items, USD 200.00 |
+| Review record | `streaming-eval-r11-review.md` |
+| Launcher | `streaming-eval-r11-launcher.sh`, which is the r10 launcher with the snapshot, the authorization and `--status-file` |
+| Run id prefix, work directory, campaign, contract, plan, policy, prices | unchanged |
+
+The launcher now passes `--status-file`, so the first half of section 4 is live: a bound that ends the run appends one `blocked:` line to `state/arctic-abstention-stream-r3.status`.
+The cost guard still runs its older snapshot, so its half arrives at its next re-snapshot; the caution of `docs/BENCHMARK_GUARD.md` says to give the guard its new code no earlier than the evaluator, which this order satisfies.
+
+The unit was stopped at 01:14:58Z while it was idle, the two held items were re-opened by appended rows, and it started on the new snapshot at 01:15:29Z.
+It took `aqa-e9b83b35d9a33a604ec0` at 01:15:30Z and finished it at 01:16:52Z, in 79.6 seconds: 18 Claude trials and nothing else.
+Its Gemini cost did not move, because the 30 recorded trials were not run again.
+
+That item's plan manifest now reads `code_commit` `a65348d`, `code_commits` `["a65348d", "5535f28"]`, `trials_per_item` 48 and all three vendors, with its original `created_at_utc`.
+`openai_codex/run-manifest.json` still reads `a65348d`, and `openai_codex/run-manifest-5535f28.json` beside it names the manifest it continues by hash.
+
+## 12. The state at the end of this task
 
 The evaluator runs as `arctic-abstention-stream-r3` from the snapshot `runtime/app-a65348d-arctic-eval-authorization-r8` of the activation directory `arctic-eval-authorization-r8`, on work directory `streaming-r11` and run id prefix `abstention-stream-r11`, with all three vendors and the Fable arm active.
 
 | Fact | Value |
 |---|---|
-| Restarted | 2026-09-17T00:07:40Z |
-| First new evaluation receipt | `c79aad30f84188da9d57756e82b8e5e21d322b14bf2d826eba42fba9b6b707d4` |
+| Live snapshot | `5535f28`, started 2026-09-17T01:15:29Z |
+| First evaluation receipt of the day's first restart | `c79aad30f84188da9d57756e82b8e5e21d322b14bf2d826eba42fba9b6b707d4` |
 | That receipt | `evaluation_answer:gemini-3.8-flash`, submitted 00:08:35Z, completed, USD 0.029674 |
 | Shared ledger | `halted` false, `evaluation_halted` false, `integrity_valid` true |
 | Carried journal rows | 16, of which 12 are item rows, so `remaining_bound` is 1988 |
 | Backfill owed | none as a separate task: the 12 carried items are re-evaluated whole as pending items |
 
-Neither half of section 4 is live yet.
-The running snapshot is `a65348d`, which predates both, so `streaming-eval-r10-launcher.sh` passes no `--status-file`: the flag does not exist there and the start would refuse it.
-The cost guard runs its own older snapshot too.
-Both halves reach their units at their next re-snapshot, after this branch merges.
+The evaluator's half of section 4 went live with the cutover of section 11.
+The cost guard runs its own older snapshot, so its half reaches it at its next re-snapshot, after this branch merges.
 Until then the bounds are 2000 items and USD 200.00, so a bound stop is far away, and the cost guard's extrapolation is the live control.
 
 Re-snapshot the evaluator before the guard, or both together.
