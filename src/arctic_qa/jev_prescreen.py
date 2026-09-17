@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import itertools
 import json
 import os
 import re
@@ -1149,6 +1150,37 @@ def _write_response(
     return path
 
 
+def _recorded_scores(
+    rows: list[dict[str, Any]],
+    pending: list[dict[str, Any]],
+    responses_dir: Path,
+    scan_position: "itertools.count[int]",
+) -> list[tuple[str, str, int]]:
+    """Return the score of every paper whose response is already recorded."""
+    outstanding = {row["candidate_key"] for row in pending}
+    scores: list[tuple[str, str, int]] = []
+    for row in rows:
+        candidate_key = row["candidate_key"]
+        if candidate_key in outstanding:
+            continue
+        path = response_file(responses_dir, candidate_key)
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            probabilities = read_probabilities(
+                (record.get("response") or {}).get("answers") or {}
+            )
+        except (OSError, ValueError, JevPrescreenError):
+            continue
+        scores.append(
+            (
+                candidate_key,
+                rank_probability(probabilities)["rank_probability"],
+                next(scan_position),
+            )
+        )
+    return scores
+
+
 def _answers_this_question_set(path: Path, question_hash: str) -> bool:
     """Say whether a recorded response answers the current question set."""
     if not path.is_file():
@@ -1158,6 +1190,92 @@ def _answers_this_question_set(path: Path, question_hash: str) -> bool:
     except (OSError, json.JSONDecodeError):
         return False
     return record.get("question_set_sha256") == question_hash
+
+
+LIVE_RANKING_SCHEMA = "jev-live-ranking-v1"
+LIVE_RANKING_FILENAME = "live-ranking.json"
+DEFAULT_LIVE_RANKING_EVERY = 25
+
+
+class LiveRanking:
+    """A ranking the producer can read while this scan is still running.
+
+    The captain's rule is that a paper the scan has scored reaches the
+    pipeline at once, rather than waiting for the whole corpus. So the scan
+    keeps every score it has so far in memory and rewrites one small file,
+    atomically, every `every` papers and at the end. The producer re-reads it
+    when a worker frees up.
+
+    The file is replaced, never appended, so a reader either sees the previous
+    whole file or the next whole file.
+    """
+
+    def __init__(self, path: Path, *, every: int = DEFAULT_LIVE_RANKING_EVERY):
+        self.path = path.resolve()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.every = max(1, every)
+        self._rows: dict[str, dict[str, Any]] = {}
+        self._since_write = 0
+        self._writes = 0
+        self._lock = threading.Lock()
+
+    def add(self, candidate_key: str, rank_probability: str, scan_position: int) -> None:
+        """Record one scored paper and write when enough have arrived."""
+        with self._lock:
+            self._rows[candidate_key] = {
+                "candidate_key": candidate_key,
+                "rank_probability": rank_probability,
+                "scan_position": scan_position,
+            }
+            self._since_write += 1
+            if self._since_write >= self.every:
+                self._write()
+
+    def seed(self, rows: Iterable[tuple[str, str, int]]) -> None:
+        """Take scores already on disk without writing once per row.
+
+        A resumed scan replays its recorded responses free, so those papers
+        never reach `add`. Without this they would be missing from the live
+        ranking, and the producer would treat papers this scan already scored
+        as unscored.
+        """
+        with self._lock:
+            for candidate_key, probability, position in rows:
+                self._rows[candidate_key] = {
+                    "candidate_key": candidate_key,
+                    "rank_probability": probability,
+                    "scan_position": position,
+                }
+            self._write()
+
+    def flush(self) -> None:
+        """Write whatever has been scored, whether or not the batch is full."""
+        with self._lock:
+            self._write()
+
+    @property
+    def writes(self) -> int:
+        with self._lock:
+            return self._writes
+
+    def _write(self) -> None:
+        records = sorted(
+            self._rows.values(),
+            key=lambda row: (-Decimal(row["rank_probability"]), row["candidate_key"]),
+        )
+        atomic_json(
+            self.path,
+            {
+                "schema": LIVE_RANKING_SCHEMA,
+                "contract_id": CONTRACT_ID,
+                "updated_at_utc": now(),
+                "question_set_sha256": question_set_sha256(),
+                "count": len(records),
+                "records": records,
+            },
+        )
+        self._since_write = 0
+        self._writes += 1
 
 
 def _failed_row(
@@ -1194,6 +1312,7 @@ def run_screen(
     workers: int = DEFAULT_WORKERS,
     limit: int | None = None,
     only_keys: Iterable[str] | None = None,
+    live_ranking_every: int = DEFAULT_LIVE_RANKING_EVERY,
 ) -> dict[str, Any]:
     """Call Jev once per paper and record every response.
 
@@ -1213,6 +1332,10 @@ def run_screen(
     responses_dir.mkdir(parents=True, exist_ok=True)
     ledger = CallLedger(output_dir / "ledger", ceiling_usd=ceiling_usd)
     question_hash = question_set_sha256()
+    # The producer reads this while the scan runs, so a scored paper reaches
+    # the pipeline without waiting for the rest of the corpus.
+    live = LiveRanking(output_dir / LIVE_RANKING_FILENAME, every=live_ranking_every)
+    scan_position = itertools.count(1)
 
     # A recorded response counts as done only when it answers the question set
     # this screen sends. A response of an older set is re-queued, because the
@@ -1224,6 +1347,9 @@ def run_screen(
             response_file(responses_dir, row["candidate_key"]), question_hash
         )
     ]
+    # A resumed scan seeds the live ranking from what it already bought, so a
+    # paper scored by an earlier pass is offered to the producer at once.
+    live.seed(_recorded_scores(rows, pending, responses_dir, scan_position))
     counts = {
         "selected": len(rows),
         "already_recorded": len(rows) - len(pending),
@@ -1407,6 +1533,19 @@ def run_screen(
                 }
             )
             _write_response(responses_dir, candidate_key, record)
+            # The score joins the live ranking the moment it exists, so the
+            # producer can pick this paper up before the scan is finished.
+            try:
+                probabilities = read_probabilities(raw.get("answers") or {})
+                live.add(
+                    candidate_key,
+                    rank_probability(probabilities)["rank_probability"],
+                    next(scan_position),
+                )
+            except JevPrescreenError:
+                # An answer the ranking cannot read is recorded all the same
+                # and reported by `--action rank`. It simply carries no score.
+                pass
             with lock:
                 counts["completed"] += 1
 
@@ -1414,6 +1553,7 @@ def run_screen(
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
             list(pool.map(guarded, pending))
 
+    live.flush()
     receipt = {
         "schema": "jev-prescreen-screen-receipt-v1",
         "contract_id": CONTRACT_ID,
@@ -1428,6 +1568,8 @@ def run_screen(
         "spent_usd": str(ledger.spent_usd),
         "ceiling_usd": str(ledger.ceiling_usd),
         "ceiling_reached": ledger.ceiling_reached,
+        "live_ranking_file": str(live.path),
+        "live_ranking_writes": live.writes,
     }
     atomic_json(output_dir / "screen-receipt.json", receipt)
     return receipt
@@ -1903,6 +2045,9 @@ def add_parser(commands: argparse._SubParsersAction) -> None:
         "--state-token-budget", type=int, default=DEFAULT_STATE_TOKEN_BUDGET
     )
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
+    parser.add_argument(
+        "--live-ranking-every", type=int, default=DEFAULT_LIVE_RANKING_EVERY
+    )
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--attempts", type=int, default=DEFAULT_ATTEMPTS)
     parser.add_argument("--limit", type=int)
@@ -1994,6 +2139,7 @@ def handle(args: argparse.Namespace) -> Any:
             workers=args.workers,
             limit=args.limit,
             only_keys=only_keys,
+            live_ranking_every=args.live_ranking_every,
         )
     if args.action == "rank":
         return build_ranking(
