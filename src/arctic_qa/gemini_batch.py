@@ -15,6 +15,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
 
+from . import ledger_store
 from .broker_provider import ROLE_STAGES, _provider_result, _request_payload
 from .db import Database, now
 from .errors import CandidateRejectedError, ProviderError
@@ -424,7 +425,7 @@ class BatchStore:
             return state
 
     def shared_ledger(self) -> dict[str, Any]:
-        ledger = _read(self.shared_ledger_file)
+        ledger = ledger_store.read_ledger(self.shared_ledger_file)
         if ledger.get("schema") != "shared-paid-call-ledger-v1" or not isinstance(
             ledger.get("requests"), dict
         ):

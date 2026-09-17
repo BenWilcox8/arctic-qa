@@ -646,7 +646,11 @@ def _watch(args: argparse.Namespace) -> dict[str, Any]:
         work_dir=args.work_dir,
         shared_ledger_file=args.shared_ledger_file,
         broker_factory=(
-            (lambda gate: _broker(args, evaluation_gate_file=gate))
+            (
+                lambda gate: _broker(
+                    args, evaluation_gate_file=gate, deferred_snapshot=True
+                )
+            )
             if needs_broker
             else None
         ),
@@ -861,7 +865,11 @@ def _run_plan(args: argparse.Namespace) -> dict[str, Any]:
         evaluation_policy_file=args.evaluation_policy_file,
         subscription_models_file=args.subscription_models_file.resolve(),
         broker_factory=(
-            (lambda gate: _broker(args, evaluation_gate_file=gate))
+            (
+                lambda gate: _broker(
+                    args, evaluation_gate_file=gate, deferred_snapshot=True
+                )
+            )
             if needs_broker
             else None
         ),
@@ -932,10 +940,21 @@ def _score(args: argparse.Namespace, run_dir: Path) -> dict[str, Any]:
 
 
 def _broker(
-    args: argparse.Namespace, *, evaluation_gate_file: Path
+    args: argparse.Namespace,
+    *,
+    evaluation_gate_file: Path,
+    deferred_snapshot: bool = False,
 ) -> SharedGeminiBroker:
+    """Build the evaluation broker.
+
+    ``deferred_snapshot`` is for the concurrent evaluator. The compacted
+    snapshot and the status file are then written by the compactor thread
+    instead of inside every commit, which would hold the shared ledger lock
+    for the length of a durable 8 MB write and starve the producer that waits
+    for it. Read "Parallel bookkeeping" in ``docs/SHARED_MODEL_BROKER.md``.
+    """
     _require(args, "shared_ledger_file", "model_receipts_dir", "credential_file")
-    return SharedGeminiBroker(
+    broker = SharedGeminiBroker(
         policy_file=args.streaming_budget_policy_file.resolve(),
         price_config_file=args.price_config_file.resolve(),
         execution_gate_file=args.execution_gate_file.resolve(),
@@ -957,6 +976,8 @@ def _broker(
             else None
         ),
     )
+    broker.deferred_snapshot = bool(deferred_snapshot)
+    return broker
 
 
 def _run_paid(args: argparse.Namespace, *, canary: bool) -> dict[str, Any]:

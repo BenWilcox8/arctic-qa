@@ -11,6 +11,7 @@ from typing import Any
 
 from . import __version__
 from . import abstention_cli
+from . import ledger_migration
 from . import concurrency_repair
 from .access_readiness import run_access_readiness, supervise_access_readiness
 from .broker_provider import BrokerProvider
@@ -547,6 +548,25 @@ def parser() -> argparse.ArgumentParser:
     )
     repair.add_argument("--output-file", type=Path)
 
+    store = commands.add_parser(
+        "migrate-ledger-store",
+        help="Convert a one-file shared paid-call ledger into the parallel "
+        "bookkeeping store, and prove the state did not move.",
+    )
+    store.add_argument("--shared-ledger-file", type=Path, required=True)
+    store.add_argument(
+        "--action",
+        default="migrate",
+        choices=("migrate", "check"),
+    )
+    store.add_argument("--archive-file", type=Path)
+    store.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write the store. Without it the command proves and writes nothing.",
+    )
+    store.add_argument("--output-file", type=Path)
+
     abstention_cli.add_parser(commands)
 
     reconcile = commands.add_parser(
@@ -850,6 +870,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.command == "abstention-eval":
             return _emit(args, abstention_cli.handle(args))
+        if args.command == "migrate-ledger-store":
+            return _emit(args, _migrate_ledger_store(args))
         if args.command == "reconcile-usage":
             return _emit(args, _reconcile_usage(args))
         if args.command == "settle-http-rejection":
@@ -1021,6 +1043,28 @@ def _doctor(args) -> dict[str, Any]:
         {"status": "ok", "mounted_writable": True, "namespace": str(paths.namespace)}
     )
     return result
+
+
+def _migrate_ledger_store(args) -> dict[str, Any]:
+    """Convert one shared paid-call ledger into the parallel store.
+
+    Run it with the producer and the evaluator stopped at a settled boundary.
+    Read "The migration" in `docs/SHARED_MODEL_BROKER.md`.
+    """
+    ledger_file = args.shared_ledger_file.resolve()
+    if args.action == "check":
+        archive = args.archive_file
+        if archive is None:
+            candidates = sorted(
+                ledger_file.parent.glob(
+                    f"{ledger_file.stem}.pre-store-archive-*{ledger_file.suffix}"
+                )
+            )
+            if not candidates:
+                raise ValueError("the ledger store has no pre-store archive")
+            archive = candidates[-1]
+        return ledger_migration.check(ledger_file, Path(archive))
+    return ledger_migration.migrate(ledger_file, apply=args.apply)
 
 
 def _reconcile_usage(args) -> dict[str, Any]:

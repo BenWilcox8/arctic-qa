@@ -486,6 +486,149 @@ After a crash, it uses that event to complete the ledger and final receipt.
 
 If no response event exists, it treats the interrupted request as an ambiguous charge.
 
+## Parallel bookkeeping
+
+The ledger keeps every guarantee it had.
+The cost of one paid call no longer grows with the history behind it.
+
+### What it replaces
+
+Until 2026-09-17 the ledger was one JSON file.
+Each operation read the whole file, proved every row of it, changed one thing, and wrote the whole file again.
+At 6,036 rows and 8.2 MB that cost about 3 seconds of serialised work for each paid call.
+
+`research/arctic-ledger-parallel-r1/report.md` holds the measurement.
+The three costs, in order, were the durable writes on a rotating data disk, the directory-wide scans of the receipts directory, and the whole-file parse with the whole-ledger proof.
+
+The number of calls in flight settles at the call length over the admission length.
+A call takes 8 seconds, so 16 calls in flight need an admission of half a second.
+That is why this section exists.
+
+The old shape is kept as history in "The one-file ledger, until 2026-09-17" below.
+
+### The store
+
+The store has three files beside each other.
+
+| file | what it is |
+| --- | --- |
+| `shared-paid-call-ledger.json` | the compacted **snapshot** |
+| `.shared-paid-call-ledger.json.journal` | the append-only **journal** |
+| `.shared-paid-call-ledger.json.journal.base.json` | the **base record**, which binds the two |
+
+The state of the ledger is the snapshot with every journal record of a higher sequence number applied, in order.
+
+A journal record is one line:
+
+```json
+{"schema":"shared-paid-call-ledger-journal-v1","seq":412,"at":"2026-09-17T04:10:02Z","delta":{...}}
+```
+
+A delta names only what the mutation changed.
+It is an **absolute assignment**, never an increment: `{"requests": {"set": {"<key>": {...}}}}` gives the new row, and `{"removed": ["<key>"]}` says a key is gone.
+Applying the same record twice therefore changes nothing, and a replay from any earlier point reaches the same state.
+That one property is what makes every stop safe, at any moment, in any order.
+
+### The base record
+
+The base record says which journal records the snapshot already holds, and binds the snapshot by its hash.
+
+```json
+{"schema":"shared-paid-call-ledger-journal-base-v1",
+ "snapshot_sha256":"<hash of the snapshot>",
+ "applied_seq":400,
+ "supersedes":{"snapshot_sha256":"<hash of the one before>","applied_seq":250}}
+```
+
+A snapshot whose hash matches neither record was changed outside the store.
+That is an integrity failure and it fails closed, because replaying the journal over a hand-edited snapshot would quietly repair a field no record names.
+
+The base record is written **before** the snapshot it names, so a stop between the two writes leaves the snapshot it supersedes, which is bound too.
+
+### One paid call
+
+| step | what it costs |
+| --- | --- |
+| read the ledger | the records another process appended since the last read |
+| prove the ledger | the rows that moved, and the size of the stage, paper and binding maps |
+| commit | one appended line |
+| make it durable | one `fsync`, shared with every call that appended before it |
+
+Nothing in that list grows with the number of rows in the ledger.
+
+### Group commit, and where the flush is
+
+`_ledger_lock` holds the shared ledger lock for the append and releases it **before** the flush.
+
+An appended record is visible to every reader of the journal the moment it is written.
+What the flush adds is durability against power loss, and the money rule needs that before the provider call, not before the lock is released.
+Outside the lock, one thread's `fsync` covers every record its peers appended.
+A wave of sixteen concurrent calls pays one flush, not sixteen.
+
+A durable write on this data disk, a USB rotating disk, costs 150 to 470 ms whatever its size.
+Group commit is the whole answer to that number, and it is why the journal lives beside the ledger and not on another device: one file, one flush, one filesystem, and the same durability the ledger always had.
+
+### The proof, and where the full pass runs
+
+`_validate_ledger` is now three parts.
+
+- `_validate_ledger_shape` checks the fields of the ledger.
+- `_row_contribution` proves one request row and returns what it adds to the totals.
+- `_compare_ledger` compares the summed contributions with what the ledger stores.
+
+`_prove_ledger` sums every row. It is the full pass and it keeps no state, so the compactor thread runs it while the hot path runs its own.
+`_validate_ledger_delta` subtracts the contribution of each row that moved, proves the row again and adds it back.
+Everything `_compare_ledger` compares is compared on every read and every commit; only the summing is incremental.
+
+### The compactor
+
+One background thread per broker of a concurrent run rewrites the snapshot, every `COMPACTION_INTERVAL_SECONDS`.
+It never takes the shared ledger lock, so it never delays a paid call.
+It materializes the store from the snapshot and the journal, runs the **full row-by-row proof**, writes the snapshot and the base record under the compaction lock, and publishes the status record.
+
+A broker that runs one operation at a time, which is every reviewed command and every test, writes the snapshot and the status with the commit instead (`deferred_snapshot`).
+The snapshot is then exact for anything that reads the plain file.
+
+The compaction lock, `.shared-paid-call-ledger.json.compaction.lock`, orders compactors against each other and against nothing else.
+A compactor that does not get it does nothing and tries again later.
+
+### Every reader
+
+Every reader in this repository reads the store, never `json.load` of the ledger file:
+
+- `ledger_store.read_ledger(path)` materializes the snapshot and the journal,
+- `ledger_store.apply_journal(path, snapshot)` finishes a snapshot a reader already read under the shared lock.
+
+The migrated readers are `live_papers.read_shared_ledger` (the website), `benchmark_guard.read_ledger` (the cost guard), `corpus_viewer` (whose cache is keyed on the journal as well as the snapshot) and `gemini_batch`.
+A reader that still reads the plain file sees the ledger as of the last compaction, which on a concurrent run is at most `COMPACTION_INTERVAL_SECONDS` old.
+
+### What did not change
+
+- Receipts are per-request immutable files, exactly as before.
+- A reservation is durable before the provider call.
+- The reservation, the settlement and the exact totals are unchanged.
+- Per-phase halts, in-flight slots and the minute window are unchanged.
+- The reviewed configuration and policy transitions and their hashes are unchanged.
+- The identity record, the integrity halt and the immutable-event proof are unchanged.
+- Ambiguous charges, orphan recovery and the completion labels are unchanged.
+
+### The migration
+
+`arctic-qa migrate-ledger-store --shared-ledger-file <path>` converts a one-file ledger into the store.
+
+It runs with the producer and the evaluator stopped, at a settled boundary.
+It copies the ledger to `<name>.pre-store-archive-<utc>.json`, writes the empty journal and the base record, materializes the store again and proves that every field of the result is identical to the archive, byte for byte after canonical serialization.
+`--check` proves an existing store against its archive without writing anything.
+
+### The one-file ledger, until 2026-09-17
+
+Until 2026-09-17 the ledger was one JSON file and nothing else.
+Every read parsed it whole and proved every row; every commit proved every row again and rewrote the file; the status record was written with every commit.
+`_ledger_evidence_fingerprint` named the state by the hash of that file.
+
+The shape was correct and it was simple, and it held the run from the first paid call to 6,036 rows.
+It ended because the work of one call grew with the history, and 16 calls in flight need a call's bookkeeping to be its own.
+
 ## Provider rejections
 
 The broker records the provider error body of every non-2xx answer in the ambiguous receipt, as `error_body` (at most 4000 characters) and `provider_error_status`.

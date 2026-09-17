@@ -37,6 +37,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from . import ledger_store
+
 
 LIVE_PAPERS_SCHEMA = "corpus-viewer-live-papers-v1"
 LEDGER_SCHEMA = "shared-paid-call-ledger-v1"
@@ -151,6 +153,10 @@ def read_shared_ledger(path: Path) -> dict[str, Any]:
     lock_path = path.with_name(f".{path.name}.lock")
     raw = _read_bytes_under_shared_lock(path, lock_path)
     value = json.loads(raw)
+    # The file is the compacted snapshot of the parallel bookkeeping store,
+    # and the journal beside it holds everything committed since. Read
+    # "Parallel bookkeeping" in docs/SHARED_MODEL_BROKER.md.
+    value = ledger_store.apply_journal(path, value)
     if not isinstance(value, dict) or value.get("schema") != LEDGER_SCHEMA:
         raise ValueError("the shared paid-call ledger schema is invalid")
     if not isinstance(value.get("requests"), dict):

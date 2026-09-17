@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 import urllib.error
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -27,6 +27,8 @@ from .gemini_eligibility import (
     call_timeout_seconds,
     model_config_for_stage,
 )
+from . import ledger_store
+from .ledger_store import LedgerStore
 from .pipeline_trace import record_model_request_trace
 from .util import atomic_json, canonical_json, sha256_bytes, sha256_file
 
@@ -226,10 +228,29 @@ CHAPTER3_CONCURRENCY_CHANGE = {
         "to": CHAPTER3_CONCURRENCY_REQUESTS_PER_MINUTE,
     },
 }
+# Chapter 3 parallel bookkeeping (captain order 2026-09-17 03:35 UTC): sixteen
+# papers in flight. The ledger no longer pays for the whole history on every
+# call, so the request rate the run can reach moves with it. The two
+# request-rate limits move together and nothing else moves: the money
+# ceilings, the per-request cap, the paper cost cap and every project design
+# count stay exactly as the expansion left them.
+CHAPTER3_PARALLEL_REQUESTS = 16
+CHAPTER3_PARALLEL_REQUESTS_PER_MINUTE = 100
+CHAPTER3_PARALLEL_CHANGE = {
+    "maximum_concurrent_generation_requests": {
+        "from": CHAPTER3_CONCURRENCY_REQUESTS,
+        "to": CHAPTER3_PARALLEL_REQUESTS,
+    },
+    "maximum_generation_requests_per_minute": {
+        "from": CHAPTER3_CONCURRENCY_REQUESTS_PER_MINUTE,
+        "to": CHAPTER3_PARALLEL_REQUESTS_PER_MINUTE,
+    },
+}
 # The registered request-rate pairs, in the order they were authorized.
 ALLOWED_REQUEST_RATES = (
     (2, 10),
     (CHAPTER3_CONCURRENCY_REQUESTS, CHAPTER3_CONCURRENCY_REQUESTS_PER_MINUTE),
+    (CHAPTER3_PARALLEL_REQUESTS, CHAPTER3_PARALLEL_REQUESTS_PER_MINUTE),
 )
 POLICY_TRANSITION_CHANGES = (
     {"live_test_maximum_papers": {"from": 20, "to": 40}},
@@ -244,6 +265,7 @@ POLICY_TRANSITION_CHANGES = (
     CHAPTER3_BUDGET_CHANGE,
     CHAPTER3_EXPANSION_CHANGE,
     CHAPTER3_CONCURRENCY_CHANGE,
+    CHAPTER3_PARALLEL_CHANGE,
 )
 # The policy transitions that move the construction ceiling. Each one binds a
 # complete stream-input gate and names its own cumulative ceiling as the tranche.
@@ -1488,6 +1510,13 @@ class SharedGeminiBroker:
         # one exclusive operation lock held for the whole call.
         self._admission_lock = threading.Lock()
         self.concurrent_construction = bool(concurrent_construction)
+        # A concurrent broker defers the compacted snapshot and the status
+        # file to its compactor thread; a broker that runs one operation at a
+        # time writes them with the commit, which is what every reviewed
+        # command sees. The streaming evaluator asks for the deferred shape
+        # itself, because its own snapshot write would be 660 ms held under
+        # the ledger lock that the producer waits for.
+        self.deferred_snapshot = bool(concurrent_construction)
         self._pacing_state = threading.local()
         # The wait and the hold of every exclusive section, by lock handle, and
         # the whole-call lock of the sequential path by thread. The second one
@@ -1501,9 +1530,24 @@ class SharedGeminiBroker:
         self._immutable_events_context: tuple[Any, ...] | None = None
         self._immutable_events_proved_at: float | None = None
         self._ledger_evidence_proved: tuple[Any, ...] | None = None
+        self._receipt_listing: tuple[tuple[int, int], list[str]] | None = None
+        # A terminal row's final receipt is immutable, so its custody is
+        # proved once and never stated again.
+        self._custody_proved: set[str] = set()
+        # The parallel bookkeeping store: the snapshot, the journal beside it
+        # and this process's view of both. Read "Parallel bookkeeping" in
+        # docs/SHARED_MODEL_BROKER.md.
+        self._store = LedgerStore(self.ledger_file)
+        self._row_contributions: dict[str, dict[str, Any]] | None = None
+        self._ledger_aggregate: dict[str, Any] | None = None
+        self._aggregate_state_id: int | None = None
+        self._compaction_thread: threading.Thread | None = None
+        self._compaction_stop = threading.Event()
+        self._compacted_seq = 0
         # One held shared ledger lock and one read of the ledger, per thread,
         # for the length of a session.
         self._ledger_session_state = threading.local()
+        self._flush_state = threading.local()
         evaluation_files = (
             evaluation_policy_file,
             evaluation_price_config_file,
@@ -1576,7 +1620,7 @@ class SharedGeminiBroker:
         """Read every applied evaluation-policy transition event, unordered."""
         events: list[tuple[Path, dict[str, Any]]] = []
         for path in sorted(
-            self.receipts_dir.glob("evaluation-policy-transition-*.json")
+            self._receipt_paths(prefix="evaluation-policy-transition-", suffix=".json")
         ):
             event = _read(path)
             authorization = event.get("authorization")
@@ -1773,8 +1817,7 @@ class SharedGeminiBroker:
             raise ValueError("the evaluation policy transition review record is absent")
         if sha256_file(review_path) != authorization["review_record_sha256"]:
             raise ValueError("the evaluation policy transition review record changed")
-        with self._lock_file.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with self._ledger_lock():
             ledger = self._validated_ledger()
         if ledger["halted"] or self._phase_halted(ledger, EVALUATION_PHASE):
             raise ValueError("the ledger is halted")
@@ -2068,6 +2111,47 @@ class SharedGeminiBroker:
             )
 
     @contextlib.contextmanager
+    def _ledger_lock(self) -> Iterator[None]:
+        """Hold the shared ledger lock, then make the journal durable.
+
+        The flush is deliberately outside the lock. An appended record is
+        already visible to every reader of the journal the moment it is
+        written; what the flush adds is durability against power loss, and the
+        money rule needs that before the provider call, not before the lock is
+        released. Outside the lock one thread's flush covers every record its
+        peers appended, so a wave of sixteen concurrent calls pays one
+        `fsync`, not sixteen. A durable write on this data disk costs 150 to
+        470 ms, which is the whole reason:
+        `research/arctic-ledger-parallel-r1/report.md`.
+        """
+        try:
+            with self._lock_file.open("a+") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+        finally:
+            if not getattr(self._flush_state, "deferred", False):
+                self._store.flush()
+
+    @contextlib.contextmanager
+    def _deferred_flush(self) -> Iterator[None]:
+        """Hold the journal's flush until the admission is over.
+
+        Admission is serialised, so a flush inside it is a flush nobody
+        shares. The free count event is not money and owes no flush at all,
+        and the reservation owes one before the provider call, which is after
+        the admission lock is released. ``execute`` flushes there, where the
+        reservations of sixteen concurrent calls meet in one ``fsync``.
+        """
+        self._flush_state.deferred = True
+        try:
+            yield
+        finally:
+            self._flush_state.deferred = False
+
+    @contextlib.contextmanager
     def _ledger_session(self) -> Iterator[None]:
         """Hold the shared ledger lock across several ledger operations.
 
@@ -2091,8 +2175,7 @@ class SharedGeminiBroker:
             finally:
                 state.depth -= 1
             return
-        with self._lock_file.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with self._ledger_lock():
             state.depth = 1
             state.ledger = None
             try:
@@ -2116,8 +2199,7 @@ class SharedGeminiBroker:
                 state.ledger = self._validated_ledger()
             yield state.ledger
             return
-        with self._lock_file.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with self._ledger_lock():
             yield self._validated_ledger()
 
     @contextlib.contextmanager
@@ -2428,7 +2510,7 @@ class SharedGeminiBroker:
             ):
                 raise ValueError("the price configuration transition identity changed")
             matching_predecessors = []
-            for path in self.receipts_dir.glob("config-transition-*.json"):
+            for path in self._receipt_paths(prefix="config-transition-", suffix=".json"):
                 if sha256_file(path) != predecessor:
                     continue
                 event = self._read_transition_event(path)
@@ -2472,7 +2554,7 @@ class SharedGeminiBroker:
                 ):
                     raise ValueError("the policy transition identity changed")
                 matching_predecessors = []
-                for path in self.receipts_dir.glob("config-transition-*.json"):
+                for path in self._receipt_paths(prefix="config-transition-", suffix=".json"):
                     if sha256_file(path) != predecessor:
                         continue
                     event = self._read_transition_event(path)
@@ -2524,7 +2606,7 @@ class SharedGeminiBroker:
                         raise ValueError("the policy transition predecessor changed")
                 else:
                     matching_predecessors = []
-                    for path in self.receipts_dir.glob("config-transition-*.json"):
+                    for path in self._receipt_paths(prefix="config-transition-", suffix=".json"):
                         if sha256_file(path) != predecessor:
                             continue
                         event = self._read_transition_event(path)
@@ -2657,7 +2739,7 @@ class SharedGeminiBroker:
             else None
         )
         matching_events: list[tuple[Path, dict[str, Any]]] = []
-        for path in self.receipts_dir.glob("config-transition-*.json"):
+        for path in self._receipt_paths(prefix="config-transition-", suffix=".json"):
             event = self._read_transition_event(path)
             authorization = event["authorization"]
             if authorization.get("ledger_file") != str(self.ledger_file):
@@ -2753,8 +2835,7 @@ class SharedGeminiBroker:
     def _initialize(self) -> None:
         self.ledger_file.parent.mkdir(parents=True, exist_ok=True)
         self.receipts_dir.mkdir(parents=True, exist_ok=True)
-        with self._lock_file.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with self._ledger_lock():
             if self.ledger_file.is_file():
                 if self._integrity_file.exists():
                     raise ValueError(
@@ -2765,11 +2846,20 @@ class SharedGeminiBroker:
                         "the shared paid-call ledger identity record is absent"
                     )
                 identity = _read(self._identity_file)
-                ledger = _read(self.ledger_file)
-                self._validate_initial_identity(identity, ledger)
+                self._validate_initial_identity(
+                    identity, ledger_store.read_ledger(self.ledger_file)
+                )
                 ledger = self._validated_ledger()
                 self._authorize_active_config(identity, ledger)
                 self._publish_status(ledger)
+                # A start compacts a snapshot that lags its journal, so a
+                # reviewed authorization always binds the state and never a
+                # stale file, and an outside reader of the plain file starts
+                # from the truth.
+                self._compacted_seq = ledger_store.snapshot_applied_seq(
+                    self.ledger_file
+                )
+                self.compact()
                 return
             if self._identity_file.exists():
                 raise ValueError(
@@ -2811,7 +2901,12 @@ class SharedGeminiBroker:
                 "updated_at_utc": _now(),
             }
             atomic_json(self._identity_file, self._ledger_identity(), immutable=True)
-            self._commit_ledger(ledger)
+            self._prove_ledger(ledger)
+            atomic_json(self.ledger_file, ledger)
+            ledger_store.initialize_store(self.ledger_file)
+            state = self._store.load()
+            self._validate_ledger(state)
+            self._publish_status(state)
 
     @staticmethod
     def _empty_usage_row() -> dict[str, Any]:
@@ -2880,6 +2975,41 @@ class SharedGeminiBroker:
         if self._status_observer is not None:
             self._status_observer(self._status_file)
 
+    def _receipt_names(self) -> list[str]:
+        """List the receipts directory once, and keep the listing.
+
+        The immutable-event proof used to walk the directory nine times, once
+        per pattern. At 23,615 entries on a rotating disk each walk cost 22 to
+        40 ms, which was 320 ms of every ledger read that had anything to
+        prove. A receipt is immutable, so the listing is a pure function of
+        the directory, and a directory whose modification time and size have
+        not moved has the same entries.
+        """
+        try:
+            status = os.stat(self.receipts_dir)
+            fingerprint = (status.st_mtime_ns, status.st_size)
+        except OSError:
+            fingerprint = (0, 0)
+        if self._receipt_listing is not None and self._receipt_listing[0] == (
+            fingerprint
+        ):
+            return self._receipt_listing[1]
+        names = sorted(
+            entry.name
+            for entry in os.scandir(self.receipts_dir)
+            if entry.is_file(follow_symlinks=False)
+        )
+        self._receipt_listing = (fingerprint, names)
+        return names
+
+    def _receipt_paths(self, *, prefix: str = "", suffix: str = "") -> list[Path]:
+        """The receipts whose name has this prefix and this suffix."""
+        return [
+            self.receipts_dir / name
+            for name in self._receipt_names()
+            if name.startswith(prefix) and name.endswith(suffix)
+        ]
+
     def _ledger_evidence_fingerprint(self) -> tuple[Any, ...]:
         """Identify the bytes the immutable-event proof is a proof of.
 
@@ -2895,15 +3025,23 @@ class SharedGeminiBroker:
             receipts = (stat.st_mtime_ns, stat.st_size)
         except OSError:
             receipts = (0, 0)
-        return (sha256_file(self.ledger_file), receipts)
+        return (self._store.sequence, receipts)
 
     def _validated_ledger(self) -> dict[str, Any]:
         if self._integrity_file.exists():
             raise ValueError("the shared paid-call ledger has an integrity halt")
         try:
+            if self._store.is_dirty():
+                # A mutation was abandoned without a commit, so this process's
+                # view is not the store. Read it again from the store.
+                self._store.discard()
+            ledger = self._store.read()
+            full, changed = self._store.take_changes()
+            if full:
+                self._validate_ledger(ledger)
+            elif changed:
+                self._validate_ledger_delta(ledger, changed)
             fingerprint = self._ledger_evidence_fingerprint()
-            ledger = _read(self.ledger_file)
-            self._validate_ledger(ledger)
             # The ledger's own consistency is proved on every read, above. The
             # proof against the receipts on disk is skipped only when nothing
             # it reads has changed since the last time it ran.
@@ -3147,7 +3285,7 @@ class SharedGeminiBroker:
             sha256_file(self.policy_file),
         )
         matching_paths = []
-        for candidate_path in self.receipts_dir.glob("config-transition-*.json"):
+        for candidate_path in self._receipt_paths(prefix="config-transition-", suffix=".json"):
             candidate = self._read_transition_event(candidate_path)
             candidate_authorization = candidate["authorization"]
             if (
@@ -3211,7 +3349,7 @@ class SharedGeminiBroker:
         pending_events: list[
             tuple[Path, dict[str, Any], tuple[str, str], tuple[str, str]]
         ] = []
-        for path in self.receipts_dir.glob("config-transition-*.json"):
+        for path in self._receipt_paths(prefix="config-transition-", suffix=".json"):
             event = self._read_transition_event(path)
             authorization = event["authorization"]
             from_pair, target_pair = self._transition_pairs(authorization, identity)
@@ -3301,18 +3439,18 @@ class SharedGeminiBroker:
             if not progressed:
                 raise ValueError("the applied configuration transition chain changed")
         reconciliation_events: dict[str, tuple[Path, dict[str, Any]]] = {}
-        for path in self.receipts_dir.glob("*.usage-reconciliation.json"):
+        for path in self._receipt_paths(suffix=".usage-reconciliation.json"):
             event = self._read_usage_reconciliation(path)
             request_key = event["request_key"]
             if request_key in reconciliation_events:
                 raise ValueError("multiple usage reconciliation events exist")
             reconciliation_events[request_key] = (path, event)
-        for path in self.receipts_dir.iterdir():
+        for name in self._receipt_names():
             match = re.fullmatch(
                 r"([a-f0-9]{64})"
                 r"(?:\.resume-[a-f0-9]{64}|\.count-retry-[1-9][0-9]*)?"
                 r"(?:\.(?:submitted|received))?\.json",
-                path.name,
+                name,
             )
             if match and match.group(1) not in ledger["requests"]:
                 raise ValueError(
@@ -3355,6 +3493,11 @@ class SharedGeminiBroker:
             self._immutable_events_proved = {}
             self._immutable_events_context = context
             self._ledger_evidence_proved = None
+            # The custody of a terminal receipt is proved with the rows, so a
+            # receipt taken away behind this process's back is caught by the
+            # same full pass, within IMMUTABLE_EVENT_REVALIDATION_SECONDS.
+            self._custody_proved = set()
+            self._receipt_listing = None
         proved = self._immutable_events_proved
         for request_key, request in ledger["requests"].items():
             signature = canonical_json(request)
@@ -3387,7 +3530,7 @@ class SharedGeminiBroker:
         accepted_successors: dict[
             tuple[str, str], tuple[str, Path, dict[str, Any]]
         ] = {}
-        for path in self.receipts_dir.glob("accepted-*.json"):
+        for path in self._receipt_paths(prefix="accepted-", suffix=".json"):
             value = _read(path)
             family_id = value.get("family_id")
             item_id = value.get("item_id")
@@ -4000,7 +4143,7 @@ class SharedGeminiBroker:
         self, ledger: dict[str, Any]
     ) -> dict[str, dict[str, Any]]:
         events: dict[str, dict[str, Any]] = {}
-        for path in self.receipts_dir.glob("ambiguous-continuation-*.json"):
+        for path in self._receipt_paths(prefix="ambiguous-continuation-", suffix=".json"):
             event = self._read_ambiguous_continuation(path)
             request_key = event["request_key"]
             if request_key in events or request_key not in ledger["requests"]:
@@ -4132,7 +4275,7 @@ class SharedGeminiBroker:
         self, ledger: dict[str, Any]
     ) -> dict[str, dict[str, Any]]:
         events: dict[str, dict[str, Any]] = {}
-        for path in self.receipts_dir.glob("orphaned-continuation-*.json"):
+        for path in self._receipt_paths(prefix="orphaned-continuation-", suffix=".json"):
             event = self._read_orphaned_continuation(path)
             request_key = event["request_key"]
             request = ledger["requests"].get(request_key)
@@ -4176,7 +4319,30 @@ class SharedGeminiBroker:
             raise ValueError("an orphaned request lacks its continuation event")
         return events
 
-    def _validate_ledger(self, ledger: dict[str, Any]) -> None:
+    # The ledger's own consistency is proved on every read and every commit.
+    # The proof used to loop over every request row, which was 150 ms at 6,036
+    # rows and, at five reads and three commits a paid call, about a second of
+    # the serialised admission. The proof is now factored into three parts:
+    # the shape of the ledger, the contribution of one request row, and the
+    # comparison of the summed contributions with what the ledger stores. A
+    # full pass sums every row. The hot path re-sums only the rows a mutation
+    # touched, and the background compactor runs a full pass off the hot path.
+
+    _SUBMITTED_STATES = frozenset(
+        {"submitted", "orphaned_no_replay", "completed", "ambiguous_charge"}
+    )
+    _TERMINAL_STATES = frozenset(
+        {
+            "completed",
+            "ambiguous_charge",
+            "count_error",
+            "too_large_not_ready",
+            "not_submitted",
+            "orphaned_no_replay",
+        }
+    )
+
+    def _validate_ledger_shape(self, ledger: dict[str, Any]) -> None:
         required = {
             "schema",
             "policy_sha256",
@@ -4222,188 +4388,213 @@ class SharedGeminiBroker:
         if not isinstance(ledger["halted"], bool):
             raise ValueError("the shared paid-call halt state is invalid")
 
-        expected_stages: dict[str, dict[str, Any]] = {}
-        expected_papers: dict[str, dict[str, Any]] = {}
-        expected_live: dict[str, dict[str, Any]] = {}
-        totals = {
+    def _row_contribution(
+        self, ledger: dict[str, Any], key: str, request: Any
+    ) -> dict[str, Any] | None:
+        """Validate one request row and return what it adds to the totals.
+
+        ``None`` means the row is valid and adds nothing, which is every row
+        that was never submitted.
+        """
+        if not re.fullmatch(r"[a-f0-9]{64}", key) or not isinstance(request, dict):
+            raise ValueError("the shared paid-call request identity is invalid")
+        if request.get("request_key") != key:
+            raise ValueError("a paid-call request key does not match its record")
+        for name in (
+            "request_sha256",
+            "run_id",
+            "stage",
+            "paper_id",
+            "family_id",
+            "source_version_id",
+            "model",
+            "gate_sha256",
+        ):
+            if not isinstance(request.get(name), str) or not request[name]:
+                raise ValueError(f"a paid-call request lacks {name}")
+        request_config_hash = request.get("price_config_sha256")
+        if request_config_hash is not None and (
+            not isinstance(request_config_hash, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", request_config_hash)
+        ):
+            raise ValueError("a paid-call request has an invalid price config hash")
+        request_policy_hash = request.get("policy_sha256")
+        if request_policy_hash is not None and (
+            not isinstance(request_policy_hash, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", request_policy_hash)
+        ):
+            raise ValueError("a paid-call request has an invalid policy hash")
+        transition_hash = request.get("config_transition_sha256")
+        if transition_hash is not None and (
+            not isinstance(transition_hash, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", transition_hash)
+        ):
+            raise ValueError("a paid-call request has an invalid config transition hash")
+        resume_receipt_sha256 = request.get("resumed_from_not_submitted_sha256")
+        resume_transition_sha256 = request.get("resumed_from_config_transition_sha256")
+        if (resume_receipt_sha256 is None) != (resume_transition_sha256 is None):
+            raise ValueError("a paid-call resume binding is incomplete")
+        for value in (resume_receipt_sha256, resume_transition_sha256):
+            if value is not None and (
+                not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value)
+            ):
+                raise ValueError("a paid-call resume binding is invalid")
+        if resume_transition_sha256 is not None and (
+            transition_hash is None or transition_hash == resume_transition_sha256
+        ):
+            raise ValueError("a paid-call resume transition did not advance")
+        if not stage_supported(request["stage"]):
+            raise ValueError("a paid-call request has an unsupported stage")
+        binding = ledger["family_bindings"].get(request["family_id"])
+        if binding != {
+            "paper_id": request["paper_id"],
+            "source_version_id": request["source_version_id"],
+        }:
+            raise ValueError("a paid-call family binding is inconsistent")
+        state = request.get("state")
+        if state not in {"counting", *self._TERMINAL_STATES, "submitted"}:
+            raise ValueError("a paid-call request state is invalid")
+        if state not in self._SUBMITTED_STATES:
+            return None
+        phase = request.get("phase")
+        if phase not in PHASES:
+            raise ValueError("a submitted paid-call phase is invalid")
+        reserved = _money(
+            request.get("reserved_usd"), "request reservation", positive=True
+        )
+        contribution = {
+            "stage": request["stage"],
+            "family_id": request["family_id"],
+            "paper_id": request["paper_id"],
+            "source_version_id": request["source_version_id"],
+            "live": phase == "live_test",
+            "inflight": 1 if state == "submitted" else 0,
             "reserved": Decimal("0"),
             "spent": Decimal("0"),
             "ambiguous": Decimal("0"),
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "thinking_tokens": 0,
         }
-        submissions = 0
-        inflight = 0
-        submitted_states = {
-            "submitted",
-            "orphaned_no_replay",
-            "completed",
-            "ambiguous_charge",
+        if state in {"submitted", "orphaned_no_replay"}:
+            contribution["reserved"] = reserved
+        elif state == "ambiguous_charge":
+            contribution["ambiguous"] = reserved
+        else:
+            actual = _money(request.get("actual_cost_usd"), "request actual cost")
+            if actual > reserved:
+                raise ValueError("a paid-call actual cost exceeds its reservation")
+            usage = request.get("usage")
+            if not isinstance(usage, dict):
+                raise ValueError("a completed paid-call request lacks usage")
+            for field in (
+                "promptTokenCount",
+                "candidatesTokenCount",
+                "thoughtsTokenCount",
+            ):
+                value = usage.get(field)
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise ValueError("a completed paid-call request has invalid usage")
+            contribution["spent"] = actual
+            contribution["input_tokens"] = usage["promptTokenCount"]
+            contribution["output_tokens"] = usage["candidatesTokenCount"]
+            contribution["thinking_tokens"] = usage["thoughtsTokenCount"]
+        return contribution
+
+    @staticmethod
+    def _empty_aggregate() -> dict[str, Any]:
+        return {
+            "stages": {},
+            "papers": {},
+            "live": {},
+            "reserved": Decimal("0"),
+            "spent": Decimal("0"),
+            "ambiguous": Decimal("0"),
+            "submissions": 0,
+            "inflight": 0,
         }
-        terminal_states = {
-            "completed",
-            "ambiguous_charge",
-            "count_error",
-            "too_large_not_ready",
-            "not_submitted",
-            "orphaned_no_replay",
-        }
-        for key, request in ledger["requests"].items():
-            if not re.fullmatch(r"[a-f0-9]{64}", key) or not isinstance(request, dict):
-                raise ValueError("the shared paid-call request identity is invalid")
-            if request.get("request_key") != key:
-                raise ValueError("a paid-call request key does not match its record")
-            for name in (
-                "request_sha256",
-                "run_id",
-                "stage",
-                "paper_id",
-                "family_id",
-                "source_version_id",
-                "model",
-                "gate_sha256",
-            ):
-                if not isinstance(request.get(name), str) or not request[name]:
-                    raise ValueError(f"a paid-call request lacks {name}")
-            request_config_hash = request.get("price_config_sha256")
-            if request_config_hash is not None and (
-                not isinstance(request_config_hash, str)
-                or not re.fullmatch(r"[a-f0-9]{64}", request_config_hash)
-            ):
-                raise ValueError("a paid-call request has an invalid price config hash")
-            request_policy_hash = request.get("policy_sha256")
-            if request_policy_hash is not None and (
-                not isinstance(request_policy_hash, str)
-                or not re.fullmatch(r"[a-f0-9]{64}", request_policy_hash)
-            ):
-                raise ValueError("a paid-call request has an invalid policy hash")
-            transition_hash = request.get("config_transition_sha256")
-            if transition_hash is not None and (
-                not isinstance(transition_hash, str)
-                or not re.fullmatch(r"[a-f0-9]{64}", transition_hash)
-            ):
-                raise ValueError(
-                    "a paid-call request has an invalid config transition hash"
-                )
-            resume_receipt_sha256 = request.get("resumed_from_not_submitted_sha256")
-            resume_transition_sha256 = request.get(
-                "resumed_from_config_transition_sha256"
-            )
-            if (resume_receipt_sha256 is None) != (resume_transition_sha256 is None):
-                raise ValueError("a paid-call resume binding is incomplete")
-            for value in (resume_receipt_sha256, resume_transition_sha256):
-                if value is not None and (
-                    not isinstance(value, str)
-                    or not re.fullmatch(r"[a-f0-9]{64}", value)
-                ):
-                    raise ValueError("a paid-call resume binding is invalid")
-            if resume_transition_sha256 is not None and (
-                transition_hash is None or transition_hash == resume_transition_sha256
-            ):
-                raise ValueError("a paid-call resume transition did not advance")
-            if not stage_supported(request["stage"]):
-                raise ValueError("a paid-call request has an unsupported stage")
-            binding = ledger["family_bindings"].get(request["family_id"])
-            if binding != {
-                "paper_id": request["paper_id"],
-                "source_version_id": request["source_version_id"],
-            }:
-                raise ValueError("a paid-call family binding is inconsistent")
-            state = request.get("state")
-            if state not in {"counting", *terminal_states, "submitted"}:
-                raise ValueError("a paid-call request state is invalid")
-            if state not in submitted_states:
-                continue
-            phase = request.get("phase")
-            if phase not in PHASES:
-                raise ValueError("a submitted paid-call phase is invalid")
-            reserved = _money(
-                request.get("reserved_usd"), "request reservation", positive=True
-            )
-            submissions += 1
-            stage = expected_stages.setdefault(
-                request["stage"], self._empty_usage_row()
-            )
-            paper = expected_papers.setdefault(
-                request["family_id"],
+
+    def _aggregate_apply(
+        self, aggregate: dict[str, Any], contribution: dict[str, Any], sign: int
+    ) -> None:
+        """Add or subtract one row's contribution to the running totals."""
+        aggregate["submissions"] += sign
+        aggregate["inflight"] += sign * int(contribution["inflight"])
+        for name in ("reserved", "spent", "ambiguous"):
+            aggregate[name] += sign * contribution[name]
+        stage = aggregate["stages"].setdefault(
+            contribution["stage"],
+            {
+                "submissions": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "thinking_tokens": 0,
+                "reserved": Decimal("0"),
+                "spent": Decimal("0"),
+                "ambiguous": Decimal("0"),
+            },
+        )
+        paper = aggregate["papers"].setdefault(
+            contribution["family_id"],
+            {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "thinking_tokens": 0,
+                "reserved": Decimal("0"),
+                "spent": Decimal("0"),
+                "ambiguous": Decimal("0"),
+                "paper_id": contribution["paper_id"],
+                "source_version_id": contribution["source_version_id"],
+            },
+        )
+        stage["submissions"] += sign
+        for row in (stage, paper):
+            for name in ("reserved", "spent", "ambiguous"):
+                row[name] += sign * contribution[name]
+            for name in ("input_tokens", "output_tokens", "thinking_tokens"):
+                row[name] += sign * int(contribution[name])
+        if contribution["live"]:
+            live = aggregate["live"].setdefault(
+                contribution["family_id"],
                 {
-                    **{
-                        key: value
-                        for key, value in self._empty_usage_row().items()
-                        if key != "submissions"
-                    },
-                    "paper_id": request["paper_id"],
-                    "source_version_id": request["source_version_id"],
+                    "submissions": 0,
+                    "reserved": Decimal("0"),
+                    "spent": Decimal("0"),
+                    "ambiguous": Decimal("0"),
                 },
             )
-            stage["submissions"] += 1
-            live = None
-            if phase == "live_test":
-                live = expected_live.setdefault(
-                    request["family_id"], self._empty_live_row()
+            live["submissions"] += sign
+            for name in ("reserved", "spent", "ambiguous"):
+                live[name] += sign * contribution[name]
+        if sign < 0:
+            # A row that gave back everything it gave leaves no row behind,
+            # exactly as a full pass would never have created one.
+            if stage["submissions"] == 0:
+                aggregate["stages"].pop(contribution["stage"], None)
+            if all(
+                paper[name] == 0
+                for name in (
+                    "reserved",
+                    "spent",
+                    "ambiguous",
+                    "input_tokens",
+                    "output_tokens",
+                    "thinking_tokens",
                 )
-                live["submissions"] += 1
-            if state in {"submitted", "orphaned_no_replay"}:
-                if state == "submitted":
-                    inflight += 1
-                totals["reserved"] += reserved
-                stage["reserved_usd"] = str(
-                    _money(stage["reserved_usd"], "stage reserved") + reserved
-                )
-                paper["reserved_usd"] = str(
-                    _money(paper["reserved_usd"], "paper reserved") + reserved
-                )
-                if live is not None:
-                    live["reserved_usd"] = str(
-                        _money(live["reserved_usd"], "live reserved") + reserved
-                    )
-            elif state == "ambiguous_charge":
-                totals["ambiguous"] += reserved
-                stage["ambiguous_usd"] = str(
-                    _money(stage["ambiguous_usd"], "stage ambiguous") + reserved
-                )
-                paper["ambiguous_usd"] = str(
-                    _money(paper["ambiguous_usd"], "paper ambiguous") + reserved
-                )
-                if live is not None:
-                    live["ambiguous_usd"] = str(
-                        _money(live["ambiguous_usd"], "live ambiguous") + reserved
-                    )
-            else:
-                actual = _money(request.get("actual_cost_usd"), "request actual cost")
-                if actual > reserved:
-                    raise ValueError("a paid-call actual cost exceeds its reservation")
-                usage = request.get("usage")
-                if not isinstance(usage, dict):
-                    raise ValueError("a completed paid-call request lacks usage")
-                for field in (
-                    "promptTokenCount",
-                    "candidatesTokenCount",
-                    "thoughtsTokenCount",
-                ):
-                    value = usage.get(field)
-                    if (
-                        isinstance(value, bool)
-                        or not isinstance(value, int)
-                        or value < 0
-                    ):
-                        raise ValueError(
-                            "a completed paid-call request has invalid usage"
-                        )
-                totals["spent"] += actual
-                stage["spent_usd"] = str(
-                    _money(stage["spent_usd"], "stage spent") + actual
-                )
-                paper["spent_usd"] = str(
-                    _money(paper["spent_usd"], "paper spent") + actual
-                )
-                if live is not None:
-                    live["spent_usd"] = str(
-                        _money(live["spent_usd"], "live spent") + actual
-                    )
-                for target in (stage, paper):
-                    target["input_tokens"] += usage["promptTokenCount"]
-                    target["output_tokens"] += usage["candidatesTokenCount"]
-                    target["thinking_tokens"] += usage["thoughtsTokenCount"]
+            ) and not any(
+                other["family_id"] == contribution["family_id"]
+                for other in self._row_contributions.values()
+            ):
+                aggregate["papers"].pop(contribution["family_id"], None)
+            if contribution["live"]:
+                live_row = aggregate["live"].get(contribution["family_id"])
+                if live_row is not None and live_row["submissions"] == 0:
+                    aggregate["live"].pop(contribution["family_id"], None)
 
+    def _compare_ledger(
+        self, ledger: dict[str, Any], aggregate: dict[str, Any]
+    ) -> None:
+        """Compare what the rows add up to with what the ledger stores."""
         source_bindings: dict[str, str] = {}
         expected_paper_bindings: dict[str, dict[str, str]] = {}
         for family_id, binding in ledger["family_bindings"].items():
@@ -4436,16 +4627,16 @@ class SharedGeminiBroker:
         if ledger["paper_bindings"] != expected_paper_bindings:
             raise ValueError("the paid-call paper bindings are inconsistent")
         for name, value in {
-            "reserved_usd": totals["reserved"],
-            "spent_usd": totals["spent"],
-            "ambiguous_reserved_usd": totals["ambiguous"],
+            "reserved_usd": aggregate["reserved"],
+            "spent_usd": aggregate["spent"],
+            "ambiguous_reserved_usd": aggregate["ambiguous"],
         }.items():
             if _money(ledger.get(name), name) != value:
                 raise ValueError(f"the shared paid-call {name} total is inconsistent")
         for name, value in {
-            "generation_submissions": submissions,
+            "generation_submissions": aggregate["submissions"],
             "count_requests": len(ledger["requests"]),
-            "inflight": inflight,
+            "inflight": aggregate["inflight"],
             "accepted_question_count": len(ledger["accepted_families"]),
         }.items():
             if ledger.get(name) != value:
@@ -4468,6 +4659,40 @@ class SharedGeminiBroker:
                         return False
             return True
 
+        expected_stages = {
+            stage: {
+                "submissions": row["submissions"],
+                "input_tokens": row["input_tokens"],
+                "output_tokens": row["output_tokens"],
+                "thinking_tokens": row["thinking_tokens"],
+                "reserved_usd": str(row["reserved"]),
+                "spent_usd": str(row["spent"]),
+                "ambiguous_usd": str(row["ambiguous"]),
+            }
+            for stage, row in aggregate["stages"].items()
+        }
+        expected_papers = {
+            family_id: {
+                "input_tokens": row["input_tokens"],
+                "output_tokens": row["output_tokens"],
+                "thinking_tokens": row["thinking_tokens"],
+                "reserved_usd": str(row["reserved"]),
+                "spent_usd": str(row["spent"]),
+                "ambiguous_usd": str(row["ambiguous"]),
+                "paper_id": row["paper_id"],
+                "source_version_id": row["source_version_id"],
+            }
+            for family_id, row in aggregate["papers"].items()
+        }
+        expected_live = {
+            family_id: {
+                "submissions": row["submissions"],
+                "reserved_usd": str(row["reserved"]),
+                "spent_usd": str(row["spent"]),
+                "ambiguous_usd": str(row["ambiguous"]),
+            }
+            for family_id, row in aggregate["live"].items()
+        }
         for name, value in {
             "stages": expected_stages,
             "papers": expected_papers,
@@ -4477,11 +4702,74 @@ class SharedGeminiBroker:
                 raise ValueError(f"the shared paid-call {name} total is inconsistent")
         if (
             not isinstance(ledger["recent_submission_times_utc"], list)
-            or len(ledger["recent_submission_times_utc"]) > submissions
+            or len(ledger["recent_submission_times_utc"]) > aggregate["submissions"]
         ):
             raise ValueError("the paid-call submission window is inconsistent")
         for value in ledger["recent_submission_times_utc"]:
             datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+    def _prove_ledger(
+        self, ledger: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+        """Prove the whole ledger, row by row, and keep nothing.
+
+        This is the full pass. It holds no state of its own, so the compactor
+        thread runs it against its own materialization while the hot path runs
+        its incremental proof against the store.
+        """
+        self._validate_ledger_shape(ledger)
+        aggregate = self._empty_aggregate()
+        contributions: dict[str, dict[str, Any]] = {}
+        for key, request in ledger["requests"].items():
+            contribution = self._row_contribution(ledger, key, request)
+            if contribution is None:
+                continue
+            contributions[key] = contribution
+            self._aggregate_apply(aggregate, contribution, 1)
+        self._compare_ledger(ledger, aggregate)
+        return aggregate, contributions
+
+    def _validate_ledger(self, ledger: dict[str, Any]) -> None:
+        """Prove the whole ledger and keep the proof for the next mutation."""
+        aggregate, contributions = self._prove_ledger(ledger)
+        self._row_contributions = contributions
+        self._ledger_aggregate = aggregate
+        self._aggregate_state_id = id(ledger)
+
+    def _validate_ledger_delta(
+        self, ledger: dict[str, Any], changed: Iterable[str]
+    ) -> None:
+        """Prove a ledger whose rows moved since the last proof.
+
+        Only the rows the mutation touched are summed again. Everything the
+        full pass compares is compared again, because the comparison is of
+        the whole ledger and costs the size of the stage, paper and binding
+        maps, not the size of the history.
+        """
+        if (
+            self._aggregate_state_id != id(ledger)
+            or self._ledger_aggregate is None
+            or self._row_contributions is None
+        ):
+            self._validate_ledger(ledger)
+            return
+        self._validate_ledger_shape(ledger)
+        aggregate = self._ledger_aggregate
+        contributions = self._row_contributions
+        for key in changed:
+            previous = contributions.pop(key, None)
+            if previous is not None:
+                self._aggregate_apply(aggregate, previous, -1)
+        for key in changed:
+            request = ledger["requests"].get(key)
+            if request is None:
+                continue
+            contribution = self._row_contribution(ledger, key, request)
+            if contribution is None:
+                continue
+            contributions[key] = contribution
+            self._aggregate_apply(aggregate, contribution, 1)
+        self._compare_ledger(ledger, aggregate)
 
     @staticmethod
     def _phase_halted(ledger: dict[str, Any], phase: str) -> str | None:
@@ -4810,6 +5098,61 @@ class SharedGeminiBroker:
             "thinking_tokens": evaluation["thinking_tokens"],
         }
 
+    def _start_compactor(self) -> None:
+        """Start the one background thread that keeps the snapshot current."""
+        if self._compaction_thread is not None:
+            return
+        thread = threading.Thread(
+            target=self._compaction_loop,
+            name="shared-ledger-compactor",
+            daemon=True,
+        )
+        self._compaction_thread = thread
+        thread.start()
+
+    def _compaction_loop(self) -> None:
+        while not self._compaction_stop.wait(
+            ledger_store.COMPACTION_INTERVAL_SECONDS
+        ):
+            try:
+                self.compact()
+            except Exception as error:  # pragma: no cover - defensive
+                self._record_integrity_halt(error)
+                self._publish_integrity_halt(error)
+                return
+
+    def compact(self) -> bool:
+        """Rewrite the snapshot and the status file, and prove the whole ledger.
+
+        Nothing here is on the path of a paid call. The compactor never takes
+        the shared ledger lock: it materializes the store from the snapshot and
+        the journal, which are both safe to read while another process appends,
+        and it writes the snapshot with an atomic rename. It also runs the full
+        row-by-row proof, which the hot path no longer runs on every read.
+        """
+        with ledger_store.held_compaction_lock(self.ledger_file) as held:
+            if not held:
+                return False
+            state, seq, _offset = ledger_store.materialize(self.ledger_file)
+            if seq <= self._compacted_seq:
+                return False
+            self._prove_ledger(state)
+            ledger_store.write_snapshot(self.ledger_file, state, seq)
+        self._compacted_seq = seq
+        self._publish_status(state)
+        return True
+
+    def stop_compactor(self) -> None:
+        """Stop the background compactor after one last compaction."""
+        self._compaction_stop.set()
+        thread = self._compaction_thread
+        if thread is not None:
+            thread.join(timeout=30.0)
+            self._compaction_thread = None
+        with self._ledger_lock():
+            pass
+        self.compact()
+
     def _publish_status(self, ledger: dict[str, Any]) -> None:
         atomic_json(self._status_file, self._status_payload(ledger))
         if self._status_observer is not None:
@@ -4933,8 +5276,34 @@ class SharedGeminiBroker:
         )
 
     def _commit_ledger(self, ledger: dict[str, Any]) -> None:
-        self._validate_ledger(ledger)
-        atomic_json(self.ledger_file, ledger)
+        """Make one mutation durable.
+
+        The cost of a commit is the size of the change, not the size of the
+        ledger: the rows the mutation touched are proved again, one line is
+        appended to the journal, and the flush that makes it durable is
+        shared with every other call that appended before it. The snapshot and
+        the status file are written by the compactor, off this path.
+        """
+        changed = LedgerStore.changed_request_keys(ledger)
+        self._validate_ledger_delta(ledger, changed)
+        if not self._store.commit(ledger, now=_now()):
+            return
+        if self.deferred_snapshot:
+            # A concurrent run defers the snapshot to the compactor. The
+            # journal is the authority and every reader of this repository
+            # reads it; the compacted file follows within
+            # COMPACTION_INTERVAL_SECONDS.
+            self._start_compactor()
+            return
+        # One operation at a time, so the snapshot costs what it always cost
+        # and stays exact for every reader of the plain file.
+        self._store.flush()
+        with ledger_store.held_compaction_lock(self.ledger_file) as held:
+            if held:
+                ledger_store.write_snapshot(
+                    self.ledger_file, ledger, self._store.sequence
+                )
+                self._compacted_seq = self._store.sequence
         self._publish_status(ledger)
 
     def doctor(self) -> dict[str, Any]:
@@ -4950,8 +5319,7 @@ class SharedGeminiBroker:
         }
 
     def status(self) -> dict[str, Any]:
-        with self._lock_file.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with self._ledger_lock():
             ledger = self._validated_ledger()
             return self._status_payload(ledger)
 
@@ -4959,8 +5327,7 @@ class SharedGeminiBroker:
         """Return the validated path for the current final receipt."""
         if not re.fullmatch(r"[a-f0-9]{64}", request_key):
             raise ValueError("the paid-call request key is invalid")
-        with self._lock_file.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with self._ledger_lock():
             ledger = self._validated_ledger()
             request = ledger["requests"].get(request_key)
             if request is None:
@@ -4976,8 +5343,7 @@ class SharedGeminiBroker:
         """Read a final receipt through validated reconciliation custody."""
         if not re.fullmatch(r"[a-f0-9]{64}", request_key):
             raise ValueError("the paid-call request key is invalid")
-        with self._lock_file.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with self._ledger_lock():
             ledger = self._validated_ledger()
             request = ledger["requests"].get(request_key)
             if request is None:
@@ -5035,8 +5401,7 @@ class SharedGeminiBroker:
     ) -> dict[str, Any]:
         if not family_id or not item_id:
             raise ValueError("accepted item identity is missing")
-        with self._lock_file.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with self._ledger_lock():
             ledger = self._validated_ledger()
             old = ledger["accepted_families"].get(family_id)
             if old and old != item_id:
@@ -5136,8 +5501,7 @@ class SharedGeminiBroker:
             raise ValueError("the reconciled request key is invalid")
         operation = hold_operation_lock(self._operation_lock_file)
         try:
-            with self._lock_file.open("a+") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
+            with self._ledger_lock():
                 ledger = self._validated_ledger()
                 request = ledger["requests"].get(request_key)
                 if request is None:
@@ -5335,8 +5699,7 @@ class SharedGeminiBroker:
             raise ValueError("the ambiguous continuation operator identity is missing")
         operation = hold_operation_lock(self._operation_lock_file)
         try:
-            with self._lock_file.open("a+") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
+            with self._ledger_lock():
                 ledger = self._validated_ledger()
                 request = ledger["requests"].get(request_key)
                 if request is None:
@@ -5610,8 +5973,7 @@ class SharedGeminiBroker:
             raise ValueError("the orphaned continuation operator identity is missing")
         operation = hold_operation_lock(self._operation_lock_file)
         try:
-            with self._lock_file.open("a+") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
+            with self._ledger_lock():
                 ledger = self._validated_ledger()
                 request = ledger["requests"].get(request_key)
                 if request is None:
@@ -5753,8 +6115,7 @@ class SharedGeminiBroker:
             raise ValueError("the http rejection operator identity is missing")
         operation = hold_operation_lock(self._operation_lock_file)
         try:
-            with self._lock_file.open("a+") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
+            with self._ledger_lock():
                 ledger = self._validated_ledger()
                 request = ledger["requests"].get(request_key)
                 if request is None:
@@ -5981,8 +6342,7 @@ class SharedGeminiBroker:
         A family the cap stopped is recorded with the money it already holds, so
         the skip is legible without a second read of the ledger.
         """
-        with self._lock_file.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with self._ledger_lock():
             ledger = self._validated_ledger()
             row = ledger["papers"].get(family_id, {})
             used = sum(
@@ -6006,8 +6366,7 @@ class SharedGeminiBroker:
 
     def operational_unresolved_families(self) -> dict[str, dict[str, str]]:
         """Return reviewed no-replay families with their exact skip reasons."""
-        with self._lock_file.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with self._ledger_lock():
             ledger = self._validated_ledger()
             events = [
                 *self._ambiguous_continuation_events(ledger).items(),
@@ -6040,8 +6399,7 @@ class SharedGeminiBroker:
             raise ValueError("the request is not approved for pretransport settlement")
         operation = hold_operation_lock(self._operation_lock_file)
         try:
-            with self._lock_file.open("a+") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
+            with self._ledger_lock():
                 ledger = self._validated_ledger()
                 request = ledger["requests"].get(request_key)
                 if request is None:
@@ -6192,8 +6550,7 @@ class SharedGeminiBroker:
             raise ValueError("the superseded integrity halt record is absent")
         operation = hold_operation_lock(self._operation_lock_file)
         try:
-            with self._lock_file.open("a+") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
+            with self._ledger_lock():
                 ledger = self._validated_ledger()
                 request = ledger["requests"].get(request_key)
                 if request is None:
@@ -6352,8 +6709,7 @@ class SharedGeminiBroker:
         """Clear one reviewed pretransport count error without replaying it."""
         operation = hold_operation_lock(self._operation_lock_file)
         try:
-            with self._lock_file.open("a+") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
+            with self._ledger_lock():
                 ledger = self._validated_ledger()
                 if sha256_file(self.ledger_file) != expected_ledger_sha256:
                     raise ValueError("the reviewed count-error ledger changed")
@@ -6454,8 +6810,7 @@ class SharedGeminiBroker:
             operation.close()
 
     def _halt(self, reason: str, *, phase: str | None = None) -> None:
-        with self._lock_file.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with self._ledger_lock():
             ledger = self._validated_ledger()
             if phase == EVALUATION_PHASE:
                 ledger["evaluation_halted"] = True
@@ -6474,8 +6829,7 @@ class SharedGeminiBroker:
         *,
         extra: dict[str, Any] | None = None,
     ) -> None:
-        with self._lock_file.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with self._ledger_lock():
             ledger = self._validated_ledger()
             request = ledger["requests"][request_key]
             if request.get("state") != "counting":
@@ -6735,8 +7089,7 @@ class SharedGeminiBroker:
 
     def _paper_cost_cap_refusal(self, request_key: str) -> dict[str, Any] | None:
         """Return the stored per-paper cap refusal of one request, or None."""
-        with self._lock_file.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with self._ledger_lock():
             ledger = self._validated_ledger()
             request = ledger["requests"].get(request_key)
             if (
@@ -6859,8 +7212,7 @@ class SharedGeminiBroker:
         """
         phase = self._pacing_phase
         while True:
-            with self._lock_file.open("a+") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
+            with self._ledger_lock():
                 ledger = self._validated_ledger()
             cutoff = datetime.now(UTC) - timedelta(minutes=1)
             if phase == EVALUATION_PHASE:
@@ -6942,8 +7294,7 @@ class SharedGeminiBroker:
         stage: str,
         reserved: Decimal,
     ) -> None:
-        with self._lock_file.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with self._ledger_lock():
             ledger = self._validated_ledger()
             request = ledger["requests"].get(request_key)
             if not request or request.get("state") != "counting":
@@ -7167,8 +7518,7 @@ class SharedGeminiBroker:
         of ending the run. A settlement that ended the run this way stopped the
         chapter 3 producer at 13:53 UTC on 2026-09-16.
         """
-        with self._lock_file.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with self._ledger_lock():
             ledger = self._validated_ledger()
             request = ledger["requests"].get(request_key)
             state = None if request is None else request.get("state")
@@ -7265,8 +7615,7 @@ class SharedGeminiBroker:
 
     def _request_row(self, request_key: str) -> dict[str, Any] | None:
         """Read one request row through the ledger lock, or None."""
-        with self._lock_file.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with self._ledger_lock():
             ledger = self._validated_ledger()
             row = ledger["requests"].get(request_key)
             return dict(row) if row is not None else None
@@ -7365,8 +7714,7 @@ class SharedGeminiBroker:
         that request would settle it twice. The evaluation path therefore
         recovers only its own run, whose in-flight locks it can see.
         """
-        with self._lock_file.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with self._ledger_lock():
             ledger = self._validated_ledger()
             requests = {key: dict(row) for key, row in ledger["requests"].items()}
         for request_key, request in requests.items():
@@ -7375,13 +7723,19 @@ class SharedGeminiBroker:
             received_path = self.receipts_dir / f"{event_stem}.received.json"
             if request["state"] in {"completed", "ambiguous_charge"}:
                 # Every terminal request keeps its custody check, whichever
-                # run wrote it.
+                # run wrote it. A final receipt is immutable and is never
+                # removed, so a row that was proved to have one still has
+                # one; stating all 6,000 of them again on every paid call
+                # cost 95 ms a call and proved nothing new.
+                if request_key in self._custody_proved:
+                    continue
                 if not final_path.is_file():
                     error = ValueError(
                         "a terminal paid request lacks its immutable final receipt"
                     )
                     self._record_integrity_halt(error)
                     raise error
+                self._custody_proved.add(request_key)
                 continue
             if request["state"] != "submitted":
                 continue
@@ -7614,6 +7968,8 @@ class SharedGeminiBroker:
         if concurrent:
             self._admission_lock.acquire()
             admitted = True
+        if concurrent:
+            self._flush_state.deferred = True
         try:
             if exclusive_batch_marker_path(self.ledger_file).exists():
                 raise ValueError("exclusive Gemini batch mode is active")
@@ -7667,6 +8023,17 @@ class SharedGeminiBroker:
             count_attempts: list[dict[str, Any]] = []
             if exact_input is None:
                 count_stem = _count_event_stem(request_key, count_retry_round)
+                if admitted:
+                    # The free token count is a provider round trip that
+                    # charges nothing and touches no accounting. Holding the
+                    # admission through it made every peer wait for a network
+                    # call that is not theirs, and the admission is what sets
+                    # how many calls can be in flight. The count is already
+                    # registered in the ledger, so a peer that admits while
+                    # this one counts meets a request that is counting and
+                    # nothing else.
+                    self._admission_lock.release()
+                    admitted = False
                 for attempt in range(1, COUNT_RETRY_ATTEMPTS + 1):
                     started_at = _now()
                     try:
@@ -7705,6 +8072,9 @@ class SharedGeminiBroker:
                             failure_class == PERMANENT_COUNT_FAILURE
                             or attempt == COUNT_RETRY_ATTEMPTS
                         ):
+                            if concurrent and not admitted:
+                                self._admission_lock.acquire()
+                                admitted = True
                             with self._exclusive_operation("count_error", request_key):
                                 return self._record_count_error(
                                     request_key,
@@ -7731,6 +8101,11 @@ class SharedGeminiBroker:
                     )
                     exact_input = value
                     break
+                if concurrent and not admitted:
+                    # Back into the admission for the reservation, which is
+                    # accounting and is serialised.
+                    self._admission_lock.acquire()
+                    admitted = True
             if count_retry_round:
                 event_stem = _count_event_stem(request_key, count_retry_round)
             elif resumed:
@@ -7824,6 +8199,33 @@ class SharedGeminiBroker:
                 "reserved_usd": str(reserved),
                 "submitted_at_utc": _now(),
             }
+            if concurrent:
+                # The request is reserved and durable. Hold its own in-flight
+                # lock, then release the admission and the exclusive operation
+                # lock so the next request can be admitted while this one is
+                # on the wire. Orphan recovery skips a request whose in-flight
+                # lock is held.
+                inflight_lock = self._hold_inflight(request_key)
+                if admitted:
+                    self._admission_lock.release()
+                    admitted = False
+                if reserved_operation is not None:
+                    self._release_operation_lock(reserved_operation)
+                    reserved_operation = None
+                if operation is not None:
+                    self._whole_call_operation.pop(threading.get_ident(), None)
+                    self._release_operation_lock(operation)
+                    operation = None
+                # The reservation is durable before the provider call, which
+                # is the money rule, and the flush is here rather than inside
+                # the admission so that the reservations of every concurrent
+                # call meet in one fsync.
+                self._flush_state.deferred = False
+                self._store.flush()
+            # The submitted receipt is written after the admission, not inside
+            # it. The in-flight lock is already held, so orphan recovery leaves
+            # this request alone, and a durable write costs 150 to 470 ms on
+            # this data disk: inside the admission every peer paid for it.
             atomic_json(
                 self.receipts_dir / f"{event_stem}.submitted.json",
                 submitted,
@@ -7842,23 +8244,6 @@ class SharedGeminiBroker:
                 # The trace is explicitly non-authoritative. Even an unexpected
                 # observability failure cannot strand a paid reservation.
                 pass
-            if concurrent:
-                # The request is reserved and durable. Hold its own in-flight
-                # lock, then release the admission and the exclusive operation
-                # lock so the next request can be admitted while this one is
-                # on the wire. Orphan recovery skips a request whose in-flight
-                # lock is held.
-                inflight_lock = self._hold_inflight(request_key)
-                if admitted:
-                    self._admission_lock.release()
-                    admitted = False
-                if reserved_operation is not None:
-                    self._release_operation_lock(reserved_operation)
-                    reserved_operation = None
-                if operation is not None:
-                    self._whole_call_operation.pop(threading.get_ident(), None)
-                    self._release_operation_lock(operation)
-                    operation = None
             try:
                 response = client.post(
                     request_config["model"], "generateContent", payload
@@ -7921,6 +8306,9 @@ class SharedGeminiBroker:
             self._settle(request_key, actual=actual, usage=usage)
             return receipt
         finally:
+            if getattr(self._flush_state, "deferred", False):
+                self._flush_state.deferred = False
+                self._store.flush()
             if inflight_lock is not None:
                 fcntl.flock(inflight_lock, fcntl.LOCK_UN)
                 inflight_lock.close()

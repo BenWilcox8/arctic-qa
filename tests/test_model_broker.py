@@ -140,6 +140,7 @@ def fixture(
     transport=None,
     prior_construction_spend_usd: Decimal = Decimal("0"),
     price_config_file: Path | None = None,
+    policy_file: Path | None = None,
 ) -> dict:
     gate = tmp_path / "gate.json"
     write_json(
@@ -158,7 +159,8 @@ def fixture(
     credential.write_text("unused-test-key", encoding="utf-8")
     credential.chmod(0o600)
     broker = SharedGeminiBroker(
-        policy_file=ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
+        policy_file=policy_file
+        or ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
         price_config_file=(
             price_config_file or ROOT / "config" / "gemini-eligibility-v1.json"
         ),
@@ -173,7 +175,8 @@ def fixture(
         "broker": broker,
         "gate": gate,
         "ledger": tmp_path / "shared-ledger.json",
-        "policy": ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
+        "policy": policy_file
+        or ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
         "price_config": (
             price_config_file or ROOT / "config" / "gemini-eligibility-v1.json"
         ),

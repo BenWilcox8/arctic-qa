@@ -48,6 +48,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from . import ledger_store
 from .abstention_render import TAXONOMY
 from .abstention_score import metrics_from_counts
 from .model_broker import EVALUATION_PHASE, EVALUATION_STAGE_PREFIX
@@ -249,10 +250,12 @@ def read_ledger(path: Path) -> dict[str, Any]:
     try:
         handle = lock_path.open("a+")
     except OSError:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return ledger_store.read_ledger(path)
     try:
         fcntl.flock(handle, fcntl.LOCK_SH)
-        return json.loads(path.read_text(encoding="utf-8"))
+        # The file is the compacted snapshot of the parallel bookkeeping
+        # store; the journal beside it holds everything committed since.
+        return ledger_store.read_ledger(path)
     finally:
         fcntl.flock(handle, fcntl.LOCK_UN)
         handle.close()

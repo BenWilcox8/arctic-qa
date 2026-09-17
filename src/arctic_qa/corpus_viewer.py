@@ -13,6 +13,8 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+
+from . import ledger_store
 from urllib.parse import parse_qs, urlsplit
 
 from .benchmark_guard import benchmark_report
@@ -2662,7 +2664,15 @@ class CorpusArtifacts:
         if path is None or not path.is_file():
             return None
         status = path.stat()
-        key = (status.st_mtime_ns, status.st_size, status.st_ino)
+        journal = ledger_store.journal_file(path)
+        try:
+            journal_status = journal.stat()
+            journal_key = (journal_status.st_mtime_ns, journal_status.st_size)
+        except OSError:
+            journal_key = (0, 0)
+        # The parallel bookkeeping store moves the journal on every commit and
+        # the snapshot only on a compaction, so the cache is keyed on both.
+        key = (status.st_mtime_ns, status.st_size, status.st_ino, journal_key)
         with self._live_lock:
             cached = self._ledger_cache
             if cached is not None and cached[0] == key:
