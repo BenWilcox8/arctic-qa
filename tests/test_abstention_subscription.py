@@ -910,7 +910,44 @@ def test_a_harness_that_never_got_its_prompt_records_nothing(tmp_path: Path) -> 
         identity=evaluation_identity(values["items"][0]),
         run_id="sub-run-1",
     )
-    with pytest.raises(HarnessUnavailableError, match="never received the prompt"):
+    with pytest.raises(HarnessUnavailableError, match="did not carry this trial"):
+        values["provider"].answer(request)
+
+    ledger = json.loads(
+        (values["ledger_dir"] / "subscription-ledger.json").read_text(encoding="utf-8")
+    )
+    assert ledger["requests"] == {}
+    assert list((values["ledger_dir"] / "receipts").glob("*.json")) == []
+
+
+def test_a_harness_that_could_not_be_started_records_nothing(tmp_path: Path) -> None:
+    """A child that never ran is the same refusal as one that got no prompt.
+
+    The probe before the row asks whether the path is executable, which a
+    half-written file still is. The Claude Code binary was rewritten at 17:31
+    UTC on 2026-09-17 and a trial met it mid-write: the transport reported no
+    exit status at all and ``OSError: [Errno 8] Exec format error``. The child
+    never ran, so nothing was asked and nothing was charged.
+    """
+    probe = fixture(tmp_path / "probe", PROVIDER_ANTHROPIC_CLAUDE_CODE)
+    lost = probe["trials"][0]["trial_id"]
+    values = fixture(
+        tmp_path,
+        PROVIDER_ANTHROPIC_CLAUDE_CODE,
+        overrides={
+            lost: {
+                "raise": "exit",
+                "returncode": None,
+                "stderr": "OSError: [Errno 8] Exec format error: '/bin/harness'",
+            }
+        },
+    )
+    request = EvaluationRequest(
+        trial=values["trials"][0],
+        identity=evaluation_identity(values["items"][0]),
+        run_id="sub-run-1",
+    )
+    with pytest.raises(HarnessUnavailableError, match="did not carry this trial"):
         values["provider"].answer(request)
 
     ledger = json.loads(

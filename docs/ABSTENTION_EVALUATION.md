@@ -521,8 +521,9 @@ Three shapes reach the evaluator, and `abstention_plan.PRE_PROVIDER_REFUSALS` is
 - `errors.BrokerOperationBusyError`, the exclusive operation lock of the shared paid-call ledger, held past the bounded wait.
 - `errors.HarnessUnavailableError`, a subscription harness binary that cannot be started.
   The probe `abstention_subscription.require_harness_binary` runs before the trial reserves its row, and the transport owns it: `SubprocessTransport.probe` asks, a scripted transport starts no process and answers by doing nothing.
-  The same error covers a harness that started and never received the prompt: the child waits a few seconds for its stdin, gives up and refuses because it was given no prompt at all.
-  `abstention_subscription.HARNESS_PROMPT_FAILURES` is what that leaves in the transport's stderr.
+  The same error covers two run-time shapes, because the probe before the row only asks whether the path is executable.
+  A child that never ran at all: the transport reports no exit status, and `abstention_subscription.is_harness_spawn_failure` says so. A binary being replaced is one of these, and the Claude Code binary was rewritten at 17:31 UTC on 2026-09-17 while a trial started it (`OSError: [Errno 8] Exec format error`).
+  A child that ran and never received the prompt: it waits a few seconds for its stdin, gives up and refuses because it was given no prompt at all. `abstention_subscription.HARNESS_PROMPT_FAILURES` is what that leaves in the transport's stderr.
   The row is already registered by then, so `SubscriptionLedger.abandon` drops it and frees the slot, and no receipt is written: nothing was asked and nothing was charged, so there is no event to receipt.
   That is the one way a row leaves the subscription ledger.
 - `errors.TransientReservationError`, the paid-call concurrency slots or the minute window of the evaluation phase, still full past the broker's own bounded wait.

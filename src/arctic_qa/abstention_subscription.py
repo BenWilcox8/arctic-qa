@@ -210,6 +210,11 @@ def harness_binary_path(binary: str) -> Path | None:
 HARNESS_SPAWN_FAILURES = (
     "FileNotFoundError: [Errno 2] No such file or directory",
     "PermissionError: [Errno 13] Permission denied",
+    # A binary that is being replaced while it is started. The probe before
+    # the row only asks whether the path is executable, which a half-written
+    # file still is: the Claude Code binary was rewritten at 17:31 UTC on
+    # 2026-09-17 and a trial met it mid-write at 17:31:57.
+    "OSError: [Errno 8] Exec format error",
 )
 
 
@@ -536,8 +541,11 @@ class ScriptedSubscriptionTransport:
             # A harness that exits non-zero can still have printed its whole
             # result first, which is what a provider refusal looks like, so
             # the script owns both streams.
+            code = event.get("returncode", 1)
             return {
-                "returncode": int(event.get("returncode", 1)),
+                # None is a child that never reported an exit status at all,
+                # which is what a harness that could not be started leaves.
+                "returncode": None if code is None else int(code),
                 "stdout": str(event.get("stdout", "")),
                 "stderr": str(event.get("stderr", "scripted harness error")),
                 "timed_out": False,
@@ -1469,7 +1477,7 @@ class SubscriptionEvaluationProvider:
             else parse_codex_output
         )
         parsed = parser(str(result.get("stdout") or ""), model=trial["model"])
-        if int(result.get("returncode") or 0) == 0 or parsed["state"] == COMPLETED:
+        if result.get("returncode") == 0 or parsed["state"] == COMPLETED:
             return parsed
         return {
             "state": STATE_FAILED,
@@ -1525,20 +1533,20 @@ class SubscriptionEvaluationProvider:
                 self.ledger._release_inflight(request_key)
                 raise
             latency = time.monotonic() - started
-            if is_harness_prompt_failure(result):
-                # The harness started, waited for its prompt, and refused
-                # because it never arrived. The provider saw nothing, so this
-                # trial has no answer to record and no call to receipt.
-                self.ledger.abandon(request_key)
-                raise HarnessUnavailableError(
-                    "the harness started but never received the prompt of this "
-                    f"trial: {redact(str(result.get('stderr') or ''))[-300:]}"
-                )
             if result.get("timed_out"):
                 parsed: dict[str, Any] = {
                     "state": STATE_TIMEOUT,
                     "error": f"the harness did not finish within {self.timeout} s",
                 }
+            elif is_harness_spawn_failure(result) or is_harness_prompt_failure(result):
+                # The child never ran, or it ran and never received the prompt.
+                # Either way the provider saw nothing, so this trial has no
+                # answer to record and no call to receipt.
+                self.ledger.abandon(request_key)
+                raise HarnessUnavailableError(
+                    "the harness did not carry this trial to the provider: "
+                    f"{redact(str(result.get('stderr') or ''))[-300:]}"
+                )
             else:
                 parsed = self._parsed_answer(result, trial)
             receipt = self._receipt(
