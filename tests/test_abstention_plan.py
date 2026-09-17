@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from arctic_qa.abstention_plan import (
+    PRE_PROVIDER_REFUSALS,
     PLAN_MANIFEST_FILENAME,
     build_vendor_runs,
     PLAN_SUMMARY_FILENAME,
@@ -38,6 +39,8 @@ from arctic_qa.abstention_subscription import (
     PROVIDER_ANTHROPIC_CLAUDE_CODE,
     PROVIDER_OPENAI_CODEX,
     SubscriptionLedger,
+    harness_binary_path,
+    require_harness_binary,
     build_subscription_provider,
     load_subscription_models,
     subscription_decoding_record,
@@ -47,6 +50,7 @@ from arctic_qa.abstention_subscription import (
 )
 from arctic_qa.abstention_run import plan_trials
 from arctic_qa.cli import main as cli_main
+from arctic_qa.errors import BrokerOperationBusyError, HarnessUnavailableError
 from arctic_qa.model_broker import OPERATION_LOCK_WAIT_INTERVAL_SECONDS, SharedGeminiBroker
 from arctic_qa.util import atomic_json
 from arctic_qa import ledger_store  # noqa: E402
@@ -1405,3 +1409,165 @@ def test_a_second_pass_reports_no_stop_of_its_own(tmp_path: Path) -> None:
     assert again["stopped_on"]["state"] == "failed"
     assert again["stopped_this_pass"] is None
     assert again["recorded_trials"] == 12
+
+
+# --- A refusal the provider never saw ----------------------------------------
+
+
+class _BusyThenAnswerProvider(ScriptedEvaluationProvider):
+    """Refuse the first N attempts with a pre-provider refusal, then answer.
+
+    ``refusal`` is the exception class, so one provider covers both shapes: the
+    exclusive operation lock of the shared ledger and a harness binary that
+    cannot be started.
+    """
+
+    def __init__(self, *, refusals: int, refusal: type[BaseException], **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.remaining = refusals
+        self.refusal = refusal
+        self.refused = 0
+        self.lock = threading.Lock()
+
+    def answer(self, request):
+        with self.lock:
+            refuse = self.remaining > 0
+            if refuse:
+                self.remaining -= 1
+                self.refused += 1
+        if refuse:
+            raise self.refusal("another paid broker operation is active")
+        return super().answer(request)
+
+
+def test_a_busy_lock_inside_a_trial_is_waited_out_and_never_stops_the_arm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refusal the provider never saw costs nothing and proves nothing.
+
+    It must not end the vendor, must not be recorded as a response and must
+    not be a stop. The trial is tried again inside the pass; here the second
+    attempt answers, so the item finishes whole.
+    """
+    monkeypatch.setattr("arctic_qa.abstention_plan.PRE_PROVIDER_RETRY_BASE_SECONDS", 0.0)
+    plan = load_plan(PLAN_FILE)
+    set_dir = frozen_set(tmp_path, count=1)
+    provider = _BusyThenAnswerProvider(
+        refusals=2, refusal=BrokerOperationBusyError, policy="gold"
+    )
+    summary = run_plan(
+        set_dir=set_dir,
+        output_dir=tmp_path / "busy-trial",
+        run_id="plan-busy-r1",
+        plan=plan,
+        vendor_runs=_gemini_only(plan, provider),
+    )
+    gemini = summary["vendors"][PROVIDER_GOOGLE_GEMINI]
+    assert provider.refused == 2
+    assert gemini["complete"] is True
+    assert gemini["recorded_trials"] == 12
+    assert gemini["stopped_this_pass"] is None
+    assert gemini["error"] is None
+    assert gemini["deferred_trials"] == 0
+    assert summary["complete"] is True
+
+
+def test_a_busy_lock_past_the_bound_leaves_the_trial_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Past the bound the trial is left pending, and the item stays open.
+
+    The containment that shipped at 13:00 UTC on 2026-09-17 recorded the busy
+    lock as a vendor stop on the question, and the no-retry contract then
+    closed the question short of its 48 responses: 87 questions in three
+    hours. A trial the provider never saw is owed, so nothing is recorded,
+    nothing stops, and the next pass runs exactly it.
+    """
+    monkeypatch.setattr("arctic_qa.abstention_plan.PRE_PROVIDER_RETRY_BASE_SECONDS", 0.0)
+    monkeypatch.setattr("arctic_qa.abstention_plan.PRE_PROVIDER_RETRY_ROUNDS", 2)
+    plan = load_plan(PLAN_FILE)
+    set_dir = frozen_set(tmp_path, count=1)
+    run_dir = tmp_path / "busy-pending"
+    # Two attempts per trial, so three refusals spend the whole bound of the
+    # first trial and one attempt of the second.
+    provider = _BusyThenAnswerProvider(
+        refusals=3, refusal=BrokerOperationBusyError, policy="gold"
+    )
+    first = run_plan(
+        set_dir=set_dir,
+        output_dir=run_dir,
+        run_id="plan-busy-r2",
+        plan=plan,
+        vendor_runs=_gemini_only(plan, provider),
+    )
+    gemini = first["vendors"][PROVIDER_GOOGLE_GEMINI]
+    assert gemini["deferred_trials"] == 1
+    assert gemini["recorded_trials"] == 11
+    assert gemini["complete"] is False
+    # The whole point: it is not a stop and it is not an error of the vendor.
+    assert gemini["stopped_this_pass"] is None
+    assert gemini["stopped_on"] is None
+    assert gemini["error"] is None
+    assert first["complete"] is False
+    assert first["deferred_trials"] == 1
+    assert gemini["deferred_reasons"] == [
+        "BrokerOperationBusyError: another paid broker operation is active"
+    ]
+    # The next pass runs exactly the trial that was left pending.
+    second = run_plan(
+        set_dir=set_dir,
+        output_dir=run_dir,
+        run_id="plan-busy-r2",
+        plan=plan,
+        vendor_runs=_gemini_only(plan, ScriptedEvaluationProvider(policy="gold")),
+    )
+    again = second["vendors"][PROVIDER_GOOGLE_GEMINI]
+    assert again["recorded_trials"] == 12
+    assert again["deferred_trials"] == 0
+    assert again["complete"] is True
+    assert again["stopped_on"] is None
+
+
+def test_an_unavailable_harness_binary_is_the_same_kind_of_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A harness that cannot start is a pre-provider refusal, not a failure.
+
+    The Claude Code binary vanished four times during a package upgrade on
+    2026-09-17. Recorded as a failed response it stopped the arm for the rest
+    of the invocation; waited out, the trial simply runs.
+    """
+    monkeypatch.setattr("arctic_qa.abstention_plan.PRE_PROVIDER_RETRY_BASE_SECONDS", 0.0)
+    assert HarnessUnavailableError in PRE_PROVIDER_REFUSALS
+    assert BrokerOperationBusyError in PRE_PROVIDER_REFUSALS
+    plan = load_plan(PLAN_FILE)
+    set_dir = frozen_set(tmp_path, count=1)
+    provider = _BusyThenAnswerProvider(
+        refusals=1, refusal=HarnessUnavailableError, policy="gold"
+    )
+    summary = run_plan(
+        set_dir=set_dir,
+        output_dir=tmp_path / "harness-gone",
+        run_id="plan-harness-r1",
+        plan=plan,
+        vendor_runs=_gemini_only(plan, provider),
+    )
+    gemini = summary["vendors"][PROVIDER_GOOGLE_GEMINI]
+    assert gemini["complete"] is True
+    assert gemini["stopped_this_pass"] is None
+    assert gemini["deferred_trials"] == 0
+
+
+def test_the_harness_probe_refuses_a_binary_that_cannot_be_started(
+    tmp_path: Path,
+) -> None:
+    """The probe runs before the row is reserved, so nothing is recorded."""
+    missing = tmp_path / "bin" / "claude"
+    with pytest.raises(HarnessUnavailableError):
+        require_harness_binary(PROVIDER_ANTHROPIC_CLAUDE_CODE, str(missing))
+    assert harness_binary_path(str(missing)) is None
+    missing.parent.mkdir(parents=True)
+    missing.write_text("#!/bin/sh\n", encoding="utf-8")
+    missing.chmod(0o755)
+    assert harness_binary_path(str(missing)) == missing
+    assert require_harness_binary(PROVIDER_ANTHROPIC_CLAUDE_CODE, str(missing)) == missing

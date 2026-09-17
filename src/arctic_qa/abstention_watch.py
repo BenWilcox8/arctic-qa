@@ -127,6 +127,12 @@ from .abstention_set import (
     load_contract,
     load_eval_set,
 )
+from .abstention_subscription import (
+    SUBSCRIPTION_PROVIDER_NAMES,
+    harness_binary_path,
+    load_subscription_models,
+    vendor_entry,
+)
 from .model_broker import (
     EVALUATION_CEILING_REASON,
     EVALUATION_ITEM_REPEAT_REASON,
@@ -603,6 +609,23 @@ def evaluate_item(
         max(trials_per_model - recorded_by_model.get(model, 0), 0)
         for model in held_models
     )
+    # The trials the provider never saw: the exclusive operation lock stayed
+    # held past the bounded wait inside the trial, or a harness binary could
+    # not be started. They are owed, so the question stays open and the next
+    # pass runs exactly them.
+    summary_vendors = summary.get("vendors") or {}
+    pending_deferred = sum(
+        int((summary_vendors.get(vendor) or {}).get("deferred_trials") or 0)
+        for vendor in vendors
+    )
+    deferred_reasons = sorted(
+        {
+            str(reason)
+            for vendor in vendors
+            for reason in (summary_vendors.get(vendor) or {}).get("deferred_reasons")
+            or []
+        }
+    )
     row = cost_row(
         item=item,
         run_id=run_id,
@@ -625,6 +648,8 @@ def evaluate_item(
         ],
         models_paused=held_models,
         pending_paused_trials=pending_paused,
+        pending_deferred_trials=pending_deferred,
+        deferred_reasons=deferred_reasons,
         cumulative=journal.cumulative(),
     )
     row["run_dir"] = str(run_dir)
@@ -633,6 +658,7 @@ def evaluate_item(
         bool(summary.get("complete"))
         and error is None
         and pending_paused == 0
+        and pending_deferred == 0
         and not row["evaluation"]["vendors_paused"]
     )
     if error is not None:
@@ -741,6 +767,32 @@ def is_lock_busy_error(error: str | None) -> bool:
         BrokerOperationBusyError.__name__ in text
         or OPERATION_LOCK_BUSY_REASON in text
     )
+
+
+HARNESS_UNAVAILABLE_MARKERS = (
+    # What the probe before the reservation raises now.
+    "harness binary is not executable now",
+    # What the transport reported before that probe existed: the child process
+    # could not be spawned at all, so the exit code is None and the stderr is
+    # the spawn error. The Claude Code binary vanished four times during a
+    # package upgrade on 2026-09-17 and each one paused the arm for good.
+    "FileNotFoundError: [Errno 2] No such file or directory",
+    "PermissionError: [Errno 13] Permission denied",
+)
+
+
+def is_harness_unavailable_reason(reason: str | None) -> bool:
+    """Say whether a vendor pause is only about a harness that would not start.
+
+    Such a pause describes the machine and not the model: nothing was
+    reserved, nothing was submitted and nothing was charged. It clears itself
+    the moment the binary is back, so the evaluator re-probes and resumes the
+    arm instead of staying dark until an operator restarts the unit.
+    """
+    if not reason:
+        return False
+    text = str(reason)
+    return any(marker in text for marker in HARNESS_UNAVAILABLE_MARKERS)
 
 
 def is_ambiguous_charge_reason(reason: str | None) -> bool:
@@ -880,6 +932,16 @@ def watch(
     # restores one of them, and never a vendor `--vendors` excluded.
     authorized_vendors = list(active)
     vendors = active
+    # The harness binary of each subscription arm, read once from the file the
+    # authorization binds. It is what the re-probe of a paused arm asks about.
+    subscription_config = load_subscription_models(
+        Path(authorization["subscription_models_file"])
+    )
+    vendor_binaries = {
+        vendor: str(vendor_entry(subscription_config, vendor)["binary"])
+        for vendor in authorized_vendors
+        if vendor in SUBSCRIPTION_PROVIDER_NAMES
+    }
     stop = {"now": False}
 
     def handle_signal(*_: Any) -> None:
@@ -1012,6 +1074,56 @@ def watch(
         )
         return True
 
+    def resume_vendors_whose_harness_returned() -> bool:
+        """Resume every arm a vanished harness binary paused. Hold ``gate``.
+
+        The sibling of :func:`resume_gemini_if_released`, and it moves the same
+        two fields. A subscription arm runs an installed binary as a child
+        process, and a package upgrade takes that path away for a moment: the
+        Claude Code binary vanished at 12:06, 12:13, 12:48 and 13:19 UTC on
+        2026-09-17, and the last of those left the arm dark for the rest of the
+        invocation while the binary was back within the minute.
+
+        The probe is the machine's own answer and costs nothing, so it is asked
+        before every question and not only between poll cycles.
+        """
+        nonlocal vendors
+        resumed = False
+        for vendor in sorted(state["paused_vendors"]):
+            if vendor not in SUBSCRIPTION_PROVIDER_NAMES:
+                continue
+            if vendor not in authorized_vendors:
+                continue
+            record = state["paused_vendors"].get(vendor) or {}
+            if not is_harness_unavailable_reason(record.get("reason")):
+                continue
+            binary = vendor_binaries.get(vendor)
+            if binary is None or harness_binary_path(binary) is None:
+                continue
+            paused_reason = str(record["reason"])
+            del state["paused_vendors"][vendor]
+            running = set(vendors) | {vendor}
+            vendors = [name for name in authorized_vendors if name in running]
+            journal.append(
+                resume_row(
+                    run_id=str(authorization["run_id_prefix"]),
+                    vendor=vendor,
+                    paused_reason=paused_reason,
+                )
+            )
+            emit(
+                {
+                    "event": "vendor_resumed",
+                    "vendor": vendor,
+                    "paused_reason": paused_reason,
+                    "reason": f"the harness binary can be started again: {binary}",
+                }
+            )
+            resumed = True
+        if resumed:
+            atomic_json(state_path, {**state, "updated_at_utc": _utc_now()})
+        return resumed
+
     def pause_vendor(vendor: str, record: dict[str, Any], *, run_id: str) -> None:
         """Pause one vendor for the rest of this invocation. Hold ``gate``."""
         nonlocal vendors
@@ -1040,8 +1152,10 @@ def watch(
                 return None
             # An arm held by an ambiguous charge the ledger has released comes
             # back here, before the question is admitted, and not only at the
-            # next poll cycle.
+            # next poll cycle. An arm a vanished harness binary paused comes
+            # back the same way.
             resume_gemini_if_released()
+            resume_vendors_whose_harness_returned()
             # Re-read the pause files before every item: a cost guard can
             # pause a model at any moment, and a resume time can pass while
             # the wave runs.
@@ -1119,6 +1233,9 @@ def watch(
                     "pending_paused_trials": result["row"]["evaluation"][
                         "pending_paused_trials"
                     ],
+                    "pending_deferred_trials": result["row"]["evaluation"].get(
+                        "pending_deferred_trials", 0
+                    ),
                     "gemini_usd": result["row"]["evaluation"]["google_gemini"]["usd"],
                     "wall_seconds": result["row"]["evaluation"]["wall_seconds"],
                 }
@@ -1132,6 +1249,22 @@ def watch(
             for vendor in list(vendors):
                 reason = vendor_stop_reason(result["summary"], vendor)
                 if reason is None:
+                    continue
+                if is_lock_busy_error(reason):
+                    # Not a stop at all: the provider never saw the request.
+                    # The trial that met it is pending, the question is not
+                    # complete, and the next pass runs exactly what is
+                    # missing. Recording it as a vendor stop is what closed 87
+                    # questions short of their 48 trials in three hours on
+                    # 2026-09-17.
+                    emit(
+                        {
+                            "event": "item_lock_busy",
+                            "item_id": item_id,
+                            "vendor": vendor,
+                            "error": reason,
+                        }
+                    )
                     continue
                 if is_item_scoped_reason(reason):
                     emit(
@@ -1527,6 +1660,8 @@ __all__ = [
     "is_ambiguous_charge_reason",
     "is_ceiling_reason",
     "is_item_scoped_reason",
+    "is_harness_unavailable_reason",
+    "is_lock_busy_error",
     "estimated_gemini_item_usd",
     "evaluate_item",
     "pending_item_ids",

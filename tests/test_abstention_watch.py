@@ -47,6 +47,7 @@ from arctic_qa.abstention_watch import (
     estimated_gemini_item_usd,
     is_ambiguous_charge_reason,
     is_ceiling_reason,
+    is_harness_unavailable_reason,
     is_item_scoped_reason,
     is_lock_busy_error,
     pending_item_ids,
@@ -2916,3 +2917,250 @@ def test_the_journal_says_which_arms_a_question_still_owes(tmp_path: Path) -> No
         trials_per_model=6,
     )
     assert owed == {"aqa-1": {"anthropic_claude_code"}}
+
+
+# --- A trial the provider never saw keeps the question open -------------------
+
+
+class _BusyOnceProvider(ScriptedEvaluationProvider):
+    """Refuse the first ``refusals`` attempts with the exclusive-lock refusal."""
+
+    def __init__(self, *, refusals: int, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.remaining = refusals
+        self.lock = threading.Lock()
+
+    def answer(self, request):
+        with self.lock:
+            refuse = self.remaining > 0
+            if refuse:
+                self.remaining -= 1
+        if refuse:
+            raise BrokerOperationBusyError(OPERATION_LOCK_BUSY_REASON)
+        return super().answer(request)
+
+
+def _watch_with(
+    providers, *, db: Path, work: Path, ledger_file: Path, auth: Path, **changes
+) -> dict:
+    """Run one invocation of the watcher with a provider per vendor."""
+    import arctic_qa.abstention_watch as module
+
+    def fake_build(*, plan, set_dir, run_id, gate_dir, vendors, **_: object):
+        return {
+            vendor: VendorRun(
+                vendor=vendor,
+                provider=providers(vendor, run_id),
+                decoding={"scripted": True},
+                models=plan["vendors"][vendor]["models"],
+                concurrency=1,
+            )
+            for vendor in vendors
+        }
+
+    original = module.build_vendor_runs
+    module.build_vendor_runs = fake_build  # type: ignore[assignment]
+    try:
+        return watch(
+            authorization_file=auth,
+            plan_file=PLAN_FILE,
+            contract_file=CH3_CONTRACT,
+            evaluation_policy_file=POLICY_V2,
+            evaluation_price_config_file=PRICES,
+            subscription_models_file=MODELS_FILE,
+            state_db=db,
+            work_dir=work,
+            shared_ledger_file=ledger_file,
+            broker_factory=None,
+            subscription_ledger_root=work / "subscription",
+            list_price_file=LIST_PRICES,
+            poll_seconds=5,
+            once=True,
+            code_commit="test-commit",
+            ledger_run_prefixes=("chapter3-",),
+            item_workers=1,
+            **changes,
+        )
+    finally:
+        module.build_vendor_runs = original  # type: ignore[assignment]
+
+
+def test_a_busy_lock_leaves_the_question_open_and_the_next_pass_finishes_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The question the busy lock touched is owed, never closed short.
+
+    The containment of 88d2384 kept the unit alive but recorded the busy lock
+    as a vendor stop on the question, and the journal still called the
+    question complete: 73 of the 155 closed questions of the live streaming-r11
+    work directory hold fewer than their 48 responses and none of them was
+    ever taken up again. A trial the provider never saw reserved nothing,
+    submitted nothing and charged nothing, so the question stays open and the
+    next pass runs exactly the trials that are missing.
+    """
+    monkeypatch.setattr("arctic_qa.abstention_plan.PRE_PROVIDER_RETRY_BASE_SECONDS", 0.0)
+    monkeypatch.setattr("arctic_qa.abstention_plan.PRE_PROVIDER_RETRY_ROUNDS", 1)
+    db = state_db(tmp_path, chapter3=["aqa-open"])
+    ledger_file = construction_ledger(tmp_path, {"family-aqa-open": ["0.01"]})
+    auth = authorization(tmp_path, db, maximum_items=2)
+    work = tmp_path / "busy-open"
+
+    def first(vendor: str, run_id: str):
+        if vendor == PROVIDER_GOOGLE_GEMINI:
+            return _BusyOnceProvider(refusals=1, policy="gold", seed=run_id)
+        return ScriptedEvaluationProvider(policy="gold", seed=run_id)
+
+    result = _watch_with(
+        first, db=db, work=work, ledger_file=ledger_file, auth=auth
+    )
+    assert result["errors"] == []
+    # The arm is not paused and the question is not a vendor stop.
+    assert result["paused_vendors"] == {}
+    journal = CostJournal(work)
+    assert [row for row in journal.rows() if row.get("kind") == "vendor_pause"] == []
+    row = journal.item_rows()[0]
+    assert row["evaluation"]["pending_deferred_trials"] == 1
+    assert row["evaluation"]["recorded_trials"] == 47
+    assert row["evaluation"]["complete"] is False
+    assert row["complete"] is False
+    assert row["evaluation"]["deferred_reasons"] == [
+        f"BrokerOperationBusyError: {OPERATION_LOCK_BUSY_REASON}"
+    ]
+    # This is the strand test: the question must still be owed.
+    assert journal.completed_item_ids() == set()
+    assert journal.row_is_complete(row) is False
+
+    def clean(vendor: str, run_id: str):
+        return ScriptedEvaluationProvider(policy="gold", seed=run_id)
+
+    again = _watch_with(clean, db=db, work=work, ledger_file=ledger_file, auth=auth)
+    assert again["errors"] == []
+    later = CostJournal(work).latest_item_rows()[0]
+    assert later["evaluation"]["recorded_trials"] == 48
+    assert later["evaluation"]["pending_deferred_trials"] == 0
+    assert later["evaluation"]["complete"] is True
+    assert CostJournal(work).completed_item_ids() == {row["item_id"]}
+
+
+def test_a_row_that_owes_a_deferred_trial_is_never_read_as_complete() -> None:
+    """Every reader of the journal owes such a question its missing trials."""
+    row = {
+        "item_id": "aqa-deferred",
+        "evaluation": {
+            "planned_trials": 48,
+            "recorded_trials": 38,
+            "vendors_paused": [],
+            "models_paused": [],
+            "pending_paused_trials": 0,
+            "pending_deferred_trials": 10,
+            "complete": False,
+        },
+    }
+    assert CostJournal.row_is_complete(row) is False
+    # And the flag alone is not trusted: a writer that sets it wrongly, which
+    # is exactly what closed 73 live questions, is still caught by the count.
+    row["evaluation"]["complete"] = True
+    assert CostJournal.row_is_complete(row) is False
+
+
+def test_a_vanished_harness_binary_resumes_the_arm_when_it_returns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pause that describes the machine lifts itself, like the Gemini one.
+
+    The Claude Code binary was reinstalled at 12:06 UTC on 2026-09-17 and the
+    path was gone for a moment. The arm was paused at 12:06, 12:13, 12:48 and
+    13:19 UTC; the binary was back within the minute each time, and nothing
+    asked. The arm made no call between 13:21 UTC and the restart.
+    """
+    binary = tmp_path / "bin" / "claude"
+    binary.parent.mkdir(parents=True)
+    entry = {"binary": str(binary), "call_timeout_seconds": 600, "models": {}}
+    monkeypatch.setattr(
+        "arctic_qa.abstention_watch.vendor_entry",
+        lambda config, vendor: entry,
+    )
+    db = state_db(tmp_path, chapter3=["aqa-gone", "aqa-back"])
+    ledger_file = construction_ledger(tmp_path, {"family-aqa-gone": ["0.01"]})
+    auth = authorization(tmp_path, db, maximum_items=2)
+    work = tmp_path / "harness-returns"
+
+    class _VanishedHarnessProvider(ScriptedEvaluationProvider):
+        """The shape the transport recorded before the probe existed."""
+
+        def answer(self, request):
+            from arctic_qa.abstention_providers import EvaluationResponse
+
+            if binary.exists():
+                return super().answer(request)
+            # The package upgrade finishes right after it took the path away,
+            # which is what the four pauses of 2026-09-17 looked like.
+            binary.write_text("#!/bin/sh\n", encoding="utf-8")
+            binary.chmod(0o755)
+            return EvaluationResponse(
+                state="failed",
+                raw_text=None,
+                finish_reason=None,
+                usage=None,
+                cost_usd=None,
+                latency_seconds=0.0,
+                request_key=None,
+                request_sha256=None,
+                receipt_sha256=None,
+                receipt_file=None,
+                model_version=None,
+                response_id=None,
+                error=(
+                    "the harness exited with None: FileNotFoundError: "
+                    f"[Errno 2] No such file or directory: '{binary}'"
+                ),
+            )
+
+    def providers(vendor: str, run_id: str):
+        if vendor == PROVIDER_ANTHROPIC_CLAUDE_CODE:
+            return _VanishedHarnessProvider(policy="gold", seed=run_id)
+        return ScriptedEvaluationProvider(policy="gold", seed=run_id)
+
+    result = _watch_with(
+        providers,
+        db=db,
+        work=work,
+        ledger_file=ledger_file,
+        auth=auth,
+        vendors=[PROVIDER_ANTHROPIC_CLAUDE_CODE, PROVIDER_OPENAI_CODEX],
+    )
+    assert result["errors"] == []
+    # The arm came back for the second question without a restart.
+    assert result["paused_vendors"] == {}
+    assert PROVIDER_ANTHROPIC_CLAUDE_CODE in result["active_vendors"]
+    journal = CostJournal(work)
+    kinds = [row.get("kind") for row in journal.rows()]
+    assert "vendor_pause" in kinds
+    assert "vendor_resume" in kinds
+    rows = journal.item_rows()
+    assert rows[1]["evaluation"]["vendors_paused"] == []
+    assert rows[1]["evaluation"]["recorded_trials"] == 36
+
+
+def test_a_harness_pause_is_told_apart_from_every_other_pause() -> None:
+    """Only a pause about the machine may lift itself on a probe."""
+    assert (
+        is_harness_unavailable_reason(
+            "failed: the harness exited with None: FileNotFoundError: "
+            "[Errno 2] No such file or directory: '/home/ben/.npm-global/bin/claude'"
+        )
+        is True
+    )
+    assert (
+        is_harness_unavailable_reason(
+            "failed: the anthropic_claude_code harness binary is not executable "
+            "now: /home/ben/.npm-global/bin/claude"
+        )
+        is True
+    )
+    # A harness that ran and failed, a budget wall and an ambiguous charge all
+    # describe the run, not the machine, and none of them lifts on a probe.
+    assert is_harness_unavailable_reason("failed: the harness exited with 1:") is False
+    assert is_harness_unavailable_reason(f"not_submitted: {EVALUATION_CEILING_REASON}") is False
+    assert is_harness_unavailable_reason("ambiguous_charge: ...") is False
+    assert is_harness_unavailable_reason(None) is False

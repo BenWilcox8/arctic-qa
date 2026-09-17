@@ -386,6 +386,8 @@ def cost_row(
     vendors_excluded: list[str] | None = None,
     models_paused: list[str] | None = None,
     pending_paused_trials: int = 0,
+    pending_deferred_trials: int = 0,
+    deferred_reasons: list[str] | None = None,
     cumulative: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one cost-journal row for one evaluated question.
@@ -403,6 +405,15 @@ def cost_row(
     run. The two were one field until 2026-09-17, and an item evaluated while
     the Claude Code arm was paused was journalled complete with 30 of its 48
     trials.
+
+    ``pending_deferred_trials`` counts the trials the provider never saw: the
+    exclusive operation lock of the shared ledger stayed held past the bounded
+    wait, or a harness binary could not be started. Such a trial reserved
+    nothing, submitted nothing and charged nothing, so it is owed exactly as a
+    paused model's trial is owed, and a row that holds one is not complete.
+    Without this field the busy lock closed 73 of the 155 closed questions of
+    the streaming-r11 work directory short of their 48 trials, and the journal
+    called every one of them complete.
     """
     all_rows = [row for rows in rows_by_vendor.values() for row in rows]
     gemini = gemini_evaluation_cost(ledger, run_id=run_id, item_id=item["item_id"])
@@ -446,7 +457,13 @@ def cost_row(
             "vendors_excluded": sorted(vendors_excluded or []),
             "models_paused": sorted(models_paused or []),
             "pending_paused_trials": int(pending_paused_trials),
-            "complete": int(pending_paused_trials) == 0 and not (vendors_paused or []),
+            "pending_deferred_trials": int(pending_deferred_trials),
+            "deferred_reasons": sorted(deferred_reasons or []),
+            "complete": (
+                int(pending_paused_trials) == 0
+                and int(pending_deferred_trials) == 0
+                and not (vendors_paused or [])
+            ),
             "wall_seconds": round(float(wall_seconds), 3),
         },
         "outcomes_by_model": outcome_counts(all_rows),
@@ -559,6 +576,12 @@ class CostJournal:
         Claude Code arm was paused, called an item complete with 30 of its 48
         trials.
 
+        A trial the provider never saw is owed the same way: the busy lock or
+        an unavailable harness binary left it pending, and
+        ``pending_deferred_trials`` counts it. The count is read here as well
+        as in the row's own flag, because a stranded question is the one
+        failure this rule exists to prevent and one reader of it is not enough.
+
         A pause is the one thing that reopens an item. An arm that *stopped
         inside* an item does not: the evaluation policy forbids a retry, so
         the trials that stop never went out and never will under this
@@ -571,6 +594,8 @@ class CostJournal:
         """
         evaluation = row.get("evaluation") or {}
         if evaluation.get("vendors_paused"):
+            return False
+        if int(evaluation.get("pending_deferred_trials", 0) or 0):
             return False
         if "complete" in evaluation:
             return bool(evaluation["complete"])

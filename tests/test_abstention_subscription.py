@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from arctic_qa.abstention_providers import EvaluationRequest, evaluation_payload
+from arctic_qa.abstention_providers import (
+    COMPLETED,
+    EvaluationRequest,
+    evaluation_payload,
+)
 from arctic_qa.abstention_render import GOLD_ABSENT, GOLD_PRESENT, N0, N1, N5
 from arctic_qa.abstention_run import (
     RESPONSES_FILENAME,
@@ -25,6 +29,7 @@ from arctic_qa.abstention_subscription import (
     STATE_POLICY_STOP,
     STATE_TIMEOUT,
     ScriptedSubscriptionTransport,
+    SubprocessTransport,
     SubscriptionLedger,
     annotate_subscription_models,
     build_subscription_provider,
@@ -37,6 +42,7 @@ from arctic_qa.abstention_subscription import (
     subscription_gate_record,
 )
 from arctic_qa.cli import main as cli_main
+from arctic_qa.errors import HarnessUnavailableError
 from arctic_qa.util import atomic_json
 from test_abstention_render import item
 
@@ -706,3 +712,42 @@ def test_subscription_dry_run_scores_through_the_cli(
     group = output["scores"][f"{CODEX}/medium"]
     assert group["counts"]["N1"] == 3 and group["counts"]["N5"] == 3
     assert output["total_cost_usd"] == "0"
+
+
+def test_a_vanished_harness_binary_reserves_nothing_and_records_nothing(
+    tmp_path: Path,
+) -> None:
+    """The probe runs before the row, so the trial stays pending and free.
+
+    The Claude Code binary was reinstalled at 12:06 UTC on 2026-09-17 and the
+    path was gone for a moment. Without this probe the child process fails to
+    spawn, the transport reports the ``OSError`` as an exit code with no
+    return code, and the trial is recorded as a failed response at N0 that the
+    no-retry contract forbids ever asking again. It also stopped the arm.
+    """
+    missing = tmp_path / "npm-global" / "bin" / "claude"
+    values = fixture(tmp_path, PROVIDER_ANTHROPIC_CLAUDE_CODE)
+    provider = values["provider"]
+    provider.binary = str(missing)
+    provider.transport = SubprocessTransport()
+    request = EvaluationRequest(
+        trial=values["trials"][0],
+        identity=evaluation_identity(values["items"][0]),
+        run_id="sub-run-1",
+    )
+    with pytest.raises(HarnessUnavailableError):
+        provider.answer(request)
+    # Nothing reserved, nothing submitted, nothing recorded.
+    ledger = json.loads(
+        (values["ledger_dir"] / "subscription-ledger.json").read_text(encoding="utf-8")
+    )
+    assert ledger["requests"] == {}
+    assert list((values["ledger_dir"] / "receipts").glob("*.json")) == []
+    # The binary comes back and the same trial runs, with no receipt to work
+    # around and no stop on record.
+    missing.parent.mkdir(parents=True)
+    missing.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    missing.chmod(0o755)
+    provider.transport = values["transport"]
+    response = provider.answer(request)
+    assert response.state == COMPLETED

@@ -50,6 +50,7 @@ from .abstention_providers import (
 )
 from .abstention_render import ABSTENTION_OPTION_TEXT, PROMPT_VERSION, prompt_sha256
 from .abstention_set import manifest_sha256
+from .errors import HarnessUnavailableError
 from .model_broker import (
     EVALUATION_GATE_SCHEMA,
     EVALUATION_PHASE,
@@ -175,6 +176,37 @@ def load_subscription_models(path: Path) -> dict[str, Any]:
     return value
 
 
+def harness_binary_path(binary: str) -> Path | None:
+    """Return the executable file this harness name resolves to, or None.
+
+    A name with no separator is looked up on ``PATH``, as the child process
+    would look it up. Anything else is a path, and a symbolic link whose target
+    is gone resolves to nothing, which is exactly the shape a package upgrade
+    leaves behind for a moment.
+    """
+    if os.sep in binary or (os.altsep and os.altsep in binary):
+        candidate = Path(binary)
+        return candidate if os.access(candidate, os.X_OK) else None
+    found = shutil.which(binary)
+    return Path(found) if found else None
+
+
+def require_harness_binary(vendor: str, binary: str) -> Path:
+    """Prove the harness binary can be started, before anything is reserved.
+
+    Raises :class:`HarnessUnavailableError`, which the caller waits out inside
+    the trial and then leaves pending. Without this probe the child process
+    fails to spawn, the transport reports the ``OSError`` as an exit code, and
+    the trial is recorded as a failed response that nothing may ever retry.
+    """
+    resolved = harness_binary_path(binary)
+    if resolved is None:
+        raise HarnessUnavailableError(
+            f"the {vendor} harness binary is not executable now: {binary}"
+        )
+    return resolved
+
+
 def vendor_entry(config: dict[str, Any], vendor: str) -> dict[str, Any]:
     if vendor not in SUBSCRIPTION_PROVIDER_NAMES:
         raise ValueError(f"unsupported subscription provider: {vendor}")
@@ -258,9 +290,20 @@ class SubscriptionTransport(Protocol):
 
     def run(self, invocation: dict[str, Any]) -> dict[str, Any]: ...
 
+    def probe(self, vendor: str, binary: str) -> None:
+        """Refuse now if this transport cannot start that harness.
+
+        The transport owns how the harness runs, so it owns this question. The
+        provider asks it before the trial reserves its row, and a transport
+        that starts no process answers by doing nothing.
+        """
+
 
 class SubprocessTransport:
     """Run the harness binary as a child process from the scratch directory."""
+
+    def probe(self, vendor: str, binary: str) -> None:
+        require_harness_binary(vendor, binary)
 
     def run(self, invocation: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -417,6 +460,9 @@ class ScriptedSubscriptionTransport:
         self.latency_seconds = latency_seconds
         self.invocations: list[dict[str, Any]] = []
         self._lock = threading.Lock()
+
+    def probe(self, vendor: str, binary: str) -> None:
+        """A scripted transport starts no process, so it needs no binary."""
 
     def run(self, invocation: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -1314,6 +1360,9 @@ class SubscriptionEvaluationProvider:
         if receipt_path.is_file():
             receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
             return self._response(receipt, path=receipt_path, resumed=True)
+        # Before the row is reserved, because a harness that cannot start
+        # proves nothing about the model and must leave the trial pending.
+        self.transport.probe(self.vendor, self.binary)
         call_dir = self.scratch_root / request_key[:16]
         if call_dir.exists():
             shutil.rmtree(call_dir)

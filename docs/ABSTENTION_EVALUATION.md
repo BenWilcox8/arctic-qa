@@ -500,6 +500,9 @@ A few stops are about one question only, and `abstention_watch.ITEM_SCOPED_REASO
   The broker names those two together as the refusals that describe the moment and not the request: `execute` waits a bounded time for room before it records one, and the next question meets an emptier window.
   They took the arm down at 11:55 UTC on 2026-09-17, minutes after it became fast enough to fill the slots.
 
+The busy lock is no longer meant to arrive here at all.
+A trial waits it out and is left pending, which "A refusal the provider never saw" below states.
+The entry stays because a reason that reaches the watch as a vendor stop must still not pause the arm, and `finish_item` emits `item_lock_busy` for it instead of `vendor_stopped_on_this_item`.
 A reason belongs in that set only when the refusal reserved nothing, submitted nothing and charged nothing, and says nothing about the next question.
 
 The busy exclusive lock reaches the watch by three routes, and none of them ends it.
@@ -509,6 +512,47 @@ A vendor reports it as a stop reason, which the set above covers.
 Every route was once this question's error, and one question's error halts the wave and ends the watch non-zero: the unit exited 1 at 12:14:20 UTC on 2026-09-17, and again at 12:49:45 UTC with only the frame contained.
 `is_lock_busy_error` is the one predicate over the text. Each route emits an `item_lock_busy` event and takes the next question, and the final raise drops these lines whatever route they took, so a raise stays what it is for: an authorization, an integrity or a halt error.
 The question keeps the trials it recorded, its row says it is not complete, and a later pass runs what is missing.
+
+### A refusal the provider never saw
+
+A trial can be refused before the provider ever sees the request.
+Two shapes reach the evaluator, and `abstention_plan.PRE_PROVIDER_REFUSALS` is that closed set:
+
+- `errors.BrokerOperationBusyError`, the exclusive operation lock of the shared paid-call ledger, held past the bounded wait.
+- `errors.HarnessUnavailableError`, a subscription harness binary that cannot be started.
+  The probe `abstention_subscription.require_harness_binary` runs before the trial reserves its row, and the transport owns it: `SubprocessTransport.probe` asks, a scripted transport starts no process and answers by doing nothing.
+
+Such a refusal reserved nothing, submitted nothing and charged nothing.
+It proves nothing about the model and nothing about the next trial.
+So it is not a stop, it is not recorded as a response, and it never counts toward the no-retry contract.
+
+`abstention_plan.run_vendor` waits it out inside the trial: `PRE_PROVIDER_RETRY_ROUNDS` attempts with a doubling backoff from `PRE_PROVIDER_RETRY_BASE_SECONDS` to `PRE_PROVIDER_RETRY_CEILING_SECONDS`.
+Past that bound the trial is left pending, exactly as a paused model's trial is left pending.
+The other trials of that vendor keep running.
+
+A pending trial is owed, so the question stays open.
+The vendor summary carries `deferred_trials` and `deferred_reasons`, the plan summary sums them, and the journal row carries `evaluation.pending_deferred_trials`.
+A row with one is not complete, in its own `evaluation.complete` flag and in `CostJournal.row_is_complete`, so the next pass takes the question up and runs exactly the trials that are missing.
+
+This rule is the answer to a live failure.
+The containment that shipped at 13:00 UTC on 2026-09-17 kept the unit alive but recorded the busy lock as a vendor stop on the question.
+In three hours the unit journal held 87 `item_done` events with `complete: false` against 16 with `complete: true`.
+Worse, the journal still called those questions complete: 73 of the 155 closed questions of the `streaming-r11` work directory hold fewer than their 48 responses, 1047 trials in all, and none of them was ever taken up again.
+
+### An arm a vanished harness binary paused
+
+A vendor pause is a circuit breaker for one invocation, and a start clears it.
+Two pauses lift themselves instead.
+The first is an ambiguous charge, which a reviewed release of the shared ledger lifts.
+The second is a harness binary that could not be started, which the machine lifts by having it back.
+
+`is_harness_unavailable_reason` reads that pause, and `resume_vendors_whose_harness_returned` probes the binary the authorization's subscription registry names.
+A binary that can be started again resumes the arm with a `vendor_resumed` event and a `vendor_resume` journal row.
+The probe is asked before every question the evaluator admits, and not only at the top of a poll cycle, for the same reason the Gemini one is: one cycle scores four waves.
+
+The Claude Code binary was reinstalled at 12:06 UTC on 2026-09-17.
+The path was gone for a moment, and the arm was paused on it at 12:06, 12:13, 12:48 and 13:19 UTC.
+The binary was back within the minute each time and nothing asked, so the arm made no call between 13:21 UTC and the next restart.
 
 ### A question an arm stopped inside
 

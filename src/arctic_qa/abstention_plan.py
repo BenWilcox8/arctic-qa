@@ -38,6 +38,7 @@ from .abstention_providers import (
     PROVIDER_GOOGLE_GEMINI,
     EvaluationProvider,
     EvaluationRequest,
+    EvaluationResponse,
     decoding_record,
 )
 from .abstention_render import TAXONOMY
@@ -68,6 +69,7 @@ from .abstention_subscription import (
     vendor_entry,
     vendor_policy_limit,
 )
+from .errors import BrokerOperationBusyError, HarnessUnavailableError
 from .model_broker import SharedGeminiBroker
 from .util import atomic_json, canonical_json, sha256_file
 
@@ -82,6 +84,25 @@ PLAN_SUMMARY_FILENAME = "plan-summary.json"
 VENDOR_NAMES = (PROVIDER_GOOGLE_GEMINI, *SUBSCRIPTION_PROVIDER_NAMES)
 DEFAULT_PLAN_FILE = Path("config/benchmark-evaluation-plan-high-v1.json")
 GATE_FILENAME_BY_VENDOR = {vendor: f"{vendor}.json" for vendor in VENDOR_NAMES}
+
+# A refusal that reached the trial before the provider saw the request. It
+# reserved nothing, submitted nothing and charged nothing, so it proves nothing
+# about this trial, about this model or about the next trial. The two shapes
+# are the exclusive operation lock of the shared paid-call ledger and a
+# subscription harness binary that cannot be started.
+#
+# The evaluation policy forbids a retry of a call the provider answered. It
+# says nothing about a call the provider never saw, and treating the two alike
+# is what stranded 73 of the 155 closed questions of the streaming-r11 work
+# directory: the busy lock closed each question with its Gemini trials
+# unrecorded and the journal still called the question complete.
+PRE_PROVIDER_REFUSALS = (BrokerOperationBusyError, HarnessUnavailableError)
+# The bounded wait inside the trial. The broker's own queue for the exclusive
+# lock is already minutes long, so these rounds are the last word before the
+# trial is left pending, and the next poll takes it up again.
+PRE_PROVIDER_RETRY_ROUNDS = 4
+PRE_PROVIDER_RETRY_BASE_SECONDS = 5.0
+PRE_PROVIDER_RETRY_CEILING_SECONDS = 60.0
 
 
 def _utc_now() -> str:
@@ -505,7 +526,41 @@ def run_vendor(
     # revisit of an item resumes what an earlier pass wrote. A stop belongs to
     # the pass that met it, because the caller pauses the vendor on it.
     fresh: list[dict[str, Any]] = []
+    # The trials this pass left pending because the provider never saw them.
+    # They are not recorded, not counted as invalid and not a stop: the caller
+    # reads this count and keeps the item open, exactly as a paused model's
+    # held trials keep it open.
+    deferred: list[dict[str, str]] = []
     started = time.monotonic()
+
+    def answer_with_bounded_wait(
+        request: EvaluationRequest,
+    ) -> EvaluationResponse | None:
+        """Answer one trial, waiting out a refusal the provider never saw.
+
+        Returns None when the bound is reached, and the trial is then left
+        pending for the next pass. Every round is a fresh attempt, because the
+        refusal describes the moment and not the request.
+        """
+        delay = PRE_PROVIDER_RETRY_BASE_SECONDS
+        for attempt in range(1, PRE_PROVIDER_RETRY_ROUNDS + 1):
+            try:
+                return provider.answer(request)
+            except PRE_PROVIDER_REFUSALS as refusal:
+                last = attempt == PRE_PROVIDER_RETRY_ROUNDS
+                halted = stop.is_set() or (should_stop is not None and should_stop())
+                if last or halted:
+                    with lock:
+                        deferred.append(
+                            {
+                                "trial_id": str(request.trial["trial_id"]),
+                                "reason": f"{type(refusal).__name__}: {refusal}",
+                            }
+                        )
+                    return None
+                time.sleep(delay)
+                delay = min(delay * 2, PRE_PROVIDER_RETRY_CEILING_SECONDS)
+        return None
 
     def work(trial: dict[str, Any]) -> None:
         if stop.is_set() or (should_stop is not None and should_stop()):
@@ -516,11 +571,16 @@ def run_vendor(
             run_id=run_id,
         )
         try:
-            response = provider.answer(request)
+            response = answer_with_bounded_wait(request)
         except BaseException as error:  # noqa: BLE001 - recorded, then re-raised
             stop.set()
             with lock:
                 errors.append(error)
+            return
+        if response is None:
+            # The provider never saw this trial. Nothing is recorded, the
+            # other trials of this vendor keep running, and the next pass
+            # takes this one up again.
             return
         row = response_row(
             trial,
@@ -575,6 +635,11 @@ def run_vendor(
     summary["paused_models"] = sorted({trial["model"] for trial in held})
     summary["pending_trials"] = len(trials) - len(rows)
     summary["pending_paused_trials"] = len(held)
+    # The trials this pass left pending because the provider never saw them.
+    # They keep the item open, so the reasons are reported and never reduced to
+    # a count alone.
+    summary["deferred_trials"] = len(deferred)
+    summary["deferred_reasons"] = sorted({row["reason"] for row in deferred})
     atomic_json(output_dir / RUN_SUMMARY_FILENAME, summary)
     return summary
 
@@ -829,6 +894,10 @@ def summarize_plan(
         vendor: bool(results.get(vendor, {}).get("complete"))
         for vendor in plan_manifest["vendors"]
     }
+    deferred_by_vendor = {
+        vendor: int(results.get(vendor, {}).get("deferred_trials") or 0)
+        for vendor in plan_manifest["vendors"]
+    }
     invalid = [row for row in all_rows if not row["valid"]]
     return {
         "schema": PLAN_SUMMARY_SCHEMA,
@@ -838,10 +907,15 @@ def summarize_plan(
         "item_count": plan_manifest["item_count"],
         "planned_trials": planned,
         "recorded_trials": len(all_rows),
-        "complete": all(vendor_complete.values()) and not failures,
+        "complete": (
+            all(vendor_complete.values())
+            and not failures
+            and not any(deferred_by_vendor.values())
+        ),
         "serial": serial,
         "paused_models": sorted(paused),
         "pending_trials": planned - len(all_rows),
+        "deferred_trials": sum(deferred_by_vendor.values()),
         "wall_seconds": round(wall_seconds, 3),
         "vendors": {
             vendor: {
@@ -857,6 +931,9 @@ def summarize_plan(
                 "stopped_this_pass": results.get(vendor, {}).get("stopped_this_pass"),
                 "paused_models": results.get(vendor, {}).get("paused_models"),
                 "pending_trials": results.get(vendor, {}).get("pending_trials"),
+                "deferred_trials": deferred_by_vendor[vendor],
+                "deferred_reasons": results.get(vendor, {}).get("deferred_reasons")
+                or [],
                 "error": failures.get(vendor),
                 "tokens": tokens_by_vendor[vendor],
                 "per_model_arm": results.get(vendor, {}).get("per_model_arm"),

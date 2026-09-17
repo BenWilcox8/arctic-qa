@@ -70,6 +70,26 @@ class PaperBindingConflictError(ArcticQAError, ValueError):
     """
 
 
+class HarnessUnavailableError(ArcticQAError):
+    """A subscription harness binary could not be started for this trial.
+
+    The evaluator runs the Claude Code and Codex arms as child processes of an
+    installed binary. A package upgrade replaces that binary, so for a moment
+    the path is not there: the Claude Code binary vanished at 12:06 UTC on
+    2026-09-17 and again at 12:13, 12:48 and 13:19, and each time the arm went
+    dark for the rest of the invocation.
+
+    The probe that raises this runs before the trial reserves its row, so
+    nothing is reserved, nothing is submitted and nothing is charged. It proves
+    nothing about the model and nothing about the next trial, exactly as
+    :class:`BrokerOperationBusyError` does. The evaluator therefore waits a
+    bounded time inside the trial and leaves the trial pending; it never
+    records a failed response and never stops the arm.
+    """
+
+    code = "HARNESS_UNAVAILABLE"
+
+
 class DuplicateRequestKeyError(ArcticQAError, ValueError):
     """The paid request key is already in the ledger and cannot be reopened.
 
