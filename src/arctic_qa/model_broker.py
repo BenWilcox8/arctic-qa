@@ -501,6 +501,23 @@ PROVIDER_TIMEOUT_CONTINUATION_EVIDENCE_SCHEMA = (
 PROVIDER_TIMEOUT_ERROR = "TimeoutError: provider outcome unknown"
 PROVIDER_TIMEOUT_ERROR_CLASS = "provider_timeout_unknown_charge"
 PROVIDER_TIMEOUT_SKIP_REASON = "operational_ambiguous_charge_provider_timeout"
+INTERRUPTED_ORPHAN_CONTINUATION_SCHEMA = (
+    "shared-paid-call-interrupted-orphan-continuation-v1"
+)
+INTERRUPTED_ORPHAN_CONTINUATION_EVIDENCE_SCHEMA = (
+    "shared-paid-call-interrupted-orphan-continuation-evidence-v1"
+)
+# The exact string orphan recovery writes when the process that held a live
+# call died and left neither a final nor a received receipt. The call went out;
+# nothing came back; the charge is unknown for the same reason a 5xx answer is.
+INTERRUPTED_ORPHAN_ERROR = "interrupted request has no durable provider response"
+INTERRUPTED_ORPHAN_ERROR_CLASS = "interrupted_orphan_unknown_charge"
+INTERRUPTED_ORPHAN_SKIP_REASON = "operational_ambiguous_charge_interrupted_orphan"
+# An interrupted orphan of the evaluation phase can outlive the derived per-item
+# gate its row binds, because the cut-over that interrupted the call rewrites
+# that gate. The release then proves a later authorized successor of the same
+# gate instead, and records both digests. It never edits the ledger row.
+SUPERSEDED_GATE_REASON = "gate rewritten by the evaluator cut-over before release"
 AMBIGUOUS_CONTINUATION_RESERVATION_POLICY = (
     "retain_full_reservation_in_ambiguous_reserved_and_count_against_all_caps"
 )
@@ -556,6 +573,18 @@ RECEIVED_MAX_TOKENS_CONTINUATION_FIELDS = AMBIGUOUS_CONTINUATION_FIELDS - {
 PROVIDER_TIMEOUT_CONTINUATION_FIELDS = AMBIGUOUS_CONTINUATION_FIELDS - {
     "http_status"
 } | {"error", "timeout_seconds"}
+INTERRUPTED_ORPHAN_CONTINUATION_FIELDS = AMBIGUOUS_CONTINUATION_FIELDS - {
+    "http_status"
+} | {"error", "superseded_gate"}
+SUPERSEDED_GATE_FIELDS = {
+    "bound_gate_sha256",
+    "successor_gate_sha256",
+    "successor_integrated_code_commit",
+    "successor_review_record",
+    "successor_review_record_sha256",
+    "successor_written_at_utc",
+    "reason",
+}
 HTTP_REJECTION_SETTLEMENT_FIELDS = {
     "schema",
     "request_key",
@@ -771,6 +800,79 @@ def _is_provider_timeout_ambiguous_case(
         and not received_receipt_present
         and final.get("reserved_usd") == request.get("reserved_usd")
         and final.get("actual_cost_usd") is None
+    )
+
+
+def _is_interrupted_orphan_ambiguous_case(
+    final: dict[str, Any],
+    request: dict[str, Any],
+    *,
+    received_receipt_present: bool,
+) -> bool:
+    """Say whether one receipt is the bounded interrupted-orphan ambiguous case.
+
+    The process that held the live call died before any receipt was durable.
+    Orphan recovery found neither a final nor a received receipt and wrote this
+    receipt in its place. The call went out and nothing came back, so the charge
+    is unknown in exactly the way a provider timeout is unknown. The receipt must
+    carry no response, no HTTP outcome, no error class and no settled cost, which
+    keeps this case disjoint from the other three.
+    """
+    if not isinstance(final, dict) or not isinstance(request, dict):
+        return False
+    return (
+        final.get("state") == "ambiguous_charge"
+        and final.get("error") == INTERRUPTED_ORPHAN_ERROR
+        and final.get("live_call_made") is True
+        and "response" not in final
+        and "error_class" not in final
+        and "http_status" not in final
+        and not received_receipt_present
+        and final.get("reserved_usd") == request.get("reserved_usd")
+        and final.get("actual_cost_usd") is None
+    )
+
+
+def _is_authorized_successor_gate(
+    gate: dict[str, Any],
+    request: dict[str, Any],
+    *,
+    authorized_run_id: str,
+) -> bool:
+    """Say whether the gate on disk is a later authorized successor of the bound one.
+
+    The derived per-item evaluation gate is rewritten on every visit, so a
+    cut-over that interrupts a call also replaces the gate that call bound. The
+    successor is accepted only when it is the same authorization for the same
+    item and the same model, its own review record is on disk and matches the
+    digest the gate names, and it was written after the interrupted call was
+    submitted. Nothing here edits the ledger row, and no other release case may
+    use it.
+    """
+    if not isinstance(gate, dict):
+        return False
+    review_record = Path(str(gate.get("review_record") or ""))
+    written = str(gate.get("written_at_utc") or "")
+    submitted = str(request.get("submitted_at_utc") or "")
+    if not written or not submitted or written <= submitted:
+        return False
+    if (
+        not review_record.is_file()
+        or sha256_file(review_record) != gate.get("review_record_sha256")
+    ):
+        return False
+    record = _read(review_record)
+    if (
+        not isinstance(record, dict)
+        or record.get("integrated_code_commit") != gate.get("integrated_code_commit")
+        or not str(gate.get("integrated_code_commit") or "").strip()
+    ):
+        return False
+    models = gate.get("models")
+    return (
+        gate.get("authorized_run_id") == authorized_run_id
+        and isinstance(models, list)
+        and request.get("model") in models
     )
 
 
@@ -4132,6 +4234,11 @@ class SharedGeminiBroker:
         ):
             return self._validate_provider_timeout_continuation(event, path)
         if (
+            isinstance(event, dict)
+            and event.get("schema") == INTERRUPTED_ORPHAN_CONTINUATION_SCHEMA
+        ):
+            return self._validate_interrupted_orphan_continuation(event, path)
+        if (
             not isinstance(event, dict)
             or set(event) != AMBIGUOUS_CONTINUATION_FIELDS
             or event.get("schema") != AMBIGUOUS_CONTINUATION_SCHEMA
@@ -4427,6 +4534,121 @@ class SharedGeminiBroker:
             raise ValueError("an ambiguous continuation time changed")
         return event
 
+    def _validate_interrupted_orphan_continuation(
+        self, event: dict[str, Any], path: Path
+    ) -> dict[str, Any]:
+        if set(event) != INTERRUPTED_ORPHAN_CONTINUATION_FIELDS:
+            raise ValueError("an ambiguous continuation event changed")
+        request_key = event.get("request_key")
+        if (
+            not isinstance(request_key, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", request_key)
+            or path.name != f"ambiguous-continuation-{request_key}.json"
+        ):
+            raise ValueError("an ambiguous continuation event changed")
+        for field in (
+            "ambiguous_receipt_sha256",
+            "evidence_file_sha256",
+            "review_file_sha256",
+            "ledger_sha256_before",
+            "gate_sha256",
+        ):
+            if not re.fullmatch(r"[a-f0-9]{64}", str(event.get(field) or "")):
+                raise ValueError("an ambiguous continuation event changed")
+        if (
+            event.get("error_class") != INTERRUPTED_ORPHAN_ERROR_CLASS
+            or event.get("error") != INTERRUPTED_ORPHAN_ERROR
+            or event.get("live_call_made") is not True
+            or event.get("received_receipt_absent") is not True
+            or event.get("reservation_policy")
+            != AMBIGUOUS_CONTINUATION_RESERVATION_POLICY
+            or event.get("scope") != "unrelated_families_only"
+            or event.get("skip_reason_code") != INTERRUPTED_ORPHAN_SKIP_REASON
+            or not str(event.get("affected_family_id") or "").strip()
+            or not str(event.get("authorized_run_id") or "").strip()
+            or not str(event.get("integrated_code_commit") or "").strip()
+            or not str(event.get("operator_id") or "").strip()
+        ):
+            raise ValueError("an ambiguous continuation event changed")
+        # The gate the row bound may have been replaced before the release. The
+        # record then names both digests and the successor's own authorization,
+        # and the successor is the gate this event's ``gate_sha256`` names.
+        superseded = event.get("superseded_gate")
+        if superseded is not None:
+            if (
+                not isinstance(superseded, dict)
+                or set(superseded) != SUPERSEDED_GATE_FIELDS
+                or superseded.get("reason") != SUPERSEDED_GATE_REASON
+                or superseded.get("successor_gate_sha256") != event["gate_sha256"]
+                or superseded.get("bound_gate_sha256") == event["gate_sha256"]
+                or not re.fullmatch(
+                    r"[a-f0-9]{64}", str(superseded.get("bound_gate_sha256") or "")
+                )
+                or not re.fullmatch(
+                    r"[a-f0-9]{64}",
+                    str(superseded.get("successor_review_record_sha256") or ""),
+                )
+                or not str(
+                    superseded.get("successor_integrated_code_commit") or ""
+                ).strip()
+                or not str(superseded.get("successor_review_record") or "").strip()
+                or not str(superseded.get("successor_written_at_utc") or "").strip()
+            ):
+                raise ValueError("an ambiguous continuation event changed")
+        request_identity = event.get("request_identity")
+        if (
+            not isinstance(request_identity, dict)
+            or set(request_identity)
+            != {
+                "run_id",
+                "stage",
+                "paper_id",
+                "family_id",
+                "source_version_id",
+                "request_sha256",
+                "reserved_usd",
+            }
+            or not all(
+                isinstance(value, str) and value for value in request_identity.values()
+            )
+            or _money(
+                event.get("reserved_usd"), "continuation reservation", positive=True
+            )
+            <= 0
+        ):
+            raise ValueError("an ambiguous continuation request identity changed")
+        evidence_path = Path(str(event.get("evidence_file") or "")).resolve()
+        review_path = Path(str(event.get("review_file") or "")).resolve()
+        if (
+            not evidence_path.is_file()
+            or sha256_file(evidence_path) != event["evidence_file_sha256"]
+            or not review_path.is_file()
+            or sha256_file(review_path) != event["review_file_sha256"]
+        ):
+            raise ValueError("an ambiguous continuation evidence changed")
+        if _read(evidence_path) != {
+            "schema": INTERRUPTED_ORPHAN_CONTINUATION_EVIDENCE_SCHEMA,
+            "request_key": request_key,
+            "error_class": INTERRUPTED_ORPHAN_ERROR_CLASS,
+            "error": INTERRUPTED_ORPHAN_ERROR,
+            "live_call_made": True,
+            "received_receipt_absent": True,
+            "actual_cost_known": False,
+            "replay_prohibited": True,
+            "affected_family_id": event["affected_family_id"],
+            "authorized_run_id": event["authorized_run_id"],
+        }:
+            raise ValueError("an ambiguous continuation evidence changed")
+        try:
+            authorized = datetime.fromisoformat(
+                str(event["authorized_at_utc"]).replace("Z", "+00:00")
+            )
+        except ValueError as error:
+            raise ValueError("an ambiguous continuation time changed") from error
+        if authorized.tzinfo is None:
+            raise ValueError("an ambiguous continuation time changed")
+        return event
+
     def _ambiguous_continuation_events(
         self, ledger: dict[str, Any]
     ) -> dict[str, dict[str, Any]]:
@@ -4484,6 +4706,13 @@ class SharedGeminiBroker:
                         received_receipt_present=received_path.exists(),
                     )
                     or _receipt_timeout_seconds(final) != event["timeout_seconds"]
+                ):
+                    raise ValueError("an ambiguous continuation receipt changed")
+            elif event["schema"] == INTERRUPTED_ORPHAN_CONTINUATION_SCHEMA:
+                if not _is_interrupted_orphan_ambiguous_case(
+                    final,
+                    request,
+                    received_receipt_present=received_path.exists(),
                 ):
                     raise ValueError("an ambiguous continuation receipt changed")
             else:
@@ -6089,11 +6318,6 @@ class SharedGeminiBroker:
                     gate = _validate_gate(gate_file, request["phase"])
                     gate_run_id = gate.get("authorized_new_run_id")
                 gate_sha256 = sha256_file(gate_file)  # type: ignore[arg-type]
-                if (
-                    request.get("gate_sha256") != gate_sha256
-                    or gate_run_id != authorized_run_id
-                ):
-                    raise ValueError("the ambiguous continuation gate changed")
                 final_path = self.receipts_dir / f"{request_key}.json"
                 received_path = self.receipts_dir / f"{request_key}.received.json"
                 trace_path = self.receipts_dir / f"{request_key}.request-trace.json"
@@ -6133,6 +6357,44 @@ class SharedGeminiBroker:
                     request,
                     received_receipt_present=received_path.exists(),
                 )
+                # One bounded case for an interrupted orphan: the process that
+                # held the call died, orphan recovery found no durable answer,
+                # and the charge is unknown for the same reason. The evidence
+                # must name the message orphan recovery wrote.
+                interrupted_orphan_case = _is_interrupted_orphan_ambiguous_case(
+                    final,
+                    request,
+                    received_receipt_present=received_path.exists(),
+                )
+                # The gate check. Every case but the interrupted orphan needs the
+                # exact gate the row bound. An interrupted orphan of the
+                # evaluation phase can outlive that gate, because the cut-over
+                # that interrupted the call rewrites the derived per-item gate,
+                # so it may instead prove a later authorized successor and record
+                # both digests.
+                superseded_gate = None
+                if request.get("gate_sha256") != gate_sha256:
+                    if not (
+                        interrupted_orphan_case
+                        and request["phase"] == EVALUATION_PHASE
+                        and _is_authorized_successor_gate(
+                            gate, request, authorized_run_id=authorized_run_id
+                        )
+                    ):
+                        raise ValueError("the ambiguous continuation gate changed")
+                    superseded_gate = {
+                        "bound_gate_sha256": request["gate_sha256"],
+                        "successor_gate_sha256": gate_sha256,
+                        "successor_integrated_code_commit": gate[
+                            "integrated_code_commit"
+                        ],
+                        "successor_review_record": gate["review_record"],
+                        "successor_review_record_sha256": gate["review_record_sha256"],
+                        "successor_written_at_utc": gate["written_at_utc"],
+                        "reason": SUPERSEDED_GATE_REASON,
+                    }
+                if gate_run_id != authorized_run_id:
+                    raise ValueError("the ambiguous continuation gate changed")
                 timeout_seconds = (
                     _receipt_timeout_seconds(final) if provider_timeout_case else None
                 )
@@ -6140,6 +6402,7 @@ class SharedGeminiBroker:
                     not http_500_case
                     and not received_max_tokens_case
                     and not provider_timeout_case
+                    and not interrupted_orphan_case
                 ):
                     raise ValueError("the request is not a supported ambiguous case")
                 if not review_file.is_file() or not evidence_file.is_file():
@@ -6172,6 +6435,19 @@ class SharedGeminiBroker:
                         "affected_family_id": request["family_id"],
                         "authorized_run_id": authorized_run_id,
                     }
+                elif interrupted_orphan_case:
+                    expected_evidence = {
+                        "schema": INTERRUPTED_ORPHAN_CONTINUATION_EVIDENCE_SCHEMA,
+                        "request_key": request_key,
+                        "error_class": INTERRUPTED_ORPHAN_ERROR_CLASS,
+                        "error": INTERRUPTED_ORPHAN_ERROR,
+                        "live_call_made": True,
+                        "received_receipt_absent": True,
+                        "actual_cost_known": False,
+                        "replay_prohibited": True,
+                        "affected_family_id": request["family_id"],
+                        "authorized_run_id": authorized_run_id,
+                    }
                 else:
                     expected_evidence = {
                         "schema": RECEIVED_MAX_TOKENS_CONTINUATION_EVIDENCE_SCHEMA,
@@ -6188,8 +6464,16 @@ class SharedGeminiBroker:
                 if evidence != expected_evidence:
                     raise ValueError("the ambiguous continuation evidence is not exact")
                 continuation_events = self._ambiguous_continuation_events(ledger)
+                # This release lifts one phase's halt, so it is the ambiguous
+                # charges of that phase that must all be in reviewed custody.
+                # A charge of the other phase holds its own halt and is
+                # released by its own review. Before the phase scope, two
+                # un-reviewed charges of different phases each blocked the
+                # other's release and neither halt could ever lift; that
+                # deadlock stopped both callers on 2026-09-17 at 10:24 UTC.
                 if any(
                     other.get("state") == "ambiguous_charge"
+                    and other.get("phase") == request["phase"]
                     and other_key != request_key
                     and other_key not in continuation_events
                     for other_key, other in ledger["requests"].items()
@@ -6205,6 +6489,10 @@ class SharedGeminiBroker:
                     schema = PROVIDER_TIMEOUT_CONTINUATION_SCHEMA
                     error_class = PROVIDER_TIMEOUT_ERROR_CLASS
                     skip_reason_code = PROVIDER_TIMEOUT_SKIP_REASON
+                elif interrupted_orphan_case:
+                    schema = INTERRUPTED_ORPHAN_CONTINUATION_SCHEMA
+                    error_class = INTERRUPTED_ORPHAN_ERROR_CLASS
+                    skip_reason_code = INTERRUPTED_ORPHAN_SKIP_REASON
                 else:
                     schema = RECEIVED_MAX_TOKENS_CONTINUATION_SCHEMA
                     error_class = "received_max_tokens_usage_unknown"
@@ -6258,6 +6546,14 @@ class SharedGeminiBroker:
                             "error": PROVIDER_TIMEOUT_ERROR,
                             "timeout_seconds": timeout_seconds,
                             "received_receipt_absent": True,
+                        }
+                    )
+                elif interrupted_orphan_case:
+                    event.update(
+                        {
+                            "error": INTERRUPTED_ORPHAN_ERROR,
+                            "received_receipt_absent": True,
+                            "superseded_gate": superseded_gate,
                         }
                     )
                 else:
