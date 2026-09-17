@@ -152,3 +152,20 @@ That is why both repairs were made with the construction files of the older pair
 | 23:50 | The orphan recovery. `inflight` 0, `integrity_valid` true, the ledger clear for the producer. |
 | 23:53 | The producer makes its first paid construction call, which closes the transition validation for good. |
 | 00:07 (17th) | The evaluator restarts on `streaming-r11` with all three vendors. |
+
+## 9. The state at the end of this task
+
+The evaluator runs as `arctic-abstention-stream-r3` from the snapshot `runtime/app-a65348d-arctic-eval-authorization-r8` of the activation directory `arctic-eval-authorization-r8`, on work directory `streaming-r11` and run id prefix `abstention-stream-r11`, with all three vendors and the Fable arm active.
+
+| Fact | Value |
+|---|---|
+| Restarted | 2026-09-17T00:07:40Z |
+| First new evaluation receipt | `c79aad30f84188da9d57756e82b8e5e21d322b14bf2d826eba42fba9b6b707d4` |
+| That receipt | `evaluation_answer:gemini-3.8-flash`, submitted 00:08:35Z, completed, USD 0.029674 |
+| Shared ledger | `halted` false, `evaluation_halted` false, `integrity_valid` true |
+| Carried journal rows | 16, of which 12 are item rows, so `remaining_bound` is 1988 |
+| Backfill owed | 66 `claude-fable-5-1` trials across 12 items |
+
+The cutover receipt is `cutover-receipt-20260916T232243Z.json` of the activation directory.
+It was written by hand from the evidence, because the script timed out waiting for `watch-state.json`, which the watcher writes only at the end of a whole poll cycle.
+The script now waits for a new journal row as well, which is the earlier proof.
