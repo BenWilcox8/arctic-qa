@@ -101,11 +101,17 @@ The per-item plan manifest binds the run id, the evaluation set directory and th
 Writing the missing trials into the r10 run directory under an r11 run id would put two run ids in one run directory and make the money evidence of that item ambiguous.
 And `a0b9a82`, the only code that could continue the r10 run, halted the shared ledger and must not run again.
 
-So the 12 items are carried forward as history, and their Fable trials need a later backfill.
-A backfill is a clean re-evaluation of those 12 items whole, all 48 trials, under `streaming-r11`.
-It costs about USD 2.02 of Gemini, which is one percent of the allocation, and gives 12 complete items instead of 12 items at 42 of 48 trials.
-To run it, remove those 12 item rows from `streaming-r11/cost-journal.jsonl`; the evaluator then takes them as new questions.
-That is a money decision, so this task did not make it.
+So the 12 items are carried forward as history, and each one is evaluated again whole under `streaming-r11`.
+
+That backfill needs no decision and no edit, because the evaluator already does it.
+`pending_item_ids` excludes the items the journal calls *complete*, and a carried row whose Fable trials are missing is not complete.
+So the evaluator takes each of those 12 items as pending, freezes it as a new one-item set under its own r11 run id, and runs the whole 48-trial plan on it.
+`CostJournal.latest_item_rows` keeps the last row of each item, so the r11 row replaces the r10 row in every total and nothing is counted twice.
+The r10 rows stay in the journal as history, with their own run ids.
+
+The first of them, `aqa-26f384109591547bc96a`, finished at 2026-09-17T00:17:24Z with all 48 trials recorded, `complete` true, no paused trials, and USD 0.156859 of Gemini in 571 seconds.
+The 12 together cost about USD 1.9 of Gemini, which is one percent of the allocation, and the result is 12 complete items instead of 12 items at 42 of 48 trials.
+Their partial r10 Gemini spend, USD 2.02, is already booked and is not recovered: that is the price of the snapshot that had to be retired.
 
 ## 6. The start-order race, still open
 
@@ -177,7 +183,7 @@ The evaluator runs as `arctic-abstention-stream-r3` from the snapshot `runtime/a
 | That receipt | `evaluation_answer:gemini-3.8-flash`, submitted 00:08:35Z, completed, USD 0.029674 |
 | Shared ledger | `halted` false, `evaluation_halted` false, `integrity_valid` true |
 | Carried journal rows | 16, of which 12 are item rows, so `remaining_bound` is 1988 |
-| Backfill owed | 66 `claude-fable-5-1` trials across 12 items |
+| Backfill owed | none as a separate task: the 12 carried items are re-evaluated whole as pending items |
 
 Neither half of section 4 is live yet.
 The running snapshot is `a65348d`, which predates both, so `streaming-eval-r10-launcher.sh` passes no `--status-file`: the flag does not exist there and the start would refuse it.
