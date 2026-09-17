@@ -179,6 +179,12 @@ The evaluator runs as `arctic-abstention-stream-r3` from the snapshot `runtime/a
 | Carried journal rows | 16, of which 12 are item rows, so `remaining_bound` is 1988 |
 | Backfill owed | 66 `claude-fable-5-1` trials across 12 items |
 
+Neither half of section 4 is live yet.
+The running snapshot is `a65348d`, which predates both, so `streaming-eval-r10-launcher.sh` passes no `--status-file`: the flag does not exist there and the start would refuse it.
+The cost guard runs its own older snapshot too.
+Both halves reach their units at their next re-snapshot, after this branch merges.
+Until then the bounds are 2000 items and USD 200.00, so a bound stop is far away, and the cost guard's extrapolation is the live control.
+
 The cutover receipt is `cutover-receipt-20260916T232243Z.json` of the activation directory.
 It was written by hand from the evidence, because the script timed out waiting for `watch-state.json`, which the watcher writes only at the end of a whole poll cycle.
 The script now waits for a new journal row as well, which is the earlier proof.
