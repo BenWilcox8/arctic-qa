@@ -217,6 +217,9 @@ CREATE INDEX IF NOT EXISTS idx_paper_completions_run
 # version, because a nullable column changes nothing for an earlier reader.
 ADDED_COLUMNS = (("paper_completions", "completed_at_utc", "TEXT"),)
 
+# How long a writer waits for a lock another connection holds.
+BUSY_TIMEOUT_SECONDS = 30.0
+
 
 def now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
@@ -239,9 +242,22 @@ class Database:
     def __init__(self, path: Path):
         self.path = path
         self.lock = threading.RLock()
-        self.connection = sqlite3.connect(path, check_same_thread=False)
+        # The state database is written by several paper threads of one
+        # producer and read by the benchmark evaluator's own process, so a
+        # writer meets a held lock often. SQLite waits ``timeout`` seconds for
+        # it and then raises ``database is locked``, which the producer
+        # contains against one paper: it faulted one paper of the concurrent
+        # chapter 3 run in a 15-minute window on 2026-09-17 at the 5-second
+        # default. A write of this database takes milliseconds, so the wait is
+        # generous and still bounded well under the call it belongs to.
+        self.connection = sqlite3.connect(
+            path, check_same_thread=False, timeout=BUSY_TIMEOUT_SECONDS
+        )
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
+        self.connection.execute(
+            f"PRAGMA busy_timeout = {int(BUSY_TIMEOUT_SECONDS * 1000)}"
+        )
 
     def close(self) -> None:
         self.connection.close()

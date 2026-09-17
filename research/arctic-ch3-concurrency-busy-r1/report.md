@@ -345,9 +345,44 @@ Three changes:
 
 ## 8. The measured window
 
-See `activation-state-5653055.json`, key `observation`, in the task data
-directory for the samples and the summary. The sequential baseline is about 3
-requests a minute and about 13 papers an hour.
+Every activation state file in the task data directory holds its own samples
+under `observation`. The sequential baseline is about 3 requests a minute and
+about 13 papers an hour.
+
+| run | what was fixed | requests a minute | papers an hour | peak in flight | calls overlapping an earlier one |
+| --- | --- | --- | --- | --- | --- |
+| sequential baseline | - | ~3 | ~13 | 1 | 0 |
+| 01:22, 5653055 | the lock queue and the dates | 2.8 | 15 | 1 | 0 of 97 |
+| 02:12, 229d136 | the per-row immutable-event proof | 5.27 | 112 | 2 | 3 of 29 |
+| 03:00, b578731 | the ledger session, the evaluator, the counting row | 6.73 | 172 | 3 | 48 of 79 |
+
+The last window is 15 minutes from 03:00:00 to 03:15:00 UTC: 101 paid requests
+and 43 papers screened, with a median call of 8 seconds. The producer ran the
+window with no exit.
+
+Faults in that window: one, `OperationalError: database is locked`, contained
+against one paper as designed. The state database is written by four paper
+threads and read and written by the evaluator's own process, and SQLite gave up
+at its 5-second default. `db.BUSY_TIMEOUT_SECONDS` is now 30 seconds, which is
+generous against a write that takes milliseconds. It takes effect at the next
+start of the producer.
+
+### What limits it now
+
+Eight papers in flight is not reachable while an admission costs seconds: the
+number in flight settles at the call length over the admission length, and the
+call is 8 seconds. The policy allows 8 concurrent requests and 40 a minute, and
+neither is the bound; no HTTP 429 has ever been recorded. The bound is the
+ledger work of an admission, so the next step, if one is wanted, is fewer and
+cheaper ledger reads per call, not a higher limit.
+
+### The models
+
+`gemini-3.1-pro-preview` is called on the concurrent path exactly as before.
+Between the 01:22 relaunch and 02:00 it completed 51 calls across
+`answer_agreement`, `answer_verification`, `blinded_reconstruction`,
+`option_verification` and `standalone_verification`, beside 49 of
+`gemini-3.8-flash`, with no error.
 
 ## 9. Tests
 

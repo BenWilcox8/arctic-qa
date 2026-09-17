@@ -453,3 +453,22 @@ def test_the_label_table_takes_the_completion_column_without_a_version_bump(
     assert "completed_at_utc" in columns
     version = database.connection.execute("SELECT version FROM schema_info").fetchone()
     assert version[0] == 5
+
+
+def test_a_writer_waits_for_a_lock_another_connection_holds(tmp_path: Path) -> None:
+    """Four paper threads and the evaluator write one state database.
+
+    At the 5-second default a writer that met a held lock raised "database is
+    locked", which the producer contains against one paper. One paper of the
+    concurrent chapter 3 run was faulted that way in a 15-minute window on
+    2026-09-17.
+    """
+    from arctic_qa import db as db_module
+
+    paths, database = _open_database(tmp_path)
+
+    timeout = database.connection.execute("PRAGMA busy_timeout").fetchone()[0]
+
+    assert timeout == int(db_module.BUSY_TIMEOUT_SECONDS * 1000)
+    assert db_module.BUSY_TIMEOUT_SECONDS >= 30.0
+    assert paths.database.is_file()
