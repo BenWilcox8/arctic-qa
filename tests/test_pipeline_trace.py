@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -323,6 +325,47 @@ def set_active_invocation(
     progress["invocation_run_id"] = invocation_run_id
     progress["recent_papers"] = recent_papers
     write_json(progress_path, progress)
+
+
+def test_two_threads_that_miss_together_build_once(tmp_path: Path) -> None:
+    """A cache that costs the whole history to fill is filled by one thread.
+
+    The viewer's background refresher and a paper-detail request missed
+    together on 2026-09-17 and each built the per-family records in full,
+    which took the pair past 90 seconds where one build takes 25.
+    """
+    namespace, _, _ = fixture_namespace(tmp_path)
+    store = PipelineTraceStore(namespace)
+    jobs = store._all_eligibility_jobs()
+    store._records_version = None
+    store._records_cache = None
+    builds = 0
+    original = store._build_paper_records
+
+    def counted(eligibility_jobs: object) -> object:
+        nonlocal builds
+        builds += 1
+        # Long enough that every other thread is certainly waiting by now.
+        time.sleep(0.3)
+        return original(eligibility_jobs)
+
+    store._build_paper_records = counted  # type: ignore[method-assign]
+    versions: list[object] = []
+    threads = [
+        threading.Thread(
+            target=lambda: versions.append(
+                (store._paper_records(jobs), store._records_version)[1]
+            )
+        )
+        for _ in range(4)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert builds == 1, f"versions seen: {len(set(map(str, versions)))} distinct"
+    assert store._records_cache is not None
 
 
 def test_a_new_receipt_rereads_itself_and_not_the_whole_directory(

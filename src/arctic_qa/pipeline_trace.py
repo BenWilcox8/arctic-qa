@@ -5,6 +5,7 @@ import binascii
 import json
 import re
 import sqlite3
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -331,6 +332,12 @@ class PipelineTraceStore:
         )
         if any(not self._inside_namespace(path) for path in configured):
             raise ValueError("pipeline trace inputs must stay inside the namespace")
+        # One derive at a time. Each cache below costs the whole history to
+        # fill, so two threads that miss together each paid it in full: a
+        # paper-detail request and the viewer's background refresher took more
+        # than 90 seconds between them on 2026-09-17 where one build takes 25.
+        # The waiter gets the builder's result instead of building again.
+        self._derive_lock = threading.RLock()
         self._receipt_cache_fingerprint: tuple[tuple[str, int, int], ...] = ()
         self._receipt_cache: list[dict[str, Any]] = []
         self._receipt_listing: dict[str, tuple[int, int]] = {}
@@ -673,10 +680,14 @@ class PipelineTraceStore:
         )
         if version == self._records_version and self._records_cache is not None:
             return self._records_cache
-        records = self._build_paper_records(eligibility_jobs)
-        self._records_version = version
-        self._records_cache = records
-        return records
+        with self._derive_lock:
+            # A thread that waited here may find the build already done.
+            if version == self._records_version and self._records_cache is not None:
+                return self._records_cache
+            records = self._build_paper_records(eligibility_jobs)
+            self._records_version = version
+            self._records_cache = records
+            return records
 
     def _build_paper_records(
         self, eligibility_jobs: list[tuple[Path, dict[str, Any]]]
@@ -1047,6 +1058,14 @@ class PipelineTraceStore:
             seen[path.name] = (status.st_size, status.st_mtime_ns)
         if seen == self._receipt_listing:
             return self._receipt_cache
+        with self._derive_lock:
+            if seen == self._receipt_listing:
+                return self._receipt_cache
+            return self._derive_receipt_events(paths, seen)
+
+    def _derive_receipt_events(
+        self, paths: dict[str, dict[str, Path]], seen: dict[str, tuple[int, int]]
+    ) -> list[dict[str, Any]]:
         derived = self._receipt_derived
         events = []
         for stem, candidates in sorted(paths.items()):
@@ -1522,14 +1541,17 @@ class PipelineTraceStore:
         )
         if fingerprint == self._job_cache_fingerprint:
             return self._job_cache
-        jobs = []
-        for path in paths:
-            value = self._read_json(path)
-            if isinstance(value, dict):
-                jobs.append((path, value))
-        self._job_cache_fingerprint = fingerprint
-        self._job_cache = jobs
-        return self._job_cache
+        with self._derive_lock:
+            if fingerprint == self._job_cache_fingerprint:
+                return self._job_cache
+            jobs = []
+            for path in paths:
+                value = self._read_json(path)
+                if isinstance(value, dict):
+                    jobs.append((path, value))
+            self._job_cache_fingerprint = fingerprint
+            self._job_cache = jobs
+            return self._job_cache
 
     def _eligibility_state(
         self,
@@ -2030,10 +2052,13 @@ class PipelineTraceStore:
         )
         if version == self._freshness_version and self._freshness_cache is not None:
             return self._freshness_cache
-        reading = self._build_freshness(progress_path)
-        self._freshness_version = version
-        self._freshness_cache = reading
-        return reading
+        with self._derive_lock:
+            if version == self._freshness_version and self._freshness_cache is not None:
+                return self._freshness_cache
+            reading = self._build_freshness(progress_path)
+            self._freshness_version = version
+            self._freshness_cache = reading
+            return reading
 
     def _build_freshness(self, progress_path: Path) -> dict[str, Any]:
         progress = self._read_json(progress_path) if progress_path.is_file() else None
