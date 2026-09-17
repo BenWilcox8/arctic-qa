@@ -112,6 +112,7 @@ from .abstention_plan import (
     merge_pause,
     paused_models,
     plan_models,
+    plan_trials_per_model,
     plan_vendors,
     run_plan,
     write_plan_gates,
@@ -331,6 +332,74 @@ def pending_item_ids(
     return pending
 
 
+def wave_order(
+    pending: list[str],
+    *,
+    open_vendors: dict[str, set[str]],
+    vendors: list[str],
+    slots: int,
+    limit: int,
+) -> list[str]:
+    """Order the backlog so every running arm has work in each wave.
+
+    The pick-up order is the oldest accepted question first, and it stayed
+    that way while an arm was paused. The captain's Claude pause of
+    2026-09-17 left a backlog of questions that owed Claude alone at the
+    front of the queue, so all eight slots held questions whose Gemini arm
+    was already complete, and the Gemini arm made no paid call between 10:03
+    and 11:06 UTC while 23 questions owed it trials.
+
+    Each wave of ``slots`` questions now keeps a share for every arm that has
+    a question to give it: ``ceil(slots / len(vendors))`` each, the arm with
+    the fewest open questions served first, and the oldest question of that
+    arm first. The rest of the wave fills in the pick-up order, so no
+    question is held back and the order inside every group is the pick-up
+    order. Beyond ``limit`` the order is untouched, because the caller keeps
+    only the first waves.
+
+    A question this journal has never seen owes every vendor its whole plan.
+    """
+    if slots <= 0 or len(vendors) < 2:
+        return pending
+    every = set(vendors)
+
+    def owes(item: str) -> set[str]:
+        return open_vendors.get(item, every)
+
+    share = -(-slots // len(vendors))
+    ordered: list[str] = []
+    remaining = list(pending)
+    while remaining and len(ordered) < limit:
+        chosen: list[str] = []
+        taken: set[str] = set()
+        scarcest = sorted(
+            vendors,
+            key=lambda vendor: (
+                sum(1 for item in remaining if vendor in owes(item)),
+                vendor,
+            ),
+        )
+        for vendor in scarcest:
+            held = sum(1 for item in chosen if vendor in owes(item))
+            for item in remaining:
+                if held >= share or len(chosen) >= slots:
+                    break
+                if item in taken or vendor not in owes(item):
+                    continue
+                chosen.append(item)
+                taken.add(item)
+                held += 1
+        for item in remaining:
+            if len(chosen) >= slots:
+                break
+            if item not in taken:
+                chosen.append(item)
+                taken.add(item)
+        ordered.extend(chosen)
+        remaining = [item for item in remaining if item not in taken]
+    return ordered + remaining
+
+
 # --- Ceiling estimate ------------------------------------------------------------
 
 
@@ -513,7 +582,7 @@ def evaluate_item(
         run_prefixes=ledger_run_prefixes,
     )
     held = paused_models(pause)
-    trials_per_model = 2 * len(plan["arms"]) * int(plan["repeats"])
+    trials_per_model = plan_trials_per_model(plan)
     recorded_by_model: dict[str, int] = {}
     for rows in rows_by_vendor.values():
         for entry in rows:
@@ -1166,13 +1235,46 @@ def watch(
             )
             break
         pending = pending[:remaining_bound]
+        # Every arm gets a share of every wave, so the arms run together
+        # instead of one after the other. The reorder comes before the wave
+        # is cut, because a question an idle arm owes can be anywhere in the
+        # backlog.
+        wave_limit = int(item_workers) * WAVE_CYCLES
+        open_vendors = journal.open_vendors_by_item(
+            models_by_vendor={
+                vendor: plan_models(plan, vendor) for vendor in vendors
+            },
+            trials_per_model=plan_trials_per_model(plan),
+        )
+        pending = wave_order(
+            pending,
+            open_vendors=open_vendors,
+            vendors=vendors,
+            slots=int(item_workers),
+            limit=wave_limit,
+        )
         # One wave, not the whole backlog. The poll cycle does the work that
         # belongs to no single question: it reads the shared ledger for a
         # released ambiguous charge, it rebuilds the set of questions a paused
         # arm holds, and it meets the questions the producer accepted since.
         # A wave of every pending question would hold all of that for as long
         # as the backlog takes, which is hours at 68 pending questions.
-        pending = pending[: int(item_workers) * WAVE_CYCLES]
+        pending = pending[:wave_limit]
+        if pending:
+            emit(
+                {
+                    "event": "wave_mix",
+                    "slots": int(item_workers),
+                    "open_by_vendor": {
+                        vendor: sum(
+                            1
+                            for item in pending[: int(item_workers)]
+                            if vendor in open_vendors.get(item, set(vendors))
+                        )
+                        for vendor in vendors
+                    },
+                }
+            )
         if not pending:
             emit({"event": "idle", "poll": polls, "evaluated": len(evaluated)})
         if pending:
@@ -1296,6 +1398,7 @@ __all__ = [
     "AUTHORIZATION_SCHEMA",
     "DEFAULT_ITEM_WORKERS",
     "WAVE_CYCLES",
+    "wave_order",
     "DEFAULT_POLL_SECONDS",
     "MAXIMUM_ITEM_WORKERS",
     "GATE_FILENAME_BY_VENDOR",

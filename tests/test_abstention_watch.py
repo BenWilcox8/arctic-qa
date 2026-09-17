@@ -52,6 +52,7 @@ from arctic_qa.abstention_watch import (
     validate_authorization,
     vendor_stop_reason,
     watch,
+    wave_order,
 )
 from arctic_qa.cli import main as cli_main
 from arctic_qa.model_broker import (
@@ -2527,3 +2528,122 @@ def test_a_busy_operation_lock_belongs_to_one_question(tmp_path: Path) -> None:
         row for row in CostJournal(work).rows() if row.get("kind") == "vendor_pause"
     ] == []
     assert len(result["items_this_invocation"]) == 2
+
+
+# --- The wave keeps every arm busy ----------------------------------------
+
+VENDORS = ["google_gemini", "anthropic_claude_code", "openai_codex"]
+
+
+def _backlog(claude_only: int, gemini_open: int) -> tuple[list[str], dict]:
+    """The queue of 2026-09-17: a Claude backlog in front of the Gemini work."""
+    pending = [f"claude-{index:02d}" for index in range(claude_only)]
+    pending += [f"open-{index:02d}" for index in range(gemini_open)]
+    owed = {item: {"anthropic_claude_code"} for item in pending[:claude_only]}
+    owed.update({item: set(VENDORS) for item in pending[claude_only:]})
+    return pending, owed
+
+
+def test_each_arm_keeps_a_share_of_every_wave() -> None:
+    """The oldest-first order left the Gemini arm with nothing to do.
+
+    The captain's Claude pause of 2026-09-17 left 33 questions that owed
+    Claude alone at the front of the queue. Eight of eight slots took them,
+    so the Gemini arm made no paid call between 10:03 and 11:06 UTC while 23
+    questions owed it trials.
+    """
+    pending, owed = _backlog(claude_only=33, gemini_open=23)
+    # Before: the whole wave owes one arm.
+    assert all(item.startswith("claude-") for item in pending[:8])
+
+    ordered = wave_order(
+        pending, open_vendors=owed, vendors=VENDORS, slots=8, limit=32
+    )
+    wave = ordered[:8]
+    for vendor in VENDORS:
+        open_here = sum(1 for item in wave if vendor in owed[item])
+        assert open_here >= 3, (vendor, wave)
+    # Nothing is lost and nothing is repeated.
+    assert sorted(ordered) == sorted(pending)
+    assert len(set(ordered)) == len(ordered)
+
+
+def test_every_wave_of_the_backlog_is_mixed_not_only_the_first() -> None:
+    """The limit covers the waves the caller keeps, and each one is mixed."""
+    pending, owed = _backlog(claude_only=33, gemini_open=23)
+    ordered = wave_order(
+        pending, open_vendors=owed, vendors=VENDORS, slots=8, limit=32
+    )
+    for start in range(0, 32, 8):
+        wave = ordered[start : start + 8]
+        gemini = sum(1 for item in wave if "google_gemini" in owed[item])
+        assert gemini >= 3, (start, wave)
+
+
+def test_the_pick_up_order_holds_inside_each_group() -> None:
+    """A reorder is a share of the wave, never a queue that jumps at random."""
+    pending, owed = _backlog(claude_only=10, gemini_open=10)
+    ordered = wave_order(
+        pending, open_vendors=owed, vendors=VENDORS, slots=8, limit=16
+    )
+    for prefix in ("claude-", "open-"):
+        group = [item for item in ordered if item.startswith(prefix)]
+        assert group == [item for item in pending if item.startswith(prefix)]
+
+
+def test_a_question_the_journal_never_saw_owes_every_arm() -> None:
+    """A question with no journal row is the whole plan, so it feeds every arm."""
+    pending = ["fresh-0", "fresh-1", "fresh-2"]
+    ordered = wave_order(
+        pending, open_vendors={}, vendors=VENDORS, slots=8, limit=8
+    )
+    assert ordered == pending
+
+
+def test_an_arm_with_no_open_question_takes_no_slot() -> None:
+    """A share is for an arm that has a question to give it, and no other."""
+    pending = [f"claude-{index}" for index in range(8)]
+    owed = {item: {"anthropic_claude_code"} for item in pending}
+    ordered = wave_order(
+        pending, open_vendors=owed, vendors=VENDORS, slots=8, limit=8
+    )
+    assert ordered == pending
+
+
+def test_one_vendor_leaves_the_pick_up_order_alone() -> None:
+    """With one arm there is nothing to share, so the order does not move."""
+    pending = [f"item-{index}" for index in range(12)]
+    ordered = wave_order(
+        pending,
+        open_vendors={item: {"google_gemini"} for item in pending},
+        vendors=["google_gemini"],
+        slots=8,
+        limit=32,
+    )
+    assert ordered == pending
+
+
+def test_the_journal_says_which_arms_a_question_still_owes(tmp_path: Path) -> None:
+    """`outcomes_by_model` counts the trials, and a short count is an open arm."""
+    journal = CostJournal(tmp_path)
+    journal.append(
+        {
+            "schema": "abstention-eval-cost-row-v1",
+            "item_id": "aqa-1",
+            "recorded_at_utc": "2026-09-17T11:00:00Z",
+            "evaluation": {"complete": False},
+            "outcomes_by_model": {
+                "gemini-3.8-flash": {"N1": 6},
+                "gemini-3.7-flash": {"N4": 6},
+                "claude-opus-5": {"N1": 2},
+            },
+        }
+    )
+    owed = journal.open_vendors_by_item(
+        models_by_vendor={
+            "google_gemini": ["gemini-3.8-flash", "gemini-3.7-flash"],
+            "anthropic_claude_code": ["claude-opus-5", "claude-sonnet-5"],
+        },
+        trials_per_model=6,
+    )
+    assert owed == {"aqa-1": {"anthropic_claude_code"}}

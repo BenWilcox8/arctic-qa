@@ -615,6 +615,31 @@ class CostJournal:
                 result.add(str(row["item_id"]))
         return result
 
+    def open_vendors_by_item(
+        self, *, models_by_vendor: dict[str, list[str]], trials_per_model: int
+    ) -> dict[str, set[str]]:
+        """Per evaluated question, the vendors that still owe it trials.
+
+        The last row of each question carries ``outcomes_by_model``, which
+        counts the trials recorded for each model of the plan. A vendor owes
+        the question trials while any of its models holds fewer than
+        ``trials_per_model``. A question this journal has never seen owes
+        every vendor its whole plan and is not in this map, so a caller reads
+        an absent question as owing everything.
+        """
+        result: dict[str, set[str]] = {}
+        for row in self.latest_item_rows():
+            counts = row.get("outcomes_by_model") or {}
+            owed: set[str] = set()
+            for vendor, models in models_by_vendor.items():
+                for model in models:
+                    recorded = sum((counts.get(model) or {}).values())
+                    if recorded < trials_per_model:
+                        owed.add(vendor)
+                        break
+            result[str(row["item_id"])] = owed
+        return result
+
     def items_awaiting_vendors(self, paused: frozenset[str] | set[str]) -> set[str]:
         """The items whose every missing trial belongs to a still-paused vendor.
 

@@ -231,6 +231,15 @@ def plan_models(plan: dict[str, Any], vendor: str) -> list[str]:
     return list(plan["vendors"][vendor]["models"])
 
 
+def plan_trials_per_model(plan: dict[str, Any]) -> int:
+    """The trials one model of the plan owes one question.
+
+    Two conditions, every arm, every repeat. A plan manifest carries the same
+    two fields and answers the same way.
+    """
+    return 2 * len(plan["arms"]) * int(plan["repeats"])
+
+
 def effective_concurrency(
     plan: dict[str, Any],
     policy: dict[str, Any],
@@ -639,7 +648,7 @@ def extend_plan_manifest(
         if vendor in vendors and vendors[vendor] != entry:
             raise ValueError("the run directory holds another model list")
         vendors[vendor] = entry
-    trials_per_model = 2 * len(current["arms"]) * int(current["repeats"])
+    trials_per_model = plan_trials_per_model(current)
     commits = [
         commit
         for commit in (
