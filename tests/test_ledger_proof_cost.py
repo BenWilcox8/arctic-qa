@@ -339,6 +339,85 @@ def test_the_fifty_at_once_transition_names_the_expansion_tranche() -> None:
     assert "CHAPTER3_SCALE_CHANGE" in rule
 
 
+def test_the_six_hundred_ceiling_is_registered_and_couples_its_checkpoint(
+    tmp_path: Path,
+) -> None:
+    """Policy v14 moves the away ceiling and its checkpoint together, and nothing else.
+
+    Captain order 2026-09-17 08:25 UTC: "Up the budget to $600 and make sure
+    that we never exceed $1000 for the whole project." The chapter 3 allocation
+    becomes USD 600 on top of the USD 53.990121 spent before this run, so both
+    money limits become USD 653.990121. The project lifetime ceiling does not
+    move.
+    """
+    assert model_broker.CHAPTER3_SIX_HUNDRED_CUMULATIVE_CEILING_USD == Decimal(
+        "653.990121"
+    )
+    assert model_broker.CHAPTER3_SIX_HUNDRED_CHANGE in model_broker.CEILING_CHANGES
+    assert (
+        model_broker.CHAPTER3_SIX_HUNDRED_CHANGE
+        in model_broker.POLICY_TRANSITION_CHANGES
+    )
+
+    source = ROOT / "config" / "streaming-dataset-budget-policy-v1.json"
+    base = json.loads(source.read_text(encoding="utf-8"))
+    base["maximum_concurrent_generation_requests"] = 50
+    base["maximum_generation_requests_per_minute"] = 300
+    base["away_maximum_generation_submissions"] = 20000
+    base["accepted_question_target"] = 2000
+    base["live_test_suballocation_usd"] = "20.00"
+    base["live_test_maximum_papers"] = None
+    base["live_test_maximum_generation_submissions"] = None
+
+    accepted = dict(base)
+    accepted["away_session_total_ceiling_usd"] = "653.990121"
+    accepted["construction_review_checkpoint_usd"] = "653.990121"
+    path = tmp_path / "v14.json"
+    write_json(path, accepted)
+    policy = model_broker._validate_policy(path)
+    assert policy["project_lifetime_ceiling_usd"] == "1000.00"
+
+    # The ceiling and its checkpoint never move apart.
+    for ceiling, checkpoint in (
+        ("653.990121", "253.990121"),
+        ("253.990121", "653.990121"),
+        ("700.00", "700.00"),
+    ):
+        refused = dict(base)
+        refused["away_session_total_ceiling_usd"] = ceiling
+        refused["construction_review_checkpoint_usd"] = checkpoint
+        write_json(path, refused)
+        with pytest.raises(ValueError, match="streaming budget value changed"):
+            model_broker._validate_policy(path)
+
+
+def test_the_project_lifetime_ceiling_counts_every_phase() -> None:
+    """USD 1,000 for the whole project, construction and evaluation together.
+
+    The construction cap adds the evaluation liabilities before it compares,
+    and the evaluation cap sums the whole ledger. Neither is per phase, so
+    neither can be passed by spending in the other one.
+    """
+    source = Path(model_broker.__file__).read_text(encoding="utf-8")
+    construction = source[source.index("def _check_construction_reservation") :]
+    construction = construction[: construction.index("\n    def ")]
+    assert (
+        "if construction_used + evaluation_used + reserved > _money(\n"
+        '            self.policy["project_lifetime_ceiling_usd"], "lifetime"\n'
+        "        ):" in construction
+    )
+    evaluation = source[source.index("def _check_evaluation_reservation") :]
+    evaluation = evaluation[: evaluation.index("\n    def ")]
+    assert 'for name in ("reserved_usd", "spent_usd", "ambiguous_reserved_usd")' in (
+        evaluation
+    )
+    assert (
+        "if self.prior + all_used + reserved > _money(\n"
+        '            self.policy["project_lifetime_ceiling_usd"], "lifetime"\n'
+        "        ):" in evaluation
+    )
+
+
 class _SlowTransport(Transport):
     """Hold every generate call open, and report the peak overlap."""
 

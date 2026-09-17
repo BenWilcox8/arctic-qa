@@ -216,6 +216,29 @@ CHAPTER3_EXPANSION_CHANGE = {
         "to": str(CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD),
     },
 }
+# Chapter 3 six hundred (captain order 2026-09-17 08:25 UTC, verbatim: "Up the
+# budget to $600 and make sure that we never exceed $1000 for the whole
+# project"). The chapter 3 allocation becomes USD 600.00 in total, so the
+# ceiling is the baseline plus USD 600.00, and the construction review
+# checkpoint moves with it because the captain's order is the review. The
+# project lifetime ceiling stays USD 1,000.00 and is what the whole project may
+# never exceed: every phase counts against it, construction and benchmark
+# evaluation alike, on the ledger's own totals. Nothing else moves. Halt at
+# exhaustion, no reset, no replay.
+CHAPTER3_SIX_HUNDRED_ALLOCATION_USD = Decimal("600.00")
+CHAPTER3_SIX_HUNDRED_CUMULATIVE_CEILING_USD = (
+    CHAPTER3_CONSTRUCTION_SPEND_BEFORE_USD + CHAPTER3_SIX_HUNDRED_ALLOCATION_USD
+)
+CHAPTER3_SIX_HUNDRED_CHANGE = {
+    "away_session_total_ceiling_usd": {
+        "from": str(CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD),
+        "to": str(CHAPTER3_SIX_HUNDRED_CUMULATIVE_CEILING_USD),
+    },
+    "construction_review_checkpoint_usd": {
+        "from": str(CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD),
+        "to": str(CHAPTER3_SIX_HUNDRED_CUMULATIVE_CEILING_USD),
+    },
+}
 # Chapter 3 paper concurrency (captain order 2026-09-16 21:20 UTC): the
 # producer runs several papers at once, so the request rate the run can reach
 # is no longer one call at a time. The two request-rate limits move together
@@ -293,6 +316,7 @@ POLICY_TRANSITION_CHANGES = (
     CHAPTER3_CONCURRENCY_CHANGE,
     CHAPTER3_PARALLEL_CHANGE,
     CHAPTER3_SCALE_CHANGE,
+    CHAPTER3_SIX_HUNDRED_CHANGE,
 )
 # The policy transitions that move the construction ceiling. Each one binds a
 # complete stream-input gate and names its own cumulative ceiling as the tranche.
@@ -301,6 +325,7 @@ CEILING_CHANGES = (
     CHAPTER2_BUDGET_EXTENSION_CHANGE,
     CHAPTER3_BUDGET_CHANGE,
     CHAPTER3_EXPANSION_CHANGE,
+    CHAPTER3_SIX_HUNDRED_CHANGE,
 )
 CEILING_EXTENSION_CHANGE: dict[str, Any] = {}
 AUTHORIZED_CAP_REASON = "the paid request exceeds the authorized live-test cap"
@@ -1140,6 +1165,7 @@ def _validate_policy(path: Path) -> dict[str, Any]:
     if checkpoint not in {
         Decimal("250"),
         CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD,
+        CHAPTER3_SIX_HUNDRED_CUMULATIVE_CEILING_USD,
     }:
         raise ValueError(
             "streaming budget value changed: construction_review_checkpoint_usd"
@@ -1155,12 +1181,20 @@ def _validate_policy(path: Path) -> dict[str, Any]:
         CHAPTER2_CUMULATIVE_CEILING_USD,
         CHAPTER3_CUMULATIVE_CEILING_USD,
         CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD,
+        CHAPTER3_SIX_HUNDRED_CUMULATIVE_CEILING_USD,
     }:
         raise ValueError(
             "streaming budget value changed: away_session_total_ceiling_usd"
         )
-    if checkpoint == CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD and away_ceiling != (
-        CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD
+    # An expanded checkpoint is the ceiling itself, because the captain's order
+    # is the review. The two move together and never apart.
+    if (
+        checkpoint
+        in {
+            CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD,
+            CHAPTER3_SIX_HUNDRED_CUMULATIVE_CEILING_USD,
+        }
+        and away_ceiling != checkpoint
     ):
         raise ValueError(
             "streaming budget value changed: construction_review_checkpoint_usd"
@@ -1199,7 +1233,10 @@ def _validate_policy(path: Path) -> dict[str, Any]:
         raise ValueError(f"streaming budget value changed: {field}")
     # The two project design counts have one registered expansion each, and
     # both move only together with the chapter 3 expansion ceiling.
-    expanded = away_ceiling == CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD
+    expanded = away_ceiling in {
+        CHAPTER3_EXPANSION_CUMULATIVE_CEILING_USD,
+        CHAPTER3_SIX_HUNDRED_CUMULATIVE_CEILING_USD,
+    }
     registered_counts = {
         "accepted_question_target": (
             CHAPTER3_EXPANSION_ACCEPTED_TARGET if expanded else 500
@@ -2650,6 +2687,8 @@ class SharedGeminiBroker:
                     expected_tranche = CHAPTER2_CUMULATIVE_CEILING_USD
                 elif changed_policy_fields == CHAPTER3_BUDGET_CHANGE:
                     expected_tranche = CHAPTER3_CUMULATIVE_CEILING_USD
+                elif changed_policy_fields == CHAPTER3_SIX_HUNDRED_CHANGE:
+                    expected_tranche = CHAPTER3_SIX_HUNDRED_CUMULATIVE_CEILING_USD
                 elif changed_policy_fields in (
                     CHAPTER3_EXPANSION_CHANGE,
                     # The request-rate transitions move no money, so each
