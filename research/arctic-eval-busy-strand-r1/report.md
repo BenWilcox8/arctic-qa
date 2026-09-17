@@ -252,6 +252,33 @@ The producer already carries the reader half of the same rule
 `RESUMABLE_NOT_SUBMITTED_REASONS`). Giving the evaluator that half is the shape
 of the fix, and it needs the reviewed transition to exist before it can work.
 
+
+## The confirmation window
+
+Fifteen minutes from the relaunch, 15:02:24 to 15:18:24 UTC, one wave of eight
+questions.
+
+| Measure | Three hours before | This window |
+| --- | --- | --- |
+| Busy-lock occurrences | 58 vendor stops | 0 |
+| `item_done` complete true | 16 | 5 |
+| `item_done` complete false | 87 | 3 |
+| Claude trials | none after 13:21 UTC | 192 |
+
+The Claude arm is scoring again: 192 trials, after making no call at all between
+13:21 UTC and the relaunch. It was paused once inside the window, at 15:09:55
+UTC, on a fresh spawn failure from the 15:06 UTC reinstall, and `vendor_resumed`
+is stamped the same second. The next question started at 15:09:56 UTC with all
+three arms. The Gemini arm ran 89 trials. The Codex arm ran none, because the
+`wave_mix` event records that none of the eight questions of this wave owed it
+any.
+
+Of the three questions that closed short, one is the harness spawn race and two
+are the transient reservation refusal. Neither is the busy lock, which is absent
+from the record.
+
+The unit runs with `KillMode=mixed`, `TimeoutStopSec=10min` and `Nice=10`.
+
 ## Guards
 
 - `tests/test_abstention_plan.py`: the bounded wait, the trial left pending, the
