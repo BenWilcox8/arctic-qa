@@ -1,13 +1,28 @@
 {
   "schema": "benchmark-evaluation-model-pause-v1",
   "config_id": "arctic-abstention-model-pause-v1",
-  "purpose": "Models the evaluator must not call for now. A paused model's trials stay pending: they are not recorded, not counted as invalid, and they run after the resume time without a re-run of anything else. Captain order 2026-09-16: 'pause the fable evaluation because I only have ~80% fable usage left today; I will run the fable benchmarking after the reset at 6:00pm today'.",
+  "purpose": "Models the evaluator must not call for now. A paused model's trials stay pending: they are not recorded, not counted as invalid, and they run after the resume time without a re-run of anything else. Captain order 2026-09-17 08:37 UTC: 'Pause the claude model benchmark evaluations until the session reset in 1h35m', which is 10:11 UTC. Captain order 2026-09-17 06:25 UTC for Fable: 'pause the fable testing'. The cost and quota guard owns its own file and writes only entries whose owner is benchmark-cost-guard; give both files to the evaluator, this one first.",
   "paused_models": {
     "claude-fable-5-1": {
-      "reason": "the captain's daily Claude Fable quota is about 80 percent used",
-      "paused_at_utc": "2026-09-16T10:20:00Z",
-      "resume_at_utc": "2026-09-16T23:00:00Z",
-      "resume_note": "6:00 pm Central on 2026-09-16, the captain's quota reset"
+      "reason": "captain order 2026-09-17 06:25 UTC: pause the Fable testing",
+      "owner": "captain",
+      "paused_at_utc": "2026-09-17T06:39:23Z",
+      "resume_at_utc": "2026-09-17T10:11:00Z",
+      "resume_note": "the Claude 5-hour session reset; after it the guard's own Fable rule holds this model when the Fable weekly usage is 80 percent or more"
+    },
+    "claude-opus-5": {
+      "reason": "captain order 2026-09-17 08:37 UTC: pause the Claude model benchmark evaluations until the session reset",
+      "owner": "captain",
+      "paused_at_utc": "2026-09-17T08:36:46Z",
+      "resume_at_utc": "2026-09-17T10:11:00Z",
+      "resume_note": "the Claude 5-hour session reset"
+    },
+    "claude-sonnet-5": {
+      "reason": "captain order 2026-09-17 08:37 UTC: pause the Claude model benchmark evaluations until the session reset",
+      "owner": "captain",
+      "paused_at_utc": "2026-09-17T08:36:46Z",
+      "resume_at_utc": "2026-09-17T10:11:00Z",
+      "resume_note": "the Claude 5-hour session reset"
     }
   }
 }

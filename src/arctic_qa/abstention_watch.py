@@ -5,7 +5,27 @@ accepted candidate that matches the current contract, freezes it as a
 one-item evaluation set with its fixed distractor order and k = 4, runs the
 whole plan of :mod:`arctic_qa.abstention_plan` on it (8 models x 2 conditions
 x 3 repeats at the high preset), and appends one row to the cost journal of
-:mod:`arctic_qa.abstention_cost`. Then it waits for the next item.
+:mod:`arctic_qa.abstention_cost`.
+
+Several questions at once. One question alone cannot fill the slots the
+policy allows: its 12 Gemini trials run 4 at a time and its 18 trials of each
+subscription vendor 3 at a time, so every vendor drains its wave and then
+waits for the slowest one. Measured at 08:35 UTC on 2026-09-17: 206 seconds
+of wall time per question, about 17 questions an hour, against a producer
+that accepts about 58 an hour. So the watcher takes up to ``item_workers``
+accepted questions at once (8 by default, ``--item-workers``) and scores them
+in parallel. Every bound of one question stays exactly as it was: its own
+evaluation set, its own derived gates, its own run directory and its own
+journal row. The slots are unchanged too, because they belong to the vendor
+and not to the question: the plan's calls in flight per vendor, the
+evaluation policy's per-minute window, and the per-phase in-flight slots of
+the shared paid-call ledger. The gain is that those slots stay full, and the
+cheap fast Gemini arm of one question never waits on the subscription arm of
+another.
+
+A question is complete only when every active arm has its trials, so an
+arm that is paused when the question is scored leaves it incomplete and a
+later pass finishes it (see ``pause`` below and ``CostJournal.row_is_complete``).
 
 Authorization. A paid Gemini call needs a gate that binds one evaluation set,
 and a streaming run meets a new set at every item, so a human cannot review
@@ -61,7 +81,9 @@ from __future__ import annotations
 import json
 import signal
 import sqlite3
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -121,6 +143,12 @@ AMBIGUOUS_CHARGE_STATE = "ambiguous_charge"
 DEFAULT_POLL_SECONDS = 30
 MINIMUM_POLL_SECONDS = 5
 MAXIMUM_POLL_SECONDS = 600
+# The questions the watcher scores at once. Eight is the captain's number of
+# 2026-09-17: it fills every vendor's slots several times over, so no arm
+# waits on another arm's wave, and it stays small enough that one wave of
+# derived gates and evaluation sets is still easy to read by hand.
+DEFAULT_ITEM_WORKERS = 8
+MAXIMUM_ITEM_WORKERS = 64
 ASSUMED_INPUT_TOKENS = 1200
 CEILING_SAFETY = Decimal("1.0")
 
@@ -552,11 +580,21 @@ def vendor_stop_reason(summary: dict[str, Any], vendor: str) -> str | None:
     a harness error, a timeout or an ambiguous charge. The policy forbids a
     retry, so the evaluator pauses that vendor for the rest of the watch and
     journals the reason. The other vendors keep running.
+
+    Only a stop of this pass counts. A recorded stop is permanent, because
+    nothing retries it, so ``stopped_on`` still names it on every later pass
+    over that item; pausing the vendor on that would take the arm down again
+    the moment a revisit touched an old stop - and a revisit is the ordinary
+    way a paused arm finishes the items it owes.
     """
     record = (summary.get("vendors") or {}).get(vendor) or {}
     if record.get("error"):
         return str(record["error"])
-    stopped = record.get("stopped_on")
+    stopped = (
+        record["stopped_this_pass"]
+        if "stopped_this_pass" in record
+        else record.get("stopped_on")
+    )
     if not stopped:
         return None
     state = str(stopped.get("state") or "stopped")
@@ -626,6 +664,7 @@ def watch(
     once: bool = False,
     backfill: bool = False,
     backfill_contract_file: Path | None = None,
+    item_workers: int = DEFAULT_ITEM_WORKERS,
     concurrency: dict[str, int] | None = None,
     vendors: list[str] | None = None,
     scratch_root: Path | None = None,
@@ -660,11 +699,22 @@ def watch(
     models the command line paused, which wins over every file. A paused
     model's trials are held, not recorded; the item is revisited after the
     resume time.
+
+    ``item_workers`` are the questions scored at once. Each one is scored
+    exactly as a single question is: its own evaluation set, derived gates,
+    run directory and journal row. A vendor paused while the wave runs is
+    paused for every question dispatched after that, and the questions
+    already in flight keep the vendor list they started with, which their own
+    journal rows record.
     """
     if not MINIMUM_POLL_SECONDS <= int(poll_seconds) <= MAXIMUM_POLL_SECONDS:
         raise ValueError(
             f"the poll interval must be from {MINIMUM_POLL_SECONDS} through "
             f"{MAXIMUM_POLL_SECONDS} seconds"
+        )
+    if not 1 <= int(item_workers) <= MAXIMUM_ITEM_WORKERS:
+        raise ValueError(
+            f"the item workers must be from 1 through {MAXIMUM_ITEM_WORKERS}"
         )
     authorization = validate_authorization(
         authorization_file,
@@ -723,10 +773,27 @@ def watch(
     polls = 0
     started = clock()
     state["started_at_utc"] = _utc_now()
+    # One gate covers everything a wave of questions shares: the active
+    # vendor list, the paused-vendor record, the ceiling precheck, the
+    # in-flight set and the published state. A worker holds it only to read
+    # or move that shared record, never while it calls a model.
+    gate = threading.Lock()
+    log_gate = threading.Lock()
+    in_flight: dict[str, str] = {}
+    # The pick-up order of the questions, which is the order the state
+    # database gave them. A wave finishes them in whatever order the vendors
+    # answer, so every reader is given the pick-up order back, exactly as the
+    # producer sorts its paper results back into the frozen selection order.
+    dispatch_order: dict[str, int] = {}
+    # `halt` stops the dispatch of new questions inside a wave. The questions
+    # already in flight finish and are journalled, exactly as the in-flight
+    # calls of one vendor finish after that vendor stops.
+    halt: dict[str, Any] = {"now": False}
 
     def emit(event: dict[str, Any]) -> None:
         if log is not None:
-            log({**event, "at": _utc_now()})
+            with log_gate:
+                log({**event, "at": _utc_now()})
 
     def report_blocked(line: str) -> None:
         """Append one ``blocked:`` line for the supervisor of this unit.
@@ -744,6 +811,9 @@ def watch(
         except OSError as error:  # pragma: no cover - environment
             emit({"event": "status_file_unwritable", "error": str(error)})
 
+    def in_pickup_order(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return sorted(rows, key=lambda row: dispatch_order.get(row["item_id"], 0))
+
     def write_state() -> None:
         """Publish the watcher state: the poll count and the items so far."""
         atomic_json(
@@ -751,12 +821,235 @@ def watch(
             {
                 **state,
                 "polls": polls,
-                "evaluated_items": [row["item_id"] for row in evaluated],
+                "evaluated_items": [
+                    row["item_id"] for row in in_pickup_order(evaluated)
+                ],
                 "active_vendors": vendors,
+                "item_workers": int(item_workers),
+                "items_in_flight": sorted(in_flight),
                 "started_at_utc": state.get("started_at_utc") or _utc_now(),
                 "updated_at_utc": _utc_now(),
             },
         )
+
+    def pause_vendor(vendor: str, record: dict[str, Any], *, run_id: str) -> None:
+        """Pause one vendor for the rest of this invocation. Hold ``gate``."""
+        nonlocal vendors
+        vendors = [name for name in vendors if name != vendor]
+        state["paused_vendors"][vendor] = record
+        atomic_json(state_path, {**state, "updated_at_utc": _utc_now()})
+        journal.append(
+            pause_row(
+                run_id=run_id,
+                vendor=vendor,
+                reason=record["reason"],
+                remaining_usd=record.get("remaining_usd"),
+            )
+        )
+
+    def start_item(item_id: str) -> tuple[list[str], dict[str, Any]] | None:
+        """Admit one question: its vendor list and the models it must hold.
+
+        Returns None when the question must not start at all, because a stop
+        signal arrived, the wave is halted or every vendor is paused. The
+        whole admission is one critical section, so two workers can never
+        read the same remaining Gemini budget and both start on it.
+        """
+        with gate:
+            if stop["now"] or halt["now"]:
+                return None
+            # Re-read the pause files before every item: a cost guard can
+            # pause a model at any moment, and a resume time can pass while
+            # the wave runs.
+            pause = merge_pause(
+                *(load_pause(path) for path in pause_files),
+                pause_models,
+            )
+            if PROVIDER_GOOGLE_GEMINI in vendors and broker_factory is not None:
+                # `ceiling_pause` is the vendor pause of a budget bound. It is
+                # not the model pause above, and it must never overwrite it.
+                ceiling_pause = _ceiling_precheck(
+                    authorization=authorization,
+                    plan=plan,
+                    price_config=price_config,
+                    journal=journal,
+                    shared_ledger_file=shared_ledger_file,
+                    items_in_flight=len(in_flight),
+                )
+                if ceiling_pause is not None:
+                    pause_vendor(
+                        PROVIDER_GOOGLE_GEMINI,
+                        ceiling_pause,
+                        run_id=str(authorization["run_id_prefix"]),
+                    )
+                    emit(
+                        {
+                            "event": "vendor_paused",
+                            "vendor": PROVIDER_GOOGLE_GEMINI,
+                            **ceiling_pause,
+                        }
+                    )
+                    # The Gemini arm is the arm the USD allocation pays for.
+                    # A budget bound turns it off while the subscription
+                    # vendors keep the run looking healthy, so the supervisor
+                    # must hear about it here and not at the exit.
+                    report_blocked(
+                        "the streaming evaluator paused the Gemini vendor on a "
+                        f"budget bound: {ceiling_pause['reason']}"
+                    )
+            if not vendors:
+                halt["now"] = True
+                return None
+            in_flight[item_id] = _utc_now()
+            dispatch_order.setdefault(item_id, len(dispatch_order))
+            write_state()
+            return list(vendors), pause
+
+    def finish_item(item_id: str, result: dict[str, Any]) -> None:
+        """Record one finished question and apply what it says. Takes ``gate``."""
+        nonlocal vendors
+        with gate:
+            in_flight.pop(item_id, None)
+            evaluated.append(result)
+            # Publish after every item, not only at the end of the poll cycle.
+            # One cycle covers every pending item, so at sixteen pending items
+            # the cycle runs for an hour, and a watcher that publishes only at
+            # its end looks stopped to the cost guard, whose staleness bound is
+            # 900 seconds.
+            write_state()
+            if result["skipped"]:
+                emit(
+                    {
+                        "event": "item_skipped",
+                        "item_id": item_id,
+                        "reason": result["reason"],
+                    }
+                )
+                return
+            emit(
+                {
+                    "event": "item_done",
+                    "item_id": item_id,
+                    "complete": result["row"]["complete"],
+                    "models_paused": result["row"]["evaluation"]["models_paused"],
+                    "pending_paused_trials": result["row"]["evaluation"][
+                        "pending_paused_trials"
+                    ],
+                    "gemini_usd": result["row"]["evaluation"]["google_gemini"]["usd"],
+                    "wall_seconds": result["row"]["evaluation"]["wall_seconds"],
+                }
+            )
+            # A vendor that stopped on this item is paused for the rest of the
+            # watch, whatever the reason: the policy forbids a retry, so the
+            # next item repeats the same stop. The other vendors run on. The
+            # one exception is an item-scoped stop, which says nothing about
+            # the next item. A question already in flight keeps the vendors it
+            # started with, and its own row records what they owe it.
+            for vendor in list(vendors):
+                reason = vendor_stop_reason(result["summary"], vendor)
+                if reason is None:
+                    continue
+                if is_item_scoped_reason(reason):
+                    emit(
+                        {
+                            "event": "vendor_stopped_on_this_item",
+                            "vendor": vendor,
+                            "item_id": item_id,
+                            "reason": reason,
+                        }
+                    )
+                    continue
+                pause_vendor(
+                    vendor, {"reason": reason}, run_id=result["row"]["run_id"]
+                )
+                emit(
+                    {
+                        "event": "vendor_paused",
+                        "vendor": vendor,
+                        "reason": reason,
+                        "budget": is_ceiling_reason(reason),
+                    }
+                )
+            if not vendors:
+                halt["now"] = True
+                emit({"event": "every_vendor_paused"})
+                report_blocked(
+                    "the streaming evaluator stopped because every vendor is "
+                    "paused: "
+                    + ", ".join(
+                        f"{name} ({(record or {}).get('reason')})"
+                        for name, record in sorted(state["paused_vendors"].items())
+                    )
+                )
+            if result["error"]:
+                # run_plan raised: an error outside the recorded responses.
+                errors.append(f"{item_id}: {result['error']}")
+                halt["now"] = True
+
+    def run_item(item_id: str) -> None:
+        """Score one question, from its own admission to its own journal row."""
+        admitted = start_item(item_id)
+        if admitted is None:
+            return
+        item_vendors, pause = admitted
+        held_now = paused_models(pause)
+        if held_now:
+            emit(
+                {
+                    "event": "models_paused",
+                    "item_id": item_id,
+                    "models": sorted(held_now),
+                }
+            )
+        emit({"event": "item_started", "item_id": item_id, "vendors": item_vendors})
+        try:
+            result = evaluate_item(
+                item_id=item_id,
+                authorization=authorization,
+                plan=plan,
+                state_db=state_db,
+                sets_dir=work_dir / "sets",
+                runs_dir=work_dir / "runs",
+                gates_dir=work_dir / "gates",
+                journal=journal,
+                prices=prices,
+                shared_ledger_file=shared_ledger_file,
+                broker_factory=broker_factory,
+                subscription_ledger_root=subscription_ledger_root,
+                authorization_file=authorization_file,
+                ledger_run_prefixes=ledger_run_prefixes,
+                vendors=item_vendors,
+                authorized_vendors=list(authorized_vendors),
+                concurrency=concurrency,
+                scratch_root=scratch_root,
+                code_commit=code_commit,
+                progress=progress,
+                pause=pause,
+                # An operator stop lands at a trial boundary. The trials it
+                # holds stay pending, the item is not complete, and a later
+                # invocation runs what is missing.
+                should_stop=lambda: stop["now"],
+            )
+        except BaseException as failure:  # noqa: BLE001 - journalled by the caller
+            # `evaluate_item` journals a row for every error of the plan
+            # itself. This is the frame around it: the item's own set, gates
+            # or ledger reads. One question must not take a whole wave down
+            # silently, so the failure is recorded as this item's error and
+            # the wave stops taking new questions.
+            with gate:
+                in_flight.pop(item_id, None)
+                errors.append(f"{item_id}: {type(failure).__name__}: {failure}")
+                halt["now"] = True
+                write_state()
+            emit(
+                {
+                    "event": "item_failed",
+                    "item_id": item_id,
+                    "error": f"{type(failure).__name__}: {failure}",
+                }
+            )
+            return
+        finish_item(item_id, result)
 
     for vendor, record in sorted(cleared_vendor_pauses.items()):
         emit(
@@ -853,170 +1146,14 @@ def watch(
         pending = pending[:remaining_bound]
         if not pending:
             emit({"event": "idle", "poll": polls, "evaluated": len(evaluated)})
-        for item_id in pending:
-            if stop["now"]:
-                break
-            # Re-read the pause file before every item: a cost guard can pause
-            # a model at any moment, and a resume time can pass mid-run.
-            pause = merge_pause(
-                *(load_pause(path) for path in pause_files),
-                pause_models,
-            )
-            held_now = paused_models(pause)
-            if held_now:
-                emit(
-                    {
-                        "event": "models_paused",
-                        "item_id": item_id,
-                        "models": sorted(held_now),
-                    }
-                )
-            if PROVIDER_GOOGLE_GEMINI in vendors and broker_factory is not None:
-                # `ceiling_pause` is the vendor pause of a budget bound. It is
-                # not the model pause above, and it must never overwrite it.
-                ceiling_pause = _ceiling_precheck(
-                    authorization=authorization,
-                    plan=plan,
-                    price_config=price_config,
-                    journal=journal,
-                    shared_ledger_file=shared_ledger_file,
-                )
-                if ceiling_pause is not None:
-                    vendors = [v for v in vendors if v != PROVIDER_GOOGLE_GEMINI]
-                    state["paused_vendors"][PROVIDER_GOOGLE_GEMINI] = ceiling_pause
-                    atomic_json(state_path, {**state, "updated_at_utc": _utc_now()})
-                    journal.append(
-                        pause_row(
-                            run_id=str(authorization["run_id_prefix"]),
-                            vendor=PROVIDER_GOOGLE_GEMINI,
-                            reason=ceiling_pause["reason"],
-                            remaining_usd=ceiling_pause.get("remaining_usd"),
-                        )
-                    )
-                    emit(
-                        {
-                            "event": "vendor_paused",
-                            "vendor": PROVIDER_GOOGLE_GEMINI,
-                            **ceiling_pause,
-                        }
-                    )
-                    # The Gemini arm is the arm the USD allocation pays for.
-                    # A budget bound turns it off while the subscription
-                    # vendors keep the run looking healthy, so the supervisor
-                    # must hear about it here and not at the exit.
-                    report_blocked(
-                        "the streaming evaluator paused the Gemini vendor on a "
-                        f"budget bound: {ceiling_pause['reason']}"
-                    )
-            emit(
-                {"event": "item_started", "item_id": item_id, "vendors": list(vendors)}
-            )
-            result = evaluate_item(
-                item_id=item_id,
-                authorization=authorization,
-                plan=plan,
-                state_db=state_db,
-                sets_dir=work_dir / "sets",
-                runs_dir=work_dir / "runs",
-                gates_dir=work_dir / "gates",
-                journal=journal,
-                prices=prices,
-                shared_ledger_file=shared_ledger_file,
-                broker_factory=broker_factory,
-                subscription_ledger_root=subscription_ledger_root,
-                authorization_file=authorization_file,
-                ledger_run_prefixes=ledger_run_prefixes,
-                vendors=list(vendors),
-                authorized_vendors=list(authorized_vendors),
-                concurrency=concurrency,
-                scratch_root=scratch_root,
-                code_commit=code_commit,
-                progress=progress,
-                pause=pause,
-                # An operator stop lands at a trial boundary. The trials it
-                # holds stay pending, the item is not complete, and a later
-                # invocation runs what is missing.
-                should_stop=lambda: stop["now"],
-            )
-            evaluated.append(result)
-            # Publish after every item, not only at the end of the poll cycle.
-            # One cycle covers every pending item, so at sixteen pending items
-            # the cycle runs for an hour, and a watcher that publishes only at
-            # its end looks stopped to the cost guard, whose staleness bound is
-            # 900 seconds.
-            write_state()
-            if result["skipped"]:
-                emit(
-                    {
-                        "event": "item_skipped",
-                        "item_id": item_id,
-                        "reason": result["reason"],
-                    }
-                )
-                continue
-            emit(
-                {
-                    "event": "item_done",
-                    "item_id": item_id,
-                    "complete": result["row"]["complete"],
-                    "models_paused": result["row"]["evaluation"]["models_paused"],
-                    "pending_paused_trials": result["row"]["evaluation"][
-                        "pending_paused_trials"
-                    ],
-                    "gemini_usd": result["row"]["evaluation"]["google_gemini"]["usd"],
-                    "wall_seconds": result["row"]["evaluation"]["wall_seconds"],
-                }
-            )
-            # A vendor that stopped on this item is paused for the rest of the
-            # watch, whatever the reason: the policy forbids a retry, so the
-            # next item repeats the same stop. The other vendors run on. The
-            # one exception is an item-scoped stop, which says nothing about
-            # the next item.
-            for vendor in list(vendors):
-                reason = vendor_stop_reason(result["summary"], vendor)
-                if reason is None:
-                    continue
-                if is_item_scoped_reason(reason):
-                    emit(
-                        {
-                            "event": "vendor_stopped_on_this_item",
-                            "vendor": vendor,
-                            "item_id": item_id,
-                            "reason": reason,
-                        }
-                    )
-                    continue
-                vendors = [name for name in vendors if name != vendor]
-                state["paused_vendors"][vendor] = {"reason": reason}
-                atomic_json(state_path, {**state, "updated_at_utc": _utc_now()})
-                journal.append(
-                    pause_row(
-                        run_id=result["row"]["run_id"], vendor=vendor, reason=reason
-                    )
-                )
-                emit(
-                    {
-                        "event": "vendor_paused",
-                        "vendor": vendor,
-                        "reason": reason,
-                        "budget": is_ceiling_reason(reason),
-                    }
-                )
-            if not vendors:
-                emit({"event": "every_vendor_paused"})
-                report_blocked(
-                    "the streaming evaluator stopped because every vendor is "
-                    "paused: "
-                    + ", ".join(
-                        f"{name} ({(record or {}).get('reason')})"
-                        for name, record in sorted(state["paused_vendors"].items())
-                    )
-                )
-                break
-            if result["error"]:
-                # run_plan raised: an error outside the recorded responses.
-                errors.append(f"{item_id}: {result['error']}")
-                break
+        if pending:
+            halt["now"] = False
+            with ThreadPoolExecutor(
+                max_workers=min(int(item_workers), len(pending)),
+                thread_name_prefix="watch-item",
+            ) as pool:
+                for future in [pool.submit(run_item, item) for item in pending]:
+                    future.result()
         # Publish the state after every poll cycle as well as after every
         # item, because a cycle that evaluates nothing still proves the
         # watcher is alive.
@@ -1037,13 +1174,14 @@ def watch(
         "work_dir": str(work_dir),
         "journal_file": str(journal.path),
         "polls": polls,
+        "item_workers": int(item_workers),
         "items_this_invocation": [
             {
                 "item_id": row["item_id"],
                 "skipped": row["skipped"],
                 "complete": row["row"].get("complete") if not row["skipped"] else None,
             }
-            for row in evaluated
+            for row in in_pickup_order(evaluated)
         ],
         "active_vendors": vendors,
         "paused_vendors": state["paused_vendors"],
@@ -1071,8 +1209,16 @@ def _ceiling_precheck(
     price_config: dict[str, Any],
     journal: CostJournal,
     shared_ledger_file: Path,
+    items_in_flight: int = 0,
 ) -> dict[str, Any] | None:
-    """Return a pause record when one more item would pass a budget bound."""
+    """Return a pause record when one more item would pass a budget bound.
+
+    ``items_in_flight`` are the questions whose Gemini trials are running
+    now. Their spend is not in the journal yet, so the check needs room for
+    all of them plus the one it is about to start; without that, eight
+    questions at once could pass the authorized bound by eight times one
+    question's reservation.
+    """
     ledger = read_ledger(shared_ledger_file)
     policy = json.loads(
         Path(authorization["evaluation_policy_file"]).read_text(encoding="utf-8")
@@ -1097,26 +1243,31 @@ def _ceiling_precheck(
     )
     authorized = Decimal(str(authorization["maximum_gemini_usd"]))
     journal_used = Decimal(str(journal.cumulative()["evaluation_gemini_usd"]))
-    if journal_used + estimate * CEILING_SAFETY > authorized:
+    room = Decimal(int(items_in_flight) + 1)
+    if journal_used + estimate * CEILING_SAFETY * room > authorized:
         return {
             "reason": "one more item would pass the authorized Gemini USD bound",
             "authorized_usd": str(authorized),
             "journal_usd": str(journal_used),
             "estimate_usd": str(estimate),
+            "items_in_flight": int(items_in_flight),
         }
-    if used + estimate * CEILING_SAFETY > ceiling:
+    if used + estimate * CEILING_SAFETY * room > ceiling:
         return {
             "reason": EVALUATION_CEILING_REASON,
             "ceiling_usd": str(ceiling),
             "remaining_usd": str(ceiling - used),
             "estimate_usd": str(estimate),
+            "items_in_flight": int(items_in_flight),
         }
     return None
 
 
 __all__ = [
     "AUTHORIZATION_SCHEMA",
+    "DEFAULT_ITEM_WORKERS",
     "DEFAULT_POLL_SECONDS",
+    "MAXIMUM_ITEM_WORKERS",
     "GATE_FILENAME_BY_VENDOR",
     "SKIP_KIND",
     "WATCH_STATE_FILENAME",

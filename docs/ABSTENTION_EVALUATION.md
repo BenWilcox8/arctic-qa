@@ -432,6 +432,57 @@ It freezes each one as a one-item evaluation set with its fixed distractor order
 It runs the whole plan on that item.
 Then it appends one row to the cost journal and waits for the next item.
 
+### Several questions at once
+
+One question cannot fill the slots that the policy allows.
+Its 12 Gemini trials run 4 at a time, and its 18 trials of each subscription vendor run 3 at a time.
+So every vendor drains its wave and then waits for the slowest vendor of that question.
+Measured at 08:35 UTC on 2026-09-17: 206 seconds of wall time per question, about 17 questions an hour, against a producer that accepted about 58 an hour.
+
+The evaluator therefore takes up to `--item-workers` accepted questions at once.
+The default is 8.
+Every record of one question stays as it was: its own evaluation set, its own derived gates, its own run directory, and exactly one journal row per pass.
+The slots stay as they were too, because a slot belongs to the vendor and not to the question:
+
+- the calls in flight per vendor from the plan file;
+- the per-minute window and the in-flight limit of the evaluation policy, which each subscription ledger applies under its own file lock;
+- the per-phase in-flight slots and the minute window of the shared paid-call ledger.
+
+The gain is that those slots stay full.
+The cheap fast Gemini arm of one question never waits on the subscription arm of another.
+
+Four rules hold the design:
+
+- The pick-up order is the order the state database gives, and every reader is given that order back.
+  A wave finishes its questions in whatever order the vendors answer, so `items_this_invocation` and `evaluated_items` are sorted back into the pick-up order.
+  This is the rule the producer follows for its paper results.
+- One admission is one critical section.
+  The Gemini ceiling precheck, the active vendor list and the pause files are read under one lock, and the check keeps room for every question in flight plus the one it admits.
+  Without that room, eight questions at once could pass the authorized Gemini USD bound by eight times one question's reservation.
+- A question already in flight keeps the vendor list it started with.
+  A vendor that stops is paused for every question dispatched after that, and each row records what the paused vendor owes its question.
+- `watch-state.json` carries `items_in_flight` and `item_workers`, and the evaluator publishes it at every admission and every finish.
+  One wave can run longer than the 900-second staleness bound of the cost guard.
+
+A paused arm leaves every question of a wave open, and a later pass finishes them all in place.
+A question is complete only when every active arm has its trials.
+
+### A question an arm stopped inside
+
+A pause reopens a question.
+An arm that stopped *inside* a question does not reopen it.
+
+The evaluation policy forbids a retry, so a trial that stops never goes out again under this contract.
+Such a question keeps the trials it holds.
+Its row records how many that is, in `evaluation.recorded_trials` against `evaluation.planned_trials`, and the row-level `complete` flag is `false`.
+`CostJournal.completed_item_ids` closes it, because a revisit could add nothing by itself.
+Reopening one is an operator action, because the recorded stop needs a judgement first.
+
+A revisit of such a question never pauses the vendor again.
+A recorded stop is permanent, so the vendor summary field `stopped_on` names it on every later pass.
+The evaluator reads `stopped_this_pass` instead, which holds the stops of the rows that this pass recorded.
+Otherwise the arm would go down again the moment a revisit touched an old stop, and a revisit is how a paused arm finishes the questions it owes.
+
 ### Authorization
 
 A paid Gemini call needs a gate that binds one evaluation set.
@@ -530,8 +581,9 @@ Each key is a model id, and its entry takes a `reason` and an optional `resume_a
 A model with no resume time stays paused until an operator removes its entry.
 A model whose resume time has passed is not paused any more.
 
-The evaluator re-reads every pause file before every item.
+The evaluator re-reads every pause file before every item, under the admission lock of that item.
 So an operator or a cost guard can pause or resume a model while the evaluator runs, and the evaluator needs no restart.
+A question already in flight keeps the pause record it started with.
 
 `--pause-file` is repeatable, because the standing orders and a guard's own decisions have different owners.
 Give the committed file first and the guard's file second: a later file wins for the same model.

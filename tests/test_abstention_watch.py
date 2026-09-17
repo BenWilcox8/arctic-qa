@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -26,6 +27,7 @@ from arctic_qa.abstention_plan import (
     parse_pause_models,
     DEFAULT_PAUSE_FILE,
     load_pause,
+    load_plan,
     paused_models,
 )
 from arctic_qa.abstention_providers import (
@@ -37,6 +39,7 @@ from arctic_qa.abstention_subscription import (
     PROVIDER_OPENAI_CODEX,
 )
 from arctic_qa.abstention_watch import (
+    MAXIMUM_ITEM_WORKERS,
     WATCH_STATE_FILENAME,
     authorization_record,
     estimated_gemini_item_usd,
@@ -541,12 +544,46 @@ def test_vendor_stop_reason_reads_every_stop_and_marks_the_budget_wall() -> None
     assert vendor_stop_reason(raised, PROVIDER_OPENAI_CODEX) == "ValueError: gate"
     assert vendor_stop_reason({"vendors": {}}, PROVIDER_OPENAI_CODEX) is None
     assert is_ceiling_reason(None) is False
+    # Only a stop of this pass pauses a vendor. A recorded stop is permanent,
+    # so `stopped_on` names it on every later pass over that item, and a
+    # revisit of it must not take the arm down again.
+    revisit = {
+        "vendors": {
+            PROVIDER_ANTHROPIC_CLAUDE_CODE: {
+                "stopped_on": {"state": "failed", "error": "an old harness fault"},
+                "stopped_this_pass": None,
+            }
+        }
+    }
+    assert vendor_stop_reason(revisit, PROVIDER_ANTHROPIC_CLAUDE_CODE) is None
+    fresh = {
+        "vendors": {
+            PROVIDER_ANTHROPIC_CLAUDE_CODE: {
+                "stopped_on": {"state": "failed", "error": "an old harness fault"},
+                "stopped_this_pass": {
+                    "state": "failed",
+                    "error": "the login expired",
+                },
+            }
+        }
+    }
+    assert vendor_stop_reason(fresh, PROVIDER_ANTHROPIC_CLAUDE_CODE) == (
+        "failed: the login expired"
+    )
 
 
 def test_a_vendor_that_stops_is_paused_for_the_rest_of_the_watch(
     tmp_path: Path,
 ) -> None:
-    """A harness failure pauses that vendor; the other vendor runs every item."""
+    """A harness failure pauses that vendor; the other vendor runs every item.
+
+    One worker, so the second question starts after the first one finished:
+    this pins the pause of a vendor against the very next question. Under
+    several workers a question already in flight keeps the vendors it started
+    with, which
+    ``test_a_vendor_pause_inside_a_wave_holds_the_questions_dispatched_after_it``
+    pins.
+    """
     db = state_db(tmp_path, chapter3=["aqa-a", "aqa-b"])
     ledger_file = construction_ledger(tmp_path, {"family-aqa-a": ["0.01"]})
     auth = authorization(tmp_path, db, maximum_items=2)
@@ -614,6 +651,7 @@ def test_a_vendor_that_stops_is_paused_for_the_rest_of_the_watch(
             code_commit="test-commit",
             ledger_run_prefixes=("chapter3-",),
             vendors=[PROVIDER_ANTHROPIC_CLAUDE_CODE, PROVIDER_OPENAI_CODEX],
+            item_workers=1,
         )
     finally:
         module.build_vendor_runs = original  # type: ignore[assignment]
@@ -1188,9 +1226,9 @@ def test_cli_pause_status_shows_the_shipped_pause_and_the_options(
     # come and go as an operator or the guard pauses a model, and the standing
     # one resumes on its own clock, so this asserts the recorded entry and
     # that the live list agrees with the rule, not the calendar.
-    assert (
-        status["entries"]["claude-fable-5-1"]["resume_at_utc"] == "2026-09-16T23:00:00Z"
-    )
+    fable_entry = status["entries"]["claude-fable-5-1"]
+    assert fable_entry["owner"] == "captain"
+    assert fable_entry["reason"] and fable_entry["resume_at_utc"]
     assert set(status["paused_now"]) == set(
         paused_models(load_pause(DEFAULT_PAUSE_FILE))
     )
@@ -1873,6 +1911,11 @@ def test_the_watcher_publishes_its_state_after_every_item(tmp_path: Path) -> Non
     At sixteen pending items a cycle runs for about an hour. A watcher that
     published only at the end of its cycle looked stopped to the cost guard,
     whose staleness bound is 900 seconds.
+
+    One worker here, so every question is finished before the next starts and
+    the published list is the finished one. A wave of several workers
+    publishes on its admissions as well, which
+    ``test_the_wave_publishes_the_questions_it_holds_in_flight`` pins.
     """
     db = state_db(tmp_path, chapter3=["aqa-a", "aqa-b", "aqa-c"])
     ledger_file = construction_ledger(tmp_path, {"family-aqa-a": ["0.01"]})
@@ -1893,6 +1936,7 @@ def test_the_watcher_publishes_its_state_after_every_item(tmp_path: Path) -> Non
         ledger_file=ledger_file,
         authorization_file=auth,
         progress=watch_state_size,
+        item_workers=1,
     )
     # The watcher published a growing item list while the one cycle ran, so a
     # reader saw progress before the cycle ended.
@@ -1962,3 +2006,430 @@ def test_an_excluded_vendor_owes_nothing(tmp_path: Path) -> None:
     )
     assert journal.completed_item_ids() == {"aqa-scoped"}
     assert journal.items_awaiting_vendors({PROVIDER_GOOGLE_GEMINI}) == set()
+
+
+# --- Several questions at once --------------------------------------------------
+
+
+class _Rendezvous:
+    """Prove that several questions really are scored at the same time.
+
+    Every answer of the provider below reports its question here. A question
+    waits until ``wanted`` different questions have reported, so the run
+    finishes quickly when the wave is concurrent and times out when it is
+    not. A sequential evaluator cannot pass: the first question would wait
+    for a question that only starts after it.
+    """
+
+    def __init__(self, wanted: int, timeout: float = 60.0) -> None:
+        self.wanted = wanted
+        self.timeout = timeout
+        self.condition = threading.Condition()
+        self.seen: set[str] = set()
+        self.timed_out = False
+
+    def arrive(self, item_id: str) -> None:
+        with self.condition:
+            self.seen.add(item_id)
+            if len(self.seen) >= self.wanted:
+                self.condition.notify_all()
+                return
+            met = self.condition.wait_for(
+                lambda: len(self.seen) >= self.wanted, timeout=self.timeout
+            )
+            if not met:
+                self.timed_out = True
+
+
+class RendezvousProvider(ScriptedEvaluationProvider):
+    """A scripted provider that reports every trial to a rendezvous."""
+
+    def __init__(self, rendezvous: _Rendezvous, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.rendezvous = rendezvous
+
+    def answer(self, request):
+        self.rendezvous.arrive(request.trial["item_id"])
+        return super().answer(request)
+
+
+def rendezvous_watch(
+    *,
+    db: Path,
+    work_dir: Path,
+    ledger_file: Path,
+    authorization_file: Path,
+    rendezvous: _Rendezvous,
+    **changes,
+) -> dict:
+    """Run the watcher with a rendezvous provider for every vendor."""
+    import arctic_qa.abstention_watch as module
+
+    def fake_build(*, plan, set_dir, run_id, gate_dir, vendors, **_: object):
+        return {
+            vendor: VendorRun(
+                vendor=vendor,
+                provider=RendezvousProvider(rendezvous, policy="gold", seed=run_id),
+                decoding={"scripted": True, "vendor": vendor},
+                models=plan["vendors"][vendor]["models"],
+                concurrency=2,
+            )
+            for vendor in vendors
+        }
+
+    original = module.build_vendor_runs
+    module.build_vendor_runs = fake_build  # type: ignore[assignment]
+    try:
+        return watch(
+            authorization_file=authorization_file,
+            plan_file=PLAN_FILE,
+            contract_file=CH3_CONTRACT,
+            evaluation_policy_file=POLICY_V2,
+            evaluation_price_config_file=PRICES,
+            subscription_models_file=MODELS_FILE,
+            state_db=db,
+            work_dir=work_dir,
+            shared_ledger_file=ledger_file,
+            broker_factory=None,
+            subscription_ledger_root=work_dir / "subscription",
+            list_price_file=LIST_PRICES,
+            poll_seconds=5,
+            once=True,
+            code_commit="test-commit",
+            ledger_run_prefixes=("chapter3-",),
+            backfill_contract_file=CH2_CONTRACT,
+            **changes,
+        )
+    finally:
+        module.build_vendor_runs = original  # type: ignore[assignment]
+
+
+def test_the_watcher_scores_several_questions_at_once(tmp_path: Path) -> None:
+    """Four questions in one wave, each with its own set, gates and row.
+
+    One question alone cannot fill the slots the policy allows, so the
+    evaluator scored 17 questions an hour against a producer that accepted 58
+    (measured 2026-09-17 08:35 UTC). The wave is the fix, and nothing of one
+    question moves: its own evaluation set, its own derived gates, its own run
+    directory, and exactly one journal row.
+    """
+    items = ["aqa-w1", "aqa-w2", "aqa-w3", "aqa-w4"]
+    db = state_db(tmp_path, chapter3=items)
+    ledger_file = construction_ledger(tmp_path, {f"family-{i}": ["0.10"] for i in items})
+    auth = authorization(tmp_path, db, maximum_items=4)
+    work = tmp_path / "wave"
+    meeting = _Rendezvous(wanted=4)
+    result = rendezvous_watch(
+        db=db,
+        work_dir=work,
+        ledger_file=ledger_file,
+        authorization_file=auth,
+        rendezvous=meeting,
+        item_workers=4,
+    )
+    assert meeting.timed_out is False
+    assert meeting.seen == set(items)
+    assert result["item_workers"] == 4
+    assert sorted(row["item_id"] for row in result["items_this_invocation"]) == items
+    journal = CostJournal(work)
+    rows = journal.item_rows()
+    assert len(rows) == 4
+    assert {row["item_id"] for row in rows} == set(items)
+    # One row per question, and every question complete on its own evidence.
+    assert all(row["complete"] is True for row in rows)
+    assert all(row["evaluation"]["recorded_trials"] == 48 for row in rows)
+    assert journal.completed_item_ids() == set(items)
+    assert len({row["eval_set_id"] for row in rows}) == 4
+    assert len({row["run_dir"] for row in rows}) == 4
+    assert len({row["gate_dir"] for row in rows}) == 4
+    for row in rows:
+        assert Path(row["gate_dir"]).name == row["item_id"]
+        assert (Path(row["run_dir"]) / PLAN_SUMMARY_FILENAME).is_file()
+    assert journal.cumulative()["items"] == 4
+    assert journal.cumulative()["trials"] == 4 * 48
+
+
+def test_the_wave_publishes_the_questions_it_holds_in_flight(tmp_path: Path) -> None:
+    """The cost guard reads watch-state.json, so a wave must publish itself.
+
+    A guard that sees no movement for 900 seconds calls the evaluator
+    stopped. One wave can run longer than that, so the state carries the
+    questions in flight and grows as they finish.
+    """
+    items = ["aqa-f1", "aqa-f2", "aqa-f3"]
+    db = state_db(tmp_path, chapter3=items)
+    ledger_file = construction_ledger(tmp_path, {f"family-{i}": ["0.10"] for i in items})
+    auth = authorization(tmp_path, db, maximum_items=3)
+    work = tmp_path / "in-flight"
+    meeting = _Rendezvous(wanted=3)
+    seen: list[int] = []
+
+    def sample(_: dict) -> None:
+        path = work / WATCH_STATE_FILENAME
+        if path.is_file():
+            published = json.loads(path.read_text(encoding="utf-8"))
+            seen.append(len(published["items_in_flight"]))
+
+    result = rendezvous_watch(
+        db=db,
+        work_dir=work,
+        ledger_file=ledger_file,
+        authorization_file=auth,
+        rendezvous=meeting,
+        item_workers=3,
+        progress=sample,
+    )
+    assert meeting.timed_out is False
+    assert max(seen) == 3
+    published = json.loads((work / WATCH_STATE_FILENAME).read_text(encoding="utf-8"))
+    assert published["item_workers"] == 3
+    # Every question finished, so nothing is in flight at the end.
+    assert published["items_in_flight"] == []
+    assert sorted(published["evaluated_items"]) == items
+    assert result["errors"] == []
+
+
+def test_a_vendor_pause_inside_a_wave_holds_the_questions_dispatched_after_it(
+    tmp_path: Path,
+) -> None:
+    """A vendor that stops is paused for every question dispatched after it.
+
+    A question already in flight keeps the vendors it started with, and its
+    own row records what they owe it. Two records come out of one incident,
+    and they are not the same:
+
+    - the questions the arm stopped *inside* keep their partial trials. The
+      policy forbids a retry, so those trials never went out and never will
+      under this contract: the journal closes them, their row-level
+      ``complete`` flag is False and their recorded trial count says how much
+      they hold. Reopening one is an operator action.
+    - the questions dispatched after the pause carry ``vendors_paused``, so
+      the arm owes them every trial and they reopen on the next start.
+    """
+    items = ["aqa-p1", "aqa-p2", "aqa-p3", "aqa-p4"]
+    db = state_db(tmp_path, chapter3=items)
+    ledger_file = construction_ledger(tmp_path, {f"family-{i}": ["0.10"] for i in items})
+    auth = authorization(tmp_path, db, maximum_items=4)
+    work = tmp_path / "wave-pause"
+
+    import arctic_qa.abstention_watch as module
+
+    class BrokenProvider(ScriptedEvaluationProvider):
+        def answer(self, request):
+            from arctic_qa.abstention_providers import EvaluationResponse
+
+            return EvaluationResponse(
+                state="failed",
+                raw_text=None,
+                finish_reason=None,
+                usage=None,
+                cost_usd=None,
+                latency_seconds=0.0,
+                request_key=None,
+                request_sha256=None,
+                receipt_sha256=None,
+                receipt_file=None,
+                model_version=None,
+                response_id=None,
+                error="the harness exited with None: FileNotFoundError",
+            )
+
+    def fake_build(*, plan, set_dir, run_id, gate_dir, vendors, **_: object):
+        return {
+            vendor: VendorRun(
+                vendor=vendor,
+                provider=(
+                    BrokenProvider(policy="gold")
+                    if vendor == PROVIDER_ANTHROPIC_CLAUDE_CODE
+                    else ScriptedEvaluationProvider(policy="gold")
+                ),
+                decoding={"scripted": True},
+                models=plan["vendors"][vendor]["models"],
+                concurrency=1,
+            )
+            for vendor in vendors
+        }
+
+    original = module.build_vendor_runs
+    module.build_vendor_runs = fake_build  # type: ignore[assignment]
+    try:
+        result = watch(
+            authorization_file=auth,
+            plan_file=PLAN_FILE,
+            contract_file=CH3_CONTRACT,
+            evaluation_policy_file=POLICY_V2,
+            evaluation_price_config_file=PRICES,
+            subscription_models_file=MODELS_FILE,
+            state_db=db,
+            work_dir=work,
+            shared_ledger_file=ledger_file,
+            broker_factory=None,
+            subscription_ledger_root=work / "subscription",
+            list_price_file=LIST_PRICES,
+            poll_seconds=5,
+            once=True,
+            code_commit="test-commit",
+            ledger_run_prefixes=("chapter3-",),
+            vendors=[PROVIDER_ANTHROPIC_CLAUDE_CODE, PROVIDER_OPENAI_CODEX],
+            item_workers=2,
+        )
+    finally:
+        module.build_vendor_runs = original  # type: ignore[assignment]
+    assert result["errors"] == []
+    assert result["active_vendors"] == [PROVIDER_OPENAI_CODEX]
+    journal = CostJournal(work)
+    # One pause, however many questions met the same broken vendor.
+    pauses = [row for row in journal.rows() if row.get("kind") == "vendor_pause"]
+    assert len(pauses) == 1
+    assert pauses[0]["vendor"] == PROVIDER_ANTHROPIC_CLAUDE_CODE
+    rows = journal.item_rows()
+    assert len(rows) == 4
+    assert {row["item_id"] for row in rows} == set(items)
+    # No question holds all 48 of its trials.
+    assert all(row["complete"] is False for row in rows)
+    assert all(row["evaluation"]["recorded_trials"] < 48 for row in rows)
+    held = [
+        row
+        for row in rows
+        if row["evaluation"]["vendors_paused"] == [PROVIDER_ANTHROPIC_CLAUDE_CODE]
+    ]
+    inside = [row for row in rows if not row["evaluation"]["vendors_paused"]]
+    # Two workers and four questions, so the second wave was dispatched after
+    # the pause and ran the Codex arm alone.
+    assert len(held) >= 2
+    assert len(inside) >= 1
+    assert all(row["evaluation"]["recorded_trials"] == 18 for row in held)
+    # The questions the arm stopped inside are closed with what they hold.
+    assert journal.completed_item_ids() == {row["item_id"] for row in inside}
+    assert journal.items_awaiting_vendors({PROVIDER_ANTHROPIC_CLAUDE_CODE}) == {
+        row["item_id"] for row in held
+    }
+
+
+def test_a_paused_model_leaves_every_question_of_a_wave_open(tmp_path: Path) -> None:
+    """The completeness rule of 0c2614a under a wave and a paused arm.
+
+    Three questions are scored at once while one Claude model is paused. Each
+    one holds its six trials, so none of them is complete, and the next pass
+    after the resume time finishes all three in place: one row each pass, the
+    latest row per question, and no trial called twice.
+    """
+    items = ["aqa-h1", "aqa-h2", "aqa-h3"]
+    db = state_db(tmp_path, chapter3=items)
+    ledger_file = construction_ledger(tmp_path, {f"family-{i}": ["0.10"] for i in items})
+    # The item bound counts the questions, not the passes, and a revisit needs
+    # room under it: at three items and a bound of three the second pass meets
+    # the bound instead of the held trials.
+    auth = authorization(tmp_path, db, maximum_items=6)
+    work = tmp_path / "wave-held"
+    held = scripted_watch(
+        db=db,
+        work_dir=work,
+        ledger_file=ledger_file,
+        authorization_file=auth,
+        item_workers=3,
+        pause_models=parse_pause_models([f"claude-opus-5={future_resume_utc()}"]),
+    )
+    assert held["paused_models"] == ["claude-opus-5"]
+    journal = CostJournal(work)
+    rows = journal.item_rows()
+    assert len(rows) == 3
+    for row in rows:
+        assert row["evaluation"]["models_paused"] == ["claude-opus-5"]
+        assert row["evaluation"]["pending_paused_trials"] == 6
+        assert row["evaluation"]["recorded_trials"] == 42
+        assert row["complete"] is False
+    assert journal.completed_item_ids() == set()
+    assert journal.held_item_ids() == set(items)
+    # While the model stays paused the wave leaves every one of them alone.
+    again = scripted_watch(
+        db=db,
+        work_dir=work,
+        ledger_file=ledger_file,
+        authorization_file=auth,
+        item_workers=3,
+        pause_models=parse_pause_models([f"claude-opus-5={future_resume_utc()}"]),
+    )
+    assert again["items_this_invocation"] == []
+    assert len(CostJournal(work).item_rows()) == 3
+    # After the resume time the held trials run, in the same run directories.
+    done = scripted_watch(
+        db=db,
+        work_dir=work,
+        ledger_file=ledger_file,
+        authorization_file=auth,
+        item_workers=3,
+        pause_models=parse_pause_models(["claude-opus-5=2026-09-16T00:00:00Z"]),
+    )
+    assert done["paused_models"] == []
+    journal = CostJournal(work)
+    assert len(journal.item_rows()) == 6
+    latest = journal.latest_item_rows()
+    assert len(latest) == 3
+    for row in latest:
+        assert row["evaluation"]["recorded_trials"] == 48
+        assert row["evaluation"]["pending_paused_trials"] == 0
+        assert row["complete"] is True
+        assert row["outcomes_by_model"]["claude-opus-5"]["N1"] == 3
+    assert journal.completed_item_ids() == set(items)
+    assert journal.cumulative()["items"] == 3
+    assert journal.cumulative()["trials"] == 3 * 48
+
+
+def test_the_ceiling_precheck_keeps_room_for_every_question_in_flight(
+    tmp_path: Path,
+) -> None:
+    """Eight questions at once must not pass the authorized Gemini bound.
+
+    The check runs under the admission lock, so it sees the questions already
+    in flight. Their Gemini spend is not in the journal yet, so the bound
+    needs room for all of them plus the one it is about to admit.
+    """
+    from arctic_qa.abstention_watch import _ceiling_precheck
+
+    db = state_db(tmp_path, chapter3=["aqa-c1"])
+    ledger_file = construction_ledger(tmp_path, {"family-aqa-c1": ["0.10"]})
+    plan = load_plan(PLAN_FILE)
+    price_config = json.loads(PRICES.read_text(encoding="utf-8"))
+    policy = json.loads(POLICY_V2.read_text(encoding="utf-8"))
+    estimate = estimated_gemini_item_usd(
+        price_config,
+        plan["vendors"][PROVIDER_GOOGLE_GEMINI]["models"],
+        list(plan["arms"]),
+        int(plan["repeats"]),
+        output_cap=int(policy["maximum_output_tokens_including_thinking"]),
+    )
+    auth_file = authorization(
+        tmp_path, db, maximum_gemini_usd=str(estimate * Decimal("1.5"))
+    )
+    authorization_record_value = json.loads(auth_file.read_text(encoding="utf-8"))
+    journal = CostJournal(tmp_path / "precheck")
+    arguments = dict(
+        authorization=authorization_record_value,
+        plan=plan,
+        price_config=price_config,
+        journal=journal,
+        shared_ledger_file=ledger_file,
+    )
+    # Room for one question, and no room for a second one beside it.
+    assert _ceiling_precheck(**arguments, items_in_flight=0) is None
+    pause = _ceiling_precheck(**arguments, items_in_flight=1)
+    assert pause is not None
+    assert pause["reason"] == "one more item would pass the authorized Gemini USD bound"
+    assert pause["items_in_flight"] == 1
+    assert pause["estimate_usd"] == str(estimate)
+
+
+def test_the_item_workers_are_bounded(tmp_path: Path) -> None:
+    db = state_db(tmp_path, chapter3=["aqa-b1"])
+    ledger_file = construction_ledger(tmp_path, {"family-aqa-b1": ["0.10"]})
+    auth = authorization(tmp_path, db)
+    for workers in (0, -1, MAXIMUM_ITEM_WORKERS + 1):
+        with pytest.raises(ValueError, match="item workers"):
+            scripted_watch(
+                db=db,
+                work_dir=tmp_path / f"bounded-{workers}",
+                ledger_file=ledger_file,
+                authorization_file=auth,
+                item_workers=workers,
+            )

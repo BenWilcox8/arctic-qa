@@ -83,6 +83,7 @@ from .abstention_subscription import (
     vendor_entry,
 )
 from .abstention_watch import (
+    DEFAULT_ITEM_WORKERS,
     DEFAULT_POLL_SECONDS,
     authorization_record,
     watch,
@@ -252,6 +253,17 @@ def add_parser(commands: argparse._SubParsersAction) -> None:
     parser.add_argument(
         "--concurrency",
         help="Override the calls in flight per vendor, as vendor=N,vendor=N.",
+    )
+    parser.add_argument(
+        "--item-workers",
+        type=int,
+        default=DEFAULT_ITEM_WORKERS,
+        help=(
+            "watch: the accepted questions scored at once (default "
+            f"{DEFAULT_ITEM_WORKERS}). Each question keeps its own evaluation "
+            "set, gates, run directory and journal row; the calls in flight "
+            "per vendor stay the plan's and the policy's."
+        ),
     )
     parser.add_argument(
         "--serial",
@@ -665,6 +677,7 @@ def _watch(args: argparse.Namespace) -> dict[str, Any]:
         once=args.once,
         backfill=args.backfill,
         backfill_contract_file=args.backfill_contract_file,
+        item_workers=args.item_workers,
         concurrency=parse_concurrency(args.concurrency),
         vendors=_split(args.vendors) or None,
         scratch_root=args.scratch_dir.resolve() if args.scratch_dir else None,

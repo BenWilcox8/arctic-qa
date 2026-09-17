@@ -34,6 +34,27 @@ models) vis a vis gemini budget, claude session/weekly usage (dont worry about
 the weekly usage except for fable), codex weekly usage. If one is rising too
 fast, then pause the benchmarking for only that model. This should be rare and
 only happen if there are very urget issues with the benchmarking cost."
+
+Captain's sleep order of 2026-09-17, 08:35 UTC: "I need to have all results
+FINISHED by around 8:00am this morning [13:00 UTC]. Extrapolate current rates
+to determine if this is feasible", and, earlier that night, "pause the fable
+testing". The deadline is the point, so the subscription arms now run to a
+floor of their own quota window instead of to a projection:
+
+- the ChatGPT arms run until the Codex weekly window has 10 percent left,
+  which is the reserve of the paper worker, and then pause;
+- the Claude arms run until the 5-hour session window or the 7-day window has
+  5 percent left, and then pause with that window's own reset as their resume
+  time, so they come back by themselves;
+- Fable, and Fable alone, stops on a usage bound instead: the captain's order
+  of 08:55 UTC stops it when its weekly window is 80 percent used, which is
+  20 percent or less remaining, and it does not resume by itself. Until then
+  it is held by the captain's own entry, which this guard never touches.
+
+The projection rule that paused a ChatGPT model hours before that floor
+(`codex_projected_exhaustion`) is retired, and the guard removes the pause
+entries it wrote. The Codex attribution measurement stays in the guard state
+as a measurement; no rule pauses on it.
 """
 
 from __future__ import annotations
@@ -106,9 +127,36 @@ PLAN_MODELS_BY_VENDOR = {
 # the captain asked for a pause to be rare.
 GEMINI_BUDGET_USD = Decimal("200.00")
 GEMINI_CEILING_MARGIN_USD = Decimal("10.00")
-CLAUDE_SESSION_FLOOR_PERCENT = Decimal("15")
-FABLE_WEEKLY_FLOOR_PERCENT = Decimal("10")
+# The captain's sleep order of 2026-09-17, 08:35 UTC: "I need to have all
+# results FINISHED by around 8:00am this morning". The subscription arms
+# therefore run to a floor and not to a projection: a reserve is kept, and
+# everything above it is spent on the deadline. The Claude floor is 5 percent
+# of the 5-hour session window, which resets about every five hours, so a
+# paused Claude arm comes back on its own. The Codex floor is 10 percent of
+# the weekly window, which is the reserve the paper worker keeps.
+CLAUDE_SESSION_FLOOR_PERCENT = Decimal("5")
+# The same floor bounds the Claude 7-day window: both windows bound every
+# Claude model, and either one at the floor stops the arm until that window
+# resets (captain order 2026-09-17, 08:55 UTC).
+CLAUDE_WEEKLY_FLOOR_PERCENT = Decimal("5")
+# Fable is the one arm with a usage bound instead of a floor: the captain
+# stops it when its weekly window is 80 percent used, which is 20 percent or
+# less remaining, and it does not come back by itself.
+FABLE_WEEKLY_FLOOR_PERCENT = Decimal("20")
 CODEX_WEEKLY_FLOOR_PERCENT = Decimal("10")
+
+# Rules the captain retired. A guard-owned pause entry of a retired rule
+# pauses a model that the captain wants running, so the guard removes such an
+# entry at once and never applies the hysteresis of a rule that no longer
+# exists. `codex_projected_exhaustion` paused gpt-6-astra at 08:29 UTC and
+# gpt-5.6-sol at 08:34 UTC on 2026-09-17 on a projection, hours before the
+# floor of the window was anywhere near; the captain replaced it with the
+# floor above.
+RETIRED_RULES = ("codex_projected_exhaustion",)
+RETIRED_RULE_NOTE = (
+    "the captain retired this rule on 2026-09-17 and replaced it with the "
+    "floor of the vendor's own quota window"
+)
 
 DEFAULT_INTERVAL_SECONDS = 300
 DEFAULT_EVALUATOR_STALE_SECONDS = 900
@@ -987,7 +1035,22 @@ def _finding(
     detail: str,
     numbers: dict[str, Any],
     candidates: tuple[str, ...],
+    pause_all: bool = False,
+    resume_at_utc: str | None = None,
 ) -> dict[str, Any]:
+    """Return one rule's reading of the meters.
+
+    ``pause_all`` says that the rule pauses every candidate model of its
+    vendor in the cycle it fires, not the costliest one. A floor of a shared
+    quota window is such a rule: the window bounds every model of the vendor
+    at once, so pausing one model of three leaves the floor being crossed by
+    the other two.
+
+    ``resume_at_utc`` is the moment the pause lifts by itself, which is the
+    reset of the window the rule reads. A pause with a resume time needs no
+    cycle of this guard to come back, so the arm returns even if the guard is
+    not running then.
+    """
     return {
         "rule": rule,
         "vendor": vendor,
@@ -995,6 +1058,8 @@ def _finding(
         "detail": detail,
         "numbers": numbers,
         "candidate_models": list(candidates),
+        "pause_all": bool(pause_all),
+        "resume_at_utc": resume_at_utc,
     }
 
 
@@ -1010,11 +1075,15 @@ def evaluate_rules(
     models_by_vendor: dict[str, tuple[str, ...]] | None = None,
     now: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    """Apply the captain's six urgent conditions and return one finding each.
+    """Apply the captain's five urgent conditions and return one finding each.
 
     A finding names the models the rule may pause. Nothing else in this module
     decides when to pause: the caller pauses the costliest candidate of a fired
-    rule, one model at a time.
+    rule, one model at a time, or every candidate of a rule whose window
+    bounds the whole vendor (``pause_all``).
+
+    The sixth rule, `codex_projected_exhaustion`, is retired: see
+    :data:`RETIRED_RULES` and the captain's order in the module docstring.
     """
     moment = now or _utc_now()
     models_of = models_by_vendor or dict(PLAN_MODELS_BY_VENDOR)
@@ -1088,7 +1157,51 @@ def evaluate_rules(
         )
     )
 
+    # The Fable rule comes first of the Claude rules on purpose. It holds one
+    # model and it gives no automatic resume, while the two window rules below
+    # hold the whole arm and do give one. So Fable takes its own entry first,
+    # and the arm-wide rule then finds it paused already and leaves it alone;
+    # the other order would give Fable a resume time the captain did not
+    # authorize.
+    fable = _percent(windows, "claude_fable")
+    after = fable_rule_active_after
+    active = after is None or moment >= after
+    findings.append(
+        _finding(
+            "fable_weekly_window_floor",
+            # "at or below", because the captain set the bound on the usage:
+            # 20 percent remaining is 80 percent used and stops the arm.
+            fired=active
+            and fable is not None
+            and fable <= FABLE_WEEKLY_FLOOR_PERCENT
+            and FABLE_MODEL in models_of[VENDOR_ANTHROPIC_CLAUDE_CODE],
+            vendor=VENDOR_ANTHROPIC_CLAUDE_CODE,
+            detail=(
+                "the Fable weekly window is "
+                f"{100 - int(FABLE_WEEKLY_FLOOR_PERCENT)} percent used or more "
+                "after the captain's own Fable pause has expired"
+            ),
+            numbers={
+                "percent_remaining": None if fable is None else str(fable),
+                "floor_percent": str(FABLE_WEEKLY_FLOOR_PERCENT),
+                "rule_active_after_utc": _stamp(after) if after else None,
+                "rule_active": active,
+                "captain_order": (
+                    "2026-09-17 08:55 UTC: stop claude-fable-5-1, with no "
+                    "automatic resume, when the Fable weekly usage reaches 80 "
+                    "percent"
+                ),
+            },
+            candidates=(
+                (FABLE_MODEL,)
+                if FABLE_MODEL in models_of[VENDOR_ANTHROPIC_CLAUDE_CODE]
+                else ()
+            ),
+        )
+    )
+
     session = _percent(windows, "claude_session")
+    session_resets = (windows.get("claude_session") or {}).get("resets_at_utc")
     findings.append(
         _finding(
             "claude_session_window_floor",
@@ -1101,45 +1214,49 @@ def evaluate_rules(
             numbers={
                 "percent_remaining": None if session is None else str(session),
                 "floor_percent": str(CLAUDE_SESSION_FLOOR_PERCENT),
-                "resets_at_utc": (windows.get("claude_session") or {}).get(
-                    "resets_at_utc"
+                "resets_at_utc": session_resets,
+                "captain_order": (
+                    "2026-09-17 08:35 UTC: the Claude arms run until the 5-hour "
+                    "window reaches 5 percent, then pause and resume on the "
+                    "reset automatically"
                 ),
             },
             candidates=models_of[VENDOR_ANTHROPIC_CLAUDE_CODE],
+            # One window bounds every Claude model, and it resets by itself.
+            pause_all=True,
+            resume_at_utc=session_resets,
         )
     )
 
-    fable = _percent(windows, "claude_fable")
-    after = fable_rule_active_after
-    active = after is None or moment >= after
+    weekly = _percent(windows, "claude_week")
+    weekly_resets = (windows.get("claude_week") or {}).get("resets_at_utc")
     findings.append(
         _finding(
-            "fable_weekly_window_floor",
-            fired=active
-            and fable is not None
-            and fable < FABLE_WEEKLY_FLOOR_PERCENT
-            and FABLE_MODEL in models_of[VENDOR_ANTHROPIC_CLAUDE_CODE],
+            "claude_weekly_window_floor",
+            fired=weekly is not None and weekly < CLAUDE_WEEKLY_FLOOR_PERCENT,
             vendor=VENDOR_ANTHROPIC_CLAUDE_CODE,
             detail=(
-                "the Fable weekly window is below "
-                f"{FABLE_WEEKLY_FLOOR_PERCENT} percent remaining after the "
-                "captain's own Fable pause has expired"
+                "the Claude 7-day window that bounds every Claude model is "
+                f"below {CLAUDE_WEEKLY_FLOOR_PERCENT} percent remaining"
             ),
             numbers={
-                "percent_remaining": None if fable is None else str(fable),
-                "floor_percent": str(FABLE_WEEKLY_FLOOR_PERCENT),
-                "rule_active_after_utc": _stamp(after) if after else None,
-                "rule_active": active,
+                "percent_remaining": None if weekly is None else str(weekly),
+                "floor_percent": str(CLAUDE_WEEKLY_FLOOR_PERCENT),
+                "resets_at_utc": weekly_resets,
+                "captain_order": (
+                    "2026-09-17 08:55 UTC: the Claude arms stop when the 5-hour "
+                    "window or the seven_day window hits the floor and resume "
+                    "at that window's reset"
+                ),
             },
-            candidates=(
-                (FABLE_MODEL,)
-                if FABLE_MODEL in models_of[VENDOR_ANTHROPIC_CLAUDE_CODE]
-                else ()
-            ),
+            candidates=models_of[VENDOR_ANTHROPIC_CLAUDE_CODE],
+            pause_all=True,
+            resume_at_utc=weekly_resets,
         )
     )
 
     codex = _percent(windows, "codex_weekly")
+    codex_window = windows.get("codex_weekly") or {}
     findings.append(
         _finding(
             "codex_weekly_window_floor",
@@ -1152,57 +1269,29 @@ def evaluate_rules(
             numbers={
                 "percent_remaining": None if codex is None else str(codex),
                 "floor_percent": str(CODEX_WEEKLY_FLOOR_PERCENT),
-                "resets_at_utc": (windows.get("codex_weekly") or {}).get(
-                    "resets_at_utc"
+                "resets_at_utc": codex_window.get("resets_at_utc"),
+                "captain_order": (
+                    "2026-09-17 08:35 UTC: the ChatGPT arms run until the Codex "
+                    "weekly window reaches 10 percent remaining, then pause; "
+                    "that reserve belongs to the paper worker"
                 ),
-            },
-            candidates=models_of[VENDOR_OPENAI_CODEX],
-        )
-    )
-
-    window = windows.get("codex_weekly") or {}
-    exhausted = parse_utc(window.get("projected_exhausted_at_utc"))
-    resets = parse_utc(window.get("resets_at_utc"))
-    early = exhausted is not None and resets is not None and exhausted < resets
-    drives = bool(attribution.get("drives"))
-    findings.append(
-        _finding(
-            "codex_projected_exhaustion",
-            fired=early and drives,
-            vendor=VENDOR_OPENAI_CODEX,
-            detail=(
-                "quota-axi projects the Codex weekly window exhausted before "
-                "its reset while the benchmark is the main consumer"
-            ),
-            numbers={
-                "projected_exhausted_at_utc": window.get("projected_exhausted_at_utc"),
-                "resets_at_utc": window.get("resets_at_utc"),
-                "projected_before_reset": early,
-                "benchmark_is_main_consumer": drives,
-                "projection_confidence": window.get("projection_confidence"),
+                # The measurement the retired projection rule read. It is kept
+                # here as a number an operator can see, and it fires nothing.
                 "attribution_measured": bool(attribution.get("measured")),
-                "attribution_unmeasured_reason": attribution.get("reason"),
-                "measured_seconds": attribution.get("measured_seconds"),
                 "benchmark_share_of_window": attribution.get(
                     "benchmark_share_of_window"
                 ),
-                "share_floor": attribution.get("share_floor")
-                or str(CODEX_DRIVES_SHARE),
-                "benchmark_percent_burn": attribution.get("benchmark_percent_burn"),
-                "window_percent_burn": attribution.get("window_percent_burn"),
-                "window_percent_burn_source": attribution.get(
-                    "window_percent_burn_source"
+                "projected_exhausted_at_utc": codex_window.get(
+                    "projected_exhausted_at_utc"
                 ),
-                "benchmark_usd_burn": attribution.get("benchmark_usd_burn"),
-                "percent_per_usd": attribution.get("percent_per_usd"),
-                "extrapolated_benchmark_percent": attribution.get(
-                    "extrapolated_benchmark_percent"
-                ),
-                "benchmark_alone_exhausts_before_reset": attribution.get(
-                    "benchmark_alone_exhausts_before_reset"
-                ),
+                "retired_projection_rule": "codex_projected_exhaustion",
+                "retired_projection_note": RETIRED_RULE_NOTE,
             },
             candidates=models_of[VENDOR_OPENAI_CODEX],
+            # One weekly window bounds every ChatGPT model, and the reserve is
+            # held until that window resets.
+            pause_all=True,
+            resume_at_utc=codex_window.get("resets_at_utc"),
         )
     )
     return findings
@@ -1600,6 +1689,9 @@ class BenchmarkGuard:
             "benchmark_is_main_codex_consumer": drives_codex,
             "codex_attribution": attribution,
             "rules": findings,
+            "retired_rules": [
+                {"rule": rule, "note": RETIRED_RULE_NOTE} for rule in RETIRED_RULES
+            ],
             "paused_models": active_pauses(pause, now=moment),
             "actions": actions,
             "hysteresis": holds,
@@ -1662,6 +1754,42 @@ class BenchmarkGuard:
             rollup[vendor] = record
         return rollup
 
+    def _retire(self, models: dict[str, Any], *, now: datetime) -> list[dict[str, Any]]:
+        """Drop the guard's own entries that no live rule holds any more.
+
+        Two kinds go. An entry of a retired rule pauses a model the captain
+        wants running and no rule can ever clear it, so the hysteresis of
+        :meth:`_act` would hold it for ever. An entry whose resume time has
+        passed pauses nothing already, so leaving it in the file only tells an
+        operator a model is paused when it is not.
+
+        A captain-owned entry is never touched, whatever its state.
+        """
+        actions: list[dict[str, Any]] = []
+        for model, entry in sorted(models.items()):
+            if (entry or {}).get("owner") != GUARD_OWNER:
+                continue
+            rule = str((entry or {}).get("rule"))
+            resume = parse_utc((entry or {}).get("resume_at_utc"))
+            if rule in RETIRED_RULES:
+                note = RETIRED_RULE_NOTE
+            elif resume is not None and resume <= now:
+                note = "the resume time of this pause has passed"
+            else:
+                continue
+            del models[model]
+            actions.append(
+                {
+                    "action": "resume",
+                    "model": model,
+                    "vendor": (entry or {}).get("vendor"),
+                    "rule": rule,
+                    "reason": note,
+                    "numbers": {"paused_at_utc": (entry or {}).get("paused_at_utc")},
+                }
+            )
+        return actions
+
     def _act(
         self,
         *,
@@ -1678,6 +1806,12 @@ class BenchmarkGuard:
         the first fired rule of that vendor owns the pause. The captain asked
         for a pause to be rare.
 
+        A rule whose window bounds the whole vendor pauses every candidate of
+        that vendor in the cycle it fires (`pause_all`), because pausing one
+        model of three leaves the other two crossing the same floor. Such a
+        pause carries the window's own reset as its resume time, so the arm
+        comes back without a cycle of this guard.
+
         Two hysteresis bounds keep a pause from flapping. A guard-owned pause is
         removed only after its rule has been clear for `RESUME_CLEAR_CYCLES`
         consecutive cycles, and a model the guard resumed is not paused again by
@@ -1690,6 +1824,7 @@ class BenchmarkGuard:
         models = dict(pause.get("paused_models") or {})
         actions: list[dict[str, Any]] = []
         holds: list[dict[str, Any]] = []
+        actions.extend(self._retire(models, now=now))
         fired = [finding for finding in findings if finding["fired"]]
         held_by_rule: dict[str, set[str]] = {}
         for finding in fired:
@@ -1699,7 +1834,12 @@ class BenchmarkGuard:
         acted_vendors: set[str] = set()
 
         for finding in fired:
-            if finding["vendor"] in acted_vendors:
+            # One pause per vendor per cycle, because two rules of one vendor
+            # say the same thing: that vendor is running out. An arm-wide rule
+            # is the exception: "stop this one model" and "stop the whole arm"
+            # are different statements, and the arm-wide rule must still reach
+            # the models the first rule did not name.
+            if finding["vendor"] in acted_vendors and not finding["pause_all"]:
                 continue
             already = {
                 model
@@ -1715,10 +1855,18 @@ class BenchmarkGuard:
                 waited = (now - resumed).total_seconds()
                 if waited < REPAUSE_HOLD_SECONDS:
                     blocked[model] = int(REPAUSE_HOLD_SECONDS - waited)
-            chosen = select_pause_model(
-                finding["candidate_models"], readings, already | set(blocked)
-            )
-            if chosen is None:
+            if finding["pause_all"]:
+                chosen_models = [
+                    model
+                    for model in finding["candidate_models"]
+                    if model not in already and model not in blocked
+                ]
+            else:
+                one = select_pause_model(
+                    finding["candidate_models"], readings, already | set(blocked)
+                )
+                chosen_models = [one] if one is not None else []
+            if not chosen_models:
                 if blocked:
                     holds.append(
                         {
@@ -1735,33 +1883,43 @@ class BenchmarkGuard:
                         }
                     )
                 continue
-            acted_vendors.add(finding["vendor"])
-            reading = readings.get(chosen) or {}
-            clear_cycles.pop(memory_key(chosen, finding["rule"]), None)
-            models[chosen] = {
-                "reason": finding["detail"],
-                "paused_at_utc": _stamp(now),
-                "owner": GUARD_OWNER,
-                "rule": finding["rule"],
-                "vendor": finding["vendor"],
-                "numbers": finding["numbers"],
-                "cost_per_question_usd": _quantize(_cost_per_question(reading)),
-                "resume_note": (
-                    "the guard removes this entry by itself after the condition "
-                    f"has been clear for {RESUME_CLEAR_CYCLES} cycles"
-                ),
-            }
-            actions.append(
-                {
-                    "action": "pause",
-                    "model": chosen,
-                    "vendor": finding["vendor"],
-                    "rule": finding["rule"],
+            if not finding["pause_all"]:
+                acted_vendors.add(finding["vendor"])
+            resume = finding.get("resume_at_utc")
+            for chosen in chosen_models:
+                reading = readings.get(chosen) or {}
+                clear_cycles.pop(memory_key(chosen, finding["rule"]), None)
+                models[chosen] = {
                     "reason": finding["detail"],
+                    "paused_at_utc": _stamp(now),
+                    "owner": GUARD_OWNER,
+                    "rule": finding["rule"],
+                    "vendor": finding["vendor"],
                     "numbers": finding["numbers"],
                     "cost_per_question_usd": _quantize(_cost_per_question(reading)),
+                    **({"resume_at_utc": resume} if resume else {}),
+                    "resume_note": (
+                        f"the pause lifts by itself at {resume}, the reset of "
+                        "the window this rule reads"
+                        if resume
+                        else "the guard removes this entry by itself after the "
+                        f"condition has been clear for {RESUME_CLEAR_CYCLES} cycles"
+                    ),
                 }
-            )
+                actions.append(
+                    {
+                        "action": "pause",
+                        "model": chosen,
+                        "vendor": finding["vendor"],
+                        "rule": finding["rule"],
+                        "reason": finding["detail"],
+                        "numbers": finding["numbers"],
+                        "resume_at_utc": resume,
+                        "cost_per_question_usd": _quantize(
+                            _cost_per_question(reading)
+                        ),
+                    }
+                )
 
         for model, entry in list(models.items()):
             if (entry or {}).get("owner") != GUARD_OWNER:

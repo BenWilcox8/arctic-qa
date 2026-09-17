@@ -119,16 +119,40 @@ A rule fires only on an urgent condition.
 The captain asked for a pause to be rare:
 "This should be rare and only happen if there are very urget issues with the benchmarking cost."
 
-| Rule | Vendor | Fires when |
-| --- | --- | --- |
-| `gemini_extrapolated_over_budget` | `google_gemini` | the extrapolated Gemini total is more than USD 200 |
-| `gemini_evaluation_ceiling_margin` | `google_gemini` | the `benchmark_evaluation` phase has less than USD 10 left under its ledger ceiling |
-| `claude_session_window_floor` | `anthropic_claude_code` | the Claude 5-hour session window is below 15 percent remaining |
-| `fable_weekly_window_floor` | `anthropic_claude_code` | the Fable weekly window is below 10 percent remaining, after the captain's own Fable pause has expired |
-| `codex_weekly_window_floor` | `openai_codex` | the Codex weekly window is below 10 percent remaining |
-| `codex_projected_exhaustion` | `openai_codex` | `quota-axi` projects the Codex weekly window exhausted before its reset, and the measured attribution shows that the benchmark drives that burn |
+| Rule | Vendor | Fires when | Pauses | Resumes |
+| --- | --- | --- | --- | --- |
+| `gemini_extrapolated_over_budget` | `google_gemini` | the extrapolated Gemini total is more than USD 200 | one model | after three clear cycles |
+| `gemini_evaluation_ceiling_margin` | `google_gemini` | the `benchmark_evaluation` phase has less than USD 10 left under its ledger ceiling | one model | after three clear cycles |
+| `fable_weekly_window_floor` | `anthropic_claude_code` | the Fable weekly window is 80 percent used or more, that is 20 percent or less remaining, after the captain's own Fable pause has expired | `claude-fable-5-1` | never by itself |
+| `claude_session_window_floor` | `anthropic_claude_code` | the Claude 5-hour session window is below 5 percent remaining | every Claude model | at that window's reset |
+| `claude_weekly_window_floor` | `anthropic_claude_code` | the Claude 7-day window is below 5 percent remaining | every Claude model | at that window's reset |
+| `codex_weekly_window_floor` | `openai_codex` | the Codex weekly window is below 10 percent remaining | every ChatGPT model | at that window's reset |
 
-Three rules need a note.
+### The captain's quota order of 2026-09-17
+
+The captain wrote at 08:35 UTC, before he went to sleep:
+"I need to have all results FINISHED by around 8:00am this morning [13:00 UTC].
+Extrapolate current rates to determine if this is feasible".
+He wrote at 08:55 UTC that the Claude arms stop when the 5-hour window or the `seven_day` window hits the floor of 5 percent, and resume at that window's reset.
+He wrote in the same order that `claude-fable-5-1` stops when its weekly usage reaches 80 percent, and that it does not come back by itself.
+
+The deadline is the point, so the subscription arms now run to a floor of their own quota window.
+The floor is a reserve and nothing more:
+
+- The ChatGPT arms run until the Codex weekly window has 10 percent left.
+  That reserve belongs to the paper worker.
+- The Claude arms run until the 5-hour window or the 7-day window has 5 percent left.
+  The floor was 15 percent of the 5-hour window until this order.
+- Fable is the one arm with a usage bound instead of a floor, and the one arm with no automatic resume.
+
+The rule `codex_projected_exhaustion` is retired.
+It paused `gpt-6-astra` at 08:29 UTC and `gpt-5.6-sol` at 08:34 UTC on 2026-09-17, at 23 percent remaining, hours before the floor.
+`RETIRED_RULES` in `src/arctic_qa/benchmark_guard.py` names it, and `guard-state.json` lists it under `retired_rules`.
+The guard removes the pause entries of a retired rule at once, and never waits for the hysteresis of a rule that can no longer be clear.
+The Codex attribution measurement stays: the floor rule carries it in its numbers and `guard-state.json` keeps the whole record under `codex_attribution`.
+No rule pauses on it.
+
+Four rules need a note.
 
 The ceiling-margin rule is inert when the ceiling is smaller than twice the warning band, that is USD 20.
 Under a small ceiling the band covers the whole budget and the rule would fire on the first call.
@@ -138,11 +162,15 @@ The field `rule_applies` records this.
 The Fable rule waits for the captain's own pause to expire.
 The captain wrote on 2026-09-16:
 "pause the fable evaluation because I only have ~80% fable usage left today; I will run the fable benchmarking after the reset at 6:00pm today".
-That pause carries `resume_at_utc` 2026-09-16T23:00:00Z.
-The guard takes that time as the moment its Fable rule starts.
+The captain's entry carries a `resume_at_utc`, and the guard takes that time as the moment its Fable rule starts.
+The Fable rule comes first of the Claude rules, before the two window rules.
+It holds one model and gives no resume time, and the window rules hold the whole arm and do give one.
+In that order Fable takes its own entry first, and a window rule then finds it paused and leaves it alone.
+The other order would give Fable a resume time that the captain did not authorize.
 
-The Codex projection rule needs proof that the benchmark drives the burn.
-The next section gives that measurement.
+An arm-wide rule is the one rule that can act after another rule of the same vendor acted in the same cycle.
+"Stop this one model" and "stop the whole arm" are different statements.
+One window bounds every model of its vendor, so a pause of one model of three leaves the other two crossing the same floor.
 
 ## The Codex attribution
 
@@ -172,9 +200,10 @@ The benchmark drives the Codex window when one of two conditions is true:
 - Its own extrapolated burn to the end of the run would exhaust the window before the reset by itself.
   That extrapolation is `questions_still_expected` multiplied by the benchmark's Codex cost per question, converted to percent points with the percent-per-USD of the same measurement.
 
-The finding of `codex_projected_exhaustion` records the share and both burns, and `guard-state.json` holds the whole measurement under `codex_attribution`.
+The finding of `codex_weekly_window_floor` records the share and the projection, and `guard-state.json` holds the whole measurement under `codex_attribution`.
+No rule fires on it since the captain's order of 2026-09-17.
 
-Three conditions stop the measurement, and the rule cannot fire while any of them holds:
+Three conditions stop the measurement, and it reports nothing while any of them holds:
 
 - The trailing window is not full yet.
   A guard that started less than 30 minutes ago has nothing to compare against.
@@ -204,7 +233,8 @@ The pause file keeps only what the evaluator reads.
 ## Which model the guard pauses
 
 A fired rule names the models of its vendor from the evaluation plan.
-The guard pauses at most one model of each affected vendor per cycle: the model with the highest cost per question that nothing pauses yet.
+A rule of a shared quota window pauses every one of them in the cycle it fires, because that window bounds them all.
+Every other rule pauses at most one model of each affected vendor per cycle: the model with the highest cost per question that nothing pauses yet.
 Two rules of one vendor say the same thing, that the vendor is running out, so the first fired rule of that vendor owns the pause.
 The captain set that tie-break for Gemini and the guard applies it to every vendor.
 A Gemini model ranks by real USD.
@@ -213,6 +243,11 @@ A model with no measured cost sorts last, because a pause would save nothing tha
 
 If the condition still holds at the next cycle, the guard pauses the next model of that vendor.
 When the condition clears, the guard removes every pause that it owns for that rule.
+
+A pause of a window rule carries that window's reset as its `resume_at_utc`.
+Such a pause lifts by itself, and it needs no cycle of this guard to lift.
+The guard also removes its own entry after that time has passed, because an entry that pauses nothing must not say that it does.
+A captain-owned entry is never touched, whatever its state.
 
 ## The pause switch
 

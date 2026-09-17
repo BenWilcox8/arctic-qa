@@ -9,9 +9,12 @@ import pytest
 
 from arctic_qa import ledger_store
 from arctic_qa.benchmark_guard import (
+    CLAUDE_SESSION_FLOOR_PERCENT,
+    CLAUDE_WEEKLY_FLOOR_PERCENT,
     CODEX_ATTRIBUTION_WINDOW_SECONDS,
     CODEX_WEEKLY_FLOOR_PERCENT,
     FABLE_MODEL,
+    FABLE_WEEKLY_FLOOR_PERCENT,
     GUARD_LOG_FILENAME,
     GUARD_MEMORY_FILENAME,
     GUARD_OWNER,
@@ -20,6 +23,7 @@ from arctic_qa.benchmark_guard import (
     PLAN_MODELS_BY_VENDOR,
     REPAUSE_HOLD_SECONDS,
     RESUME_CLEAR_CYCLES,
+    RETIRED_RULES,
     VENDOR_ANTHROPIC_CLAUDE_CODE,
     VENDOR_GOOGLE_GEMINI,
     VENDOR_OPENAI_CODEX,
@@ -40,6 +44,15 @@ from arctic_qa.benchmark_guard import (
 FIXTURES = Path(__file__).parents[1] / "fixtures"
 RECORDED_QUOTA = FIXTURES / "quota-axi-2026-09-16T10-41Z.json"
 CLAUDE_SESSION_LOW = FIXTURES / "quota-axi-claude-session-low.json"
+# Below the captain's 5 percent floor of 2026-09-17; CLAUDE_SESSION_LOW, at 12
+# percent, is above it and was below the 15 percent floor it replaced.
+CLAUDE_SESSION_AT_FLOOR = FIXTURES / "quota-axi-claude-session-at-floor.json"
+CLAUDE_WEEKLY_AT_FLOOR = FIXTURES / "quota-axi-claude-weekly-at-floor.json"
+CLAUDE_SESSION_AND_FABLE = FIXTURES / "quota-axi-claude-session-and-fable.json"
+# The recorded report with the Fable weekly window raised above the captain's
+# 80 percent usage bound, so that no rule of the guard fires on it. The
+# recorded report itself is 85 percent used there.
+QUIET_QUOTA = FIXTURES / "quota-axi-quiet.json"
 FABLE_LOW = FIXTURES / "quota-axi-fable-weekly-low.json"
 CODEX_LOW = FIXTURES / "quota-axi-codex-weekly-low.json"
 CODEX_EXHAUSTION_CLEAR = FIXTURES / "quota-axi-codex-exhaustion-clear.json"
@@ -243,15 +256,25 @@ def test_recorded_quota_report_flattens_to_the_four_guarded_windows() -> None:
     assert windows["codex_weekly"]["resets_at_utc"] == "2026-09-20T10:08:04.000Z"
 
 
-def test_recorded_quota_fires_no_rule_at_the_present_spend() -> None:
-    findings = evaluate_rules(
+def test_recorded_quota_fires_only_the_fable_usage_bound() -> None:
+    """The recorded report is 85 percent used on the Fable weekly window.
+
+    Under the 10 percent floor that window ran on. The captain replaced the
+    floor with a usage bound on 2026-09-17: 80 percent used stops Fable, so
+    the recorded report fires that one rule and nothing else.
+    """
+    arguments = dict(
         gemini=gemini_block(spend="0.153364", evaluated=5, still=272),
         evaluation_ceiling_usd=Decimal("200.00"),
         evaluation_used_usd=Decimal("0.153364"),
-        windows=windows_of(RECORDED_QUOTA),
         now=NOW,
     )
-    assert [finding["rule"] for finding in findings if finding["fired"]] == []
+    findings = evaluate_rules(windows=windows_of(RECORDED_QUOTA), **arguments)
+    assert [finding["rule"] for finding in findings if finding["fired"]] == [
+        "fable_weekly_window_floor"
+    ]
+    quiet = evaluate_rules(windows=windows_of(QUIET_QUOTA), **arguments)
+    assert [finding["rule"] for finding in quiet if finding["fired"]] == []
 
 
 def test_gemini_extrapolation_over_the_budget_fires_on_the_gemini_models() -> None:
@@ -308,20 +331,40 @@ def test_evaluation_ceiling_margin_is_inert_under_a_small_ceiling() -> None:
     assert finding["numbers"]["rule_applies"] is False
 
 
-def test_claude_session_floor_fires_on_the_recorded_low_session_window() -> None:
-    findings = evaluate_rules(
+def test_the_claude_session_floor_is_the_captains_five_percent() -> None:
+    """Twelve percent runs on; three percent pauses the whole Claude arm.
+
+    The floor was 15 percent until the captain's sleep order of 2026-09-17:
+    the deadline is the point, so the arms run down to a 5 percent reserve and
+    come back on the window's own reset, which the finding carries.
+    """
+    assert CLAUDE_SESSION_FLOOR_PERCENT == Decimal("5")
+    above = evaluate_rules(
         gemini=gemini_block(spend="1.00", evaluated=10, still=10),
         evaluation_ceiling_usd=Decimal("200.00"),
         evaluation_used_usd=Decimal("1.00"),
         windows=windows_of(CLAUDE_SESSION_LOW),
         now=NOW,
     )
+    assert rule(above, "claude_session_window_floor")["fired"] is False
+    findings = evaluate_rules(
+        gemini=gemini_block(spend="1.00", evaluated=10, still=10),
+        evaluation_ceiling_usd=Decimal("200.00"),
+        evaluation_used_usd=Decimal("1.00"),
+        windows=windows_of(CLAUDE_SESSION_AT_FLOOR),
+        now=NOW,
+    )
     finding = rule(findings, "claude_session_window_floor")
     assert finding["fired"] is True
-    assert finding["numbers"]["percent_remaining"] == "12"
+    assert finding["numbers"]["percent_remaining"] == "3"
     assert finding["candidate_models"] == list(
         PLAN_MODELS_BY_VENDOR[VENDOR_ANTHROPIC_CLAUDE_CODE]
     )
+    # One window bounds every Claude model, so the whole arm pauses, and the
+    # reset of that window is the resume time.
+    assert finding["pause_all"] is True
+    assert finding["resume_at_utc"] == finding["numbers"]["resets_at_utc"]
+    assert finding["resume_at_utc"] is not None
 
 
 def test_fable_weekly_floor_holds_until_the_captains_resume_time() -> None:
@@ -348,15 +391,53 @@ def test_fable_weekly_floor_holds_until_the_captains_resume_time() -> None:
     assert rule(after, "fable_weekly_window_floor")["candidate_models"] == [FABLE_MODEL]
 
 
-def test_fable_weekly_floor_ignores_the_recorded_fifteen_percent() -> None:
+def test_the_fable_bound_is_eighty_percent_used_and_never_auto_resumes() -> None:
+    """Captain order 2026-09-17, 08:55 UTC: stop Fable at 80 percent used.
+
+    Fable is the one arm with a usage bound instead of a floor, and the one
+    arm with no automatic resume: it comes back when the captain says so.
+    """
+    assert FABLE_WEEKLY_FLOOR_PERCENT == Decimal("20")
+    arguments = dict(
+        gemini=gemini_block(spend="1.00", evaluated=10, still=10),
+        evaluation_ceiling_usd=Decimal("200.00"),
+        evaluation_used_usd=Decimal("1.00"),
+        now=datetime(2026, 9, 17, 1, 0, tzinfo=UTC),
+    )
+    # 15 percent remaining is 85 percent used, so the bound is met.
+    findings = evaluate_rules(windows=windows_of(RECORDED_QUOTA), **arguments)
+    finding = rule(findings, "fable_weekly_window_floor")
+    assert finding["fired"] is True
+    assert finding["numbers"]["percent_remaining"] == "15"
+    assert finding["candidate_models"] == [FABLE_MODEL]
+    assert finding["pause_all"] is False
+    assert finding["resume_at_utc"] is None
+    # 60 percent remaining is 40 percent used, so it is not.
+    quiet = evaluate_rules(windows=windows_of(QUIET_QUOTA), **arguments)
+    assert rule(quiet, "fable_weekly_window_floor")["fired"] is False
+
+
+def test_the_claude_weekly_window_has_the_same_floor_as_the_session_window() -> None:
+    """Captain order 2026-09-17, 08:55 UTC: the seven_day window counts too."""
+    assert CLAUDE_WEEKLY_FLOOR_PERCENT == Decimal("5")
     findings = evaluate_rules(
         gemini=gemini_block(spend="1.00", evaluated=10, still=10),
         evaluation_ceiling_usd=Decimal("200.00"),
         evaluation_used_usd=Decimal("1.00"),
-        windows=windows_of(RECORDED_QUOTA),
-        now=datetime(2026, 9, 17, 1, 0, tzinfo=UTC),
+        windows=windows_of(CLAUDE_WEEKLY_AT_FLOOR),
+        now=NOW,
     )
-    assert rule(findings, "fable_weekly_window_floor")["fired"] is False
+    # The 5-hour window is high in this report, so the weekly rule is the one
+    # that stops the arm, and the arm comes back at the weekly reset.
+    assert rule(findings, "claude_session_window_floor")["fired"] is False
+    finding = rule(findings, "claude_weekly_window_floor")
+    assert finding["fired"] is True
+    assert finding["numbers"]["percent_remaining"] == "4"
+    assert finding["candidate_models"] == list(
+        PLAN_MODELS_BY_VENDOR[VENDOR_ANTHROPIC_CLAUDE_CODE]
+    )
+    assert finding["pause_all"] is True
+    assert finding["resume_at_utc"] == finding["numbers"]["resets_at_utc"]
 
 
 def test_codex_weekly_floor_fires_below_ten_percent() -> None:
@@ -373,47 +454,42 @@ def test_codex_weekly_floor_fires_below_ten_percent() -> None:
     assert finding["candidate_models"] == list(
         PLAN_MODELS_BY_VENDOR[VENDOR_OPENAI_CODEX]
     )
+    # The 10 percent reserve belongs to the paper worker, so the whole ChatGPT
+    # arm pauses until the weekly window resets.
+    assert finding["pause_all"] is True
+    assert finding["resume_at_utc"] == finding["numbers"]["resets_at_utc"]
 
 
-def test_codex_projected_exhaustion_needs_the_benchmark_to_be_the_main_consumer() -> (
-    None
-):
-    windows = windows_of(RECORDED_QUOTA)
-    idle = evaluate_rules(
-        gemini=gemini_block(spend="1.00", evaluated=10, still=10),
-        evaluation_ceiling_usd=Decimal("200.00"),
-        evaluation_used_usd=Decimal("1.00"),
-        windows=windows,
-        codex_attribution_record={"drives": False},
-        now=NOW,
-    )
-    driving = evaluate_rules(
-        gemini=gemini_block(spend="1.00", evaluated=10, still=10),
-        evaluation_ceiling_usd=Decimal("200.00"),
-        evaluation_used_usd=Decimal("1.00"),
-        windows=windows,
-        codex_attribution_record={"drives": True},
-        now=NOW,
-    )
-    # The recorded report projects exhaustion on 2026-09-17, before the
-    # 2026-09-20 weekly reset.
-    assert rule(idle, "codex_projected_exhaustion")["numbers"]["projected_before_reset"]
-    assert rule(idle, "codex_projected_exhaustion")["fired"] is False
-    assert rule(driving, "codex_projected_exhaustion")["fired"] is True
+def test_the_retired_projection_rule_is_gone_and_its_numbers_stay() -> None:
+    """A dominant share and an early projection now pause nothing.
 
-
-def test_codex_projected_exhaustion_clears_when_the_projection_passes_the_reset() -> (
-    None
-):
+    The recorded report projects the Codex weekly window exhausted on
+    2026-09-17, before its 2026-09-20 reset, and the attribution says the
+    benchmark drives the burn. Under the old rule that pair paused a ChatGPT
+    model at 23 percent remaining. The captain retired it on 2026-09-17: the
+    ChatGPT arms now run to the 10 percent floor. The measurement stays in the
+    floor rule's numbers, where an operator can read it.
+    """
     findings = evaluate_rules(
         gemini=gemini_block(spend="1.00", evaluated=10, still=10),
         evaluation_ceiling_usd=Decimal("200.00"),
         evaluation_used_usd=Decimal("1.00"),
-        windows=windows_of(CODEX_EXHAUSTION_CLEAR),
-        codex_attribution_record={"drives": True},
+        windows=windows_of(RECORDED_QUOTA),
+        codex_attribution_record={"drives": True, "measured": True},
         now=NOW,
     )
-    assert rule(findings, "codex_projected_exhaustion")["fired"] is False
+    assert "codex_projected_exhaustion" in RETIRED_RULES
+    assert [
+        finding
+        for finding in findings
+        if finding["rule"] in RETIRED_RULES
+    ] == []
+    floor = rule(findings, "codex_weekly_window_floor")
+    assert floor["fired"] is False
+    assert floor["numbers"]["percent_remaining"] == "23"
+    assert floor["numbers"]["projected_exhausted_at_utc"] == EXHAUSTION_BEFORE_RESET
+    assert floor["numbers"]["attribution_measured"] is True
+    assert floor["numbers"]["retired_projection_rule"] == "codex_projected_exhaustion"
 
 
 def test_an_absent_quota_window_fires_nothing() -> None:
@@ -649,7 +725,7 @@ def append_codex_row(workspace: dict[str, Path], index: int) -> None:
 
 def codex_quota_file(path: Path, *, percent_remaining: int, projected: str) -> Path:
     """Write one recorded quota report with a chosen Codex weekly reading."""
-    report = json.loads(RECORDED_QUOTA.read_text(encoding="utf-8"))
+    report = json.loads(QUIET_QUOTA.read_text(encoding="utf-8"))
     for provider in report["providers"]:
         if provider["provider"] != "codex":
             continue
@@ -679,7 +755,7 @@ def guard_for(workspace: dict[str, Path], quota: Path) -> BenchmarkGuard:
 def test_a_quiet_cycle_writes_state_and_log_and_pauses_nothing(
     workspace: dict[str, Path],
 ) -> None:
-    state = guard_for(workspace, RECORDED_QUOTA).cycle(now=NOW)
+    state = guard_for(workspace, QUIET_QUOTA).cycle(now=NOW)
     assert state["actions"] == []
     assert state["paused_models"] == {}
     assert not workspace["pause"].exists()
@@ -691,37 +767,49 @@ def test_a_quiet_cycle_writes_state_and_log_and_pauses_nothing(
     assert state["evaluation_phase"]["used_usd"] == "0.300000"
 
 
-def test_the_session_floor_pauses_one_claude_model_and_reports_it(
+def test_the_session_floor_pauses_every_claude_model_and_reports_them(
     workspace: dict[str, Path],
 ) -> None:
-    state = guard_for(workspace, CLAUDE_SESSION_LOW).cycle(now=NOW)
-    assert [action["model"] for action in state["actions"]] == [FABLE_MODEL]
-    assert state["actions"][0]["action"] == "pause"
-    assert state["actions"][0]["rule"] == "claude_session_window_floor"
+    """One window bounds three models, so pausing one of them saves nothing."""
+    state = guard_for(workspace, CLAUDE_SESSION_AT_FLOOR).cycle(now=NOW)
+    assert [action["model"] for action in state["actions"]] == list(
+        PLAN_MODELS_BY_VENDOR[VENDOR_ANTHROPIC_CLAUDE_CODE]
+    )
+    assert {action["action"] for action in state["actions"]} == {"pause"}
+    assert {action["rule"] for action in state["actions"]} == {
+        "claude_session_window_floor"
+    }
     pause = read_pause_file(workspace["pause"])
-    entry = pause["paused_models"][FABLE_MODEL]
-    assert entry["owner"] == GUARD_OWNER
-    assert entry["rule"] == "claude_session_window_floor"
+    for model in PLAN_MODELS_BY_VENDOR[VENDOR_ANTHROPIC_CLAUDE_CODE]:
+        entry = pause["paused_models"][model]
+        assert entry["owner"] == GUARD_OWNER
+        assert entry["rule"] == "claude_session_window_floor"
+        # The 5-hour window resets by itself, so the arm comes back without a
+        # cycle of this guard.
+        assert entry["resume_at_utc"] == entry["numbers"]["resets_at_utc"]
     status = workspace["status"].read_text(encoding="utf-8").splitlines()
     assert status[0].startswith("working: paused claude-fable-5-1 on ")
-    assert "percent_remaining=12" in status[0]
+    assert "percent_remaining=3" in status[0]
+    assert len(status) == 3
 
 
-def test_a_second_cycle_pauses_the_next_model_while_the_condition_holds(
+def test_a_second_cycle_adds_nothing_once_the_whole_arm_is_paused(
     workspace: dict[str, Path],
 ) -> None:
-    guard = guard_for(workspace, CLAUDE_SESSION_LOW)
+    guard = guard_for(workspace, CLAUDE_SESSION_AT_FLOOR)
     guard.cycle(now=NOW)
     state = guard.cycle(now=NOW)
-    assert [action["model"] for action in state["actions"]] == ["claude-opus-5"]
-    assert sorted(state["paused_models"]) == [FABLE_MODEL, "claude-opus-5"]
+    assert state["actions"] == []
+    assert sorted(state["paused_models"]) == sorted(
+        PLAN_MODELS_BY_VENDOR[VENDOR_ANTHROPIC_CLAUDE_CODE]
+    )
 
 
 def test_the_guard_resumes_its_own_pause_after_three_clear_cycles(
     workspace: dict[str, Path],
 ) -> None:
-    guard_for(workspace, CLAUDE_SESSION_LOW).cycle(now=NOW)
-    clear = guard_for(workspace, RECORDED_QUOTA)
+    guard_for(workspace, CLAUDE_SESSION_AT_FLOOR).cycle(now=NOW)
+    clear = guard_for(workspace, QUIET_QUOTA)
     for index in range(1, RESUME_CLEAR_CYCLES):
         state = clear.cycle(now=NOW + CYCLE * index)
         assert state["actions"] == []
@@ -729,11 +817,13 @@ def test_the_guard_resumes_its_own_pause_after_three_clear_cycles(
         assert state["hysteresis"][0]["hold"] == "clear_cycles"
         assert state["hysteresis"][0]["clear_cycles"] == index
     state = clear.cycle(now=NOW + CYCLE * RESUME_CLEAR_CYCLES)
-    assert [action["action"] for action in state["actions"]] == ["resume"]
-    assert state["actions"][0]["model"] == FABLE_MODEL
+    assert {action["action"] for action in state["actions"]} == {"resume"}
+    assert [action["model"] for action in state["actions"]] == list(
+        PLAN_MODELS_BY_VENDOR[VENDOR_ANTHROPIC_CLAUDE_CODE]
+    )
     assert read_pause_file(workspace["pause"])["paused_models"] == {}
     status = workspace["status"].read_text(encoding="utf-8").splitlines()
-    assert status[-1].startswith("working: resumed claude-fable-5-1 on ")
+    assert status[-1].startswith("working: resumed claude-sonnet-5 on ")
 
 
 def test_a_resumed_model_is_not_paused_again_by_the_same_rule_for_thirty_minutes(
@@ -746,7 +836,7 @@ def test_a_resumed_model_is_not_paused_again_by_the_same_rule_for_thirty_minutes
         read_pause_file(workspace["pause"])["paused_models"][FABLE_MODEL]["rule"]
         == "fable_weekly_window_floor"
     )
-    clear = guard_for(workspace, RECORDED_QUOTA)
+    clear = guard_for(workspace, QUIET_QUOTA)
     for index in range(1, RESUME_CLEAR_CYCLES + 1):
         state = clear.cycle(now=NOW + CYCLE * index)
     assert [action["action"] for action in state["actions"]] == ["resume"]
@@ -788,14 +878,18 @@ def test_the_guard_never_removes_a_pause_an_operator_wrote(
         ),
         encoding="utf-8",
     )
-    state = guard_for(workspace, CLAUDE_SESSION_LOW).cycle(now=NOW)
+    state = guard_for(workspace, CLAUDE_SESSION_AT_FLOOR).cycle(now=NOW)
     pause = read_pause_file(workspace["pause"])
     assert pause["paused_models"][FABLE_MODEL]["resume_at_utc"] == (
         "2026-09-16T23:00:00Z"
     )
     assert "owner" not in pause["paused_models"][FABLE_MODEL]
-    # The captain already holds Fable, so the rule takes the next Claude model.
-    assert [action["model"] for action in state["actions"]] == ["claude-opus-5"]
+    # The captain already holds Fable, so the rule takes the Claude models that
+    # nothing holds yet and leaves the captain's entry exactly as written.
+    assert [action["model"] for action in state["actions"]] == [
+        "claude-opus-5",
+        "claude-sonnet-5",
+    ]
 
 
 def test_the_gemini_budget_extrapolation_reaches_the_guard_state(
@@ -821,7 +915,7 @@ def test_a_runaway_gemini_cost_pauses_the_costlier_gemini_model(
     ledger_store.write_snapshot(
         workspace["ledger"], ledger, ledger_store.snapshot_applied_seq(workspace["ledger"])
     )
-    state = guard_for(workspace, RECORDED_QUOTA).cycle(now=NOW)
+    state = guard_for(workspace, QUIET_QUOTA).cycle(now=NOW)
     assert [action["model"] for action in state["actions"]] == ["gemini-3.8-flash"]
     assert state["actions"][0]["rule"] == "gemini_extrapolated_over_budget"
     assert Decimal(state["gemini_budget"]["extrapolated_total_usd"]) > Decimal("200.00")
@@ -872,23 +966,128 @@ def test_the_command_line_runs_one_cycle_against_a_recorded_report(
 def test_two_rules_of_one_vendor_pause_only_one_model(
     workspace: dict[str, Path],
 ) -> None:
-    # A Codex weekly window below 10 percent and an exhaustion projected before
-    # the reset both say the same thing, so one model is enough.
-    guard = BenchmarkGuard(
-        journal_dir=workspace["journal"],
-        guard_dir=workspace["guard"],
-        pause_file=workspace["pause"],
-        shared_ledger_file=workspace["ledger"],
-        construction_policy_file=workspace["construction"],
-        evaluation_policy_file=workspace["evaluation"],
-        recorded_quota_file=CODEX_LOW,
+    # An extrapolated total over the budget and a ledger ceiling inside its
+    # last USD 10 both say the same thing about Gemini, so one model is enough.
+    ledger = json.loads(workspace["ledger"].read_text(encoding="utf-8"))
+    ledger["requests"]["a"]["actual_cost_usd"] = "195.000000"
+    ledger_store.write_snapshot(
+        workspace["ledger"],
+        ledger,
+        ledger_store.snapshot_applied_seq(workspace["ledger"]),
     )
-    state = guard.cycle(now=NOW)
+    state = guard_for(workspace, QUIET_QUOTA).cycle(now=NOW)
+    fired = [finding["rule"] for finding in state["rules"] if finding["fired"]]
+    assert fired == [
+        "gemini_extrapolated_over_budget",
+        "gemini_evaluation_ceiling_margin",
+    ]
+    gemini = [
+        action for action in state["actions"] if action["vendor"] == VENDOR_GOOGLE_GEMINI
+    ]
+    assert len(gemini) == 1
+    assert gemini[0]["rule"] == "gemini_extrapolated_over_budget"
+
+
+def test_the_codex_floor_pauses_the_whole_chatgpt_arm_at_once(
+    workspace: dict[str, Path],
+) -> None:
+    """The reserve of the paper worker: below 10 percent every arm stops."""
+    state = guard_for(workspace, CODEX_LOW).cycle(now=NOW)
     codex = [
         action for action in state["actions"] if action["vendor"] == VENDOR_OPENAI_CODEX
     ]
-    assert len(codex) == 1
-    assert codex[0]["rule"] == "codex_weekly_window_floor"
+    assert [action["model"] for action in codex] == list(
+        PLAN_MODELS_BY_VENDOR[VENDOR_OPENAI_CODEX]
+    )
+    assert {action["rule"] for action in codex} == {"codex_weekly_window_floor"}
+    pause = read_pause_file(workspace["pause"])
+    for model in PLAN_MODELS_BY_VENDOR[VENDOR_OPENAI_CODEX]:
+        entry = pause["paused_models"][model]
+        assert entry["resume_at_utc"] == "2026-09-20T10:08:04.000Z"
+
+
+def test_a_pause_of_a_retired_rule_is_removed_on_the_next_cycle(
+    workspace: dict[str, Path],
+) -> None:
+    """The live file of 2026-09-17 08:34 UTC, and the sweep that clears it.
+
+    The retired rule can never be clear again, so the hysteresis of a clear
+    rule would hold these entries for ever. The captain's own entry is not
+    the guard's, so it stays exactly as written.
+    """
+    workspace["guard"].mkdir(parents=True, exist_ok=True)
+    workspace["pause"].write_text(
+        json.dumps(
+            {
+                "schema": PAUSE_SCHEMA,
+                "paused_models": {
+                    FABLE_MODEL: {
+                        "owner": "captain",
+                        "reason": "captain order 2026-09-17: pause the Fable testing",
+                    },
+                    "gpt-6-astra": {
+                        "owner": GUARD_OWNER,
+                        "rule": "codex_projected_exhaustion",
+                        "vendor": VENDOR_OPENAI_CODEX,
+                        "paused_at_utc": "2026-09-17T08:29:26Z",
+                        "reason": "quota-axi projects the Codex weekly window "
+                        "exhausted before its reset while the benchmark is the "
+                        "main consumer",
+                    },
+                    "gpt-5.6-sol": {
+                        "owner": GUARD_OWNER,
+                        "rule": "codex_projected_exhaustion",
+                        "vendor": VENDOR_OPENAI_CODEX,
+                        "paused_at_utc": "2026-09-17T08:34:27Z",
+                        "reason": "quota-axi projects the Codex weekly window "
+                        "exhausted before its reset while the benchmark is the "
+                        "main consumer",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = guard_for(workspace, QUIET_QUOTA).cycle(now=NOW)
+    assert [
+        (action["action"], action["model"]) for action in state["actions"]
+    ] == [("resume", "gpt-5.6-sol"), ("resume", "gpt-6-astra")]
+    pause = read_pause_file(workspace["pause"])
+    assert sorted(pause["paused_models"]) == [FABLE_MODEL]
+    assert pause["paused_models"][FABLE_MODEL]["owner"] == "captain"
+    assert state["retired_rules"] == [
+        {"rule": rule_name, "note": state["retired_rules"][0]["note"]}
+        for rule_name in RETIRED_RULES
+    ]
+
+
+def test_a_guard_pause_whose_resume_time_has_passed_is_removed(
+    workspace: dict[str, Path],
+) -> None:
+    """An expired entry pauses nothing, so it must not say that it does."""
+    workspace["guard"].mkdir(parents=True, exist_ok=True)
+    workspace["pause"].write_text(
+        json.dumps(
+            {
+                "schema": PAUSE_SCHEMA,
+                "paused_models": {
+                    "claude-opus-5": {
+                        "owner": GUARD_OWNER,
+                        "rule": "claude_session_window_floor",
+                        "vendor": VENDOR_ANTHROPIC_CLAUDE_CODE,
+                        "reason": "the Claude 5-hour session window is below 5 "
+                        "percent remaining",
+                        "resume_at_utc": "2026-09-16T11:00:00Z",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = guard_for(workspace, QUIET_QUOTA).cycle(now=NOW)
+    assert [action["model"] for action in state["actions"]] == ["claude-opus-5"]
+    assert state["actions"][0]["action"] == "resume"
+    assert read_pause_file(workspace["pause"])["paused_models"] == {}
 
 
 def test_the_codex_projection_waits_for_a_full_measurement_window(
@@ -896,12 +1095,12 @@ def test_the_codex_projection_waits_for_a_full_measurement_window(
 ) -> None:
     # The first cycle has no trailing window to measure, so the rule that reads
     # the attribution cannot fire however the projection looks.
-    guard = guard_for(workspace, RECORDED_QUOTA)
+    guard = guard_for(workspace, QUIET_QUOTA)
     first = guard.cycle(now=NOW)
     assert first["benchmark_is_main_codex_consumer"] is False
     assert first["codex_attribution"]["measured"] is False
     assert str(CODEX_ATTRIBUTION_WINDOW_SECONDS) in first["codex_attribution"]["reason"]
-    assert rule(first["rules"], "codex_projected_exhaustion")["fired"] is False
+    assert first["actions"] == []
     memory = json.loads(
         (workspace["guard"] / GUARD_MEMORY_FILENAME).read_text(encoding="utf-8")
     )
@@ -936,15 +1135,18 @@ def test_alternating_codex_cycles_under_another_sessions_burn_pause_nothing(
     assert Decimal(attribution["benchmark_usd_burn"]) > Decimal("0")
     assert Decimal(attribution["benchmark_share_of_window"]) < Decimal("0.5")
     assert attribution["drives"] is False
-    assert rule(state["rules"], "codex_projected_exhaustion")["fired"] is False
     assert actions == []
 
 
-def test_a_dominant_codex_share_pauses_one_model_and_holds_it(
+def test_a_dominant_codex_share_pauses_nothing_above_the_floor(
     workspace: dict[str, Path], tmp_path: Path
 ) -> None:
-    """The window burns only while this benchmark books Codex calls, so the
-    benchmark owns the burn and the projection is urgent.
+    """The window burns only while this benchmark books Codex calls.
+
+    Under the retired rule that share paused a ChatGPT model at 39 percent
+    remaining. The captain's order of 2026-09-17 spends that headroom on the
+    deadline: the share is still measured, and only the 10 percent floor
+    pauses an arm.
     """
     quota = tmp_path / "quota"
     quota.mkdir()
@@ -966,28 +1168,29 @@ def test_a_dominant_codex_share_pauses_one_model_and_holds_it(
     assert attribution["measured"] is True
     assert Decimal(attribution["benchmark_share_of_window"]) >= Decimal("0.5")
     assert Decimal(attribution["percent_per_usd"]) > Decimal("0")
-    assert [action["model"] for action in actions] == ["gpt-6-astra"]
-    assert actions[0]["rule"] == "codex_projected_exhaustion"
-    numbers = actions[0]["numbers"]
+    assert percent > CODEX_WEEKLY_FLOOR_PERCENT
+    assert actions == []
+    assert state["paused_models"] == {}
+    # The floor is the one rule of this vendor, and it reports the projection
+    # the retired rule read.
+    floor = rule(state["rules"], "codex_weekly_window_floor")
+    assert floor["fired"] is False
+    assert floor["numbers"]["projected_exhausted_at_utc"] == EXHAUSTION_BEFORE_RESET
     assert (
-        numbers["benchmark_share_of_window"]
-        == (attribution["benchmark_share_of_window"])
+        floor["numbers"]["benchmark_share_of_window"]
+        == attribution["benchmark_share_of_window"]
     )
-    assert numbers["benchmark_percent_burn"] == attribution["benchmark_percent_burn"]
-    assert numbers["window_percent_burn"] == attribution["window_percent_burn"]
 
-    # One clear cycle does not lift the pause.
-    clear = codex_quota_file(
-        quota / "clear.json",
-        percent_remaining=percent,
+    # Below the floor the whole arm stops, whatever the share says.
+    at_floor = codex_quota_file(
+        quota / "at-floor.json",
+        percent_remaining=9,
         projected=EXHAUSTION_AFTER_RESET,
     )
-    after = guard_for(workspace, clear).cycle(now=NOW + CYCLE * 14)
-    assert rule(after["rules"], "codex_projected_exhaustion")["fired"] is False
-    assert after["actions"] == []
-    assert "gpt-6-astra" in after["paused_models"]
-    assert after["hysteresis"][0]["clear_cycles"] == 1
-    assert after["hysteresis"][0]["clear_cycles_required"] == RESUME_CLEAR_CYCLES
+    after = guard_for(workspace, at_floor).cycle(now=NOW + CYCLE * 14)
+    assert [action["model"] for action in after["actions"]] == list(
+        PLAN_MODELS_BY_VENDOR[VENDOR_OPENAI_CODEX]
+    )
 
 
 def _set_watch_state(workspace: dict[str, Path], updated_at_utc: str) -> None:
@@ -1005,7 +1208,7 @@ def test_a_stopped_evaluator_is_an_error_and_one_blocked_line(
     The unit met its item bound at 2026-09-16T19:31:44Z, exited 0, and no
     operator saw it until the next morning.
     """
-    guard = guard_for(workspace, RECORDED_QUOTA)
+    guard = guard_for(workspace, QUIET_QUOTA)
     running = guard.cycle(now=NOW)
     assert running["evaluator"]["running"] is True
     assert running["errors"] == []
@@ -1046,3 +1249,84 @@ def test_an_absent_watch_state_is_an_error_too(workspace: dict[str, Path]) -> No
         "directory: it never started, or it runs elsewhere"
     ]
     assert workspace["status"].read_text(encoding="utf-8").startswith("blocked: ")
+
+
+def test_the_fable_bound_keeps_its_own_entry_under_the_arm_wide_pause(
+    workspace: dict[str, Path],
+) -> None:
+    """Two rules of the Claude arm, and Fable must not get a resume time.
+
+    The Fable bound holds one model with no automatic resume; the session
+    floor holds the whole arm and resumes it at the reset. Both fire here, so
+    the Fable entry must be the bound's own and the arm-wide rule must reach
+    the other two models.
+    """
+    # This report carries the Fable window at 15 percent, which is 85 percent
+    # used, together with a 5-hour window under the floor.
+    state = guard_for(workspace, CLAUDE_SESSION_AND_FABLE).cycle(now=NOW)
+    fired = [finding["rule"] for finding in state["rules"] if finding["fired"]]
+    assert fired == ["fable_weekly_window_floor", "claude_session_window_floor"]
+    assert [action["model"] for action in state["actions"]] == [
+        FABLE_MODEL,
+        "claude-opus-5",
+        "claude-sonnet-5",
+    ]
+    pause = read_pause_file(workspace["pause"])
+    fable = pause["paused_models"][FABLE_MODEL]
+    assert fable["rule"] == "fable_weekly_window_floor"
+    assert "resume_at_utc" not in fable
+    for model in ("claude-opus-5", "claude-sonnet-5"):
+        entry = pause["paused_models"][model]
+        assert entry["rule"] == "claude_session_window_floor"
+        assert entry["resume_at_utc"] == entry["numbers"]["resets_at_utc"]
+
+
+def test_the_claude_weekly_floor_pauses_the_whole_arm_in_one_cycle(
+    workspace: dict[str, Path],
+) -> None:
+    state = guard_for(workspace, CLAUDE_WEEKLY_AT_FLOOR).cycle(now=NOW)
+    assert [action["model"] for action in state["actions"]] == list(
+        PLAN_MODELS_BY_VENDOR[VENDOR_ANTHROPIC_CLAUDE_CODE]
+    )
+    assert {action["rule"] for action in state["actions"]} == {
+        "claude_weekly_window_floor"
+    }
+    pause = read_pause_file(workspace["pause"])
+    for model in PLAN_MODELS_BY_VENDOR[VENDOR_ANTHROPIC_CLAUDE_CODE]:
+        assert pause["paused_models"][model]["resume_at_utc"] == (
+            "2026-09-16T22:59:59.339056+00:00"
+        )
+
+
+def test_a_captain_pause_with_a_resume_time_survives_every_cycle(
+    workspace: dict[str, Path],
+) -> None:
+    """The captain's own entries of 2026-09-17 08:37 UTC, and 10:11 UTC.
+
+    The guard removes its own expired entries and never a captain's, whatever
+    their state: the captain owns when that arm comes back.
+    """
+    workspace["guard"].mkdir(parents=True, exist_ok=True)
+    entries = {
+        model: {
+            "owner": "captain",
+            "reason": "captain order 2026-09-17 08:37 UTC: pause the Claude "
+            "model benchmark evaluations until the session reset",
+            "paused_at_utc": "2026-09-17T08:36:46Z",
+            "resume_at_utc": "2026-09-17T10:11:00Z",
+        }
+        for model in ("claude-opus-5", "claude-sonnet-5")
+    }
+    workspace["pause"].write_text(
+        json.dumps({"schema": PAUSE_SCHEMA, "paused_models": entries}),
+        encoding="utf-8",
+    )
+    # Long after that resume time, and with every rule clear.
+    state = guard_for(workspace, QUIET_QUOTA).cycle(
+        now=datetime(2026, 9, 17, 12, 0, tzinfo=UTC)
+    )
+    assert state["actions"] == []
+    pause = read_pause_file(workspace["pause"])
+    assert pause["paused_models"] == entries
+    # The entries no longer pause anything, which is what the resume time says.
+    assert state["paused_models"] == {}

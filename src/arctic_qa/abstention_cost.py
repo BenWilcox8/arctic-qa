@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import threading
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -492,9 +493,17 @@ def resume_row(*, run_id: str, vendor: str, paused_reason: str) -> dict[str, Any
 
 
 class CostJournal:
-    """Append-only journal: one row per evaluated question, plus pause rows."""
+    """Append-only journal: one row per evaluated question, plus pause rows.
+
+    Several questions are scored at once, so several threads of one evaluator
+    append to this file and read it back. One re-entrant lock covers both: an
+    append is one line, and a reader must never meet half of one. Every
+    reader of the rows goes through :meth:`rows`, and several of them call it
+    while holding the lock already, which is why the lock is re-entrant.
+    """
 
     def __init__(self, directory: Path) -> None:
+        self._lock = threading.RLock()
         self.directory = directory
         directory.mkdir(parents=True, exist_ok=True)
         self.path = directory / JOURNAL_FILENAME
@@ -516,13 +525,11 @@ class CostJournal:
             )
 
     def rows(self) -> list[dict[str, Any]]:
-        if not self.path.is_file():
-            return []
-        return [
-            json.loads(line)
-            for line in self.path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        with self._lock:
+            if not self.path.is_file():
+                return []
+            text = self.path.read_text(encoding="utf-8")
+        return [json.loads(line) for line in text.splitlines() if line.strip()]
 
     def item_rows(self) -> list[dict[str, Any]]:
         """Every item row in file order, including a superseded one."""
@@ -551,6 +558,16 @@ class CostJournal:
         that flag from the paused models alone. One of them, written while the
         Claude Code arm was paused, called an item complete with 30 of its 48
         trials.
+
+        A pause is the one thing that reopens an item. An arm that *stopped
+        inside* an item does not: the evaluation policy forbids a retry, so
+        the trials that stop never went out and never will under this
+        contract. Such an item keeps its partial trials, and its row records
+        exactly how many it holds (``evaluation.recorded_trials`` against
+        ``evaluation.planned_trials``) and the row-level ``complete`` flag is
+        False. Reopening one is an operator action, because it needs the
+        recorded stop to be judged first. Read "A question an arm stopped
+        inside" in docs/ABSTENTION_EVALUATION.md.
         """
         evaluation = row.get("evaluation") or {}
         if evaluation.get("vendors_paused"):
@@ -619,9 +636,10 @@ class CostJournal:
         return result
 
     def append(self, row: dict[str, Any]) -> None:
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(canonical_json(row) + "\n")
-            handle.flush()
+        with self._lock:
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(canonical_json(row) + "\n")
+                handle.flush()
 
     def cumulative(self) -> dict[str, Any]:
         """Totals over every item so far, for the next row's cumulative block."""

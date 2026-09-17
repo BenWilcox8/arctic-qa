@@ -1004,10 +1004,11 @@ def test_the_pause_record_merges_the_file_and_the_command_line(tmp_path: Path) -
     # and removes entries while the run goes on. So this asserts the captain's
     # standing entry only, and the rest of the test owns its own record.
     committed = load_pause(PAUSE_FILE)
-    assert (
-        committed["paused_models"]["claude-fable-5-1"]["resume_at_utc"]
-        == "2026-09-16T23:00:00Z"
-    )
+    fable_entry = committed["paused_models"]["claude-fable-5-1"]
+    # The captain owns this entry and its resume time moves with his orders,
+    # so the assertion is on the shape of the entry and not on the date.
+    assert fable_entry["owner"] == "captain"
+    assert fable_entry["reason"] and fable_entry["resume_at_utc"]
     shipped = fable_pause()
     before = datetime(2026, 9, 16, 12, 0, tzinfo=UTC)
     after = datetime(2026, 9, 17, 0, 0, tzinfo=UTC)
@@ -1321,3 +1322,86 @@ def test_a_later_pass_on_a_later_commit_finishes_the_item(tmp_path: Path) -> Non
         .splitlines()
     ]
     assert {row["code_commit"] for row in claude_rows} == {"ea00336"}
+
+
+class _StopOnceProvider(ScriptedEvaluationProvider):
+    """Answer the first trial with a harness failure, then answer normally."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.remaining = 1
+        self.lock = threading.Lock()
+
+    def answer(self, request):
+        from arctic_qa.abstention_providers import EvaluationResponse
+
+        with self.lock:
+            stop = self.remaining > 0
+            self.remaining -= 1
+        if not stop:
+            return super().answer(request)
+        return EvaluationResponse(
+            state="failed",
+            raw_text=None,
+            finish_reason=None,
+            usage=None,
+            cost_usd=None,
+            latency_seconds=0.0,
+            request_key=None,
+            request_sha256=None,
+            receipt_sha256=None,
+            receipt_file=None,
+            model_version=None,
+            response_id=None,
+            error="the harness exited with None: FileNotFoundError",
+        )
+
+
+def _gemini_only(plan: dict, provider) -> dict:
+    return {
+        PROVIDER_GOOGLE_GEMINI: VendorRun(
+            vendor=PROVIDER_GOOGLE_GEMINI,
+            provider=provider,
+            decoding={"scripted": True},
+            models=plan["vendors"][PROVIDER_GOOGLE_GEMINI]["models"],
+            concurrency=1,
+        )
+    }
+
+
+def test_a_second_pass_reports_no_stop_of_its_own(tmp_path: Path) -> None:
+    """A recorded stop belongs to the pass that met it, and to no later one.
+
+    Nothing retries a stop, so the row stays in ``responses.jsonl`` for ever
+    and ``stopped_on`` keeps naming it. The evaluator pauses a vendor on a
+    stop, so a later pass over the same item must report its own stops only:
+    otherwise the arm goes down again the moment a revisit touches an old
+    stop, and a revisit is how a paused arm finishes the items it owes.
+    """
+    plan = load_plan(PLAN_FILE)
+    set_dir = frozen_set(tmp_path, count=1)
+    run_dir = tmp_path / "stopped-pass"
+    first = run_plan(
+        set_dir=set_dir,
+        output_dir=run_dir,
+        run_id="plan-stop-r1",
+        plan=plan,
+        vendor_runs=_gemini_only(plan, _StopOnceProvider(policy="gold")),
+    )
+    gemini = first["vendors"][PROVIDER_GOOGLE_GEMINI]
+    assert gemini["complete"] is False
+    assert gemini["stopped_on"]["state"] == "failed"
+    assert gemini["stopped_this_pass"] == gemini["stopped_on"]
+    # The second pass answers every trial that is missing. The old stop is
+    # still on record, and it is not this pass's stop.
+    second = run_plan(
+        set_dir=set_dir,
+        output_dir=run_dir,
+        run_id="plan-stop-r1",
+        plan=plan,
+        vendor_runs=_gemini_only(plan, ScriptedEvaluationProvider(policy="gold")),
+    )
+    again = second["vendors"][PROVIDER_GOOGLE_GEMINI]
+    assert again["stopped_on"]["state"] == "failed"
+    assert again["stopped_this_pass"] is None
+    assert again["recorded_trials"] == 12

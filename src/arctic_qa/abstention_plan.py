@@ -492,6 +492,10 @@ def run_vendor(
     stop = threading.Event()
     counters = {"calls": 0}
     errors: list[BaseException] = []
+    # The rows this pass recorded, which is not every row of the run: a
+    # revisit of an item resumes what an earlier pass wrote. A stop belongs to
+    # the pass that met it, because the caller pauses the vendor on it.
+    fresh: list[dict[str, Any]] = []
     started = time.monotonic()
 
     def work(trial: dict[str, Any]) -> None:
@@ -520,6 +524,7 @@ def run_vendor(
                 handle.write(canonical_json(row) + "\n")
                 handle.flush()
             rows.append(row)
+            fresh.append(row)
             if not response.resumed:
                 counters["calls"] += 1
         if response.state != COMPLETED:
@@ -539,6 +544,21 @@ def run_vendor(
     if errors:
         raise errors[0]
     summary = summarize_run(rows, {**run_manifest, "planned_trials": len(trials)})
+    # The stop of THIS pass, which is what pauses a vendor. `stopped_on` holds
+    # the first stop of the whole run directory, and a stop there is permanent:
+    # the policy forbids a retry, so the recorded row stays for ever. Reading
+    # it would pause the vendor again on every later pass over that item, and
+    # the arm would be off again the moment a revisit touched an old stop.
+    stopped_now = [row for row in fresh if row["response"]["state"] != COMPLETED]
+    summary["stopped_this_pass"] = (
+        {
+            "trial_id": stopped_now[0]["trial_id"],
+            "state": stopped_now[0]["response"]["state"],
+            "error": stopped_now[0]["response"]["error"],
+        }
+        if stopped_now
+        else None
+    )
     summary["calls_this_invocation"] = counters["calls"]
     summary["vendor"] = vendor_run.vendor
     summary["concurrency"] = workers
@@ -825,6 +845,7 @@ def summarize_plan(
                 "concurrency": results.get(vendor, {}).get("concurrency"),
                 "wall_seconds": results.get(vendor, {}).get("wall_seconds"),
                 "stopped_on": results.get(vendor, {}).get("stopped_on"),
+                "stopped_this_pass": results.get(vendor, {}).get("stopped_this_pass"),
                 "paused_models": results.get(vendor, {}).get("paused_models"),
                 "pending_trials": results.get(vendor, {}).get("pending_trials"),
                 "error": failures.get(vendor),
