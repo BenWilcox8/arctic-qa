@@ -521,6 +521,10 @@ Three shapes reach the evaluator, and `abstention_plan.PRE_PROVIDER_REFUSALS` is
 - `errors.BrokerOperationBusyError`, the exclusive operation lock of the shared paid-call ledger, held past the bounded wait.
 - `errors.HarnessUnavailableError`, a subscription harness binary that cannot be started.
   The probe `abstention_subscription.require_harness_binary` runs before the trial reserves its row, and the transport owns it: `SubprocessTransport.probe` asks, a scripted transport starts no process and answers by doing nothing.
+  The same error covers a harness that started and never received the prompt: the child waits a few seconds for its stdin, gives up and refuses because it was given no prompt at all.
+  `abstention_subscription.HARNESS_PROMPT_FAILURES` is what that leaves in the transport's stderr.
+  The row is already registered by then, so `SubscriptionLedger.abandon` drops it and frees the slot, and no receipt is written: nothing was asked and nothing was charged, so there is no event to receipt.
+  That is the one way a row leaves the subscription ledger.
 - `errors.TransientReservationError`, the paid-call concurrency slots or the minute window of the evaluation phase, still full past the broker's own bounded wait.
   The broker raises it only for a caller that sets `defer_transient_reservations`, which the evaluator's brokers do; every other caller keeps the recorded `not_submitted` refusal.
   Nothing is written for it: no receipt, no ledger mutation, and the row stays `counting` for the next attempt to reuse.
@@ -555,6 +559,22 @@ The concurrency limit of the evaluation phase belongs to the shared paid-call le
 `watch` builds it once per invocation at `maximum_concurrent_requests` of the evaluation policy and hands it to every question, and `GeminiBrokerEvaluationProvider` takes it around the paid call alone, never around a replayed receipt.
 So a call past the limit waits in this process, where waiting is free, instead of waiting out the broker's bound and being refused.
 The per-vendor slots of the subscription arms are unchanged, because a slot there belongs to the vendor and nothing outside this process enforces it.
+
+### The exit code is not the answer
+
+A subscription harness can exit non-zero after it has printed its whole result.
+
+Claude Code does exactly that when the provider declines the request: the result object carries `stop_reason: "refusal"` and the refusal text in `result`, and the process exits 1 with an empty stderr.
+
+The provider saw the request and answered it, so that is a response of this trial like any other.
+It carries no letter, so it scores N0, it counts toward the 48 planned responses, and nothing asks it again.
+It also says nothing about the next question, because a safeguard reads the text of this one: every refusal of this evaluation names a broad safeguard over the Arctic biology stimulus.
+
+`SubscriptionEvaluationProvider._parsed_answer` therefore reads the printed output first, whatever the exit code, and the exit code becomes the error only when no result record is there.
+`parse_claude_output` owns the refusal, so every caller reads it the same way.
+
+Recorded as an infrastructure failure instead, one refusal stopped the whole Claude arm for the rest of the invocation.
+That happened at 17:05:31 and again at 17:10:47 UTC on 2026-09-17; eight refusals were recorded that day and each one closed the arm.
 
 ### A harness the question could not start, and a harness that was upgraded
 

@@ -808,3 +808,142 @@ def test_the_version_read_of_a_binary_that_will_not_start_is_not_an_error(
         binary_version(
             PROVIDER_ANTHROPIC_CLAUDE_CODE, str(present), Refuses(), cwd=tmp_path
         )
+
+
+# --- The exit code is not the answer -----------------------------------------
+
+
+REFUSAL_RESULT = {
+    "type": "result",
+    "subtype": "success",
+    "is_error": True,
+    "stop_reason": "refusal",
+    "result": (
+        "API Error: Opus 5's safeguards flagged this message "
+        "(https://www.anthropic.com/legal/aup). Details: `[bio]`"
+    ),
+    "num_turns": 1,
+    "duration_api_ms": 798,
+    "session_id": "refusal-session",
+    "total_cost_usd": 0.00872,
+    "usage": {
+        "input_tokens": 2,
+        "cache_creation_input_tokens": 871,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 0,
+        "output_tokens_details": {"thinking_tokens": 0},
+    },
+    "modelUsage": {"claude-opus-5": {"inputTokens": 2, "outputTokens": 0}},
+}
+
+NO_STDIN_STDERR = (
+    "Warning: no stdin data received in 3s, proceeding without it. If piping "
+    "from a slow command, redirect stdin explicitly: < /dev/null to skip, or "
+    "wait longer.\nError: Input must be provided either through stdin or as a "
+    "prompt argument when using --print\n"
+)
+
+
+def test_a_provider_refusal_is_an_answer_and_never_stops_the_arm(
+    tmp_path: Path,
+) -> None:
+    """A safeguard refusal is a response of this trial, not a broken harness.
+
+    Claude Code prints its whole result object and then exits 1 when the
+    provider declines. Read by the exit code alone it was an infrastructure
+    failure, and one of them stopped the whole Claude arm for the rest of the
+    invocation: that happened at 17:05:31 and again at 17:10:47 UTC on
+    2026-09-17, on the broad safeguard over the Arctic biology stimulus.
+
+    The provider saw the request and answered it, so the trial is recorded. It
+    carries no letter, so it scores N0 and counts toward the planned
+    responses, and the arm takes the next question.
+    """
+    probe = fixture(tmp_path / "probe", PROVIDER_ANTHROPIC_CLAUDE_CODE)
+    refused = probe["trials"][1]["trial_id"]
+    values = fixture(
+        tmp_path,
+        PROVIDER_ANTHROPIC_CLAUDE_CODE,
+        overrides={
+            refused: {
+                "raise": "exit",
+                "returncode": 1,
+                "stdout": json.dumps(REFUSAL_RESULT),
+                "stderr": "",
+            }
+        },
+    )
+    summary = run(values, tmp_path)
+
+    assert summary["stopped_on"] is None
+    assert summary["recorded_trials"] == len(values["trials"])
+    assert summary["complete"] is True
+    rows = rows_of(tmp_path)
+    refusal_row = next(row for row in rows if row["trial_id"] == refused)
+    assert refusal_row["response"]["state"] == COMPLETED
+    assert refusal_row["response"]["finish_reason"] == "refusal"
+    assert "safeguards flagged" in refusal_row["response"]["raw_text"]
+    assert refusal_row["valid"] is False and refusal_row["outcome"] == N0
+    # Every other trial of the run answered as it always did.
+    assert sum(1 for row in rows if row["valid"]) == len(rows) - 1
+
+
+def test_a_harness_that_never_got_its_prompt_records_nothing(tmp_path: Path) -> None:
+    """The prompt never arrived, so the provider saw nothing and owes a trial.
+
+    The child waits a few seconds for its stdin, gives up and refuses because
+    it was given no prompt. Nothing was asked and nothing was charged, so the
+    ledger row is dropped, no receipt is written, and the trial is left for
+    the next pass exactly as a binary that would not start is.
+    """
+    probe = fixture(tmp_path / "probe", PROVIDER_ANTHROPIC_CLAUDE_CODE)
+    lost = probe["trials"][0]["trial_id"]
+    values = fixture(
+        tmp_path,
+        PROVIDER_ANTHROPIC_CLAUDE_CODE,
+        overrides={
+            lost: {"raise": "exit", "returncode": 1, "stderr": NO_STDIN_STDERR}
+        },
+    )
+    request = EvaluationRequest(
+        trial=values["trials"][0],
+        identity=evaluation_identity(values["items"][0]),
+        run_id="sub-run-1",
+    )
+    with pytest.raises(HarnessUnavailableError, match="never received the prompt"):
+        values["provider"].answer(request)
+
+    ledger = json.loads(
+        (values["ledger_dir"] / "subscription-ledger.json").read_text(encoding="utf-8")
+    )
+    assert ledger["requests"] == {}
+    assert list((values["ledger_dir"] / "receipts").glob("*.json")) == []
+
+
+def test_a_harness_that_exits_with_no_result_is_still_a_failure(
+    tmp_path: Path,
+) -> None:
+    """The exit code still owns the outcome when the harness printed nothing."""
+    probe = fixture(tmp_path / "probe", PROVIDER_ANTHROPIC_CLAUDE_CODE)
+    broken = probe["trials"][0]["trial_id"]
+    values = fixture(
+        tmp_path,
+        PROVIDER_ANTHROPIC_CLAUDE_CODE,
+        overrides={broken: {"raise": "exit", "stderr": "login expired"}},
+    )
+    summary = run(values, tmp_path)
+    assert summary["stopped_on"]["state"] == STATE_FAILED
+    assert "login expired" in summary["stopped_on"]["error"]
+
+
+def test_parse_claude_output_reads_a_refusal_as_a_completed_call() -> None:
+    """The parser owns the refusal, so every caller reads it the same way."""
+    parsed = parse_claude_output(json.dumps(REFUSAL_RESULT), model="claude-opus-5")
+    assert parsed["state"] == COMPLETED
+    assert parsed["finish_reason"] == "refusal"
+    assert parsed["usage"]["candidatesTokenCount"] == 0
+    # An error that is not a refusal is still a failure of the call.
+    broken = dict(REFUSAL_RESULT, stop_reason="end_turn", subtype="error_during_execution")
+    assert parse_claude_output(json.dumps(broken), model="claude-opus-5")["state"] == (
+        STATE_FAILED
+    )

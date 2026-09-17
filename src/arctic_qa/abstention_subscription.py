@@ -82,6 +82,18 @@ STATE_POLICY_STOP = "policy_stop"
 STATE_INTERRUPTED = "interrupted"
 INFLIGHT_DIRNAME = ".inflight"
 SLOT_WAIT_SECONDS = 0.2
+# What the harness reports when the provider saw the request and declined it.
+# Claude Code prints its whole result object, with the refusal text in
+# ``result``, and then exits non-zero. The call was made and answered, so it is
+# a response of this trial like any other: it has no letter, so it scores N0,
+# it counts toward the planned responses, and nothing asks it again.
+#
+# It says nothing about the next question, because a safeguard reads the text
+# of this one: every refusal of this evaluation names a broad safeguard over
+# the Arctic biology stimulus. Recorded as an infrastructure failure it paused
+# the whole Claude arm for the rest of the invocation, at 17:05:31 and again
+# at 17:10:47 UTC on 2026-09-17, and eight of its questions were left short.
+HARNESS_REFUSAL_STOP_REASON = "refusal"
 # Environment variables that must never reach the harness: a parent Claude
 # Code session, an API key that would change the billing, or a Codex home.
 STRIPPED_ENV_PREFIXES = ("CLAUDE", "ANTHROPIC_", "OPENAI_", "CODEX_")
@@ -199,6 +211,25 @@ HARNESS_SPAWN_FAILURES = (
     "FileNotFoundError: [Errno 2] No such file or directory",
     "PermissionError: [Errno 13] Permission denied",
 )
+
+
+# What a harness that started but never received the prompt leaves behind. The
+# child waits a few seconds for its stdin, gives up, and refuses because it was
+# given no prompt at all. The provider saw nothing, so this proves nothing
+# about the model and nothing about the next trial: it is waited out inside the
+# trial and the trial is left pending, like a binary that would not start.
+HARNESS_PROMPT_FAILURES = (
+    "no stdin data received",
+    "Input must be provided either through stdin",
+)
+
+
+def is_harness_prompt_failure(result: dict[str, Any]) -> bool:
+    """Say whether one transport result is a harness that never got its prompt."""
+    if int(result.get("returncode") or 0) == 0:
+        return False
+    stderr = str(result.get("stderr") or "")
+    return any(marker in stderr for marker in HARNESS_PROMPT_FAILURES)
 
 
 def is_harness_spawn_failure(result: dict[str, Any]) -> bool:
@@ -502,9 +533,12 @@ class ScriptedSubscriptionTransport:
         if event.get("raise") == "timeout":
             return {"returncode": None, "stdout": "", "stderr": "", "timed_out": True}
         if event.get("raise") == "exit":
+            # A harness that exits non-zero can still have printed its whole
+            # result first, which is what a provider refusal looks like, so
+            # the script owns both streams.
             return {
                 "returncode": int(event.get("returncode", 1)),
-                "stdout": "",
+                "stdout": str(event.get("stdout", "")),
                 "stderr": str(event.get("stderr", "scripted harness error")),
                 "timed_out": False,
             }
@@ -564,7 +598,9 @@ def parse_claude_output(stdout: str, *, model: str) -> dict[str, Any]:
         return {"state": STATE_FAILED, "error": "claude printed no JSON result"}
     if not isinstance(result, dict) or result.get("type") != "result":
         return {"state": STATE_FAILED, "error": "claude printed no result object"}
-    if result.get("is_error") or result.get("subtype") != "success":
+    if str(result.get("stop_reason") or "") != HARNESS_REFUSAL_STOP_REASON and (
+        result.get("is_error") or result.get("subtype") != "success"
+    ):
         return {
             "state": STATE_FAILED,
             "error": f"claude result subtype {result.get('subtype')}: "
@@ -1095,6 +1131,26 @@ class SubscriptionLedger:
             self._sleep(wait if wait > 0 else SLOT_WAIT_SECONDS)
             now = self._clock()
 
+    def abandon(self, request_key: str) -> None:
+        """Drop one row whose call never reached the provider, and free the slot.
+
+        The row registered a call that was going to be made. When the harness
+        started but never received the prompt, no request went out, nothing was
+        answered and nothing was charged, so there is no event to receipt and
+        nothing for the no-retry contract to hold: the row is removed and the
+        same request key is free for the next attempt of the trial.
+
+        This is the only way a row leaves this ledger. Every row that named a
+        call the provider saw is settled and keeps its immutable receipt.
+        """
+        try:
+            with _FileLock(self._lock_path()):
+                ledger = self._read()
+                if ledger["requests"].pop(request_key, None) is not None:
+                    atomic_json(self.ledger_file, ledger)
+        finally:
+            self._release_inflight(request_key)
+
     def settle(self, request_key: str, receipt: dict[str, Any]) -> Path:
         """Write the immutable receipt, close the ledger row, free the slot."""
         path = self.receipt_path(request_key)
@@ -1391,6 +1447,36 @@ class SubscriptionEvaluationProvider:
             harness=receipt.get("harness"),
         )
 
+    def _parsed_answer(
+        self, result: dict[str, Any], trial: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Read one finished harness run, whatever its exit code.
+
+        The exit code is not the answer. Claude Code exits non-zero when the
+        provider declines the request, and prints its whole result object
+        first; reading the exit code alone threw that answer away and recorded
+        an infrastructure failure, which stopped the arm for every later
+        question of the invocation.
+
+        So the printed output is read first. A parser that finds the harness's
+        own result record owns the outcome, and the exit code is kept in the
+        receipt beside it. Only when no such record is there does the exit code
+        become the error, exactly as it always did.
+        """
+        parser = (
+            parse_claude_output
+            if self.vendor == PROVIDER_ANTHROPIC_CLAUDE_CODE
+            else parse_codex_output
+        )
+        parsed = parser(str(result.get("stdout") or ""), model=trial["model"])
+        if int(result.get("returncode") or 0) == 0 or parsed["state"] == COMPLETED:
+            return parsed
+        return {
+            "state": STATE_FAILED,
+            "error": f"the harness exited with {result.get('returncode')}: "
+            f"{redact(str(result.get('stderr') or ''))[-500:]}",
+        }
+
     def answer(self, request: EvaluationRequest) -> EvaluationResponse:
         trial = request.trial
         request_key = self.request_key(request)
@@ -1439,21 +1525,22 @@ class SubscriptionEvaluationProvider:
                 self.ledger._release_inflight(request_key)
                 raise
             latency = time.monotonic() - started
+            if is_harness_prompt_failure(result):
+                # The harness started, waited for its prompt, and refused
+                # because it never arrived. The provider saw nothing, so this
+                # trial has no answer to record and no call to receipt.
+                self.ledger.abandon(request_key)
+                raise HarnessUnavailableError(
+                    "the harness started but never received the prompt of this "
+                    f"trial: {redact(str(result.get('stderr') or ''))[-300:]}"
+                )
             if result.get("timed_out"):
                 parsed: dict[str, Any] = {
                     "state": STATE_TIMEOUT,
                     "error": f"the harness did not finish within {self.timeout} s",
                 }
-            elif result.get("returncode") != 0:
-                parsed = {
-                    "state": STATE_FAILED,
-                    "error": f"the harness exited with {result.get('returncode')}: "
-                    f"{redact(str(result.get('stderr') or ''))[-500:]}",
-                }
-            elif self.vendor == PROVIDER_ANTHROPIC_CLAUDE_CODE:
-                parsed = parse_claude_output(result["stdout"], model=trial["model"])
             else:
-                parsed = parse_codex_output(result["stdout"], model=trial["model"])
+                parsed = self._parsed_answer(result, trial)
             receipt = self._receipt(
                 trial,
                 request_key,
