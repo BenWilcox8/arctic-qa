@@ -1,7 +1,7 @@
 # Several questions at once, and the captain's quota floors
 
 Task `arctic-eval-parallel-items-r1`, 2026-09-17, branch `fm/arctic-eval-parallel-items-r1`.
-Commits: `82612f5` (the wave and the quota floors) and `60f216c` (one count per question in the guard).
+Commits: `82612f5` (the wave and the quota floors), `60f216c` (one count per question in the guard) and `8901214` (four waves a poll cycle).
 
 ## The question
 
@@ -56,9 +56,18 @@ The guard now removes them at once, and it also removes its own entries whose re
 
 ## The live run
 
-The evaluator runs as user unit `arctic-abstention-stream-r3` from snapshot `82612f5`, with 8 questions in flight.
-The cost guard runs from snapshot `60f216c`.
-`streaming-eval-r11-authorization-82612f5.json` is the successor authorization, and it binds the same five files, the same bounds and the same work directory as `87c69ce`.
+The evaluator runs as user unit `arctic-abstention-stream-r3` with 8 questions in flight.
+The cost guard and the corpus viewer read the same journal, and both now count one row per question.
+Each snapshot has its own successor authorization, and each one binds the same five files, the same bounds and the same work directory as `87c69ce` did:
+
+| Snapshot | Started | What moved |
+| --- | --- | --- |
+| `82612f5` | 09:20 UTC | the wave of 8 questions and the quota floors |
+| `60f216c` | 09:25 UTC (guard), 09:37 UTC (viewer) | one count per question |
+| `8901214` | the next start | four waves a poll cycle |
+
+The 75-worker crew stopped the evaluator at 09:38 UTC for its policy v15 transition, because a live evaluator breaks the revalidation of a fresh transition.
+It came back at 09:44 UTC on the `82612f5` launcher, at the producer's first paid call under v15.
 
 `extrapolation.md` holds the measured rates and the projection of the dataset onto 13:00 and 14:00 UTC.
 
