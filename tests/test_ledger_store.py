@@ -395,3 +395,21 @@ def test_the_parallel_transition_names_the_expansion_tranche() -> None:
     named = source[tuple_start:tuple_end]
     assert "CHAPTER3_CONCURRENCY_CHANGE" in named
     assert "CHAPTER3_PARALLEL_CHANGE" in named
+
+
+def test_the_no_replay_probe_reads_the_receipts_listing(tmp_path: Path) -> None:
+    """The reviewed transition path builds a broker without __init__.
+
+    The live v12 transition was refused at 04:58 UTC on 2026-09-17 with
+    "requires a settled ledger or validated no-replay holds" because the probe
+    lacked the receipts-listing cache. The ledger held an ambiguous charge and
+    a retained reservation, which is what routes a transition through here.
+    """
+    from arctic_qa.model_broker import SharedGeminiBroker
+
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    ledger = {"requests": {}, "ambiguous_reserved_usd": "0.1", "reserved_usd": "0.02"}
+    assert SharedGeminiBroker.validate_no_replay_liabilities(
+        ledger=ledger, receipts_dir=receipts
+    ) == {}

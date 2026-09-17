@@ -2260,6 +2260,8 @@ class SharedGeminiBroker:
         """
         validator = cls.__new__(cls)
         validator.receipts_dir = receipts_dir.resolve()
+        validator._receipt_listing = None
+        validator._custody_proved = set()
         ambiguous = validator._ambiguous_continuation_events(ledger)
         orphaned = validator._orphaned_continuation_events(ledger)
         overlap = set(ambiguous) & set(orphaned)
@@ -2993,10 +2995,13 @@ class SharedGeminiBroker:
             fingerprint = (status.st_mtime_ns, status.st_size)
         except OSError:
             fingerprint = (0, 0)
-        if self._receipt_listing is not None and self._receipt_listing[0] == (
-            fingerprint
-        ):
-            return self._receipt_listing[1]
+        # A probe built without ``__init__`` (``validate_no_replay_liabilities``)
+        # has no listing yet. The live v12 transition was refused at 04:58 UTC
+        # on 2026-09-17 because this read an attribute the probe lacked, and
+        # the refusal was read as an unsettled ledger.
+        listing = getattr(self, "_receipt_listing", None)
+        if listing is not None and listing[0] == fingerprint:
+            return listing[1]
         names = sorted(
             entry.name
             for entry in os.scandir(self.receipts_dir)
