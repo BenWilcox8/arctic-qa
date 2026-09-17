@@ -40,6 +40,31 @@ PYTHONPATH=src python -m arctic_qa corpus-view \
 
 Stop the foreground process with `Ctrl-C`.
 
+## How the viewer answers a request
+
+One background thread builds the four routes the page polls.
+The routes are `/api/state`, `/api/live-benchmark`, `/api/live-papers` and the unfiltered `/api/pipeline-trace`.
+A request copies out the bytes of the last cycle and answers in milliseconds.
+`--refresh-interval-seconds` sets the cycle, 15 seconds by default, which is the cadence the page polls at.
+The header `X-Snapshot-Age-Seconds` gives the age of the bytes that were served.
+Each payload keeps its own `generated_at_utc`, which is the moment the reading was taken and not the moment it was served.
+`/healthz` reads the same snapshot.
+
+A failed cycle keeps the last good bytes and puts the failure in `X-Snapshot-Refresh-Error`.
+The failure also goes to the standard output of the process.
+
+A fixed pool of request threads serves every request.
+`--worker-threads` sets its size, 8 by default.
+The pool is fixed for memory, not only for load: a new thread gets a malloc arena of its own from the C library, about 64 MB, and those pages never go back.
+A thread for each request walked the viewer to the arena limit and 3.8 GB in six hours on 2026-09-17, and it then accepted connections and returned empty responses.
+
+A backlog longer than the pool gets HTTP 503 with a message.
+Do not make an over-full backlog drop the connection instead: an accepted connection that answers nothing reads as a dead site, which is the failure this rule exists to prevent.
+
+Do not move the work of a polled route back into its request handler.
+Each of these routes reads a record of tens or hundreds of megabytes: the shared ledger, the query index, the state database.
+`/api/state` answered in 6.4 seconds that way, so a page that polls every 15 seconds queued its own requests.
+
 The server exposes only `/`, the named APIs, `/healthz`, and fixed download routes.
 It does not expose source files, PDFs, credentials, directories, or arbitrary paths.
 
@@ -55,7 +80,31 @@ No route accepts a file path.
 
 The section "Live benchmarking" shows the streaming abstention evaluation.
 It uses `/api/live-benchmark`.
-The route rebuilds the whole payload from the files on each request and makes no paid call.
+The route builds the whole payload from the files and makes no paid call.
+The background refresher builds it, as it builds every polled route.
+
+### Every count is a count of questions
+
+The evaluator appends one journal row for each pass over a question, and it passes again whenever a paused arm owes that question trials.
+So the journal always holds more rows than questions.
+Every count of this section reads the last row of each question, which carries that question's whole record.
+The page states the source under the counts and reports the rows beside the questions.
+A reader that counted rows told the page 286 questions on 2026-09-17 where the journal held 160.
+
+A question is complete when its recorded trials reach its planned trials.
+It is not complete because its row carries the `complete` flag: a row written while an arm was paused carries that flag and still holds part of its plan.
+The flag stays readable as `row_complete_flag`.
+
+`coverage` in the payload holds the counts:
+questions with a response, questions with every response, questions part answered, questions stranded, questions held by a pause, questions revisited, questions reopened, the trials recorded against the trials planned, and the journal rows beside the questions.
+A stranded question is one whose last row holds fewer responses than its plan and which no pause names.
+Nothing takes such a question up on its own, because the evaluation policy forbids a retry of a trial that stopped.
+Reopening one is an operator action.
+
+Each arm carries `questions_with_a_response` and `questions_with_every_response` of its own.
+An arm covers a question only when it recorded its whole share of that question's plan.
+The share is the planned trials over the models of the plan, and the model count comes from the widest row of the journal.
+It never comes from one row's own model count: a row names only the models that recorded something, so that put the share at 24 where it is 6.
 
 Two options select its inputs.
 `--benchmark-journal-dir` points at the work directory of the streaming evaluator.
@@ -63,6 +112,7 @@ The route reads `cost-journal.jsonl` and `watch-state.json` from it.
 `--benchmark-guard-state-file` points at `guard-state.json` of the cost and quota guard.
 
 The section shows the per-model table with the N1 to N5 counts and the seven paper metrics, the per-question cost rows, the Gemini spend against the USD 200 allocation with its extrapolation, the four guarded quota windows, the guard rules, and the evaluator watch state.
+The "Evaluator state" block says whether the evaluator is polling, how many questions are in flight, how many question workers it runs, when its watch state last moved, and which arms it runs.
 Without the guard state file the section still shows the journal, and marks the budget readings as not available.
 
 `docs/BENCHMARK_GUARD.md` describes the guard, its rules, and how to operate it.
@@ -75,6 +125,10 @@ The table refreshes every 15 seconds without a page reload, together with the re
 The route reads records only.
 It never writes to the shared ledger, the state database, or a completion label.
 It never touches the producer, a launcher, or the evaluator.
+
+When no producer runs, the section says so above the table rather than showing an empty one.
+It names the moment generation stopped, which is `producer.stopped_at_utc` of the payload, and the last message the producer wrote.
+The producer writes its progress record for each finished paper, so the last record of a stopped run is the moment it stopped.
 
 The upper table holds the papers the producer analyzes at this moment.
 A paper is in that table when three conditions are true.
@@ -138,6 +192,15 @@ Use `--pipeline-namespace` to enable the inspector.
 Use `--pipeline-db-file` and `--pipeline-receipts-dir` to select the database and retained model receipts.
 Repeat `--pipeline-eligibility-root` for each selected eligibility receipt root.
 The configured shared ledger supplies the accounting records.
+
+Each cache of the adapter is filled by one thread at a time, and each is kept until one of its inputs moves.
+The per-family records cost the whole state database to build, the receipts cost the whole receipts directory to read.
+Two threads that missed together each built the records in full, which took a paper-detail request and the background refresher past 90 seconds where one build takes 25.
+
+A receipt is immutable once written, so the adapter keeps the parsed event for each receipt and reads again only what the directory listing says moved.
+Re-deriving all of them because one arrived cost 77 seconds against the 48,938 receipts of 2026-09-17.
+The shared ledger has two live writers, so a receipt arrives every few seconds and almost every request paid it.
+Keep this rule when you change the adapter; it is the rule the broker keeps for the same directory, in "The immutable-event proof, and what one read of it costs" of `docs/SHARED_MODEL_BROKER.md`.
 
 The paper list is bounded to 100 rows per request.
 Filters can select a title, DOI, paper ID, run, final state, or current stage.

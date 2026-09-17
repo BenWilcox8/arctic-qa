@@ -2271,10 +2271,17 @@ def _question_cost_row(row: dict[str, Any]) -> dict[str, Any]:
     evaluation = row.get("evaluation") or {}
     generation = row.get("generation") or {}
     family = generation.get("family") or {}
+    planned = int(evaluation.get("planned_trials") or 0)
     return {
         "item_id": row.get("item_id"),
         "recorded_at_utc": row.get("recorded_at_utc"),
-        "complete": bool(row.get("complete")),
+        # The same rule the counts above the table use: a question is complete
+        # when its responses arrived, not when its row carries the flag. The
+        # flag said yes beside "36 of 48" in the trials column of the same row.
+        "complete": bool(
+            planned and row_recorded_trials(row) >= planned
+        ),
+        "row_complete_flag": bool(row.get("complete")),
         "family_id": row.get("family_id"),
         "generation_usd": family.get("usd"),
         "generation_paid_calls": family.get("paid_calls"),

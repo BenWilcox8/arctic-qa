@@ -268,6 +268,29 @@ def test_report_calls_a_question_complete_only_on_every_response(
     assert coverage["trials_planned"] == 48
 
 
+def test_the_question_table_and_the_counts_agree_on_complete(
+    benchmark_files: dict[str, Path],
+) -> None:
+    """One page must not call a question complete in one place and not another.
+
+    The row's flag said yes beside "24 of 48" in the trials column of the same
+    row of the same table.
+    """
+    _revisited_journal(benchmark_files["journal"])
+    report = benchmark_report(
+        journal_dir=benchmark_files["journal"],
+        guard_state_file=benchmark_files["guard"],
+        now=BEFORE_RESUME,
+    )
+    question = report["questions"][0]
+    assert question["recorded_trials"] == 24
+    assert question["planned_trials"] == 48
+    assert question["complete"] is False
+    # The row's own flag stays readable, and stays what it was.
+    assert question["row_complete_flag"] is True
+    assert report["coverage"]["questions_with_every_response"] == 0
+
+
 def test_report_gives_each_arm_its_own_coverage(
     benchmark_files: dict[str, Path],
 ) -> None:

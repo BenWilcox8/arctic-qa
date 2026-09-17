@@ -3092,7 +3092,16 @@ class CorpusRequestHandler(BaseHTTPRequestHandler):
             self.send_header("X-Snapshot-Age-Seconds", str(age))
         refresh_error = getattr(self, "_refresh_error", None)
         if refresh_error:
-            self.send_header("X-Snapshot-Refresh-Error", refresh_error[:200])
+            # A header value carries no newline and no byte above ASCII, and a
+            # refresh failure is arbitrary text. A broken header here would
+            # break the one answer the page still has.
+            self.send_header(
+                "X-Snapshot-Refresh-Error",
+                "".join(
+                    character if 32 <= ord(character) < 127 else " "
+                    for character in refresh_error
+                )[:200],
+            )
         self.send_header("Cache-Control", "no-store")
         self.send_header(
             "Content-Security-Policy",

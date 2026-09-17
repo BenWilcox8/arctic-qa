@@ -977,6 +977,42 @@ def test_polled_routes_answer_from_the_background_snapshot(tmp_path: Path) -> No
         thread.join(timeout=5)
 
 
+def test_a_failed_refresh_keeps_the_last_good_answer(tmp_path: Path) -> None:
+    """A cycle that fails serves the bytes of the last one that worked.
+
+    The refresher owns every polled route, so a refresher that dies or that
+    lets one failure through freezes the whole page. The failure is reported
+    in a header beside the answer, and the header is safe to send whatever the
+    failure said.
+    """
+    fixture_corpus(tmp_path)
+    artifacts = CorpusArtifacts(tmp_path, "test-run", tmp_path / "runtime")
+    server = CorpusServer(("127.0.0.1", 0), artifacts)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with urllib.request.urlopen(f"{base}/api/state") as response:
+            good = response.read()
+            assert response.headers.get("X-Snapshot-Refresh-Error") is None
+
+        def broken() -> dict[str, object]:
+            raise RuntimeError("the index is gone\nand the line broke\u2014here")
+
+        artifacts.state = broken  # type: ignore[method-assign]
+        server.snapshot.refresh_once()
+
+        with urllib.request.urlopen(f"{base}/api/state") as response:
+            assert response.read() == good
+            reported = response.headers["X-Snapshot-Refresh-Error"]
+        assert "the index is gone" in reported
+        assert "\n" not in reported and reported.isascii()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_the_request_threads_are_a_fixed_pool(tmp_path: Path) -> None:
     """The viewer answers every request on the same few threads.
 
