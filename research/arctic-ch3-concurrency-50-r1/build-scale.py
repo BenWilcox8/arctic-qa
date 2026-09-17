@@ -61,14 +61,40 @@ OPTION_WORKERS = int(os.environ.get("CH3_OPTION_WORKERS", "4"))
 ELIGIBILITY_PROMPT = "config/gemini-eligibility-prompt-v8.txt"
 ELIGIBILITY_SCHEMA = "schemas/gemini-eligibility.v4.schema.json"
 RESCREEN_PROMPT = "config/gemini-eligibility-geography-rescreen-v2.txt"
-CEILING = "253.990121"
-POLICY_V13 = DATA / "streaming-dataset-budget-policy-v13-chapter3-scale.json"
+# The transition this activation applies is chosen by CH3_TRANSITION: the
+# request-rate pair of policy v13, or the USD 600 allocation of policy v14.
+CEILING = "653.990121" if os.environ.get("CH3_TRANSITION") == "v14" else "253.990121"
 SLOTS = 50
 PER_MINUTE = 300
-CHANGED_FIELDS = {
-    "maximum_concurrent_generation_requests": {"from": 16, "to": SLOTS},
-    "maximum_generation_requests_per_minute": {"from": 100, "to": PER_MINUTE},
-}
+if os.environ.get("CH3_TRANSITION") == "v14":
+    POLICY_V13 = DATA / "streaming-dataset-budget-policy-v14-chapter3-six-hundred.json"
+    CHANGED_FIELDS = {
+        "away_session_total_ceiling_usd": {"from": "253.990121", "to": "653.990121"},
+        "construction_review_checkpoint_usd": {
+            "from": "253.990121",
+            "to": "653.990121",
+        },
+    }
+else:
+    POLICY_V13 = DATA / "streaming-dataset-budget-policy-v13-chapter3-scale.json"
+    CHANGED_FIELDS = {
+        "maximum_concurrent_generation_requests": {"from": 16, "to": SLOTS},
+        "maximum_generation_requests_per_minute": {"from": 100, "to": PER_MINUTE},
+    }
+REASON_V14 = (
+    "Chapter 3 six hundred (captain order 2026-09-17 08:25 UTC, verbatim: "
+    "'Up the budget to $600 and make sure that we never exceed $1000 for the "
+    "whole project'). The chapter 3 allocation becomes USD 600.00 in total, so "
+    "the away-session ceiling and the construction review checkpoint both move "
+    "from USD 253.990121 to USD 653.990121: the USD 53.990121 spent before this "
+    "run plus USD 600.00. The captain's order is the review, so the checkpoint "
+    "is the ceiling and the two never move apart. Nothing else moves: the "
+    "project lifetime ceiling stays USD 1,000.00 and counts every phase, "
+    "construction and benchmark evaluation alike, on the ledger's own totals; "
+    "the per-request cap, the paper cost cap, the request rate and every "
+    "project design count stay exactly as they were. Halt at exhaustion; no "
+    "replay; no retry; no budget reset."
+)
 REASON = (
     "Chapter 3 fifty in flight (captain order 2026-09-17 06:25 UTC). The warm "
     "ledger proof no longer walks the whole history, so the serialised "
@@ -82,6 +108,8 @@ REASON = (
     f"tranche of USD {CEILING}. Halt at exhaustion; no replay; no retry; no "
     "budget reset."
 )
+if os.environ.get("CH3_TRANSITION") == "v14":
+    REASON = REASON_V14
 
 # The streaming abstention evaluator, which shares the ledger.
 EVAL_UNIT = "arctic-abstention-stream-r3"
@@ -248,10 +276,16 @@ class Activation:
 
     @staticmethod
     def evaluator_inflight(ledger: dict) -> int:
+        """The evaluation requests with a live call and a reservation.
+
+        A ``counting`` row is free and reserves nothing, and one of them can be
+        left by a stop and never clear, so waiting for zero of them never
+        reaches a boundary. See ``our_inflight``.
+        """
         return sum(
             1
             for request in ledger.get("requests", {}).values()
-            if request.get("state") in {"submitted", "counting"}
+            if request.get("state") == "submitted"
             and request.get("phase") == "benchmark_evaluation"
         )
 
@@ -794,10 +828,12 @@ class Activation:
         before = self.validate_ledger(live_policy, self.gate, live_transition)
         assert before["integrity_valid"] is True, before
         assert before["halted"] is False, before
-        assert (
-            before["limits"]["maximum_concurrent_generation_requests"]
-            == CHANGED_FIELDS["maximum_concurrent_generation_requests"]["from"]
-        )
+        for field, limits in CHANGED_FIELDS.items():
+            assert before["limits"][field] == limits["from"], (
+                field,
+                before["limits"][field],
+                limits["from"],
+            )
         active = before["config_transition_sha256"]
         prior_events = [
             path
@@ -832,8 +868,15 @@ class Activation:
         assert after["halted"] is False, after
         event = self.find_event(authorization)
         assert after["config_transition_sha256"] == sha256_file(event)
+        for field, limits in CHANGED_FIELDS.items():
+            assert after["limits"][field] == limits["to"], (
+                field,
+                after["limits"][field],
+                limits["to"],
+            )
         assert after["limits"]["maximum_concurrent_generation_requests"] == SLOTS
         assert after["limits"]["maximum_generation_requests_per_minute"] == PER_MINUTE
+        assert after["limits"]["project_lifetime_ceiling_usd"] == "1000.00"
         assert after["limits"]["away_session_total_ceiling_usd"] == CEILING
         assert after["spent_usd"] == ledger["spent_usd"], "the transition moved money"
         assert after["policy_sha256"] == sha256_file(POLICY_V13)

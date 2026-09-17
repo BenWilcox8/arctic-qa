@@ -254,6 +254,83 @@ The measured peak runs ahead of the arithmetic at 50 because the option
 verdicts of one paper go out in a wave of four, so a burst exceeds the steady
 rate. The steady rate is what the requests a minute say, and it fell.
 
+### The first HTTP 503, two minutes after the window
+
+At 08:19:23 UTC, two minutes after the 50-worker window closed, Gemini answered
+one `finding_answer_extraction` call with HTTP 503, `UNAVAILABLE`, "This model
+is currently experiencing high demand." That is the **first 5xx of run
+`chapter3-7dc6485-r3`**, at the highest concurrency the run has been asked to
+hold. No HTTP 429 has been recorded at any point, at any concurrency.
+
+A 503 does not prove that nothing was billed, so the broker recorded
+`known_http_response_unknown_charge` and halted the whole ledger, which is the
+rule for an ambiguous construction charge. The producer ended.
+
+Released the reviewed way at 08:38 UTC with
+`authorize-ambiguous-continuation`, the bounded 5xx case: the receipt records
+`live_call_made`, there is no `.received.json`, and no `actual_cost_usd`. The
+reservation of USD 0.057810 stays in `ambiguous_reserved_usd` and counts
+against every cap; nothing was settled, retried or replayed. The review and the
+evidence are `ambiguous-continuation-review-3977fa5d.md` and
+`ambiguous-continuation-evidence-3977fa5d.json` in the activation directory,
+and the immutable event is
+`ambiguous-continuation-3977fa5d….json` in the receipts directory.
+
+One 503 in 724 calls at 43 in flight is not a rate limit; it is a busy model.
+But it is the first signal of any kind from the provider, and it arrived at 50
+and not at 32.
+
+### Policy v14: the USD 600 allocation
+
+Captain order 2026-09-17 08:25 UTC, verbatim: "Up the budget to $600 and make
+sure that we never exceed $1000 for the whole project."
+
+`CHAPTER3_SIX_HUNDRED_CHANGE`, applied at 08:39:20 UTC, moves the away-session
+ceiling and the construction review checkpoint together from USD 253.990121 to
+**USD 653.990121**: the USD 53.990121 spent before this run plus the USD 600
+allocation. The captain's order is the review, so the checkpoint is the
+ceiling, and `_validate_policy` refuses a policy that moves one without the
+other. Nothing else moves.
+
+The ledger after the transition:
+
+| limit | value | remaining |
+| --- | --- | --- |
+| `project_lifetime_ceiling_usd` | 1000.00 | 826.54 |
+| `away_session_total_ceiling_usd` | 653.990121 | 497.00 |
+| `construction_review_checkpoint_usd` | 653.990121 | 497.00 |
+| `reserved_for_benchmark_evaluation_usd` | 500.00 | 483.52 |
+| `maximum_concurrent_generation_requests` | 50 | |
+| `maximum_generation_requests_per_minute` | 300 | |
+
+**USD 1,000 for the whole project was already enforced across every phase, and
+still is.** It needed no new code, which was checked rather than assumed: the
+construction cap adds the evaluation liabilities before it compares
+(`construction_used + evaluation_used + reserved`), and the evaluation cap sums
+the whole ledger's reserved, spent and ambiguous funds. Neither is per phase,
+so neither can be passed by spending in the other one.
+`tests/test_ledger_proof_cost.py::test_the_project_lifetime_ceiling_counts_every_phase`
+reads both rules out of the source so a later edit cannot quietly make one of
+them per phase.
+
+**One thing to watch.** `dataset_construction_allocation_usd` is still USD
+500.00 and is not enforced anywhere; it is only reported, as
+`remaining.dataset_construction_usd`. Construction may now spend up to USD
+653.990121, so that reported figure will go **negative** once construction
+passes USD 500. Nothing stops on it and no cap is weakened, but the viewer and
+the cost guard read it. Moving it would mean cutting
+`reserved_for_benchmark_evaluation_usd` to keep the two summing to the lifetime
+ceiling, which is a captain's allocation decision and was not asked for.
+
+### The spend rate, and what the ceiling means in hours
+
+Construction spend went from USD 145.7 to USD 173.0 in the 30 minutes of stages
+1 and 2: about **USD 55 an hour** at 32 to 50 workers. Construction used,
+including the USD 53.990121 before this run, is USD 210.7 of the new USD
+653.990121 ceiling, so the ceiling is about **8 hours away** at that rate. It
+was about 45 minutes away under v13. The ceiling stops the run by itself,
+which is the design.
+
 ## 8. Machine headroom
 
 Eight cores. During the 32-thread window the producer used 30 to 38 percent of
@@ -309,21 +386,27 @@ faster.
    its own materialization without the ledger lock. The full immutable-event
    pass can run the same way.
 
-**Google is not the limit, and nobody has seen where it is.** No HTTP 429 and
-no HTTP 503 has ever been recorded on this run, at any concurrency, in any
-window. The per-model rate at which Gemini begins to throttle is still unknown,
-so it is not an argument for or against 100 in either direction.
+**Google has spoken once, at 50 and not at 32.** No HTTP 429 has ever been
+recorded on this run, at any concurrency. One HTTP 503, `UNAVAILABLE`, "high
+demand", arrived two minutes after the 50-worker window closed: the first 5xx
+of the run, one in 724 calls at 43 in flight. That is a busy model, not a
+published rate limit, and it cost a reviewed release and a stopped producer
+because an ambiguous construction charge halts the whole ledger. The per-model
+rate at which Gemini throttles is still unknown. What the 503 does say is that
+**the cost of the next one rises with the concurrency**: more calls in flight
+means more chances an hour that the run stops for a reviewed release.
 
-So: **50 now, measured and live.** 100 is reachable and is a scheduling change
-rather than a ledger change. If the choice is between 32 and 50 on today's
-code, 50 screens more papers an hour and 32 makes more calls a minute with half
-the lock hold; the run is left at 50 because papers an hour is what the
-campaign counts.
+So: **50 now, measured and live, under policy v14.** 100 is reachable and is a
+scheduling change rather than a ledger change. If the choice is between 32 and
+50 on today's code, 50 screens more papers an hour and 32 makes more calls a
+minute with half the lock hold and no 503; the run is left at 50 because papers
+an hour is what the campaign counts, and because the captain asked for it.
 
 ## 10. The run it is left at
 
-Run `chapter3-7dc6485-r3` on snapshot `3053f65`, 50 paper workers, 4 option
-workers, policy v13 (50 concurrent, 300 a minute), with
+Run `chapter3-7dc6485-r3` on snapshot `87c69ce`, 50 paper workers, 4 option
+workers, policy v14 (50 concurrent, 300 a minute, away ceiling and checkpoint
+USD 653.990121, lifetime USD 1,000.00), with
 `ARCTIC_QA_OPERATION_LOCK_LOG_SECONDS=0` so every exclusive section stays in
 the log. The streaming evaluator, the cost guard and the website viewer run on
 the same snapshot. The activation is
