@@ -1855,3 +1855,35 @@ def test_the_bound_needs_no_status_file(tmp_path: Path) -> None:
         db=db, work_dir=work_dir, ledger_file=ledger_file, authorization_file=auth
     )
     assert again["items_this_invocation"] == []
+
+
+def test_the_watcher_publishes_its_state_after_every_item(tmp_path: Path) -> None:
+    """One poll cycle covers every pending item, so it must not publish once.
+
+    At sixteen pending items a cycle runs for about an hour. A watcher that
+    published only at the end of its cycle looked stopped to the cost guard,
+    whose staleness bound is 900 seconds.
+    """
+    db = state_db(tmp_path, chapter3=["aqa-a", "aqa-b", "aqa-c"])
+    ledger_file = construction_ledger(tmp_path, {"family-aqa-a": ["0.01"]})
+    auth = authorization(tmp_path, db, maximum_items=3)
+    work_dir = tmp_path / "published"
+    seen: list[int] = []
+
+    def watch_state_size(_: dict) -> None:
+        path = work_dir / WATCH_STATE_FILENAME
+        if path.is_file():
+            seen.append(
+                len(json.loads(path.read_text(encoding="utf-8"))["evaluated_items"])
+            )
+
+    scripted_watch(
+        db=db,
+        work_dir=work_dir,
+        ledger_file=ledger_file,
+        authorization_file=auth,
+        progress=watch_state_size,
+    )
+    # The watcher published a growing item list while the one cycle ran, so a
+    # reader saw progress before the cycle ended.
+    assert seen and max(seen) >= 2

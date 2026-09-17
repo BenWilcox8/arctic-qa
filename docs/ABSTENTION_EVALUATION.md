@@ -593,7 +593,9 @@ systemctl --user stop arctic-abstention-stream-r1
 
 The launcher of the first live run is `$ARCTIC_QA_DATA_ROOT/arctic-qa/abstention-eval/private/streaming-eval-r1-launcher.sh`.
 The work directory holds the sets, the derived gates, the runs, the cost journal and `watch-state.json`.
-The evaluator writes `watch-state.json` after every poll, so its poll count and its item list rise while the unit runs.
+The evaluator writes `watch-state.json` after every item and after every poll, so its item list and its poll count rise while the unit runs.
+One poll cycle covers every pending item, so at sixteen pending items a cycle runs for about an hour.
+A watcher that published only at the end of its cycle would look stopped to the cost guard, whose staleness bound is 900 seconds.
 
 A per-item plan manifest binds the run id and the code commit, and it is immutable.
 So a new commit needs a new run id prefix and a new work directory.

@@ -901,6 +901,12 @@ def watch(
                 pause=pause,
             )
             evaluated.append(result)
+            # Publish after every item, not only at the end of the poll cycle.
+            # One cycle covers every pending item, so at sixteen pending items
+            # the cycle runs for an hour, and a watcher that publishes only at
+            # its end looks stopped to the cost guard, whose staleness bound is
+            # 900 seconds.
+            write_state()
             if result["skipped"]:
                 emit(
                     {
@@ -973,10 +979,9 @@ def watch(
                 # run_plan raised: an error outside the recorded responses.
                 errors.append(f"{item_id}: {result['error']}")
                 break
-        # Publish the state after every poll cycle, not only at the end. A
-        # long-running unit never reaches the end, so an operator reading
-        # `watch-state.json` must see the poll count rise and the items grow
-        # while it runs.
+        # Publish the state after every poll cycle as well as after every
+        # item, because a cycle that evaluates nothing still proves the
+        # watcher is alive.
         write_state()
         if errors or stop["now"] or once:
             break
