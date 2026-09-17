@@ -60,6 +60,7 @@ from arctic_qa.model_broker import (
     EVALUATION_ITEM_REPEAT_REASON,
     EVALUATION_PHASE,
     OPERATION_LOCK_BUSY_REASON,
+    TRANSIENT_RESERVATION_REASONS,
 )
 from arctic_qa.util import atomic_json
 from test_abstention_render import _candidate, _state_db, DISTRACTORS
@@ -2575,6 +2576,29 @@ def test_one_poll_cycle_scores_a_bounded_number_of_questions(tmp_path: Path) -> 
         item_workers=2,
     )
     assert [row["item_id"] for row in again["items_this_invocation"]] == items[8:]
+
+
+def test_a_full_slot_or_minute_belongs_to_one_question() -> None:
+    """A refusal that describes the moment must not take an arm down.
+
+    The broker names the concurrency slots and the minute window together as
+    the two refusals that describe the moment and not the request: `execute`
+    waits a bounded time for room before it records one, nothing is reserved,
+    submitted or charged, and the next question meets an emptier window.
+
+    The evaluator treated them as a vendor stop, so the Gemini arm went dark
+    for the rest of the invocation the first time a wave filled the slots. It
+    happened at 11:55 UTC on 2026-09-17, minutes after the arm got fast enough
+    to fill them.
+    """
+    for reason in TRANSIENT_RESERVATION_REASONS:
+        assert reason in ITEM_SCOPED_REASONS
+        assert is_item_scoped_reason(f"not_submitted: {reason}") is True
+    # A budget wall, a harness fault and an ambiguous charge still pause the
+    # arm, because none of them is about this question alone.
+    assert is_item_scoped_reason(f"not_submitted: {EVALUATION_CEILING_REASON}") is False
+    assert is_item_scoped_reason("failed: the harness exited with 1") is False
+    assert is_item_scoped_reason("ambiguous_charge") is False
 
 
 def test_a_busy_operation_lock_belongs_to_one_question(tmp_path: Path) -> None:

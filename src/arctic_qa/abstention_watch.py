@@ -131,6 +131,7 @@ from .model_broker import (
     EVALUATION_ITEM_REPEAT_REASON,
     EVALUATION_PHASE,
     OPERATION_LOCK_BUSY_REASON,
+    TRANSIENT_RESERVATION_REASONS,
     SharedGeminiBroker,
     phase_halt_reason,
 )
@@ -691,6 +692,14 @@ ITEM_SCOPED_REASONS = (
     # threads queue on that lock, and it took the Gemini arm down at 09:58 UTC
     # on 2026-09-17 until an operator restarted the unit.
     OPERATION_LOCK_BUSY_REASON,
+    # The paid-call concurrency slots or the minute window of the evaluation
+    # phase were full. The broker names these two together as the refusals
+    # that "describe the moment, not the request": ``execute`` waits a bounded
+    # time for room before it records one, nothing is reserved, submitted or
+    # charged, and the next question meets an emptier window. The arm that
+    # this task made faster met them at 11:55 UTC on 2026-09-17 and went dark
+    # for the rest of the invocation.
+    *TRANSIENT_RESERVATION_REASONS,
 )
 
 

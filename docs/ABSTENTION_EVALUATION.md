@@ -490,12 +490,15 @@ Each poll emits a `wave_mix` event with the open questions per arm of the wave i
 ### A stop that belongs to one question
 
 A vendor that stops is paused for the rest of the invocation, because the policy forbids a retry.
-Two stops are about one question only, and `abstention_watch.ITEM_SCOPED_REASONS` is that closed set:
+A few stops are about one question only, and `abstention_watch.ITEM_SCOPED_REASONS` is that closed set:
 
 - the per-item repeat limit of the evaluation policy, which counts the calls of one item, condition, model and arm;
 - a busy exclusive operation lock of the shared paid-call ledger, which reserved nothing, submitted nothing and charged nothing.
   The producer treats the same refusal as a paper-level one and skips that paper.
   A wave meets it more often, because four Gemini threads queue on that lock, and it took the Gemini arm of the live evaluator down at 09:58 UTC on 2026-09-17 until an operator restarted the unit.
+- the full concurrency slots and the full minute window of the evaluation phase, which are `model_broker.TRANSIENT_RESERVATION_REASONS`.
+  The broker names those two together as the refusals that describe the moment and not the request: `execute` waits a bounded time for room before it records one, and the next question meets an emptier window.
+  They took the arm down at 11:55 UTC on 2026-09-17, minutes after it became fast enough to fill the slots.
 
 A reason belongs in that set only when the refusal reserved nothing, submitted nothing and charged nothing, and says nothing about the next question.
 
