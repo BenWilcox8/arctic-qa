@@ -864,3 +864,68 @@ def test_an_automatic_continuation_never_settles_the_charge(
     assert execute(broker, paper="p1", run_id="run-current")["state"] == (
         "ambiguous_charge"
     )
+
+
+def test_a_stale_receipts_listing_never_ends_the_run(tmp_path: Path, monkeypatch) -> None:
+    """A released ambiguity that this broker has not listed yet is not a stop.
+
+    A concurrent broker keeps its receipts listing for up to
+    `RECEIPT_LISTING_REFRESH_SECONDS`, so a continuation event another caller
+    wrote is invisible for that long. The reservation read that as an
+    unresolved ambiguous charge and raised "the paid-call broker is halted",
+    which `streaming.py` ends the run on. The chapter 3 producer exited that
+    way at 11:21:21 UTC on 2026-09-17 while every ambiguous charge of the
+    ledger already had its continuation event.
+    """
+    monkeypatch.setattr(model_broker, "AUTOMATIC_CONTINUATION_LIMIT_PER_HOUR", 0)
+    values = fixture(tmp_path, transport=Http500ThenSuccess())
+    broker = values["broker"]
+    # The producer runs concurrently, so it keeps its listing.
+    broker.concurrent_construction = True
+    receipt = execute(broker, paper="p0", run_id="run-current")
+    assert receipt["state"] == "ambiguous_charge"
+    assert json.loads(values["ledger"].read_text(encoding="utf-8"))["halted"] is True
+
+    # Another caller reviews and releases it. This broker never lists again.
+    releaser = SharedGeminiBroker(
+        policy_file=ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
+        price_config_file=ROOT / "config" / "gemini-eligibility-v1.json",
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=values["receipts"],
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+    )
+    review = tmp_path / "continuation-review.md"
+    review.write_text("pass\n", encoding="utf-8")
+    evidence = tmp_path / "continuation-evidence.json"
+    write_json(
+        evidence,
+        {
+            "schema": "shared-paid-call-ambiguous-continuation-evidence-v1",
+            "request_key": receipt["request_key"],
+            "error_class": "known_http_response_unknown_charge",
+            "http_status": 500,
+            "live_call_made": True,
+            "received_receipt_absent": True,
+            "actual_cost_known": False,
+            "replay_prohibited": True,
+            "affected_family_id": receipt["family_id"],
+            "authorized_run_id": "run-current",
+        },
+    )
+    result = releaser.authorize_ambiguous_continuation(
+        request_key=receipt["request_key"],
+        expected_ledger_sha256=sha256_file(values["ledger"]),
+        review_file=review,
+        evidence_file=evidence,
+        authorized_run_id="run-current",
+        operator_id="test-operator",
+    )
+    assert result["applied"] is True
+    assert json.loads(values["ledger"].read_text(encoding="utf-8"))["halted"] is False
+
+    # The listing this broker kept predates the release. The next paid call
+    # must still go out: it re-lists rather than ending the run.
+    monkeypatch.setattr(model_broker, "RECEIPT_LISTING_REFRESH_SECONDS", 3600.0)
+    assert execute(broker, paper="p1", run_id="run-current")["state"] == "completed"

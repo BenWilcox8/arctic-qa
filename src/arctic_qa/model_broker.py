@@ -8200,13 +8200,29 @@ class SharedGeminiBroker:
                 for key, row in ledger["requests"].items()
                 if row.get("state") == "ambiguous_charge"
             }
-            unresolved_ambiguous = ambiguous_requests - continuation_events.keys()
-            blocking = {
-                key
-                for key in unresolved_ambiguous
-                if phase == EVALUATION_PHASE
-                or ledger["requests"][key].get("phase") != EVALUATION_PHASE
-            }
+            def blocking_ambiguous(events: dict[str, Any]) -> set[str]:
+                return {
+                    key
+                    for key in ambiguous_requests - events.keys()
+                    if phase == EVALUATION_PHASE
+                    or ledger["requests"][key].get("phase") != EVALUATION_PHASE
+                }
+
+            blocking = blocking_ambiguous(continuation_events)
+            if blocking:
+                # A concurrent broker keeps its receipts listing for up to
+                # RECEIPT_LISTING_REFRESH_SECONDS, so a continuation event
+                # another caller wrote, or this process wrote for another
+                # request, can be invisible for that long. A run must never end
+                # on a stale listing: the producer exited at 11:21:21 UTC on
+                # 2026-09-17 on ambiguous charges that all had their events.
+                # The re-list costs one scandir and happens only here, on the
+                # path that is otherwise about to stop the run.
+                self._receipt_listing = None
+                self._receipt_derived = {}
+                blocking = blocking_ambiguous(
+                    self._ambiguous_continuation_events(ledger)
+                )
             if self._phase_halted(ledger, phase) is not None or blocking:
                 raise ValueError("the paid-call broker is halted")
             evaluation_used = self._evaluation_totals(ledger)["used_usd"]
