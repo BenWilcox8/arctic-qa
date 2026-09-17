@@ -194,13 +194,65 @@ tracks the thread count: 33 at its peak against 32 paper workers, where 16
 workers reached 11. Nobody waits for the lock any more: the mean wait is one
 millisecond.
 
+### Stage 2: 50 paper workers, 08:02 to 08:17 UTC
+
+Snapshot `3053f65`, same policy, same evaluator, same readers. A successor
+start, so it applied no transition and the evaluator stayed up through it.
+
+| measure | 16 workers | 32 workers | 50 workers |
+| --- | --- | --- | --- |
+| requests a minute | 20.8 | **55.8** | 48.3 |
+| peak in flight | 11 | 33 | **43** |
+| papers screened an hour | 120 | 522 | **564** |
+| serialised lock hold a call | 2.44 s | 0.206 s | 0.319 s |
+| `orphan_recovery` mean hold | 0.82 s | 0.067 s | 0.156 s |
+| `count_registration` mean hold | 0.56 s | 0.018 s | 0.022 s |
+| `reserve` mean hold | 1.06 s | 0.121 s | 0.141 s |
+| longest hold of the window | 9.4 s | 3.3 s | 18.2 s |
+| mean wait for the lock | 0.55 s | 0.001 s | 0.001 s |
+| HTTP 429 / 503 | 0 / 0 | 0 / 0 | 0 / 0 |
+| ambiguous charges | 0 | 0 | 0 |
+| candidate processing faults | 1 | 0 | 3 |
+| producer CPU | 0.67 core | 0.45 core | 0.39 core |
+| producer threads / resident | 18 / 1.5 GB | 38 / 2.1 GB | 60 / 2.9 GB |
+| machine load, 8 cores | 9 | 13.6 | 15.2 |
+
+724 paid requests in the window, 141 papers screened, nothing halted.
+
+**50 threads is past the knee, and the knee is the interpreter, not the
+ledger.** The mean wait for the lock is a millisecond at both thread counts, so
+nobody queues; what grew is the **hold**, from 0.206 s to 0.319 s, because the
+thread holding the lock shares one interpreter with 49 peers instead of 31.
+More papers are in flight (43 against 33) and slightly more papers are screened
+an hour (564 against 522), but fewer requests are made a minute (48.3 against
+55.8). The extra threads buy breadth and pay for it in rate.
+
+**The periodic full proof became a stall.** Six holds of 10 to 18 seconds
+landed in the 15-minute window, spaced two to three minutes apart: the full
+immutable-event pass (2.4 s of CPU, every
+`IMMUTABLE_EVENT_REVALIDATION_SECONDS`) and the reload after a compaction,
+each multiplied by the same interpreter contention. That is about 9 percent of
+the window spent inside one exclusive section. At 16 threads it was invisible
+under the 2.44 s of ordinary cost; at 50 it is the largest single stall left,
+and it belongs off the hot path, where the compactor already runs the full
+money proof.
+
 ### What sets the number in flight
 
 The number in flight settles at the length of one call over the serialised
-bookkeeping of one call. At the 8-second median latency and 0.206 s serialised,
-that is 39, and the 32-thread stage measured a peak of 33. The arithmetic the
-predecessor used still holds; only the second number moved, from 2.44 s to
-0.206 s.
+bookkeeping of one call. The call length is the model's, 8 seconds at the
+median, and is not ours to move. The arithmetic the predecessor used still
+holds; only the second number moved, and it now moves with the thread count:
+
+| threads | serialised a call | 8 s over it | measured peak |
+| --- | --- | --- | --- |
+| 16 (before) | 2.44 s | 3 | 11 |
+| 32 | 0.206 s | 39 | 33 |
+| 50 | 0.319 s | 25 | 43 |
+
+The measured peak runs ahead of the arithmetic at 50 because the option
+verdicts of one paper go out in a wave of four, so a burst exceeds the steady
+rate. The steady rate is what the requests a minute say, and it fell.
 
 ## 8. Machine headroom
 
@@ -224,39 +276,49 @@ actually using them.
 
 Written against the measurement, not against the hope.
 
-**50 is the honest ceiling of one producer process today.** The number in
-flight is the length of one call over the serialised bookkeeping of one call.
-The call length is the model's, 8 seconds at the median, and is not ours to
-move. The serialised cost is 0.206 s, so the ceiling is about 39, which is what
-the 32-thread stage measured. More threads past that point queue instead of
-calling, and each extra thread makes every other thread's lock hold longer,
-because the holder shares the interpreter with them.
+**50 runs, and it is where one producer process stops paying.** The run is at
+50 paper workers now, with 43 calls in flight at its peak, 564 papers screened
+an hour and no HTTP 429 in 724 paid calls. That is the captain's number, met.
+But the 32-thread stage made more requests a minute with a shorter lock hold,
+and the whole gain from 32 to 50 is 8 percent more papers an hour. The return
+has flattened.
 
-**100 needs two things, and only one of them is more code.**
+**What flattened it is the interpreter, not the ledger and not Google.** The
+mean wait for the exclusive lock is one millisecond at both thread counts, so
+nothing queues. What grows is the hold: 0.206 s at 32 threads, 0.319 s at 50,
+for the same 26 milliseconds of real work per section. A thread holding the
+lock shares one interpreter with every other paper thread of its process, so
+each thread added past about 30 lengthens every other thread's serialised
+section. 100 threads in one process would make the run slower than 50, not
+faster.
 
-1. The serialised cost has to fall to about 0.08 s. What is left in it is not
-   history any more: the immutable-event proof of the rows that moved (12 ms),
-   the money proof of the delta (7 ms) and the commit (7 ms), about 26 ms of
-   real CPU per exclusive section, which 32 peer threads inflate to 120 ms.
-   There is another factor of two or three there, but it is in the money proof
-   itself and each step of it is smaller and riskier than the last.
-2. The threads have to stop starving the lock holder. That is the multiplier,
-   and it is the one worth attacking: the holder of an exclusive section
-   competes for the interpreter with every other paper thread of its process.
-   Splitting the producer into two or three processes over disjoint halves of
-   the Jev ranking does not divide the lock, which is a file lock every process
-   shares, but it does divide the peers the holder competes with. Two processes
-   of 25 threads should hold the lock for about half as long as one process of
-   50, which doubles the ceiling. The store is multi-process safe by design and
-   `arctic-ledger-parallel-r1` proved it under the evaluator.
+**100 needs processes, and one more thing off the hot path.**
 
-**Google is not the limit yet, and nobody has seen where it is.** No HTTP 429
-has ever been recorded on this run, at any concurrency, including the 32-thread
+1. **Processes, not threads.** Splitting the producer over disjoint halves of
+   the live Jev ranking does not divide the lock, which is a file lock every
+   process shares, but it divides the peers the lock holder competes with. Two
+   processes of 32 threads should hold the lock for about as long as one
+   process of 32 does, at twice the papers. The store is multi-process safe by
+   design and `arctic-ledger-parallel-r1` proved it under the evaluator; what
+   is missing is the split of the ranking and a second activation, not code in
+   the broker. This is the next experiment.
+2. **The full immutable-event pass belongs off the hot path.** Six holds of 10
+   to 18 seconds landed in the 15-minute window, about 9 percent of it: the
+   periodic full proof and the reload after a compaction, each multiplied by
+   the same contention. The compactor already runs the full money proof against
+   its own materialization without the ledger lock. The full immutable-event
+   pass can run the same way.
+
+**Google is not the limit, and nobody has seen where it is.** No HTTP 429 and
+no HTTP 503 has ever been recorded on this run, at any concurrency, in any
 window. The per-model rate at which Gemini begins to throttle is still unknown,
-so it cannot be the argument for or against 100.
+so it is not an argument for or against 100 in either direction.
 
-So: 50 now, measured. 100 is reachable, by processes rather than threads, and
-it is the next experiment rather than the next line of code.
+So: **50 now, measured and live.** 100 is reachable and is a scheduling change
+rather than a ledger change. If the choice is between 32 and 50 on today's
+code, 50 screens more papers an hour and 32 makes more calls a minute with half
+the lock hold; the run is left at 50 because papers an hour is what the
+campaign counts.
 
 ## 10. What was not done, and why
 
