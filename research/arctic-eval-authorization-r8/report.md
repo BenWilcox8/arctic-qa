@@ -254,8 +254,9 @@ The evaluator runs as `arctic-abstention-stream-r3` from the snapshot `runtime/a
 | First evaluation receipt of the day's first restart | `c79aad30f84188da9d57756e82b8e5e21d322b14bf2d826eba42fba9b6b707d4` |
 | That receipt | `evaluation_answer:gemini-3.8-flash`, submitted 00:08:35Z, completed, USD 0.029674 |
 | Shared ledger | `halted` false, `evaluation_halted` false, `integrity_valid` true |
-| Carried journal rows | 16, of which 12 are item rows, so `remaining_bound` is 1988 |
-| Backfill owed | none as a separate task: the 12 carried items are re-evaluated whole as pending items |
+| Items evaluated | 16, every one complete, 706 trials, USD 2.104426 of Gemini |
+| Backlog owed | none: the 12 carried items were re-evaluated whole and the two truncated ones were finished |
+| `remaining_bound` | 2000 minus 16 item rows, so 1984 |
 
 The evaluator's half of section 4 went live with the cutover of section 11.
 The cost guard runs its own older snapshot, so its half reaches it at its next re-snapshot, after this branch merges.
@@ -265,6 +266,8 @@ Re-snapshot the evaluator before the guard, or both together.
 The running evaluator still writes `watch-state.json` only at the end of a poll cycle, so that file is hours old while the unit works: at 00:23Z it still held the state of the invocation that stopped at 23:40Z.
 The old guard reads it and says `running` false without acting.
 A guard on the new code against an evaluator on the old code would read the same thing and append a `blocked:` line for a healthy evaluator, every hour.
+
+At 01:18:13Z the second held item finished too, so every accepted question of the campaign is evaluated on all eight models and the evaluator waits for the next one.
 
 The cutover receipt is `cutover-receipt-20260916T232243Z.json` of the activation directory.
 It was written by hand from the evidence, because the script timed out waiting for `watch-state.json`, which the watcher writes only at the end of a whole poll cycle.
