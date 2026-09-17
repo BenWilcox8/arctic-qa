@@ -285,6 +285,47 @@ def summarize_run(
     }
 
 
+def without_harness_version(manifest: dict[str, Any]) -> dict[str, Any]:
+    """The run manifest with the harness version of the pass taken out.
+
+    The harness version is a record of the pass that ran, exactly as
+    ``code_commit`` is. The `claude` and `codex` binaries are upgraded on this
+    machine while a run is open, and every response row records the version
+    that answered it, so the evidence of each call is complete without the
+    manifest binding it.
+
+    Binding it into the identity of the run directory made an upgrade final.
+    A question with trials left could never be finished afterwards, because
+    :func:`prepare_run` refused its own directory with "the run directory
+    holds a different run manifest". Eight questions of the `streaming-r11`
+    work directory met that on 2026-09-17, when the Claude Code binary went
+    from 2.1.273 to 2.1.274, and the refusal ended the unit at 16:04:18 UTC.
+    """
+    decoding = dict(manifest.get("decoding") or {})
+    decoding.pop("harness_version", None)
+    return {**manifest, "decoding": decoding}
+
+
+def pass_manifest_name(output_dir: Path, run_manifest: dict[str, Any]) -> str:
+    """The file name of this pass's own manifest record.
+
+    A pass is named by its code commit. Two passes of one commit can still
+    differ, because the harness binary is upgraded between them, so a name
+    that another record already holds takes a short digest as well.
+    """
+    commit = str(run_manifest.get("code_commit") or "unknown")
+    name = f"run-manifest-{commit}.json"
+    path = output_dir / name
+    if path.is_file():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        if (existing.get("decoding") or {}).get("harness_version") != (
+            run_manifest.get("decoding") or {}
+        ).get("harness_version"):
+            digest = sha256_bytes(canonical_json(run_manifest).encode())[:12]
+            return f"run-manifest-{commit}-{digest}.json"
+    return name
+
+
 def prepare_run(
     *,
     set_dir: Path,
@@ -350,15 +391,21 @@ def prepare_run(
             for key, value in existing.items()
             if key not in ("created_at_utc", "code_commit")
         }
-        if stable != {
+        current = {
             key: value for key, value in run_manifest.items() if key != "code_commit"
-        }:
+        }
+        if without_harness_version(stable) != without_harness_version(current):
             raise ValueError("the run directory holds a different run manifest")
         # The first manifest stays exactly as it was written. A later pass on
-        # another snapshot records its own beside it, so an item can be
-        # finished after a cutover and the record of each pass is its own.
-        if existing.get("code_commit") != run_manifest["code_commit"]:
-            later = output_dir / f"run-manifest-{run_manifest['code_commit']}.json"
+        # another snapshot, or on an upgraded harness binary, records its own
+        # beside it, so an item can be finished after a cutover and the record
+        # of each pass is its own.
+        if existing.get("code_commit") != run_manifest["code_commit"] or (
+            existing.get("decoding") or {}
+        ).get("harness_version") != (run_manifest.get("decoding") or {}).get(
+            "harness_version"
+        ):
+            later = output_dir / pass_manifest_name(output_dir, run_manifest)
             if not later.is_file():
                 atomic_json(
                     later,

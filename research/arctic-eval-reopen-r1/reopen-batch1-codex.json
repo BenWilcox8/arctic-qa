@@ -1,0 +1,458 @@
+{
+  "applied": true,
+  "captain_order": "captain order 2026-09-17 15:48 UTC",
+  "gemini_trials_reopened": 137,
+  "gemini_usd_per_trial": "0.01576684239130434782608695652",
+  "measured_at_utc": "2026-09-17T16:01:44Z",
+  "projected_gemini_usd": "2.160057",
+  "questions_already_reopened": [],
+  "questions_in_flight_left_alone": [],
+  "questions_not_reopened": [
+    {
+      "item_id": "aqa-7f09e4bdf6bac5c50d4c",
+      "planned_trials": 48,
+      "recorded_trials": 40,
+      "run_id": "abstention-stream-r10-aqa-7f09e4bdf6bac5c50d4c",
+      "why": "the run directory of this question belongs to another run id, so this evaluator would ask all of its trials again, which the evaluation policy forbids"
+    }
+  ],
+  "questions_reopened": 17,
+  "questions_with_a_row": 195,
+  "recorded_trials_the_provider_never_answered": [
+    {
+      "error": "the evaluation repeat limit for this item is complete",
+      "item_id": "aqa-52dee70307a8186522bf",
+      "model": "gemini-3.8-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the evaluation repeat limit for this item is complete",
+      "item_id": "aqa-52dee70307a8186522bf",
+      "model": "gemini-3.7-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the evaluation repeat limit for this item is complete",
+      "item_id": "aqa-52dee70307a8186522bf",
+      "model": "gemini-3.8-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the evaluation repeat limit for this item is complete",
+      "item_id": "aqa-52dee70307a8186522bf",
+      "model": "gemini-3.7-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the evaluation repeat limit for this item is complete",
+      "item_id": "aqa-9d5b8cc412f835cc5201",
+      "model": "gemini-3.8-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the evaluation repeat limit for this item is complete",
+      "item_id": "aqa-9d5b8cc412f835cc5201",
+      "model": "gemini-3.7-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the evaluation repeat limit for this item is complete",
+      "item_id": "aqa-9d5b8cc412f835cc5201",
+      "model": "gemini-3.7-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the evaluation repeat limit for this item is complete",
+      "item_id": "aqa-9d5b8cc412f835cc5201",
+      "model": "gemini-3.8-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the evaluation repeat limit for this item is complete",
+      "item_id": "aqa-7e056efad24ee1a12f0c",
+      "model": "gemini-3.8-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the evaluation repeat limit for this item is complete",
+      "item_id": "aqa-7e056efad24ee1a12f0c",
+      "model": "gemini-3.7-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the evaluation repeat limit for this item is complete",
+      "item_id": "aqa-b54e1f03e8456ad1fc91",
+      "model": "gemini-3.8-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the evaluation repeat limit for this item is complete",
+      "item_id": "aqa-b54e1f03e8456ad1fc91",
+      "model": "gemini-3.7-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the evaluation repeat limit for this item is complete",
+      "item_id": "aqa-199da6fd46bc6e3d7cd2",
+      "model": "gemini-3.8-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the evaluation repeat limit for this item is complete",
+      "item_id": "aqa-199da6fd46bc6e3d7cd2",
+      "model": "gemini-3.7-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the harness exited with None: FileNotFoundError: [Errno 2] No such file or directory: '/home/ben/.npm-global/bin/claude'",
+      "item_id": "aqa-0f42dabd7605064eacc5",
+      "model": "claude-fable-5-1",
+      "state": "failed"
+    },
+    {
+      "error": "the harness exited with None: FileNotFoundError: [Errno 2] No such file or directory: '/home/ben/.npm-global/bin/claude'",
+      "item_id": "aqa-0f42dabd7605064eacc5",
+      "model": "claude-opus-5",
+      "state": "failed"
+    },
+    {
+      "error": "the harness exited with 1: ",
+      "item_id": "aqa-045259006a74fb22b627",
+      "model": "gpt-5.6-sol",
+      "state": "failed"
+    },
+    {
+      "error": "the harness exited with None: FileNotFoundError: [Errno 2] No such file or directory: '/home/ben/.npm-global/bin/claude'",
+      "item_id": "aqa-1404191eb95ac65f706c",
+      "model": "claude-fable-5-1",
+      "state": "failed"
+    },
+    {
+      "error": "the harness exited with None: FileNotFoundError: [Errno 2] No such file or directory: '/home/ben/.npm-global/bin/claude'",
+      "item_id": "aqa-f486d0741609bd77e771",
+      "model": "claude-opus-5",
+      "state": "failed"
+    },
+    {
+      "error": "codex printed no JSON event",
+      "item_id": "aqa-c305f368b2f8785873d6",
+      "model": "gpt-6-astra",
+      "state": "failed"
+    },
+    {
+      "error": "codex turn did not complete: Exceeded skills context budget. All skill descriptions were removed and 5 additional skills were not included in the model-visible skills list.",
+      "item_id": "aqa-c305f368b2f8785873d6",
+      "model": "gpt-5.6-sol",
+      "state": "failed"
+    },
+    {
+      "error": "codex turn did not complete: Exceeded skills context budget. All skill descriptions were removed and 5 additional skills were not included in the model-visible skills list.",
+      "item_id": "aqa-c305f368b2f8785873d6",
+      "model": "gpt-6-astra",
+      "state": "failed"
+    },
+    {
+      "error": "the harness exited with None: FileNotFoundError: [Errno 2] No such file or directory: '/home/ben/.npm-global/bin/claude'",
+      "item_id": "aqa-27d0a5c52655da6b2283",
+      "model": "claude-fable-5-1",
+      "state": "failed"
+    },
+    {
+      "error": "the harness exited with None: FileNotFoundError: [Errno 2] No such file or directory: '/home/ben/.npm-global/bin/claude'",
+      "item_id": "aqa-27d0a5c52655da6b2283",
+      "model": "claude-sonnet-5",
+      "state": "failed"
+    },
+    {
+      "error": "the paid-call concurrency limit is complete",
+      "item_id": "aqa-27d0a5c52655da6b2283",
+      "model": "gemini-3.8-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "codex turn did not complete: Exceeded skills context budget. All skill descriptions were removed and 5 additional skills were not included in the model-visible skills list.",
+      "item_id": "aqa-9086ffebf48bcbf3f6d5",
+      "model": "gpt-5.6-terra",
+      "state": "failed"
+    },
+    {
+      "error": "codex turn did not complete: Exceeded skills context budget. All skill descriptions were removed and 5 additional skills were not included in the model-visible skills list.",
+      "item_id": "aqa-4ebeabada03d8016f85c",
+      "model": "gpt-5.6-sol",
+      "state": "failed"
+    },
+    {
+      "error": "codex turn did not complete: Exceeded skills context budget. All skill descriptions were removed and 5 additional skills were not included in the model-visible skills list.",
+      "item_id": "aqa-8ef45b7047feec11d615",
+      "model": "gpt-5.6-sol",
+      "state": "failed"
+    },
+    {
+      "error": "the harness exited with 1: ",
+      "item_id": "aqa-fae5ab9441c11022aa0a",
+      "model": "gpt-5.6-terra",
+      "state": "failed"
+    },
+    {
+      "error": "interrupted request has no durable provider response",
+      "item_id": "aqa-26ee2a318740fde88911",
+      "model": "gemini-3.8-flash",
+      "state": "ambiguous_charge"
+    },
+    {
+      "error": "codex turn did not complete: Exceeded skills context budget. All skill descriptions were removed and 5 additional skills were not included in the model-visible skills list.",
+      "item_id": "aqa-26ee2a318740fde88911",
+      "model": "gpt-5.6-terra",
+      "state": "failed"
+    },
+    {
+      "error": "duplicate request key",
+      "item_id": "aqa-26ee2a318740fde88911",
+      "model": "gpt-5.6-sol",
+      "state": "policy_stop"
+    },
+    {
+      "error": "the harness process did not settle this request",
+      "item_id": "aqa-f9a1dcadc17f70bf8935",
+      "model": "gpt-5.6-sol",
+      "state": "interrupted"
+    },
+    {
+      "error": "the harness process did not settle this request",
+      "item_id": "aqa-c2e3718eeed3474b6ada",
+      "model": "gpt-5.6-terra",
+      "state": "interrupted"
+    },
+    {
+      "error": "codex turn did not complete: no turn.completed event",
+      "item_id": "aqa-2f73cc246fcf2f9ff43f",
+      "model": "gpt-6-astra",
+      "state": "failed"
+    },
+    {
+      "error": "the paid-call concurrency limit is complete",
+      "item_id": "aqa-ea84e5a387514e3d3f74",
+      "model": "gemini-3.8-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the paid-call concurrency limit is complete",
+      "item_id": "aqa-5903b596b017f0d4310e",
+      "model": "gemini-3.7-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the paid-call concurrency limit is complete",
+      "item_id": "aqa-5903b596b017f0d4310e",
+      "model": "gemini-3.8-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the harness exited with None: FileNotFoundError: [Errno 2] No such file or directory: '/home/ben/.npm-global/bin/claude'",
+      "item_id": "aqa-68518f4c566af5dbedfe",
+      "model": "claude-sonnet-5",
+      "state": "failed"
+    },
+    {
+      "error": "the paid-call concurrency limit is complete",
+      "item_id": "aqa-cbf7569360b73d93456f",
+      "model": "gemini-3.7-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the harness exited with None: FileNotFoundError: [Errno 2] No such file or directory: '/home/ben/.npm-global/bin/claude'",
+      "item_id": "aqa-391b05d6b772464972f3",
+      "model": "claude-sonnet-5",
+      "state": "failed"
+    },
+    {
+      "error": "the paid-call concurrency limit is complete",
+      "item_id": "aqa-7c6a8c61dc96dc3dd1fa",
+      "model": "gemini-3.7-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the harness exited with 1: ",
+      "item_id": "aqa-fd31a931c45fa28f7b07",
+      "model": "claude-opus-5",
+      "state": "failed"
+    },
+    {
+      "error": "the harness exited with 1: ",
+      "item_id": "aqa-fd31a931c45fa28f7b07",
+      "model": "claude-sonnet-5",
+      "state": "failed"
+    },
+    {
+      "error": "the harness exited with 1: ",
+      "item_id": "aqa-fd31a931c45fa28f7b07",
+      "model": "claude-sonnet-5",
+      "state": "failed"
+    },
+    {
+      "error": "the harness exited with 1: ",
+      "item_id": "aqa-fd31a931c45fa28f7b07",
+      "model": "claude-opus-5",
+      "state": "failed"
+    },
+    {
+      "error": "the paid-call concurrency limit is complete",
+      "item_id": "aqa-1e5e91866f210a4c5059",
+      "model": "gemini-3.8-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the harness exited with None: FileNotFoundError: [Errno 2] No such file or directory: '/home/ben/.npm-global/bin/claude'",
+      "item_id": "aqa-d0f245a3b9676356ccda",
+      "model": "claude-fable-5-1",
+      "state": "failed"
+    },
+    {
+      "error": "the paid-call concurrency limit is complete",
+      "item_id": "aqa-edd8ca8e4f36f3b21842",
+      "model": "gemini-3.8-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the paid-call concurrency limit is complete",
+      "item_id": "aqa-1338583a9d3af2f2a580",
+      "model": "gemini-3.7-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the paid-call concurrency limit is complete",
+      "item_id": "aqa-8e708e5c7f6355dd1030",
+      "model": "gemini-3.7-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the harness exited with None: FileNotFoundError: [Errno 2] No such file or directory: '/home/ben/.npm-global/bin/claude'",
+      "item_id": "aqa-c6ea6abd5090185e19af",
+      "model": "claude-opus-5",
+      "state": "failed"
+    },
+    {
+      "error": "the harness exited with None: FileNotFoundError: [Errno 2] No such file or directory: '/home/ben/.npm-global/bin/claude'",
+      "item_id": "aqa-c1119bfdf922fe128f5b",
+      "model": "claude-sonnet-5",
+      "state": "failed"
+    },
+    {
+      "error": "the paid-call concurrency limit is complete",
+      "item_id": "aqa-f3e9cd93d6cdcdd457f4",
+      "model": "gemini-3.8-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the harness exited with None: FileNotFoundError: [Errno 2] No such file or directory: '/home/ben/.npm-global/bin/claude'",
+      "item_id": "aqa-256e304bd90182d3c7ae",
+      "model": "claude-fable-5-1",
+      "state": "failed"
+    },
+    {
+      "error": "the harness exited with -15: ",
+      "item_id": "aqa-efecfe69d723a6e4b0be",
+      "model": "claude-opus-5",
+      "state": "failed"
+    },
+    {
+      "error": "the paid-call concurrency limit is complete",
+      "item_id": "aqa-33a58099ec21f8954d36",
+      "model": "gemini-3.8-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the harness exited with 143: ",
+      "item_id": "aqa-a408711eb1a95b8aaf5a",
+      "model": "claude-fable-5-1",
+      "state": "failed"
+    },
+    {
+      "error": "the paid-call concurrency limit is complete",
+      "item_id": "aqa-e2c23bb02f0091834978",
+      "model": "gemini-3.8-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the harness exited with 143: ",
+      "item_id": "aqa-811f75ab5abca1b533dc",
+      "model": "claude-sonnet-5",
+      "state": "failed"
+    },
+    {
+      "error": "the harness exited with 143: ",
+      "item_id": "aqa-63ba73fcdcc23e1fc891",
+      "model": "claude-fable-5-1",
+      "state": "failed"
+    },
+    {
+      "error": "the harness exited with 143: ",
+      "item_id": "aqa-9db8c3dd3b428f942a93",
+      "model": "claude-sonnet-5",
+      "state": "failed"
+    },
+    {
+      "error": "the paid-call concurrency limit is complete",
+      "item_id": "aqa-ace133a8fe61884f296e",
+      "model": "gemini-3.7-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the paid-call concurrency limit is complete",
+      "item_id": "aqa-22df11234af42b685418",
+      "model": "gemini-3.7-flash",
+      "state": "not_submitted"
+    },
+    {
+      "error": "the harness exited with None: FileNotFoundError: [Errno 2] No such file or directory: '/home/ben/.npm-global/bin/claude'",
+      "item_id": "aqa-861277d29839e3974b79",
+      "model": "claude-sonnet-5",
+      "state": "failed"
+    },
+    {
+      "error": "the harness exited with None: FileNotFoundError: [Errno 2] No such file or directory: '/home/ben/.npm-global/bin/claude'",
+      "item_id": "aqa-e39c131fc70fbf841f27",
+      "model": "claude-opus-5",
+      "state": "failed"
+    },
+    {
+      "error": "the paid-call concurrency limit is complete",
+      "item_id": "aqa-9d5b4e3157bfbc59d18a",
+      "model": "gemini-3.8-flash",
+      "state": "not_submitted"
+    }
+  ],
+  "reopened_item_ids": [
+    "aqa-045259006a74fb22b627",
+    "aqa-b090be4d6c22d807cc4c",
+    "aqa-edd8ca8e4f36f3b21842",
+    "aqa-a40afe4dee1780bc8319",
+    "aqa-c8a27d90c1331a10949e",
+    "aqa-1338583a9d3af2f2a580",
+    "aqa-71b39b6e13ea02c74302",
+    "aqa-8e708e5c7f6355dd1030",
+    "aqa-eb0b93df1d29b250c103",
+    "aqa-10cae0d7f038fc2e813d",
+    "aqa-03dbe60c75799123ef1b",
+    "aqa-2cbbea930ac101b2586d",
+    "aqa-738949c5c347a199267f",
+    "aqa-737f93409bacd649dcaa",
+    "aqa-5137484b1ade34a073dc",
+    "aqa-ac2c51e03aa170196765",
+    "aqa-f3e9cd93d6cdcdd457f4"
+  ],
+  "schema": "abstention-eval-reopen-summary-v1",
+  "task": "arctic-eval-reopen-r1",
+  "trials_reopened": 440,
+  "trials_reopened_by_model": {
+    "claude-fable-5-1": 37,
+    "claude-opus-5": 44,
+    "claude-sonnet-5": 47,
+    "gemini-3.7-flash": 69,
+    "gemini-3.8-flash": 68,
+    "gpt-5.6-sol": 60,
+    "gpt-5.6-terra": 63,
+    "gpt-6-astra": 52
+  },
+  "work_dir": "/mnt/crdata/research-abstention/arctic-qa/abstention-eval/streaming-r11"
+}

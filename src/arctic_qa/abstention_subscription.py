@@ -191,6 +191,24 @@ def harness_binary_path(binary: str) -> Path | None:
     return Path(found) if found else None
 
 
+# What a harness that could not be started leaves in the transport's stderr.
+# The child process never ran, so the exit code is None and the stderr is the
+# spawn error itself. This tuple is the one owner of those texts, and
+# `abstention_watch` reads it for the vendor pause that lifts itself.
+HARNESS_SPAWN_FAILURES = (
+    "FileNotFoundError: [Errno 2] No such file or directory",
+    "PermissionError: [Errno 13] Permission denied",
+)
+
+
+def is_harness_spawn_failure(result: dict[str, Any]) -> bool:
+    """Say whether one transport result is a harness that would not start."""
+    if result.get("returncode") is None:
+        return True
+    stderr = str(result.get("stderr") or "")
+    return any(marker in stderr for marker in HARNESS_SPAWN_FAILURES)
+
+
 def require_harness_binary(vendor: str, binary: str) -> Path:
     """Prove the harness binary can be started, before anything is reserved.
 
@@ -1141,7 +1159,21 @@ def harness_environment(
 def binary_version(
     vendor: str, binary: str, transport: SubscriptionTransport, *, cwd: Path
 ) -> str:
-    """Return the version line that the harness binary prints."""
+    """Return the version line that the harness binary prints.
+
+    A binary that cannot be started now is not an error of this run. The
+    harness is upgraded on this machine while the evaluator runs, so the path
+    is gone for a moment: the Claude Code binary was replaced at 09:31, 12:06,
+    15:06 and 16:03 UTC on 2026-09-17. This therefore raises
+    :class:`HarnessUnavailableError`, which the caller waits out and then
+    leaves the question open. A plain ``ValueError`` here ended the unit at
+    16:04:18 UTC on 2026-09-17, two minutes after it took up a wave.
+
+    The transport owns the question of whether it can start that harness, so
+    the probe is its own: a transport that starts no process answers by doing
+    nothing.
+    """
+    transport.probe(vendor, binary)
     result = transport.run(
         {
             "purpose": "version",
@@ -1158,7 +1190,13 @@ def binary_version(
         }
     )
     if result["returncode"] != 0:
-        raise ValueError(f"{binary} --version failed: {result['stderr'][:200]}")
+        detail = result["stderr"][:200]
+        if is_harness_spawn_failure(result):
+            raise HarnessUnavailableError(
+                f"the {vendor} harness binary is not executable now: "
+                f"{binary}: {detail}"
+            )
+        raise ValueError(f"{binary} --version failed: {detail}")
     return result["stdout"].strip().splitlines()[0] if result["stdout"].strip() else ""
 
 

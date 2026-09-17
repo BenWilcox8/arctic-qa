@@ -57,7 +57,7 @@ from arctic_qa.abstention_watch import (
     wave_order,
 )
 from arctic_qa.cli import main as cli_main
-from arctic_qa.errors import BrokerOperationBusyError
+from arctic_qa.errors import BrokerOperationBusyError, HarnessUnavailableError
 from arctic_qa.model_broker import (
     EVALUATION_CEILING_REASON,
     EVALUATION_ITEM_REPEAT_REASON,
@@ -3164,3 +3164,76 @@ def test_a_harness_pause_is_told_apart_from_every_other_pause() -> None:
     assert is_harness_unavailable_reason(f"not_submitted: {EVALUATION_CEILING_REASON}") is False
     assert is_harness_unavailable_reason("ambiguous_charge: ...") is False
     assert is_harness_unavailable_reason(None) is False
+
+
+def test_a_vanished_harness_binary_around_the_plan_never_ends_the_watch(
+    tmp_path: Path,
+) -> None:
+    """A harness that will not start belongs to one question, not to the watch.
+
+    The read of the harness version runs while the question builds its run,
+    which is the frame around the plan and not the trial's own bounded wait.
+    It reserved nothing, submitted nothing and charged nothing, and the binary
+    is usually back within the minute. Ending the watch on it took the unit
+    down at 16:04:18 UTC on 2026-09-17, two minutes after it took up a wave.
+    """
+    import arctic_qa.abstention_watch as module
+
+    db = state_db(tmp_path / "db", chapter3=["aqa-a", "aqa-b"])
+    ledger_file = construction_ledger(
+        tmp_path, {"family-aqa-a": ["0.01"], "family-aqa-b": ["0.01"]}
+    )
+    auth = authorization(tmp_path, db, maximum_items=4)
+    work = tmp_path / "gone"
+    events: list[dict] = []
+    seen: list[str] = []
+
+    original = module.evaluate_item
+
+    def missing_first(*, item_id: str, **changes):  # type: ignore[no-untyped-def]
+        seen.append(item_id)
+        if len(seen) == 1:
+            raise HarnessUnavailableError(
+                "the anthropic_claude_code harness binary is not executable "
+                "now: /home/ben/.npm-global/bin/claude"
+            )
+        return original(item_id=item_id, **changes)
+
+    module.evaluate_item = missing_first  # type: ignore[assignment]
+    try:
+        result = scripted_watch(
+            db=db,
+            work_dir=work,
+            ledger_file=ledger_file,
+            authorization_file=auth,
+            item_workers=1,
+            log=events.append,
+        )
+    finally:
+        module.evaluate_item = original  # type: ignore[assignment]
+
+    assert result["errors"] == []
+    assert seen == ["aqa-a", "aqa-b"]
+    contained = [row for row in events if row["event"] == "item_harness_unavailable"]
+    assert [row["item_id"] for row in contained] == ["aqa-a"]
+    assert [row for row in events if row["event"] == "item_failed"] == []
+    # The question keeps its place: it has no journal row, so a later pass
+    # takes it up and runs the whole plan on it.
+    assert "aqa-a" not in {row["item_id"] for row in CostJournal(work).item_rows()}
+
+
+def test_the_version_read_of_a_missing_binary_is_a_harness_pause() -> None:
+    """The message of the version read is read as a harness that would not start.
+
+    `binary_version` raises it while the question builds its run. The watch
+    must read it exactly as it reads the probe's own refusal, so the arm
+    resumes by itself when the binary is back.
+    """
+    assert is_harness_unavailable_reason(
+        "the anthropic_claude_code harness binary is not executable now: "
+        "/home/ben/.npm-global/bin/claude: FileNotFoundError: [Errno 2] "
+        "No such file or directory"
+    )
+    assert not is_harness_unavailable_reason(
+        "/home/ben/.npm-global/bin/claude --version failed: the login expired"
+    )

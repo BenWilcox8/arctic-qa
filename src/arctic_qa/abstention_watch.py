@@ -92,7 +92,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import db
-from .errors import BrokerOperationBusyError
+from .errors import BrokerOperationBusyError, HarnessUnavailableError
 
 from .abstention_cost import (
     CostJournal,
@@ -128,6 +128,7 @@ from .abstention_set import (
     load_eval_set,
 )
 from .abstention_subscription import (
+    HARNESS_SPAWN_FAILURES,
     SUBSCRIPTION_PROVIDER_NAMES,
     harness_binary_path,
     load_subscription_models,
@@ -770,14 +771,15 @@ def is_lock_busy_error(error: str | None) -> bool:
 
 
 HARNESS_UNAVAILABLE_MARKERS = (
-    # What the probe before the reservation raises now.
+    # What the probe before the reservation raises now, and what the read of
+    # the harness version raises when the binary is not there.
     "harness binary is not executable now",
     # What the transport reported before that probe existed: the child process
     # could not be spawned at all, so the exit code is None and the stderr is
     # the spawn error. The Claude Code binary vanished four times during a
     # package upgrade on 2026-09-17 and each one paused the arm for good.
-    "FileNotFoundError: [Errno 2] No such file or directory",
-    "PermissionError: [Errno 13] Permission denied",
+    # `abstention_subscription` owns these two texts.
+    *HARNESS_SPAWN_FAILURES,
 )
 
 
@@ -1298,7 +1300,21 @@ def watch(
                         for name, record in sorted(state["paused_vendors"].items())
                     )
                 )
-            if result["error"] and is_lock_busy_error(result["error"]):
+            if result["error"] and is_harness_unavailable_reason(result["error"]):
+                # The harness binary was not there when this question built
+                # its run. That describes the machine and not the question:
+                # nothing was reserved, submitted or charged, the binary is
+                # usually back within the minute, and the question keeps every
+                # trial it recorded. Ending the watch on it took the unit down
+                # at 16:04:18 UTC on 2026-09-17.
+                emit(
+                    {
+                        "event": "item_harness_unavailable",
+                        "item_id": item_id,
+                        "error": result["error"],
+                    }
+                )
+            elif result["error"] and is_lock_busy_error(result["error"]):
                 # A bounded wait for the exclusive lock belongs to this
                 # question. It ends no wave and no watch: the question keeps
                 # the trials it recorded, its row says it is not complete, and
@@ -1395,6 +1411,27 @@ def watch(
                     "event": "item_lock_busy",
                     "item_id": item_id,
                     "error": f"{type(busy).__name__}: {busy}",
+                }
+            )
+            return
+        except HarnessUnavailableError as unavailable:
+            # The harness binary could not be started while this question
+            # built its run. The read of the harness version runs before the
+            # plan, so it lands here and not in the trial's own bounded wait.
+            # It describes the machine and not the question: nothing was
+            # reserved, submitted or charged, and the binary is usually back
+            # within the minute. The question keeps every trial it recorded
+            # and its place in the backlog, and the next wave takes it up.
+            # Ending the watch on it took the unit down at 16:04:18 UTC on
+            # 2026-09-17, two minutes after it took up a wave.
+            with gate:
+                in_flight.pop(item_id, None)
+                write_state()
+            emit(
+                {
+                    "event": "item_harness_unavailable",
+                    "item_id": item_id,
+                    "error": f"{type(unavailable).__name__}: {unavailable}",
                 }
             )
             return
@@ -1578,7 +1615,11 @@ def watch(
     # reserved nothing, submitted nothing and charged nothing, and the
     # question it belongs to is not complete, so the next poll runs what is
     # missing. This is the last guard on a path that has ended the unit twice.
-    fatal = [line for line in errors if not is_lock_busy_error(line)]
+    fatal = [
+        line
+        for line in errors
+        if not is_lock_busy_error(line) and not is_harness_unavailable_reason(line)
+    ]
     if fatal:
         raise RuntimeError("; ".join(fatal))
     return result

@@ -466,3 +466,76 @@ def test_cli_dry_run_score_render_and_list_models(
         == 2
     )
     assert "Pro variant" in capsys.readouterr().err
+
+
+def test_an_upgraded_harness_binary_still_finishes_the_question(
+    tmp_path: Path,
+) -> None:
+    """A harness upgrade must not close a run directory that owes trials.
+
+    The harness version is a record of the pass, exactly as the code commit
+    is, and every response row already carries the version that answered it.
+    Binding it into the identity of the run directory made an upgrade final:
+    `prepare_run` refused the directory with "the run directory holds a
+    different run manifest", and eight questions of the streaming-r11 work
+    directory could never be finished. The refusal ended the live unit at
+    16:04:18 UTC on 2026-09-17.
+    """
+    set_dir = frozen_set(tmp_path)
+    provider = ScriptedEvaluationProvider(policy="gold")
+    price_config = json.loads(
+        (ROOT / "config" / "benchmark-evaluation-prices-v1.json").read_text()
+    )
+    decoding = decoding_record(price_config, [PRO], ["medium"])
+    run_dir = tmp_path / "run"
+    first = run_evaluation(
+        set_dir=set_dir,
+        output_dir=run_dir,
+        run_id="r1",
+        models=[PRO],
+        arms=["medium"],
+        repeats=2,
+        provider=provider,
+        decoding={**decoding, "harness_version": "2.1.273 (Claude Code)"},
+        code_commit="aaaaaaa",
+        max_calls=5,
+    )
+    assert first["recorded_trials"] == 5 and first["complete"] is False
+
+    # The binary is upgraded between the two passes.
+    second = run_evaluation(
+        set_dir=set_dir,
+        output_dir=run_dir,
+        run_id="r1",
+        models=[PRO],
+        arms=["medium"],
+        repeats=2,
+        provider=provider,
+        decoding={**decoding, "harness_version": "2.1.274 (Claude Code)"},
+        code_commit="aaaaaaa",
+    )
+    assert second["recorded_trials"] == 12 and second["complete"] is True
+    assert second["calls_this_invocation"] == 7
+
+    # The first manifest is untouched, and the pass that ran on the upgraded
+    # binary has its own record beside it.
+    first_manifest = json.loads((run_dir / RUN_MANIFEST_FILENAME).read_text())
+    assert first_manifest["decoding"]["harness_version"] == "2.1.273 (Claude Code)"
+    later = sorted(run_dir.glob("run-manifest-aaaaaaa*.json"))
+    assert len(later) == 1
+    assert json.loads(later[0].read_text())["decoding"]["harness_version"] == (
+        "2.1.274 (Claude Code)"
+    )
+
+    # Everything else in the manifest is still the identity of the run.
+    with pytest.raises(ValueError, match="different run manifest"):
+        run_evaluation(
+            set_dir=set_dir,
+            output_dir=run_dir,
+            run_id="r1",
+            models=[PRO],
+            arms=["low"],
+            repeats=2,
+            provider=provider,
+            decoding={**decoding, "harness_version": "2.1.274 (Claude Code)"},
+        )

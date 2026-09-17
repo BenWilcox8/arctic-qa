@@ -539,6 +539,26 @@ The containment that shipped at 13:00 UTC on 2026-09-17 kept the unit alive but 
 In three hours the unit journal held 87 `item_done` events with `complete: false` against 16 with `complete: true`.
 Worse, the journal still called those questions complete: 73 of the 155 closed questions of the `streaming-r11` work directory hold fewer than their 48 responses, 1047 trials in all, and none of them was ever taken up again.
 
+### A harness the question could not start, and a harness that was upgraded
+
+The trial's own bounded wait covers a harness binary that vanishes between two trials.
+It does not cover the moment before the plan runs.
+A question builds its run first, and that build reads the harness version with `binary_version`.
+The binary can be gone at that moment too.
+
+`binary_version` therefore raises `errors.HarnessUnavailableError`, not a `ValueError`.
+The transport owns the question, so the probe is `transport.probe`.
+`abstention_watch.run_item` contains that error against the one question: it emits `item_harness_unavailable`, leaves the question open with every trial it recorded, and takes the next question.
+The question has no new journal row, so the next wave runs the whole plan that is missing.
+A plain `ValueError` there ended the unit at 16:04:18 UTC on 2026-09-17, two minutes after it took up a wave.
+
+The harness version is a record of the pass, not part of the identity of the run directory.
+`abstention_run.without_harness_version` takes it out of the comparison, and `pass_manifest_name` records the pass that ran on the new binary beside the first manifest.
+Every response row already carries the version that answered it, so the evidence of each call is complete.
+
+Before this rule an upgrade was final.
+The Claude Code binary went from 2.1.273 to 2.1.274 on 2026-09-17, and the eight questions whose Claude pass had run on the older binary could never be finished: `prepare_run` refused their own run directory with "the run directory holds a different run manifest".
+
 ### An arm a vanished harness binary paused
 
 A vendor pause is a circuit breaker for one invocation, and a start clears it.

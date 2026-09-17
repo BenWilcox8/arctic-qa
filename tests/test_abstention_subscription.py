@@ -751,3 +751,60 @@ def test_a_vanished_harness_binary_reserves_nothing_and_records_nothing(
     provider.transport = values["transport"]
     response = provider.answer(request)
     assert response.state == COMPLETED
+
+
+def test_the_version_read_of_a_binary_that_will_not_start_is_not_an_error(
+    tmp_path: Path,
+) -> None:
+    """A harness that will not start is a wait, never an error of the run.
+
+    `binary_version` runs while a question builds its run, before any trial
+    reserves a row. The Claude Code binary is replaced on this machine while
+    the evaluator runs, so the path is gone for a moment. A plain ValueError
+    there ended the live unit at 16:04:18 UTC on 2026-09-17.
+    """
+    from arctic_qa.abstention_subscription import (
+        binary_version,
+        require_harness_binary,
+    )
+
+    class WillNotStart:
+        """A transport whose child process never ran."""
+
+        def probe(self, vendor: str, binary: str) -> None:
+            """This transport starts a process, so it asks the path itself."""
+            require_harness_binary(vendor, binary)
+
+        def run(self, invocation: dict) -> dict:
+            return {
+                "returncode": None,
+                "stdout": "",
+                "stderr": (
+                    "FileNotFoundError: [Errno 2] No such file or directory: "
+                    "'/home/ben/.npm-global/bin/claude'"
+                ),
+            }
+
+    class Refuses(WillNotStart):
+        """A transport whose child process ran and refused."""
+
+        def run(self, invocation: dict) -> dict:
+            return {"returncode": 1, "stdout": "", "stderr": "the login expired"}
+
+    missing = tmp_path / "claude"
+    with pytest.raises(HarnessUnavailableError, match="not executable now"):
+        binary_version(
+            PROVIDER_ANTHROPIC_CLAUDE_CODE,
+            str(missing),
+            WillNotStart(),
+            cwd=tmp_path,
+        )
+
+    # A binary that is there and refuses is still an error of the run.
+    present = tmp_path / "claude-present"
+    present.write_text("#!/bin/sh\n")
+    present.chmod(0o755)
+    with pytest.raises(ValueError, match="--version failed"):
+        binary_version(
+            PROVIDER_ANTHROPIC_CLAUDE_CODE, str(present), Refuses(), cwd=tmp_path
+        )
