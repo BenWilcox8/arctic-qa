@@ -183,13 +183,21 @@ is in the log.
 | `count_registration` mean hold | 0.56 s | 0.018 s |
 | `reserve` mean hold | 1.06 s | 0.121 s |
 | mean wait for the lock | 0.55 s (count) | 0.001 s |
-| HTTP 429 / 503 | 0 / 0 | 0 / 0 |
+| provider 5xx (see below) | 0 | 0 |
 | ambiguous charges | 0 | 0 |
 | candidate processing faults | 1 | 0 |
 | producer CPU | 0.67 of a core | 0.45 of a core |
 | machine load, 8 cores | 9 | 13.6 |
 
-558 paid requests in the window, 87 papers screened. The number in flight now
+558 paid requests in the window, 87 papers screened.
+
+A note on the 5xx row, because the obvious counter is worthless: the ledger
+**row** of a request carries no provider status, so counting `http_status` over
+the rows, which is what the first draft of the observation script did, would
+report zero whatever the provider said. What proves the zero is the halt. A 5xx
+answer is an ambiguous charge, an ambiguous construction charge halts the whole
+ledger, and neither window halted. The provider status lives in the receipt,
+not the row. The number in flight now
 tracks the thread count: 33 at its peak against 32 paper workers, where 16
 workers reached 11. Nobody waits for the lock any more: the mean wait is one
 millisecond.
@@ -210,7 +218,7 @@ start, so it applied no transition and the evaluator stayed up through it.
 | `reserve` mean hold | 1.06 s | 0.121 s | 0.141 s |
 | longest hold of the window | 9.4 s | 3.3 s | 18.2 s |
 | mean wait for the lock | 0.55 s | 0.001 s | 0.001 s |
-| HTTP 429 / 503 | 0 / 0 | 0 / 0 | 0 / 0 |
+| provider 5xx (see below) | 0 | 0 | 0 |
 | ambiguous charges | 0 | 0 | 0 |
 | candidate processing faults | 1 | 0 | 3 |
 | producer CPU | 0.67 core | 0.45 core | 0.39 core |

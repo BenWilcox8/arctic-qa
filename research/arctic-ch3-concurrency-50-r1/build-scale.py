@@ -1209,8 +1209,14 @@ class Activation:
             "ledger_inflight": ledger["inflight"],
             "spent_usd": ledger["spent_usd"],
             "halted": ledger["halted"],
-            "http_429": sum(1 for r in ours if r.get("http_status") == 429),
-            "http_503": sum(1 for r in ours if r.get("http_status") == 503),
+            # The ledger row carries no provider status: it lives in the
+            # receipt. What a window proves about 5xx is the halt, because a
+            # 5xx answer is an ambiguous charge and an ambiguous construction
+            # charge halts the whole ledger.
+            "halt_reason": ledger.get("halt_reason"),
+            "ambiguous_rows": sum(
+                1 for r in ours if r.get("state") == "ambiguous_charge"
+            ),
             "ambiguous": sum(1 for r in ours if r.get("state") == "ambiguous_charge"),
             "screened_papers": len(list(jobs.glob("*.json"))) if jobs.is_dir() else 0,
             "counts": progress.get("counts", {}),
@@ -1253,8 +1259,9 @@ class Activation:
                 (last["screened_papers"] - first["screened_papers"]) * 60.0 / minutes, 1
             ),
             "peak_in_flight": peak,
-            "http_429": last["http_429"] - first["http_429"],
-            "http_503": last["http_503"] - first["http_503"],
+            "halted_during_window": bool(last["halted"] or first["halted"]),
+            "halt_reason": last["halt_reason"],
+            "new_ambiguous_rows": last["ambiguous_rows"] - first["ambiguous_rows"],
             "ambiguous": last["ambiguous"] - first["ambiguous"],
             "candidate_processing_fault": last["counts"].get(
                 "candidate_processing_fault", 0
