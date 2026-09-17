@@ -2917,6 +2917,26 @@ class CorpusArtifacts:
         }
 
 
+_PAGE: bytes | None = None
+_PAGE_LOCK = threading.Lock()
+
+
+def _page_bytes() -> bytes:
+    """The viewer page, read from disk once for the life of the process.
+
+    The file never changes while the process runs, and the data disk is a USB
+    rotating disk that the refresher keeps busy. A cold read of these 185 KB
+    took 23.8 seconds on 2026-09-17 while the first refresh cycle ran, so the
+    page looked dead although every API answered in milliseconds.
+    """
+    global _PAGE
+    if _PAGE is None:
+        with _PAGE_LOCK:
+            if _PAGE is None:
+                _PAGE = Path(__file__).with_name("corpus_viewer.html").read_bytes()
+    return _PAGE
+
+
 def _release_free_memory() -> None:
     """Hand glibc's free pages back to the kernel after a refresh cycle.
 
@@ -3130,8 +3150,7 @@ class CorpusRequestHandler(BaseHTTPRequestHandler):
         parsed = urlsplit(self.path)
         try:
             if parsed.path == "/":
-                body = Path(__file__).with_name("corpus_viewer.html").read_bytes()
-                self._send(HTTPStatus.OK, body, "text/html; charset=utf-8")
+                self._send(HTTPStatus.OK, _page_bytes(), "text/html; charset=utf-8")
             elif parsed.path == "/api/state":
                 self._cached("/api/state")
             elif parsed.path == "/api/candidates":
@@ -3275,6 +3294,7 @@ class CorpusServer(HTTPServer):
         self.snapshot = snapshot or LiveSnapshot(
             artifacts, interval_seconds=refresh_interval_seconds
         )
+        _page_bytes()
         self.snapshot.refresh_once()
         self.snapshot.start()
         self._requests: queue.Queue[tuple[Any, Any]] = queue.Queue(
