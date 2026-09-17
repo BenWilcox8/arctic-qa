@@ -205,7 +205,38 @@ worthless: the evaluator was down on a halt for the first half of it and the
 ledger halted for the second. The measured window at 50 with both callers up is
 the one recorded below, 10:44 to 11:04 UTC.
 
-FIFTY_WINDOW
+The window from 10:44 to 11:04 UTC ran with both callers up. It also spans the
+fourth halt of the day and the relaunch that answered it, so its paper rate is
+depressed by one replay; its lock numbers are the ones to read.
+
+| measurement | 50 threads (10:44 to 11:04) | 75 threads (09:44 to 10:04) |
+| --- | --- | --- |
+| requests a minute | 20.85 | 8.15 |
+| papers an hour | 195 | 165 |
+| peak requests in flight | 49 | 31 |
+| `orphan_recovery` mean wait | 0.000 s | 0.058 s |
+| `count_registration` mean wait | 0.000 s | 1.898 s |
+| `orphan_recovery` mean hold | 0.471 s | 0.642 s |
+| serialised bookkeeping a call | **0.640 s** | **1.661 s** |
+| 429, 5xx, ledger halt | none | none |
+| `candidate_processing_fault` delta | 0 | 0 |
+| producer resident size | 2.0 GB | 3.2 GB |
+
+Seventy-five threads never filled their own slots: the peak was 31 calls in
+flight against 49 at fifty threads. Past the knee the extra threads do not buy
+breadth; they lengthen the hold, and the lock is what everything waits for.
+
+Three later windows were opened and none is clean: the producer exited on the
+reservation's halt check at 11:21:21 and again at 11:44:51 UTC, each time while
+the ledger read `halted` false and every ambiguous charge of the ledger had its
+continuation event. The first exit is explained by the stale receipts listing
+described in section 6 and is fixed. The second survived that fix, so the two
+conditions behind the one message now name themselves, and the next exit will
+say which fired and on which charge.
+
+The comparison above therefore stands on the two windows that are alike: each
+spans one relaunch replay, at 75 and at 50, and the evaluator's own lock wait is
+measured from its journal and is untouched by either.
 
 ## 6. Three halts, and the rule that answers them
 
@@ -263,6 +294,23 @@ knows the schema, and both callers were moved to that code.
 A new receipt schema on a shared ledger is a cut-over of every reader, not a
 change to one writer. Write the reader first, ship it everywhere, then write the
 record.
+
+### Two exits the rule did not answer
+
+The producer exited twice more, at 11:21:21 and 11:44:51 UTC, on the
+reservation's own halt check. Each time the ledger read `halted` false
+afterwards, every ambiguous charge of the ledger had its continuation event,
+and no new ambiguous row existed.
+
+The first is explained: a concurrent broker keeps its receipts listing for up to
+`RECEIPT_LISTING_REFRESH_SECONDS`, so a continuation event another caller wrote
+is invisible to it for that long, and the check read those charges as
+unresolved. The reservation now lists the directory again before it stops the
+run, and only then.
+
+The second survived that fix, so the cause is still open. Two conditions raised
+the one message and it named neither, so each now names itself and the blocking
+one names the charges it found. The next exit says which fired.
 
 ### The rule: one unknown charge stops nobody
 
