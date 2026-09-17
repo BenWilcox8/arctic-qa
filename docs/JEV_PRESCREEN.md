@@ -355,6 +355,11 @@ A stopped screen keeps everything it bought, and a second screen over the same d
 If the provider reports no `input_tokens`, the row is billed on the estimate and records `billed_from_estimate` true.
 The prescreen has no free token count, so this is the honest fallback.
 
+One paper never ends the screen.
+Any fault raised while one paper is read, chunked, sent or recorded is caught, written to the ledger against that paper, counted in `faulted`, and the screen continues.
+This copies the producer's own rule in `streaming._ends_the_run`.
+Without it, one unreadable file would end a screen of 4,420 papers, because `ThreadPoolExecutor.map` re-raises the first exception when its result is read.
+
 ## 12. Commands
 
 Build the manifest over the retained set.

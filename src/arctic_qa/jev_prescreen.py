@@ -1043,8 +1043,33 @@ def run_screen(
         "stopped_on_ceiling": 0,
         "shrunk_after_422": 0,
         "shrunk_and_failed": 0,
+        "faulted": 0,
     }
     lock = threading.Lock()
+
+    def guarded(row: dict[str, Any]) -> None:
+        """Contain every fault of one paper, as the producer does.
+
+        `ThreadPoolExecutor.map` re-raises the first exception when its result
+        is read, so an unreadable file or any other unexpected fault would end
+        the whole screen. One paper must never do that: the fault is recorded
+        against that paper and the screen continues.
+        """
+        try:
+            one(row)
+        except Exception as error:  # noqa: BLE001 - the containment boundary
+            ledger.record(
+                _failed_row(
+                    str(row.get("candidate_key")),
+                    "",
+                    model,
+                    now(),
+                    f"{type(error).__name__}: {error}",
+                )
+            )
+            with lock:
+                counts["failed"] += 1
+                counts["faulted"] += 1
 
     def one(row: dict[str, Any]) -> None:
         candidate_key = row["candidate_key"]
@@ -1177,7 +1202,7 @@ def run_screen(
 
     if pending:
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-            list(pool.map(one, pending))
+            list(pool.map(guarded, pending))
 
     receipt = {
         "schema": "jev-prescreen-screen-receipt-v1",

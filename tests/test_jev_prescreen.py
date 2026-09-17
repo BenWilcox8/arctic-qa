@@ -1396,3 +1396,48 @@ def test_the_refused_attempt_and_its_retry_both_reach_the_ledger(tmp_path):
     # rows carry different request hashes.
     assert "cost_usd" not in rows[0]
     assert rows[0]["request_sha256"] != rows[1]["request_sha256"]
+
+
+def test_an_unreadable_article_fails_its_own_paper_and_not_the_screen(tmp_path):
+    good = _extraction(tmp_path, "good", "Article text. " * 200)
+    missing = _extraction(tmp_path, "gone", "Article text. " * 200)
+    freeze = _write_jsonl(
+        tmp_path / "freeze.jsonl",
+        [_frozen_row("10.1/gone", 1, missing), _frozen_row("10.1/good", 2, good)],
+    )
+    dispositions = _write_jsonl(
+        tmp_path / "d.ndjson",
+        [
+            _disposition("10.1/gone", "retained_article_type"),
+            _disposition("10.1/good", "retained_article_type"),
+        ],
+    )
+    manifest = Path(
+        jev.build_manifest(
+            dispositions_file=dispositions,
+            freeze_manifest_file=freeze,
+            output_dir=tmp_path / "manifest",
+        )["manifest_file"]
+    )
+    # The file disappears after the manifest recorded it, which is what a
+    # moved or unmounted corpus looks like to a long screen.
+    missing.unlink()
+    receipt = jev.run_screen(
+        manifest_file=manifest,
+        output_dir=tmp_path / "run",
+        client=FakeClient(),
+        ceiling_usd=Decimal("1.00"),
+        workers=2,
+    )
+    assert receipt["counts"]["completed"] == 1
+    assert receipt["counts"]["failed"] == 1
+    assert receipt["counts"]["faulted"] == 1
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "run" / "ledger" / "calls.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    faulted = [row for row in rows if row["state"] == "failed"]
+    assert len(faulted) == 1
+    assert "FileNotFoundError" in faulted[0]["error"]
