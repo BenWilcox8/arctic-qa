@@ -424,7 +424,31 @@ the same snapshot. The activation is
 The evaluator's unit now carries `TimeoutStopSec=900`, because a stop lands at
 a trial boundary and one trial of the slowest vendor is minutes.
 
-## 11. What was not done, and why
+## 11. The release suite
+
+`nix develop -c bash -c 'PYTHONPATH=src pytest tests/ -q'` on the branch head,
+after the last relaunch: **1,650 tests, all passing**, no failures and no
+errors. The suite was run twice, once on `5d4ee8c` and again after the USD 600
+ceiling landed on `87c69ce`, because a money-path change owes its own run.
+
+New guards on this branch:
+
+- `tests/test_ledger_proof_cost.py`: a warm read lists the receipts directory
+  once, replays only the rows the store reports moved, and makes no glob; a row
+  changed behind the store, a receipt absent from the ledger and an
+  accepted-item receipt taken away are all still caught; one paid call takes
+  three exclusive sections and none around the free token count; the serialised
+  hold of one call stays under 0.2 s at 50 rows of history; fifty construction
+  calls are in flight at once with exact money; the fifty-at-once rate pair and
+  the USD 600 ceiling pair are registered, each couples the fields that must
+  move together, and the transition of each names its own tranche; the project
+  lifetime ceiling counts every phase; the reservation's count of the
+  evaluation calls in flight equals the full totals.
+- `tests/test_ledger_store.py`: a rollback leaves every container tracked, and
+  undoes a row edited in place.
+- `tests/test_abstention_plan.py`: an operator stop lands at a trial boundary.
+
+## 12. What was not done, and why
 
 **The hot journal and lock were not moved to the local SSD.** The brief asked
 for it, and the measurement says it is not where the serialised cost is. The
