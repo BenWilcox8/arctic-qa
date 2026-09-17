@@ -100,6 +100,7 @@ The benchmark measures how often a model abstains when no listed option is corre
 | `arctic-jev-prescreen-r1/` | The TypeSafe Jev prescreen: the calibration of the ranking against this run own outcomes, the cost of scanning the frozen corpus, the unpublished token limit the paid calls uncovered, and the first production measurement of the reordered pipeline. |
 | `arctic-ledger-parallel-r1/` | The parallel bookkeeping store of the shared paid-call ledger: the measurement that attributed the per-call cost to durable writes on a rotating disk, the snapshot-plus-journal design, the live migration, the cutover to sixteen paper workers under policy v12, the adversarial audit and the state-database incident. |
 | `arctic-ch3-concurrency-50-r1/` | Fifty papers in flight: the lock-hold measurement that attributed the 21-requests-a-minute cap to 2.44 s of serialised bookkeeping per paid call, the four rules that took one warm ledger read from 371 ms to 12 ms, the rollback defect the fifty-thread test found, policy v13 and the staged relaunch. |
+| `arctic-eval-parallel-items-r1/` | Several questions scored at once: the measured rates per arm of the streaming evaluator at eight questions in flight, the captain's quota floors of 2026-09-17, and the extrapolation of the dataset to the 13:00 and 14:00 UTC deadlines. |
 
 ## Cost guard
 
