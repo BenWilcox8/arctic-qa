@@ -167,7 +167,32 @@ row that names it is never proved from a cached listing.**
 
 ## 7. The staged relaunch
 
-Recorded below as each stage runs.
+### Stage 1: 32 paper workers, 07:49 to 07:59 UTC
+
+Snapshot `3fe649d`, policy v13, the evaluator and the readers live on the same
+snapshot, `ARCTIC_QA_OPERATION_LOCK_LOG_SECONDS=0` so every exclusive section
+is in the log.
+
+| measure | 16 workers, before (06:25 window) | 32 workers, after |
+| --- | --- | --- |
+| requests a minute | 20.8 | **55.8** |
+| peak in flight | 11 | **33** |
+| papers screened an hour | 120 | 522 |
+| serialised lock hold a call | 2.44 s | **0.206 s** |
+| `orphan_recovery` mean hold | 0.82 s | 0.067 s |
+| `count_registration` mean hold | 0.56 s | 0.018 s |
+| `reserve` mean hold | 1.06 s | 0.121 s |
+| mean wait for the lock | 0.55 s (count) | 0.001 s |
+| HTTP 429 / 503 | 0 / 0 | 0 / 0 |
+| ambiguous charges | 0 | 0 |
+| candidate processing faults | 1 | 0 |
+| producer CPU | 0.67 of a core | 0.45 of a core |
+| machine load, 8 cores | 9 | 13.6 |
+
+558 paid requests in the window, 87 papers screened. The number in flight now
+tracks the thread count: 33 at its peak against 32 paper workers, where 16
+workers reached 11. Nobody waits for the lock any more: the mean wait is one
+millisecond.
 
 ## 8. Machine headroom
 
