@@ -17,7 +17,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from .errors import BrokerOperationBusyError
+from .errors import BrokerOperationBusyError, DuplicateRequestKeyError
 from .gemini_eligibility import (
     DEFAULT_CALL_TIMEOUT_SECONDS,
     MAXIMUM_CALL_TIMEOUT_SECONDS,
@@ -6644,6 +6644,45 @@ class SharedGeminiBroker:
             self._halt(f"countTokens error: {type(error).__name__}", phase=phase)
         return receipt
 
+    # The fields that name one request, whatever the configuration bound to it
+    # was when it was registered. The gate, the policy, the price config and
+    # the transition may all move between one start and the next; the request
+    # itself does not.
+    REQUEST_IDENTITY_FIELDS = (
+        "request_key",
+        "request_sha256",
+        "run_id",
+        "phase",
+        "stage",
+        "paper_id",
+        "family_id",
+        "source_version_id",
+        "model",
+    )
+
+    def _reusable_counting_row(
+        self, existing: dict[str, Any], base: dict[str, Any]
+    ) -> bool:
+        """Say whether a ledger row may be reopened by this count event.
+
+        A ``counting`` row registered a free ``countTokens`` preflight and
+        nothing else: no reservation, no submission, no charge, no receipt. A
+        start that ends between the count event and the reservation leaves one
+        behind, and the next start walks back to that same call. Reusing the
+        row costs one more free count and keeps the identity it already has;
+        refusing it would end the producer over a call that never happened.
+
+        The identity must be the same. A row whose request key matches but
+        whose paper, family, source version, stage or model differs is not this
+        request, and is refused like every other existing key.
+        """
+        if existing.get("state") != "counting":
+            return False
+        return all(
+            existing.get(name) == base.get(name)
+            for name in self.REQUEST_IDENTITY_FIELDS
+        )
+
     def _count_event(
         self, request_key: str, base: dict[str, Any], *, phase: str | None = None
     ) -> None:
@@ -6651,8 +6690,12 @@ class SharedGeminiBroker:
             halt = self._phase_halted(ledger, phase or base.get("phase") or "live_test")
             if halt is not None:
                 raise ValueError(f"the paid-call broker is halted: {halt}")
-            if request_key in ledger["requests"]:
-                raise ValueError("the paid request key already exists")
+            existing = ledger["requests"].get(request_key)
+            if existing is not None and not self._reusable_counting_row(existing, base):
+                # The key names a call the ledger already holds in a state that
+                # cannot be reopened. Replaying it could charge twice, so it is
+                # refused; the refusal is about this call, never about the run.
+                raise DuplicateRequestKeyError("the paid request key already exists")
             binding = {
                 "paper_id": base["paper_id"],
                 "source_version_id": base["source_version_id"],
@@ -6681,7 +6724,11 @@ class SharedGeminiBroker:
                 )
             ledger["family_bindings"].setdefault(base["family_id"], binding)
             ledger["paper_bindings"].setdefault(base["paper_id"], paper_binding)
-            ledger["count_requests"] += 1
+            if existing is None:
+                # ``count_requests`` is the count of rows, which the ledger
+                # totals check against ``len(requests)``. A reused row adds no
+                # row, so it adds no count.
+                ledger["count_requests"] += 1
             ledger["requests"][request_key] = {**base, "state": "counting"}
             ledger["updated_at_utc"] = _now()
             self._commit_ledger(ledger)
@@ -6723,12 +6770,16 @@ class SharedGeminiBroker:
                 # The cap refusal describes the family, not the moment. It is
                 # never resumed and never settled, under any transition.
                 raise ValueError("the per-paper cap refusal is never resumed")
+            if self._reusable_counting_row(request, base):
+                # A free count that never reached a reservation. There is
+                # nothing to resume, and ``_count_event`` reopens the row.
+                return None
             if (
                 request.get("state") != "not_submitted"
                 or reason not in RESUMABLE_NOT_SUBMITTED_REASONS
                 or request.get("resumed_from_not_submitted_sha256") is not None
             ):
-                raise ValueError("the paid request key already exists")
+                raise DuplicateRequestKeyError("the paid request key already exists")
             event_path = self._config_transition_event_path
             if event_path is None or not event_path.is_file():
                 if reason == AUTHORIZED_CAP_REASON:

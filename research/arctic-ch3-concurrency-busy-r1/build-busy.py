@@ -120,15 +120,20 @@ class Activation:
 
     @staticmethod
     def our_inflight(ledger: dict) -> int:
-        """Count the requests of THIS run that are on the wire.
+        """Count the requests of THIS run that are between two durable states.
 
         ``inflight`` counts every caller of the shared ledger and the benchmark
         evaluator keeps calling, so the producer's own boundary is this count.
+
+        A ``counting`` row counts too. It has no reservation and no charge, but
+        a stop that leaves one makes the next start walk back to that same
+        call: it ended the producer at 02:32:10 UTC on 2026-09-17, before the
+        broker learned to reuse such a row.
         """
         return sum(
             1
             for request in ledger.get("requests", {}).values()
-            if request.get("state") == "submitted"
+            if request.get("state") in {"submitted", "counting"}
             and str(request.get("run_id")) == RUN_ID
         )
 

@@ -17,6 +17,7 @@ from .discovery import manual_record
 from .errors import (
     AmbiguousChargeError,
     BrokerOperationBusyError,
+    DuplicateRequestKeyError,
     BudgetError,
     CandidateRejectedError,
     CountUnavailableError,
@@ -3527,7 +3528,13 @@ def _ends_the_run(error: BaseException) -> bool:
     it reserved nothing and submitted nothing.
     """
     if isinstance(
-        error, (PaperCostCapError, BrokerOperationBusyError, CountUnavailableError)
+        error,
+        (
+            PaperCostCapError,
+            BrokerOperationBusyError,
+            CountUnavailableError,
+            DuplicateRequestKeyError,
+        ),
     ):
         return False
     if isinstance(error, (BudgetError, AmbiguousChargeError)) or is_run_stop(error):

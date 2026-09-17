@@ -275,13 +275,48 @@ after a change to the ledger, 0.21 s with none.
 
 Relaunched at 01:58:09 UTC on commit 229d136.
 
-## 6. The measured window
+## 6. The third fault: the evaluator held the shared ledger lock
+
+Cutting the proof cost took the producer to 5.27 requests a minute and 112
+papers an hour, and overlap appeared (peak 2 in flight, was 1). The admission
+was still about 20 seconds, and `count_registration` still held 10 to 13 of
+them, which the producer's own work no longer explains.
+
+Measured directly, while the producer and the evaluator both ran: the **shared
+ledger lock** (`.shared-paid-call-ledger.json.lock`, not the operation lock) was
+held by someone else for a median of 2.35 s and up to 6.56 s per acquisition.
+The holder is the streaming abstention evaluator, `abstention-eval --action
+watch`, which shares this ledger and, on the snapshot it ran, still proved 5,393
+rows against 21,508 receipt files on every read. The count registration took
+that lock three times, which is the 7 to 10 seconds that were left.
+
+Two answers, both applied:
+
+- `research/arctic-ch3-concurrency-busy-r1/cutover-evaluator.py` moved the
+  evaluator onto this branch's snapshot at 02:27:58 UTC, under a successor
+  authorization bound to the running commit. `abstention_watch` refuses an
+  authorization whose `integrated_code_commit` is not the running one, and
+  passing the old commit while running new code would have been a false record
+  on a money path, so the successor names the predecessor and its review
+  exactly as a successor execution gate does. The five files the authorization
+  binds are byte-identical between the two commits, and the script refuses
+  otherwise; no bound, plan, policy, price or model moved.
+- The three steps that register a counted request now run in one
+  `_ledger_session`: the shared lock is taken once and the validated ledger is
+  read once. No other writer can change the file while the session holds the
+  lock, so the second read would return the same bytes, and a commit writes the
+  very object the session holds.
+
+Measured after the evaluator restarted: the shared ledger lock wait fell from a
+median of 2.35 s to 0.21 s.
+
+## 7. The measured window
 
 See `activation-state-5653055.json`, key `observation`, in the task data
 directory for the samples and the summary. The sequential baseline is about 3
 requests a minute and about 13 papers an hour.
 
-## 7. Tests
+## 8. Tests
 
 - `tests/test_broker_operation_lock_queue.py`: four paper threads queue for one
   lock and every request completes; a concurrent request waits past the

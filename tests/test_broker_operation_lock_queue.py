@@ -383,3 +383,103 @@ def test_a_session_is_reentrant_and_does_not_deadlock(tmp_path: Path) -> None:
     # The lock is free again outside the session.
     with broker._locked_ledger() as ledger:
         assert "requests" in ledger
+
+
+# The duplicate request key, which must never end the producer.
+
+
+def test_a_counting_row_of_a_dead_start_is_reused(tmp_path: Path) -> None:
+    """A free count that never reached a reservation is not a made call.
+
+    A stop between the count event and the reservation leaves a ``counting``
+    row, and the next start walks back to the same call. The row carries no
+    reservation, no submission and no charge, so it is reused; refusing it
+    ended the chapter 3 producer at 02:32:10 UTC on 2026-09-17.
+    """
+    values = _concurrent(tmp_path)
+    broker = values["broker"]
+    transport = broker.transport
+
+    # Register the count event and stop there, exactly as a killed start does.
+    key = None
+    original = broker._reserve
+
+    def refuse(**kwargs):
+        nonlocal key
+        key = kwargs["request_key"]
+        raise KeyboardInterrupt("the start was stopped")
+
+    broker._reserve = refuse  # type: ignore[method-assign]
+    with pytest.raises(KeyboardInterrupt):
+        execute(broker)
+    broker._reserve = original  # type: ignore[method-assign]
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    assert ledger["requests"][key]["state"] == "counting"
+    transport.methods.clear()
+
+    receipt = execute(broker)
+
+    assert receipt["state"] == "completed"
+    assert receipt["request_key"] == key
+    assert transport.methods == ["countTokens", "generateContent"]
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    assert ledger["requests"][key]["state"] == "completed"
+    assert ledger["inflight"] == 0
+
+
+def test_a_counting_row_of_another_request_is_still_refused(tmp_path: Path) -> None:
+    """Only the same request identity reopens the row."""
+    values = _concurrent(tmp_path)
+    broker = values["broker"]
+    row = {
+        "request_key": "b" * 64,
+        "run_id": "run-1",
+        "phase": "live_test",
+        "stage": "eligibility",
+        "paper_id": "another-paper",
+        "family_id": "another-family",
+        "source_version_id": "another-source",
+        "model": "gemini-3.8-flash",
+    }
+    assert broker._reusable_counting_row({**row, "state": "counting"}, row) is True
+    assert (
+        broker._reusable_counting_row(
+            {**row, "state": "counting", "paper_id": "p1"}, row
+        )
+        is False
+    )
+    assert broker._reusable_counting_row({**row, "state": "completed"}, row) is False
+
+
+def test_a_duplicate_request_key_never_ends_the_run() -> None:
+    from arctic_qa import streaming
+    from arctic_qa.broker_provider import broker_boundary
+    from arctic_qa.errors import DuplicateRequestKeyError, is_run_stop
+
+    with pytest.raises(DuplicateRequestKeyError) as raised:
+        with broker_boundary():
+            raise DuplicateRequestKeyError("the paid request key already exists")
+
+    assert is_run_stop(raised.value) is False
+    assert streaming._ends_the_run(raised.value) is False
+    assert isinstance(raised.value, ValueError)
+
+
+def test_a_key_the_ledger_holds_as_completed_is_refused_not_replayed(
+    tmp_path: Path,
+) -> None:
+    from arctic_qa.errors import DuplicateRequestKeyError
+
+    values = _concurrent(tmp_path)
+    broker = values["broker"]
+    receipt = execute(broker)
+    key = receipt["request_key"]
+    ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
+    base = {
+        name: ledger["requests"][key][name]
+        for name in broker.REQUEST_IDENTITY_FIELDS
+        if name in ledger["requests"][key]
+    }
+
+    with pytest.raises(DuplicateRequestKeyError):
+        broker._count_event(key, base, phase="live_test")
