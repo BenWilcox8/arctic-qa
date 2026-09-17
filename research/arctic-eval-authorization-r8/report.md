@@ -172,7 +172,32 @@ That is why both repairs were made with the construction files of the older pair
 | 23:53 | The producer makes its first paid construction call, which closes the transition validation for good. |
 | 00:07 (17th) | The evaluator restarts on `streaming-r11` with all three vendors. |
 
-## 9. The state at the end of this task
+## 9. A paused vendor owed its trials, and no one asked for them
+
+At 2026-09-17T00:26:03Z the Claude Code arm stopped with
+`FileNotFoundError: /home/ben/.npm-global/bin/claude`.
+The binary was missing for a moment while its package was upgraded, and the symlink was healthy again by 00:31Z.
+
+A vendor pause lasts the whole invocation, because the policy forbids a retry.
+That part is correct and a start clears it.
+What was not correct is what happened to the items evaluated in the meantime.
+
+The item row's `complete` flag came from the paused **models** alone.
+A paused **vendor** did not enter it, so the two items that followed, `aqa-e9b83b35d9a33a604ec0` and `aqa-1320395512ecedfe93b2`, were journalled complete with 30 of their 48 trials.
+`completed_item_ids` never returns a complete item, so those 36 Claude trials were lost for good.
+
+A paused vendor owes its trials now, exactly as a paused model does.
+The reader applies the same rule to the rows the old code wrote, so an item recorded complete while a vendor was paused re-opens without an edit of the journal.
+An item whose every missing trial belongs to a still-paused vendor waits instead of being revisited on every poll, which is the vendor half of `items_held_by`.
+
+`--vendors` is a different thing and keeps its own field.
+It is the scope the operator chose, it lands in `evaluation.vendors_excluded`, and it owes nothing, so a run restricted to the subscription vendors still completes its items.
+
+The two truncated items were re-opened on the live journal by `reopen-vendor-paused-items.py` of the activation directory.
+It appends one corrected copy of each affected row with `complete` false and a `correction` block naming the reason; it never rewrites a line, and `latest_item_rows` reads the last row of each item, so the correction takes effect, the original stays as the record and no total moves.
+The unit was restarted at 00:39:16Z with the Claude arm back, and it took `aqa-e9b83b35d9a33a604ec0` up at 00:39:17Z to run its 18 missing trials.
+
+## 10. The state at the end of this task
 
 The evaluator runs as `arctic-abstention-stream-r3` from the snapshot `runtime/app-a65348d-arctic-eval-authorization-r8` of the activation directory `arctic-eval-authorization-r8`, on work directory `streaming-r11` and run id prefix `abstention-stream-r11`, with all three vendors and the Fable arm active.
 
