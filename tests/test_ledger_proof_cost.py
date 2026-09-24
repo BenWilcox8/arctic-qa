@@ -764,24 +764,41 @@ def test_the_project_lifetime_ceiling_counts_every_phase() -> None:
     )
 
 
-class _SlowTransport(Transport):
-    """Hold every generate call open, and report the peak overlap."""
+class _BarrierTransport(Transport):
+    """Hold the first ``parties`` generate calls open until all of them arrive.
 
-    def __init__(self, hold_seconds: float = 0.5) -> None:
+    A barrier, not a sleep: the calls meet only if the broker admitted all of
+    them at once, whatever the load of the machine. A fixed 0.5-second window
+    saw a peak of 37 on a loaded machine. The later calls pass straight
+    through, and a barrier that never fills gives up after ``timeout_seconds``
+    and leaves the peak it saw for the assertion.
+    """
+
+    def __init__(self, parties: int, timeout_seconds: float) -> None:
         super().__init__()
         self._lock = threading.Lock()
-        self._hold = hold_seconds
+        self._barrier = threading.Barrier(parties)
+        self._parties = parties
+        self._timeout = timeout_seconds
+        self.arrivals = 0
         self.active = 0
         self.peak = 0
+        self.barrier_broken = False
 
     def post(self, model: str, method: str, body: dict) -> dict:
         if method != "generateContent":
             return super().post(model, method, body)
         with self._lock:
+            self.arrivals += 1
+            waits = self.arrivals <= self._parties
             self.active += 1
             self.peak = max(self.peak, self.active)
         try:
-            time.sleep(self._hold)
+            if waits:
+                try:
+                    self._barrier.wait(timeout=self._timeout)
+                except threading.BrokenBarrierError:
+                    self.barrier_broken = True
             response = super().post(model, method, body)
         finally:
             with self._lock:
@@ -796,9 +813,10 @@ def test_fifty_construction_calls_are_in_flight_at_once(tmp_path: Path) -> None:
 
     The admission is what sets how many calls can be in flight, so this is the
     end the serialised bookkeeping has to leave room for. The transport holds
-    each call open, which is what the live 8-second model latency does.
+    each of the first fifty calls open until all fifty are on the wire, which
+    is what the live 8-second model latency does.
     """
-    transport = _SlowTransport(hold_seconds=0.5)
+    transport = _BarrierTransport(parties=50, timeout_seconds=120)
     values = _concurrent(
         tmp_path,
         transport,
@@ -819,8 +837,9 @@ def test_fifty_construction_calls_are_in_flight_at_once(tmp_path: Path) -> None:
             ]
         ]
 
-    assert [receipt["state"] for receipt in receipts] == ["completed"] * len(work)
+    assert transport.barrier_broken is False, transport.peak
     assert transport.peak == 50, transport.peak
+    assert [receipt["state"] for receipt in receipts] == ["completed"] * len(work)
     status = broker.status()
     assert status["halted"] is False
     assert status["integrity_valid"] is True

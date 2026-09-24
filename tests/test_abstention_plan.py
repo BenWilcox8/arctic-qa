@@ -869,6 +869,14 @@ def test_run_plan_mixes_a_live_gemini_broker_with_a_subscription_vendor(
     set_dir = frozen_set(tmp_path, count=1)
     review = tmp_path / "review.md"
     review.write_text("review\n")
+    # The gate and the provider read the version of one test binary, so the
+    # harness installed on the machine never enters the test.
+    codex_version = "codex-cli 0.154.0"
+    codex_binary = tmp_path / "bin" / "codex"
+    codex_binary.parent.mkdir()
+    codex_binary.write_text(f"#!/bin/sh\necho '{codex_version}'\n", encoding="utf-8")
+    codex_binary.chmod(0o755)
+    binaries = {PROVIDER_OPENAI_CODEX: str(codex_binary)}
     gate_dir = tmp_path / "gates"
     write_plan_gates(
         plan=plan,
@@ -881,7 +889,7 @@ def test_run_plan_mixes_a_live_gemini_broker_with_a_subscription_vendor(
         evaluation_price_config_file=PRICES,
         subscription_models_file=MODELS_FILE,
         integrated_code_commit="fixture-commit",
-        binary_versions={PROVIDER_OPENAI_CODEX: "codex-cli 0.154.0"},
+        binaries=binaries,
         vendors=vendors,
     )
     manifest, items = load_eval_set(set_dir)
@@ -896,7 +904,7 @@ def test_run_plan_mixes_a_live_gemini_broker_with_a_subscription_vendor(
         scripted_subscription_answers(
             PROVIDER_OPENAI_CODEX, codex_trials, policy="abstain", seed="mixed"
         ),
-        version="codex-cli 0.154.0",
+        version=codex_version,
     )
     credential = tmp_path / "private" / "gemini.key"
     credential.parent.mkdir(mode=0o700, exist_ok=True)
@@ -934,6 +942,7 @@ def test_run_plan_mixes_a_live_gemini_broker_with_a_subscription_vendor(
         broker_factory=broker_factory,
         subscription_ledger_root=tmp_path / "subscription",
         vendors=vendors,
+        binaries=binaries,
     )
     assert runs[PROVIDER_GOOGLE_GEMINI].concurrency == 4
     assert runs[PROVIDER_OPENAI_CODEX].concurrency == 3

@@ -27,6 +27,7 @@ from arctic_qa.model_broker import (  # noqa: E402
     HTTP_REJECTION_SETTLEMENT_SCHEMA,
     SharedGeminiBroker,
 )
+from arctic_qa import model_broker  # noqa: E402
 from arctic_qa.util import sha256_file  # noqa: E402
 from test_ambiguous_continuation import (  # noqa: E402
     Http500ThenSuccess,
@@ -257,7 +258,12 @@ def test_a_receipt_without_a_body_settles_on_a_matching_reproduction(
     assert _reopen(values, RejectingTransport()).status()["integrity_valid"] is True
 
 
-def test_a_server_error_is_not_a_rejection_case(tmp_path: Path) -> None:
+def test_a_server_error_is_not_a_rejection_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A bounded 5xx charge releases itself while the hourly bound has room.
+    # This test reads the halt that stands once the bound is used up.
+    monkeypatch.setattr(model_broker, "AUTOMATIC_CONTINUATION_LIMIT_PER_HOUR", 0)
     transport = Http500ThenSuccess()
     values = fixture(tmp_path, transport)
     receipt = execute(values["broker"], paper="p1", run_id="run-current")

@@ -855,7 +855,12 @@ def test_consistently_lowered_ledger_spend_conflicts_with_immutable_receipt(
         fixture(tmp_path, transport=Transport())
 
 
-def test_ambiguous_generation_halts_without_replay(tmp_path: Path):
+def test_ambiguous_generation_halts_without_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # A provider timeout releases itself while the hourly bound has room.
+    # This test reads the halt that stands once the bound is used up.
+    monkeypatch.setattr(model_broker, "AUTOMATIC_CONTINUATION_LIMIT_PER_HOUR", 0)
     transport = Transport("generate")
     broker = fixture(tmp_path, transport=transport)["broker"]
     receipt = execute(broker)
@@ -2077,7 +2082,11 @@ def test_reviewed_successor_gate_preserves_an_immutable_transition(
     assert execute(restarted, paper="p3")["state"] == "completed"
 
 
-def test_transition_does_not_apply_to_an_unsettled_ledger(tmp_path: Path):
+def test_transition_does_not_apply_to_an_unsettled_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # With the hourly bound used up, the ambiguous charge halts the ledger.
+    monkeypatch.setattr(model_broker, "AUTOMATIC_CONTINUATION_LIMIT_PER_HOUR", 0)
     values = fixture(tmp_path, transport=Transport("generate"))
     assert execute(values["broker"])["state"] == "ambiguous_charge"
     active_config = tmp_path / "active-price-config.json"
@@ -2100,6 +2109,60 @@ def test_transition_does_not_apply_to_an_unsettled_ledger(tmp_path: Path):
         )
 
     assert list((tmp_path / "receipts").glob("config-transition-*.json")) == []
+
+
+def test_transition_applies_over_an_automatic_continuation_within_the_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A bounded ambiguous charge is a validated no-replay hold, not a halt.
+
+    Within the hourly bound, the broker writes the continuation record and
+    keeps the whole reservation in ``ambiguous_reserved_usd``. The ledger is
+    not halted, so a reviewed transition applies over that hold. The charge
+    is not settled or replayed by the transition.
+    """
+    monkeypatch.setattr(model_broker, "AUTOMATIC_CONTINUATION_LIMIT_PER_HOUR", 5)
+    values = fixture(tmp_path, transport=Transport("generate"))
+    receipt = execute(values["broker"])
+    assert receipt["state"] == "ambiguous_charge"
+    key = receipt["request_key"]
+    receipts = tmp_path / "receipts"
+    event = json.loads(
+        (receipts / f"ambiguous-continuation-{key}.json").read_text(encoding="utf-8")
+    )
+    assert event["operator_id"] == "automatic-ambiguous-continuation"
+    before = ledger_store.read_ledger(values["ledger"])
+    assert before["halted"] is False
+    reserved = Decimal(before["requests"][key]["reserved_usd"])
+    assert Decimal(before["ambiguous_reserved_usd"]) == reserved > 0
+    active_config = tmp_path / "active-price-config.json"
+    active_config.write_bytes(
+        (ROOT / "config" / "gemini-eligibility-v1.json").read_bytes() + b"\n"
+    )
+    transition = reviewed_transition(tmp_path, values, active_config)
+    restarted_transport = Transport()
+
+    transitioned = SharedGeminiBroker(
+        policy_file=ROOT / "config" / "streaming-dataset-budget-policy-v1.json",
+        price_config_file=active_config,
+        execution_gate_file=values["gate"],
+        ledger_file=values["ledger"],
+        receipts_dir=receipts,
+        credential_file=tmp_path / "private" / "gemini.key",
+        prior_construction_spend_usd=Decimal("0"),
+        transport=restarted_transport,
+        config_transition_file=transition,
+    )
+
+    assert len(list(receipts.glob("config-transition-*.json"))) == 1
+    assert transitioned.status()["halted"] is False
+    after = ledger_store.read_ledger(values["ledger"])
+    assert after["requests"][key]["state"] == "ambiguous_charge"
+    assert Decimal(after["ambiguous_reserved_usd"]) == reserved
+    assert Decimal(after["spent_usd"]) == Decimal(before["spent_usd"])
+    # The held family is never asked again; an unrelated paper runs.
+    assert execute(transitioned, paper="p2")["state"] == "completed"
+    assert restarted_transport.methods == ["countTokens", "generateContent"]
 
 
 def test_reviewed_policy_transition_preserves_spend_and_immutable_custody(
