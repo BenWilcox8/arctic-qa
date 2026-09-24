@@ -2226,7 +2226,9 @@ def test_the_watcher_scores_several_questions_at_once(tmp_path: Path) -> None:
     """
     items = ["aqa-w1", "aqa-w2", "aqa-w3", "aqa-w4"]
     db = state_db(tmp_path, chapter3=items)
-    ledger_file = construction_ledger(tmp_path, {f"family-{i}": ["0.10"] for i in items})
+    ledger_file = construction_ledger(
+        tmp_path, {f"family-{i}": ["0.10"] for i in items}
+    )
     auth = authorization(tmp_path, db, maximum_items=4)
     work = tmp_path / "wave"
     meeting = _Rendezvous(wanted=4)
@@ -2269,7 +2271,9 @@ def test_the_wave_publishes_the_questions_it_holds_in_flight(tmp_path: Path) -> 
     """
     items = ["aqa-f1", "aqa-f2", "aqa-f3"]
     db = state_db(tmp_path, chapter3=items)
-    ledger_file = construction_ledger(tmp_path, {f"family-{i}": ["0.10"] for i in items})
+    ledger_file = construction_ledger(
+        tmp_path, {f"family-{i}": ["0.10"] for i in items}
+    )
     auth = authorization(tmp_path, db, maximum_items=3)
     work = tmp_path / "in-flight"
     meeting = _Rendezvous(wanted=3)
@@ -2319,7 +2323,9 @@ def test_a_vendor_pause_inside_a_wave_holds_the_questions_dispatched_after_it(
     """
     items = ["aqa-p1", "aqa-p2", "aqa-p3", "aqa-p4"]
     db = state_db(tmp_path, chapter3=items)
-    ledger_file = construction_ledger(tmp_path, {f"family-{i}": ["0.10"] for i in items})
+    ledger_file = construction_ledger(
+        tmp_path, {f"family-{i}": ["0.10"] for i in items}
+    )
     auth = authorization(tmp_path, db, maximum_items=4)
     work = tmp_path / "wave-pause"
 
@@ -2427,7 +2433,9 @@ def test_a_paused_model_leaves_every_question_of_a_wave_open(tmp_path: Path) -> 
     """
     items = ["aqa-h1", "aqa-h2", "aqa-h3"]
     db = state_db(tmp_path, chapter3=items)
-    ledger_file = construction_ledger(tmp_path, {f"family-{i}": ["0.10"] for i in items})
+    ledger_file = construction_ledger(
+        tmp_path, {f"family-{i}": ["0.10"] for i in items}
+    )
     # The item bound counts the questions, not the passes, and a revisit needs
     # room under it: at three items and a bound of three the second pass meets
     # the bound instead of the held trials.
@@ -2557,7 +2565,9 @@ def test_one_poll_cycle_scores_a_bounded_number_of_questions(tmp_path: Path) -> 
     """
     items = [f"aqa-c{index}" for index in range(9)]
     db = state_db(tmp_path, chapter3=items)
-    ledger_file = construction_ledger(tmp_path, {f"family-{i}": ["0.10"] for i in items})
+    ledger_file = construction_ledger(
+        tmp_path, {f"family-{i}": ["0.10"] for i in items}
+    )
     auth = authorization(tmp_path, db, maximum_items=9)
     work = tmp_path / "bounded-cycle"
     result = scripted_watch(
@@ -2635,9 +2645,9 @@ def test_a_busy_lock_in_an_item_result_never_ends_the_watch(tmp_path: Path) -> N
     # No raise, no halted wave, and the second question was taken.
     assert result["errors"] == []
     assert seen == ["aqa-a", "aqa-b"]
-    assert [
-        row["item_id"] for row in events if row["event"] == "item_lock_busy"
-    ] == ["aqa-a"]
+    assert [row["item_id"] for row in events if row["event"] == "item_lock_busy"] == [
+        "aqa-a"
+    ]
 
 
 def test_the_watch_raises_for_a_real_error(tmp_path: Path) -> None:
@@ -2692,9 +2702,7 @@ def test_a_busy_lock_around_the_plan_never_ends_the_watch(tmp_path: Path) -> Non
     def busy_first(*, item_id: str, **changes):  # type: ignore[no-untyped-def]
         seen.append(item_id)
         if len(seen) == 1:
-            raise BrokerOperationBusyError(
-                "another paid broker operation is active"
-            )
+            raise BrokerOperationBusyError("another paid broker operation is active")
         return original(item_id=item_id, **changes)
 
     module.evaluate_item = busy_first  # type: ignore[assignment]
@@ -2826,9 +2834,7 @@ def test_each_arm_keeps_a_share_of_every_wave() -> None:
     # Before: the whole wave owes one arm.
     assert all(item.startswith("claude-") for item in pending[:8])
 
-    ordered = wave_order(
-        pending, open_vendors=owed, vendors=VENDORS, slots=8, limit=32
-    )
+    ordered = wave_order(pending, open_vendors=owed, vendors=VENDORS, slots=8, limit=32)
     wave = ordered[:8]
     for vendor in VENDORS:
         open_here = sum(1 for item in wave if vendor in owed[item])
@@ -2841,9 +2847,7 @@ def test_each_arm_keeps_a_share_of_every_wave() -> None:
 def test_every_wave_of_the_backlog_is_mixed_not_only_the_first() -> None:
     """The limit covers the waves the caller keeps, and each one is mixed."""
     pending, owed = _backlog(claude_only=33, gemini_open=23)
-    ordered = wave_order(
-        pending, open_vendors=owed, vendors=VENDORS, slots=8, limit=32
-    )
+    ordered = wave_order(pending, open_vendors=owed, vendors=VENDORS, slots=8, limit=32)
     for start in range(0, 32, 8):
         wave = ordered[start : start + 8]
         gemini = sum(1 for item in wave if "google_gemini" in owed[item])
@@ -2853,9 +2857,7 @@ def test_every_wave_of_the_backlog_is_mixed_not_only_the_first() -> None:
 def test_the_pick_up_order_holds_inside_each_group() -> None:
     """A reorder is a share of the wave, never a queue that jumps at random."""
     pending, owed = _backlog(claude_only=10, gemini_open=10)
-    ordered = wave_order(
-        pending, open_vendors=owed, vendors=VENDORS, slots=8, limit=16
-    )
+    ordered = wave_order(pending, open_vendors=owed, vendors=VENDORS, slots=8, limit=16)
     for prefix in ("claude-", "open-"):
         group = [item for item in ordered if item.startswith(prefix)]
         assert group == [item for item in pending if item.startswith(prefix)]
@@ -2864,9 +2866,7 @@ def test_the_pick_up_order_holds_inside_each_group() -> None:
 def test_a_question_the_journal_never_saw_owes_every_arm() -> None:
     """A question with no journal row is the whole plan, so it feeds every arm."""
     pending = ["fresh-0", "fresh-1", "fresh-2"]
-    ordered = wave_order(
-        pending, open_vendors={}, vendors=VENDORS, slots=8, limit=8
-    )
+    ordered = wave_order(pending, open_vendors={}, vendors=VENDORS, slots=8, limit=8)
     assert ordered == pending
 
 
@@ -2874,9 +2874,7 @@ def test_an_arm_with_no_open_question_takes_no_slot() -> None:
     """A share is for an arm that has a question to give it, and no other."""
     pending = [f"claude-{index}" for index in range(8)]
     owed = {item: {"anthropic_claude_code"} for item in pending}
-    ordered = wave_order(
-        pending, open_vendors=owed, vendors=VENDORS, slots=8, limit=8
-    )
+    ordered = wave_order(pending, open_vendors=owed, vendors=VENDORS, slots=8, limit=8)
     assert ordered == pending
 
 
@@ -2998,7 +2996,9 @@ def test_a_busy_lock_leaves_the_question_open_and_the_next_pass_finishes_it(
     submitted nothing and charged nothing, so the question stays open and the
     next pass runs exactly the trials that are missing.
     """
-    monkeypatch.setattr("arctic_qa.abstention_plan.PRE_PROVIDER_RETRY_BASE_SECONDS", 0.0)
+    monkeypatch.setattr(
+        "arctic_qa.abstention_plan.PRE_PROVIDER_RETRY_BASE_SECONDS", 0.0
+    )
     monkeypatch.setattr("arctic_qa.abstention_plan.PRE_PROVIDER_RETRY_ROUNDS", 1)
     db = state_db(tmp_path, chapter3=["aqa-open"])
     ledger_file = construction_ledger(tmp_path, {"family-aqa-open": ["0.01"]})
@@ -3010,9 +3010,7 @@ def test_a_busy_lock_leaves_the_question_open_and_the_next_pass_finishes_it(
             return _BusyOnceProvider(refusals=1, policy="gold", seed=run_id)
         return ScriptedEvaluationProvider(policy="gold", seed=run_id)
 
-    result = _watch_with(
-        first, db=db, work=work, ledger_file=ledger_file, auth=auth
-    )
+    result = _watch_with(first, db=db, work=work, ledger_file=ledger_file, auth=auth)
     assert result["errors"] == []
     # The arm is not paused and the question is not a vendor stop.
     assert result["paused_vendors"] == {}
@@ -3161,7 +3159,10 @@ def test_a_harness_pause_is_told_apart_from_every_other_pause() -> None:
     # A harness that ran and failed, a budget wall and an ambiguous charge all
     # describe the run, not the machine, and none of them lifts on a probe.
     assert is_harness_unavailable_reason("failed: the harness exited with 1:") is False
-    assert is_harness_unavailable_reason(f"not_submitted: {EVALUATION_CEILING_REASON}") is False
+    assert (
+        is_harness_unavailable_reason(f"not_submitted: {EVALUATION_CEILING_REASON}")
+        is False
+    )
     assert is_harness_unavailable_reason("ambiguous_charge: ...") is False
     assert is_harness_unavailable_reason(None) is False
 

@@ -303,6 +303,7 @@ def pending_item_ids(
     contract belongs to an earlier campaign, so it passes None and every
     campaign is searched.
     """
+
     def query() -> list[Any]:
         connection = db.connect_read_only(state_db)
         connection.row_factory = sqlite3.Row
@@ -751,9 +752,7 @@ def is_item_scoped_reason(reason: str | None) -> bool:
     submitted nothing and charged nothing, and says nothing about the next
     item.
     """
-    return bool(reason) and any(
-        text in str(reason) for text in ITEM_SCOPED_REASONS
-    )
+    return bool(reason) and any(text in str(reason) for text in ITEM_SCOPED_REASONS)
 
 
 def is_lock_busy_error(error: str | None) -> bool:
@@ -773,8 +772,7 @@ def is_lock_busy_error(error: str | None) -> bool:
         return False
     text = str(error)
     return (
-        BrokerOperationBusyError.__name__ in text
-        or OPERATION_LOCK_BUSY_REASON in text
+        BrokerOperationBusyError.__name__ in text or OPERATION_LOCK_BUSY_REASON in text
     )
 
 
@@ -1296,9 +1294,7 @@ def watch(
                         }
                     )
                     continue
-                pause_vendor(
-                    vendor, {"reason": reason}, run_id=result["row"]["run_id"]
-                )
+                pause_vendor(vendor, {"reason": reason}, run_id=result["row"]["run_id"])
                 emit(
                     {
                         "event": "vendor_paused",
@@ -1542,9 +1538,7 @@ def watch(
         # backlog.
         wave_limit = int(item_workers) * WAVE_CYCLES
         open_vendors = journal.open_vendors_by_item(
-            models_by_vendor={
-                vendor: plan_models(plan, vendor) for vendor in vendors
-            },
+            models_by_vendor={vendor: plan_models(plan, vendor) for vendor in vendors},
             trials_per_model=plan_trials_per_model(plan),
         )
         pending = wave_order(

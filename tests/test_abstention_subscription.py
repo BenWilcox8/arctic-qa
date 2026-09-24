@@ -901,9 +901,7 @@ def test_a_harness_that_never_got_its_prompt_records_nothing(tmp_path: Path) -> 
     values = fixture(
         tmp_path,
         PROVIDER_ANTHROPIC_CLAUDE_CODE,
-        overrides={
-            lost: {"raise": "exit", "returncode": 1, "stderr": NO_STDIN_STDERR}
-        },
+        overrides={lost: {"raise": "exit", "returncode": 1, "stderr": NO_STDIN_STDERR}},
     )
     request = EvaluationRequest(
         trial=values["trials"][0],
@@ -980,7 +978,9 @@ def test_parse_claude_output_reads_a_refusal_as_a_completed_call() -> None:
     assert parsed["finish_reason"] == "refusal"
     assert parsed["usage"]["candidatesTokenCount"] == 0
     # An error that is not a refusal is still a failure of the call.
-    broken = dict(REFUSAL_RESULT, stop_reason="end_turn", subtype="error_during_execution")
+    broken = dict(
+        REFUSAL_RESULT, stop_reason="end_turn", subtype="error_during_execution"
+    )
     assert parse_claude_output(json.dumps(broken), model="claude-opus-5")["state"] == (
         STATE_FAILED
     )

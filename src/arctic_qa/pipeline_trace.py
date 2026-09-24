@@ -740,7 +740,9 @@ class PipelineTraceStore:
         # and some readers below take the last of them.
         candidates_by_source: dict[str, list[tuple[int, dict[str, Any]]]] = {}
         for position, row in enumerate(candidates):
-            candidates_by_source.setdefault(row["source_id"], []).append((position, row))
+            candidates_by_source.setdefault(row["source_id"], []).append(
+                (position, row)
+            )
         findings_by_source: dict[str, list[tuple[int, dict[str, Any]]]] = {}
         for position, row in enumerate(findings):
             findings_by_source.setdefault(row["source_id"], []).append((position, row))

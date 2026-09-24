@@ -227,6 +227,7 @@ def family_generation_cost(
 
 def accepted_item_count(state_db: Path, campaign_id: str) -> int:
     """Count the accepted candidates of one campaign in the state database."""
+
     def query() -> Any:
         connection = db.connect_read_only(state_db)
         try:

@@ -1219,7 +1219,9 @@ class LiveRanking:
         self._writes = 0
         self._lock = threading.Lock()
 
-    def add(self, candidate_key: str, rank_probability: str, scan_position: int) -> None:
+    def add(
+        self, candidate_key: str, rank_probability: str, scan_position: int
+    ) -> None:
         """Record one scored paper and write when enough have arrived."""
         with self._lock:
             self._rows[candidate_key] = {

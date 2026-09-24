@@ -439,7 +439,9 @@ class PaperPicker:
         """How many of the papers still to analyse carry a score."""
         with self._lock:
             return sum(
-                1 for key in self._frozen if key not in self._taken and key in self._scores
+                1
+                for key in self._frozen
+                if key not in self._taken and key in self._scores
             )
 
     def _reload(self) -> None:
@@ -1271,9 +1273,7 @@ def run_stream(
         with ThreadPoolExecutor(
             max_workers=paper_workers, thread_name_prefix="paper"
         ) as pool:
-            for future in [
-                pool.submit(pick_and_process) for _ in range(paper_workers)
-            ]:
+            for future in [pool.submit(pick_and_process) for _ in range(paper_workers)]:
                 future.result()
     else:
         pick_and_process()

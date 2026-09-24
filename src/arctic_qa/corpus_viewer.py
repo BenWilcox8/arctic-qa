@@ -450,7 +450,9 @@ class CorpusArtifacts:
         if not self.database.is_file():
             return None
         try:
-            with sqlite3.connect(self.database, timeout=db.BUSY_TIMEOUT_SECONDS) as connection:
+            with sqlite3.connect(
+                self.database, timeout=db.BUSY_TIMEOUT_SECONDS
+            ) as connection:
                 row = connection.execute(
                     "SELECT value FROM cache_meta WHERE key='base_fingerprint'"
                 ).fetchone()
@@ -618,7 +620,9 @@ class CorpusArtifacts:
         screening_file = self._screening_file()
         screening = _read_json(screening_file) if screening_file else []
         links = self._zotero_links()
-        with sqlite3.connect(self.database, timeout=db.BUSY_TIMEOUT_SECONDS) as connection:
+        with sqlite3.connect(
+            self.database, timeout=db.BUSY_TIMEOUT_SECONDS
+        ) as connection:
             connection.execute(
                 """UPDATE candidates SET decision='pending', eligibility='unreviewed',
                 pending_reason='unreviewed', selected=0, evidence_locator=NULL,
@@ -2542,7 +2546,9 @@ class CorpusArtifacts:
             payload["protocol"] = None
             payload["stages"] = []
             return payload
-        with sqlite3.connect(self.database, timeout=db.BUSY_TIMEOUT_SECONDS) as connection:
+        with sqlite3.connect(
+            self.database, timeout=db.BUSY_TIMEOUT_SECONDS
+        ) as connection:
             connection.row_factory = sqlite3.Row
             counts = connection.execute(
                 """SELECT COUNT(*) discovered,
@@ -2862,7 +2868,12 @@ class CorpusArtifacts:
             where.append("gemini_status=?")
             values.append(gemini_status)
         clause = " WHERE " + " AND ".join(where) if where else ""
-        with self._lock, sqlite3.connect(self.database, timeout=db.BUSY_TIMEOUT_SECONDS) as connection:
+        with (
+            self._lock,
+            sqlite3.connect(
+                self.database, timeout=db.BUSY_TIMEOUT_SECONDS
+            ) as connection,
+        ):
             connection.row_factory = sqlite3.Row
             total = connection.execute(
                 f"SELECT COUNT(*) FROM candidates{clause}", values
@@ -3077,8 +3088,7 @@ class LiveSnapshot:
             entry = self._entries.get(route)
         if entry is None:
             raise RuntimeError(
-                f"the background refresher has not built {route} yet; "
-                "retry in a moment"
+                f"the background refresher has not built {route} yet; retry in a moment"
             )
         return entry
 
@@ -3099,9 +3109,7 @@ class CorpusRequestHandler(BaseHTTPRequestHandler):
         entry = self.snapshot.entry(route)
         self._age = int(max(time.monotonic() - entry["built_at"], 0))
         self._refresh_error = entry["error"]
-        self._send(
-            HTTPStatus.OK, entry["body"], "application/json; charset=utf-8"
-        )
+        self._send(HTTPStatus.OK, entry["body"], "application/json; charset=utf-8")
 
     def _headers(self, status: HTTPStatus, content_type: str, length: int) -> None:
         self.send_response(status)

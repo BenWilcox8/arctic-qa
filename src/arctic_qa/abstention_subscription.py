@@ -1257,8 +1257,7 @@ def binary_version(
         detail = result["stderr"][:200]
         if is_harness_spawn_failure(result):
             raise HarnessUnavailableError(
-                f"the {vendor} harness binary is not executable now: "
-                f"{binary}: {detail}"
+                f"the {vendor} harness binary is not executable now: {binary}: {detail}"
             )
         raise ValueError(f"{binary} --version failed: {detail}")
     return result["stdout"].strip().splitlines()[0] if result["stdout"].strip() else ""

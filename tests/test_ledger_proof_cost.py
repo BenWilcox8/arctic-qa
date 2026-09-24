@@ -173,7 +173,10 @@ def test_the_evaluator_broker_says_it_shares_the_ledger() -> None:
     assert (
         "defer_transient_reservations=bool(defer_transient_reservations),"
     ) in source
-    assert source.count("evaluation_gate_file=gate,\n                    concurrent=True,") == 2
+    assert (
+        source.count("evaluation_gate_file=gate,\n                    concurrent=True,")
+        == 2
+    )
     assert source.count("defer_transient_reservations=True,") == 2
     assert "deferred_snapshot=True" not in source
 
@@ -411,9 +414,9 @@ def test_a_seeded_broker_still_takes_the_full_pass_when_it_is_due(
     monkeypatch.setattr(SharedGeminiBroker, "_validate_request_events", record)
     second._immutable_events_proved_at = None
     second._validated_ledger()
-    assert proved == sorted(
-        ledger_store.read_ledger(second.ledger_file)["requests"]
-    ), proved
+    assert proved == sorted(ledger_store.read_ledger(second.ledger_file)["requests"]), (
+        proved
+    )
     # The seeded custody is gone with it, so the next recovery states the final
     # receipt of every terminal row again and a receipt taken away is caught.
     assert second._custody_proved == set()

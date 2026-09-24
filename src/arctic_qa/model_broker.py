@@ -533,6 +533,8 @@ def _release_ledger_compactor(ledger_file: Path, owner: Any) -> None:
     with _PROCESS_LEDGER_LOCK:
         if _PROCESS_LEDGER_COMPACTORS.get(ledger_file) is owner:
             _PROCESS_LEDGER_COMPACTORS.pop(ledger_file, None)
+
+
 # The name of an immutable paid-call receipt: the request key, an optional
 # resume or count-retry qualifier, and an optional stage.
 PAID_CALL_RECEIPT_NAME = re.compile(
@@ -987,9 +989,8 @@ def _is_authorized_successor_gate(
     submitted = str(request.get("submitted_at_utc") or "")
     if not written or not submitted or written <= submitted:
         return False
-    if (
-        not review_record.is_file()
-        or sha256_file(review_record) != gate.get("review_record_sha256")
+    if not review_record.is_file() or sha256_file(review_record) != gate.get(
+        "review_record_sha256"
     ):
         return False
     record = _read(review_record)
@@ -4890,14 +4891,10 @@ class SharedGeminiBroker:
         evidence_path = (
             self.receipts_dir / f"automatic-ambiguous-evidence-{request_key}.json"
         )
-        review_path = (
-            self.receipts_dir / f"automatic-ambiguous-review-{request_key}.md"
-        )
+        review_path = self.receipts_dir / f"automatic-ambiguous-review-{request_key}.md"
         evidence: dict[str, Any] = {
             "schema": {
-                AMBIGUOUS_CONTINUATION_SCHEMA: (
-                    AMBIGUOUS_CONTINUATION_EVIDENCE_SCHEMA
-                ),
+                AMBIGUOUS_CONTINUATION_SCHEMA: (AMBIGUOUS_CONTINUATION_EVIDENCE_SCHEMA),
                 PROVIDER_TIMEOUT_CONTINUATION_SCHEMA: (
                     PROVIDER_TIMEOUT_CONTINUATION_EVIDENCE_SCHEMA
                 ),
@@ -8395,6 +8392,7 @@ class SharedGeminiBroker:
                 for key, row in ledger["requests"].items()
                 if row.get("state") == "ambiguous_charge"
             }
+
             def blocking_ambiguous(events: dict[str, Any]) -> set[str]:
                 return {
                     key
@@ -8705,9 +8703,7 @@ class SharedGeminiBroker:
             # One unknown charge stops neither caller while the hourly bound of
             # its phase has room. The continuation keeps the whole reservation
             # and records the same release the reviewed operation records.
-            if not self._automatic_ambiguous_continuation(
-                ledger, request_key, request
-            ):
+            if not self._automatic_ambiguous_continuation(ledger, request_key, request):
                 if request["phase"] == EVALUATION_PHASE:
                     # Halt the evaluation phase only. The construction phase
                     # keeps its own ceiling, slots and window.

@@ -813,9 +813,7 @@ def test_one_unknown_charge_continues_the_run_and_the_sixth_halts_it(
         assert ledger["halt_reason"] is None, index
 
     ledger = json.loads(values["ledger"].read_text(encoding="utf-8"))
-    reserved = sum(
-        Decimal(ledger["requests"][key]["reserved_usd"]) for key in keys
-    )
+    reserved = sum(Decimal(ledger["requests"][key]["reserved_usd"]) for key in keys)
     assert Decimal(ledger["ambiguous_reserved_usd"]) == reserved
     assert Decimal(ledger["spent_usd"]) == Decimal("0")
 
@@ -866,7 +864,9 @@ def test_an_automatic_continuation_never_settles_the_charge(
     )
 
 
-def test_a_stale_receipts_listing_never_ends_the_run(tmp_path: Path, monkeypatch) -> None:
+def test_a_stale_receipts_listing_never_ends_the_run(
+    tmp_path: Path, monkeypatch
+) -> None:
     """A released ambiguity that this broker has not listed yet is not a stop.
 
     A concurrent broker keeps its receipts listing for up to

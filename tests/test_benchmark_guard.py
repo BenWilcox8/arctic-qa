@@ -480,11 +480,7 @@ def test_the_retired_projection_rule_is_gone_and_its_numbers_stay() -> None:
         now=NOW,
     )
     assert "codex_projected_exhaustion" in RETIRED_RULES
-    assert [
-        finding
-        for finding in findings
-        if finding["rule"] in RETIRED_RULES
-    ] == []
+    assert [finding for finding in findings if finding["rule"] in RETIRED_RULES] == []
     floor = rule(findings, "codex_weekly_window_floor")
     assert floor["fired"] is False
     assert floor["numbers"]["percent_remaining"] == "23"
@@ -914,7 +910,9 @@ def test_a_runaway_gemini_cost_pauses_the_costlier_gemini_model(
     ledger = json.loads(workspace["ledger"].read_text(encoding="utf-8"))
     ledger["requests"]["a"]["actual_cost_usd"] = "40.000000"
     ledger_store.write_snapshot(
-        workspace["ledger"], ledger, ledger_store.snapshot_applied_seq(workspace["ledger"])
+        workspace["ledger"],
+        ledger,
+        ledger_store.snapshot_applied_seq(workspace["ledger"]),
     )
     state = guard_for(workspace, QUIET_QUOTA).cycle(now=NOW)
     assert [action["model"] for action in state["actions"]] == ["gemini-3.8-flash"]
@@ -983,7 +981,9 @@ def test_two_rules_of_one_vendor_pause_only_one_model(
         "gemini_evaluation_ceiling_margin",
     ]
     gemini = [
-        action for action in state["actions"] if action["vendor"] == VENDOR_GOOGLE_GEMINI
+        action
+        for action in state["actions"]
+        if action["vendor"] == VENDOR_GOOGLE_GEMINI
     ]
     assert len(gemini) == 1
     assert gemini[0]["rule"] == "gemini_extrapolated_over_budget"
@@ -1050,9 +1050,10 @@ def test_a_pause_of_a_retired_rule_is_removed_on_the_next_cycle(
         encoding="utf-8",
     )
     state = guard_for(workspace, QUIET_QUOTA).cycle(now=NOW)
-    assert [
-        (action["action"], action["model"]) for action in state["actions"]
-    ] == [("resume", "gpt-5.6-sol"), ("resume", "gpt-6-astra")]
+    assert [(action["action"], action["model"]) for action in state["actions"]] == [
+        ("resume", "gpt-5.6-sol"),
+        ("resume", "gpt-6-astra"),
+    ]
     pause = read_pause_file(workspace["pause"])
     assert sorted(pause["paused_models"]) == [FABLE_MODEL]
     assert pause["paused_models"][FABLE_MODEL]["owner"] == "captain"

@@ -58,7 +58,10 @@ from arctic_qa.errors import (
     HarnessUnavailableError,
     TransientReservationError,
 )
-from arctic_qa.model_broker import OPERATION_LOCK_WAIT_INTERVAL_SECONDS, SharedGeminiBroker
+from arctic_qa.model_broker import (
+    OPERATION_LOCK_WAIT_INTERVAL_SECONDS,
+    SharedGeminiBroker,
+)
 from arctic_qa.util import atomic_json
 from arctic_qa import ledger_store  # noqa: E402
 from test_abstention_broker import LetterTransport, bind, evaluation_fixture, execute
@@ -1438,7 +1441,9 @@ class _BusyThenAnswerProvider(ScriptedEvaluationProvider):
     cannot be started.
     """
 
-    def __init__(self, *, refusals: int, refusal: type[BaseException], **kwargs) -> None:
+    def __init__(
+        self, *, refusals: int, refusal: type[BaseException], **kwargs
+    ) -> None:
         super().__init__(**kwargs)
         self.remaining = refusals
         self.refusal = refusal
@@ -1465,7 +1470,9 @@ def test_a_busy_lock_inside_a_trial_is_waited_out_and_never_stops_the_arm(
     not be a stop. The trial is tried again inside the pass; here the second
     attempt answers, so the item finishes whole.
     """
-    monkeypatch.setattr("arctic_qa.abstention_plan.PRE_PROVIDER_RETRY_BASE_SECONDS", 0.0)
+    monkeypatch.setattr(
+        "arctic_qa.abstention_plan.PRE_PROVIDER_RETRY_BASE_SECONDS", 0.0
+    )
     plan = load_plan(PLAN_FILE)
     set_dir = frozen_set(tmp_path, count=1)
     provider = _BusyThenAnswerProvider(
@@ -1499,7 +1506,9 @@ def test_a_busy_lock_past_the_bound_leaves_the_trial_pending(
     hours. A trial the provider never saw is owed, so nothing is recorded,
     nothing stops, and the next pass runs exactly it.
     """
-    monkeypatch.setattr("arctic_qa.abstention_plan.PRE_PROVIDER_RETRY_BASE_SECONDS", 0.0)
+    monkeypatch.setattr(
+        "arctic_qa.abstention_plan.PRE_PROVIDER_RETRY_BASE_SECONDS", 0.0
+    )
     monkeypatch.setattr("arctic_qa.abstention_plan.PRE_PROVIDER_RETRY_ROUNDS", 2)
     plan = load_plan(PLAN_FILE)
     set_dir = frozen_set(tmp_path, count=1)
@@ -1553,7 +1562,9 @@ def test_an_unavailable_harness_binary_is_the_same_kind_of_refusal(
     2026-09-17. Recorded as a failed response it stopped the arm for the rest
     of the invocation; waited out, the trial simply runs.
     """
-    monkeypatch.setattr("arctic_qa.abstention_plan.PRE_PROVIDER_RETRY_BASE_SECONDS", 0.0)
+    monkeypatch.setattr(
+        "arctic_qa.abstention_plan.PRE_PROVIDER_RETRY_BASE_SECONDS", 0.0
+    )
     assert HarnessUnavailableError in PRE_PROVIDER_REFUSALS
     assert BrokerOperationBusyError in PRE_PROVIDER_REFUSALS
     plan = load_plan(PLAN_FILE)
@@ -1586,7 +1597,9 @@ def test_the_harness_probe_refuses_a_binary_that_cannot_be_started(
     missing.write_text("#!/bin/sh\n", encoding="utf-8")
     missing.chmod(0o755)
     assert harness_binary_path(str(missing)) == missing
-    assert require_harness_binary(PROVIDER_ANTHROPIC_CLAUDE_CODE, str(missing)) == missing
+    assert (
+        require_harness_binary(PROVIDER_ANTHROPIC_CLAUDE_CODE, str(missing)) == missing
+    )
 
 
 def test_full_paid_call_slots_are_the_same_kind_of_refusal(
@@ -1601,7 +1614,9 @@ def test_full_paid_call_slots_are_the_same_kind_of_refusal(
     never reach its 48 planned responses. Five questions met this between
     16:30 and 16:43 UTC on 2026-09-17.
     """
-    monkeypatch.setattr("arctic_qa.abstention_plan.PRE_PROVIDER_RETRY_BASE_SECONDS", 0.0)
+    monkeypatch.setattr(
+        "arctic_qa.abstention_plan.PRE_PROVIDER_RETRY_BASE_SECONDS", 0.0
+    )
     monkeypatch.setattr("arctic_qa.abstention_plan.PRE_PROVIDER_RETRY_ROUNDS", 2)
     assert TransientReservationError in PRE_PROVIDER_REFUSALS
     plan = load_plan(PLAN_FILE)

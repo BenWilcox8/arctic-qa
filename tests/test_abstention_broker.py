@@ -48,6 +48,8 @@ def no_automatic_continuation(monkeypatch):
     the bound itself.
     """
     monkeypatch.setattr(model_broker, "AUTOMATIC_CONTINUATION_LIMIT_PER_HOUR", 0)
+
+
 PRO = "gemini-3.1-pro-preview"
 
 

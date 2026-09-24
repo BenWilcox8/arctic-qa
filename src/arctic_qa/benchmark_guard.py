@@ -342,8 +342,7 @@ def row_recorded_trials(row: dict[str, Any]) -> int:
     if "recorded_trials" in evaluation:
         return int(evaluation.get("recorded_trials") or 0)
     return sum(
-        sum(counts.values())
-        for counts in (row.get("outcomes_by_model") or {}).values()
+        sum(counts.values()) for counts in (row.get("outcomes_by_model") or {}).values()
     )
 
 
@@ -2088,9 +2087,7 @@ class BenchmarkGuard:
                         "reason": finding["detail"],
                         "numbers": finding["numbers"],
                         "resume_at_utc": resume,
-                        "cost_per_question_usd": _quantize(
-                            _cost_per_question(reading)
-                        ),
+                        "cost_per_question_usd": _quantize(_cost_per_question(reading)),
                     }
                 )
 
@@ -2278,9 +2275,7 @@ def _question_cost_row(row: dict[str, Any]) -> dict[str, Any]:
         # The same rule the counts above the table use: a question is complete
         # when its responses arrived, not when its row carries the flag. The
         # flag said yes beside "36 of 48" in the trials column of the same row.
-        "complete": bool(
-            planned and row_recorded_trials(row) >= planned
-        ),
+        "complete": bool(planned and row_recorded_trials(row) >= planned),
         "row_complete_flag": bool(row.get("complete")),
         "family_id": row.get("family_id"),
         "generation_usd": family.get("usd"),
