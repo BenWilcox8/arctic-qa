@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-message: "If you use this code, the ArcticQA dataset or the ArcticAbstain responses, please cite the paper below."
+message: "If you use this code, the ArcticQA dataset or the ArcticAbstain responses, please cite the paper below. The code is MIT-licensed; the dataset in data/arcticqa-v1/ is CC BY 4.0."
 title: "Arctic Questions, Missing Answers: code and data for the ArcticQA dataset and the ArcticAbstain benchmark"
 abstract: >-
   ArcticQA is a dataset of 194 multiple-choice questions built from primary
@@ -14,6 +14,16 @@ type: software
 authors:
   - family-names: Wilcox
     given-names: Benjamin
+  - family-names: Gao
+    given-names: Dawei
+  - family-names: Kathiravelu
+    given-names: Pradeeban
+  - family-names: Causey
+    given-names: Douglas
+  - family-names: Sha
+    given-names: Kewei
+  - family-names: Feng
+    given-names: Yunhe
 repository-code: "https://github.com/BenWilcox8/arctic-qa"
 license: MIT
 version: 0.1.0

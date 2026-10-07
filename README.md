@@ -11,8 +11,9 @@ A comparison of the two conditions shows whether a model abstains because no val
 ## Status
 
 - **Machine-accepted, not expert-verified.** Every item carries the label `machine_accepted_unverified`. All automated gates passed, but no domain expert reviewed any item, and the residual error rate is not measured.
-- **Not publicly released.** The repository is private. The data is a frozen research record from the evaluation snapshot of 2026-09-17T18:02:42Z.
-- **Source evidence withheld.** The verbatim source passages behind the items are not in the repository. Their quotation rights were cleared only for private analysis. See [the data README](data/arcticqa-v1/README.md#what-is-withheld).
+- **Released under open licenses.** The dataset in `data/arcticqa-v1/` is released under CC BY 4.0, and the code under the MIT License. See [License](#license).
+- **Frozen.** The data comes from the evaluation snapshot of 2026-09-17T18:02:42Z and does not change.
+- **Source passages withheld.** The repository holds no text of the source papers. Each item names its source paper by DOI. See [the data README](data/arcticqa-v1/README.md#what-is-withheld).
 
 ## Headline result
 
@@ -36,6 +37,23 @@ This gives 9,312 recorded responses, of which 9,205 are valid.
 
 The table gives exact values, rounded. The paper prints each shift as the difference of the two rounded rates, so it shows +2.6 for Gemini 3.7 Flash and +11.1 for ChatGPT Astra. It also prints 0.0011 for the Holm p of ChatGPT Astra, whose exact value is 0.00105.
 [`data/arcticqa-v1/results/TABLES.md`](data/arcticqa-v1/results/TABLES.md) holds both paper tables with the p-values, and the data README explains each [difference in presentation](data/arcticqa-v1/README.md#how-the-numbers-relate-to-the-paper).
+
+## Get the data
+
+Clone the repository, or download single files from the `data/arcticqa-v1/` folder:
+
+```bash
+git clone https://github.com/BenWilcox8/arctic-qa.git
+cd arctic-qa
+```
+
+Each JSONL file has one JSON record per line, so plain Python reads it with no extra package:
+
+```python
+import json
+items = [json.loads(line) for line in open("data/arcticqa-v1/items.jsonl", encoding="utf-8")]
+responses = [json.loads(line) for line in open("data/arcticqa-v1/responses.jsonl", encoding="utf-8")]
+```
 
 ## The data
 
@@ -67,6 +85,8 @@ It writes `data/arcticqa-v1/results/`; add `--check` to compare with the committ
 Without Nix, any Python 3.11 or later works: `PYTHONPATH=src python3 -m arctic_qa.paper_tables`.
 The package has no third-party dependency.
 
+The paper's figure plots the two abstention rates of each model, which are the `present_abstention` and `absent_abstention` columns of `data/arcticqa-v1/results/condition-shifts.csv`.
+
 ## The code that matters most
 
 ### Dataset construction (paper section 3)
@@ -82,6 +102,7 @@ The package has no third-party dependency.
 
 The writer model was Gemini 3.8 Flash, and the answer and option judges were Gemini 3.1 Pro Preview.
 Of the 776 distractors of the 194 items, 455 have a rule-based confirmation and 321 rest on the judge's verdict alone.
+185 of the 194 source papers have a Semantic Scholar discovery record.
 The metadata prefilter kept 16,339 papers, of which 4,420 had full text and formed the frozen corpus ([JEV_PRESCREEN.md](docs/JEV_PRESCREEN.md)).
 The run screened a ranked part of that corpus, so the 194 items are not a random sample of Arctic research.
 
@@ -174,7 +195,7 @@ Read [Benchmark guard](docs/BENCHMARK_GUARD.md) for the cost and quota guard tha
 
 | Path | Contents |
 | --- | --- |
-| [`data/`](data/arcticqa-v1/README.md) | The released items, conditions, responses and result tables. |
+| [`data/`](data/arcticqa-v1/README.md) | The released items, conditions, responses and result tables (CC BY 4.0). |
 | [`src/arctic_qa/`](src/arctic_qa/README.md) | The Python package, command-line interface, pipeline, evaluator, analysis, guard and viewers. |
 | [`tests/`](tests/README.md) | The executable contracts and end-to-end replay tests. |
 | [`schemas/`](schemas/README.md) | JSON Schemas for source records, progress records, provider answers and exported items. |
@@ -185,7 +206,7 @@ Read [Benchmark guard](docs/BENCHMARK_GUARD.md) for the cost and quota guard tha
 | `flake.nix` and `flake.lock` | The pinned Nix development environment. |
 | `pyproject.toml` | The Python package metadata and test configuration. |
 | `CITATION.cff` | The machine-readable citation record. |
-| `LICENSE` | The MIT license. |
+| `LICENSE` | The MIT License of the code. See [License](#license). |
 | `AGENTS.md`, `CLAUDE.md` | Contributor instructions for coding agents. They do not affect the pipeline. |
 
 ### Data root and credentials
@@ -203,8 +224,39 @@ The system never emits `CERTAINLY_TRUE` or `CERTAINLY_FALSE`.
 It never converts model votes into a confidence probability.
 Source content is untrusted data, so provider prompts tell models not to obey instructions inside a paper.
 
-## License and citation
+## What the repository does not include
 
-The code is available under the [MIT license](LICENSE).
-The data has no public license yet, because it is not released.
-Use [CITATION.cff](CITATION.cff) when you cite this repository.
+The paper mentions these records, and the repository does not hold them:
+
+| Not included | Reason |
+| --- | --- |
+| The verbatim source passages (answer evidence and distractor contradictions) | The authors withhold all text of the source papers. Each item gives the DOI of its paper instead. |
+| The full texts and PDFs of the source papers | They are copyrighted by their publishers. |
+| The per-candidate construction records: rejected candidates, judge verdicts and rationales, validation events | They quote the source passages. |
+| The provider receipts and the paid-call ledger | Each receipt holds the full request, with source text. The responses file keeps the model output of every evaluation call. |
+| The discovery and metadata-filter records (84,829 and 16,339 papers in the paper) | They were not prepared for release. The code that made them is here. |
+| The paper's LaTeX source and figure files | The authors distribute the paper separately. The figure's data is in `results/condition-shifts.csv`. |
+
+The prompts, the role and model configuration, the eligibility policy and all pipeline code are in the repository: `config/`, `src/arctic_qa/generation.py` and `data/arcticqa-v1/prompt.json`.
+
+## Citation
+
+Please cite the paper:
+
+```bibtex
+@misc{wilcox2026arctic,
+  title  = {Arctic Questions, Missing Answers: A Dataset and Benchmark for {LLM} Abstention in Arctic Science},
+  author = {Wilcox, Benjamin and Gao, Dawei and Kathiravelu, Pradeeban and Causey, Douglas and Sha, Kewei and Feng, Yunhe},
+  year   = {2026},
+  note   = {arXiv identifier to be added}
+}
+```
+
+[CITATION.cff](CITATION.cff) holds the same record in machine-readable form.
+
+## License
+
+- **Code:** the MIT License, in [`LICENSE`](LICENSE). It covers everything outside `data/arcticqa-v1/`.
+- **Dataset:** the Creative Commons Attribution 4.0 International License (CC BY 4.0), in [`data/arcticqa-v1/LICENSE`](data/arcticqa-v1/LICENSE). It covers every file in `data/arcticqa-v1/`. The legal code is at https://creativecommons.org/licenses/by/4.0/legalcode.
+
+The source papers keep their own copyright. The dataset names each one by DOI and holds no text from it.

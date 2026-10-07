@@ -1,0 +1,32 @@
+ArcticQA v1 dataset and ArcticAbstain responses
+
+Copyright (c) 2026 Benjamin Wilcox, Dawei Gao, Pradeeban Kathiravelu, Douglas Causey,
+Kewei Sha, and Yunhe Feng
+
+This license applies to every file in the data/arcticqa-v1/ folder of this
+repository, including the results/ subfolder.
+
+These files are licensed under the Creative Commons Attribution 4.0
+International License (CC BY 4.0).
+
+You are free to share (copy and redistribute the material in any medium or
+format) and adapt (remix, transform, and build upon the material) for any
+purpose, even commercially, under this term:
+
+  Attribution - You must give appropriate credit, provide a link to the
+  license, and indicate if changes were made. You may do so in any reasonable
+  manner, but not in any way that suggests the licensor endorses you or your
+  use.
+
+The full legal code is at:
+https://creativecommons.org/licenses/by/4.0/legalcode
+
+To give credit, cite the paper "Arctic Questions, Missing Answers: A Dataset
+and Benchmark for LLM Abstention in Arctic Science" (CITATION.cff at the root
+of this repository).
+
+This license covers the questions, options, model responses and result tables
+that the authors created. It does not cover the source papers that the
+questions were built from; each item names its source only by DOI, and no text
+of a source paper is included. The code in the rest of the repository is
+licensed separately under the MIT License (LICENSE at the repository root).

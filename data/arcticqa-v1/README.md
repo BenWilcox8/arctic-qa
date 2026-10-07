@@ -11,16 +11,16 @@ The largest file is `responses.jsonl` at about 19 MB.
 ## Status
 
 - **Machine-accepted, not expert-verified.** Every item has the label `machine_accepted_unverified`. All automated checks passed, but no domain expert reviewed any item. The residual error rate is not measured.
-- **Not publicly released.** The repository is private. These files are a frozen research record for the authors and reviewers.
+- **License.** These files are released under CC BY 4.0. See [License](#license).
 - **Frozen.** The files come from the evaluation snapshot of 2026-09-17T18:02:42Z. Nothing here changes after that time.
 
 ## What is withheld
 
-- **Source evidence passages and paper text.** Each item was built from a verbatim passage of its source paper. The rights to quote those passages were cleared only for private analysis. The passages stay out of this folder until the authors make a release decision.
+- **Source evidence passages and paper text.** Each item was built from a verbatim passage of its source paper. The authors withhold all source passages and all other text of the source papers.
 - **Provider receipts, request keys and harness command lines.** These are internal operation records.
 - **Credentials and machine paths.** Error messages had the absolute paths of the evaluation machine replaced with `<home>` or `<data-root>`.
 
-Each item names its source paper by DOI, title and year, so a reader with access can find the evidence.
+Each item names its source paper by DOI alone (`paper.doi`), so a reader can find the paper and its evidence.
 
 ## Files
 
@@ -32,6 +32,7 @@ Each item names its source paper by DOI, title and year, so a reader with access
 | `responses.csv` | 9,312 | A flat copy of the main response fields, for spreadsheets. |
 | `prompt.json` | 1 | The system instruction, the user template and the output contract. |
 | `excluded-items.json` | 1 | The one accepted question outside the analysis, with the reason. |
+| `LICENSE` | | The CC BY 4.0 notice for this folder. |
 | `MANIFEST.json` | 1 | Counts, the SHA-256 of each file, and the hash of the source list. |
 | `source-hashes.txt` | 970 | The SHA-256 of each frozen snapshot file that the build read. |
 | `results/` | | The paper tables and their inputs (see "Reproduce the paper tables"). |
@@ -77,7 +78,7 @@ Eight models answered each condition three times at high reasoning effort: 194 x
 | `status` | Always `machine_accepted_unverified`. |
 | `language_script` | `latin`, `cyrillic` or `mixed`. |
 | `numeric_answer` | True when the gold answer is numeric. |
-| `paper` | The `doi`, `title`, `year` and `paper_family_id` of the source paper. |
+| `paper` | The `doi` of the source paper, and the `paper_family_id` that the pipeline gave it. |
 | `construction` | The writer model, the option verifier models and the generation prompt version. |
 | `eval_set_id`, `candidate_hash` | The ids that bind the item to its frozen evaluation set. |
 
@@ -199,3 +200,11 @@ The build checks each frozen set against its manifest hash, refuses a trial with
 It then writes the files and `MANIFEST.json`.
 `source-hashes.txt` lists each snapshot file it read, with paths relative to the snapshot root.
 Do not edit these files by hand.
+
+## License
+
+The files in this folder, `results/` included, are licensed under the Creative Commons Attribution 4.0 International License (CC BY 4.0).
+`LICENSE` holds the notice, and the legal code is at https://creativecommons.org/licenses/by/4.0/legalcode.
+To give credit, cite the paper (`CITATION.cff` at the repository root).
+The source papers keep their own copyright, and this folder holds no text from them.
+The code of the repository is licensed separately under the MIT License.

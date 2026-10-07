@@ -194,7 +194,10 @@ def test_no_private_material_is_released():
     item_keys = {key for row in read_jsonl("items.jsonl") for key in row}
     paper_keys = {key for row in read_jsonl("items.jsonl") for key in row["paper"]}
     assert item_keys.isdisjoint({"evidence", "source", "construction_roles"})
-    assert paper_keys == {"doi", "title", "year", "paper_family_id"}
+    # Source passages are withheld; the source of each item is its DOI alone.
+    assert paper_keys == {"doi", "paper_family_id"}
+    dois = [row["paper"]["doi"] for row in read_jsonl("items.jsonl")]
+    assert len(dois) == 194 and all(dois) and len(set(dois)) == 194
     assert all(
         path.stat().st_size < 50 * 1024 * 1024
         for path in DATA.rglob("*")

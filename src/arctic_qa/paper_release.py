@@ -182,7 +182,7 @@ def load_responses(
 
 
 def source_metadata(snapshot: Path, item_ids: list[str]) -> dict[str, dict[str, Any]]:
-    """Return the status and the bibliographic record of each item's paper."""
+    """Return the status and the DOI of each item's paper."""
     db = snapshot / "production" / "state.sqlite3"
     wal = Path(f"{db}-wal")
     if wal.exists() and wal.stat().st_size:
@@ -192,20 +192,18 @@ def source_metadata(snapshot: Path, item_ids: list[str]) -> dict[str, dict[str, 
         out = {}
         for item_id in item_ids:
             row = conn.execute(
-                "select c.status, c.run_id, s.doi, s.title, s.year "
+                "select c.status, c.run_id, s.doi "
                 "from candidates c join sources s on s.source_id = c.source_id "
                 "where c.item_id = ?",
                 (item_id,),
             ).fetchall()
             if len(row) != 1:
                 raise ValueError(f"item {item_id} has {len(row)} source rows")
-            status, run_id, doi, title, year = row[0]
+            status, run_id, doi = row[0]
             out[item_id] = {
                 "status": status,
                 "run_id": run_id,
                 "doi": doi,
-                "title": title,
-                "year": year,
             }
         return out
     finally:
@@ -242,8 +240,6 @@ def item_record(
         "numeric_answer": bool(item["strata"]["numeric"]),
         "paper": {
             "doi": meta["doi"],
-            "title": meta["title"],
-            "year": meta["year"],
             "paper_family_id": item["family_id"],
         },
         "construction": {
@@ -425,6 +421,9 @@ def build(snapshot: Path, out: Path) -> dict[str, Any]:
     ]
     if {row["status"] for row in items} != {"machine_accepted_unverified"}:
         raise ValueError("an analysed item is not machine_accepted_unverified")
+    # The DOI is the only source field released, so every item needs one.
+    if not all(row["paper"]["doi"] for row in items):
+        raise ValueError("an analysed item has no source DOI")
     conditions = [
         row
         for i, record in zip(complete, items)
@@ -533,7 +532,7 @@ def build(snapshot: Path, out: Path) -> dict[str, Any]:
         "source_digest": sha256_text(files["source-hashes.txt"]),
         "files": {name: sha256_text(text) for name, text in sorted(files.items())},
         "withheld": [
-            "source evidence passages and paper text (rights cleared only for private analysis)",
+            "source evidence passages and all other text of the source papers (sources are named by DOI)",
             "provider receipts, request keys and harness command lines",
             "credentials and absolute paths of the evaluation machine",
         ],

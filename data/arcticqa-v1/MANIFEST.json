@@ -2,7 +2,7 @@
   "release_id": "arcticqa-v1",
   "snapshot_utc": "2026-09-17T18:02:42Z",
   "builder": "src/arctic_qa/paper_release.py",
-  "builder_sha256": "42dd097462174af4b0ce66b1322e928515b44d807f2862abe91fa0df4d7fad44",
+  "builder_sha256": "46267c8a9b9e256a8548490d36f4110bad8fa144c0ff69f8b094efc63a2eab29",
   "renderer_sha256": "b9ca45124a24981870a872fb1f7322446f0429616f5f519c66c9a4b1b6ed406a",
   "counts": {
     "items": 194,
@@ -24,14 +24,14 @@
   "files": {
     "conditions.jsonl": "6edfa49548df29c25194678352b156a5a7b142ad9f5e3b83c0f2fbdb9045ef1e",
     "excluded-items.json": "5515df61e75f37b87e1c00162cd2c4f7d422fb7feb9d505996dcdf320bd2f532",
-    "items.jsonl": "0e3937ca19e2475e62bccd2148d33ca57536a7d0e36b544012fe217f4919aef1",
+    "items.jsonl": "c931197c308fe6a8f72d70a4586912700e22ddb08b17c1880fe55a5f641fce94",
     "prompt.json": "d042eafb31bfd635180905b64d938403d67875089a4b2755753fbba723c4db27",
     "responses.csv": "d127e400bfe0a018317b4edcb0f430f34329522d989f28f56a8829e132d74f73",
     "responses.jsonl": "078f8055db33095eaf82d1afebd112c18318c46b96512799b7fc6ee092c70efb",
     "source-hashes.txt": "c9254bfaf002ab31db2b4456dd2cfc33866e503e730d4ed9e6d7caf8277bcccb"
   },
   "withheld": [
-    "source evidence passages and paper text (rights cleared only for private analysis)",
+    "source evidence passages and all other text of the source papers (sources are named by DOI)",
     "provider receipts, request keys and harness command lines",
     "credentials and absolute paths of the evaluation machine"
   ]
