@@ -278,6 +278,18 @@ This module computes the N0 to N5 counts, abstention metrics, random baseline, a
 This module joins construction cost, Gemini evaluation cost, and subscription token usage for each question.
 `CostJournal` writes append-only rows, and `summarize_journal()` returns cumulative cost and model metrics.
 
+## Paper data and analysis
+
+### `paper_release.py`
+
+This module builds `data/arcticqa-v1/` from the frozen evaluation snapshot.
+`build()` reads the frozen sets, responses and state database, re-renders every call, and writes the items, conditions, responses and manifest.
+
+### `paper_tables.py`
+
+This module computes the tables of the paper from `data/arcticqa-v1/responses.jsonl` alone.
+`compute()` returns the rates, shifts, bootstrap intervals, sign-flip tests, Holm values and metrics, and `main()` writes them under `results/`.
+
 ## Monitoring and calibration
 
 ### `benchmark_guard.py`

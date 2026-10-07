@@ -64,6 +64,7 @@ The other documents explain one stage or one safety boundary in detail.
 
 | Document | What it gives you |
 | --- | --- |
+| [../data/arcticqa-v1/README.md](../data/arcticqa-v1/README.md) | The released items, conditions, responses and paper tables, with their schema. |
 | [ABSTENTION_EVALUATION.md](ABSTENTION_EVALUATION.md) | The 8-model abstention benchmark: sets, plans, gates, providers and scores. |
 | [BENCHMARK_GUARD.md](BENCHMARK_GUARD.md) | The budget and quota guard of the live benchmark, and its pause rules. |
 | [BENCHMARK_INPUT_CONTRACT.md](BENCHMARK_INPUT_CONTRACT.md) | What one model-facing benchmark item contains. |

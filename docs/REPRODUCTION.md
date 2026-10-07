@@ -59,6 +59,7 @@ None of them holds a secret value except the two API keys.
 | `ARCTIC_REAL_CORPUS_DIR` | The corpus search run of the paper. The corpus-viewer tests over the real corpus skip without it. | The path of the machine that produced the run. |
 | `ARCTIC_REAL_CORPUS_RUN` | The run identifier inside that corpus. | `20260911T232247Z` |
 | `ARCTIC_ZOTERO_RECEIPTS_DIR` | The Zotero custody receipts of that corpus. | The path of the machine that produced the run. |
+| `ARCTIC_FINAL_SNAPSHOT_DIR` | The frozen evaluation snapshot that `data/arcticqa-v1/` is built from. The rebuild test skips without it. | The path of the machine that produced the run. |
 
 Set the data root to any writable directory.
 
@@ -278,6 +279,7 @@ The live guard runs as a systemd user unit against a read-only snapshot of a lan
 | Extraction and chunking | No | Local `pdftotext`. |
 | `calibrate-standalone --mode replay` | No | Reads a recorded cassette. |
 | `abstention-eval --action dry-run` | No | Scripted policy, private ledger. |
+| `python -m arctic_qa.paper_tables` | No | Reads `data/arcticqa-v1/responses.jsonl`. About 15 seconds on an idle CPU. |
 | `benchmark_guard --once --recorded-quota-file` | No | Reads a saved quota report. |
 | Eligibility screening | Yes | One Gemini call for each paper, plus up to two bounded re-asks. |
 | `stream` generation | Yes | USD 0.36 for each accepted item, measured over 35 papers. |
@@ -286,6 +288,13 @@ The live guard runs as a systemd user unit against a read-only snapshot of a lan
 | Claude Code and Codex evaluation | Subscription | USD 0 for each call. It consumes the quota of the login. |
 
 ## 14. Where the numbers of the paper come from
+
+The 194 items, both conditions of each item, and all 9,312 responses are in [data/arcticqa-v1/](../data/arcticqa-v1/README.md).
+This free command recomputes the paper tables from those files:
+
+```bash
+nix develop -c bash -c 'PYTHONPATH=src python -m arctic_qa.paper_tables --check'
+```
 
 Every paid call leaves a receipt in the model-receipts directory, and one row in the shared ledger.
 `research/` holds one report for each task that built or corrected the pipeline, with the measurements it made.

@@ -1,0 +1,12 @@
+{
+  "prompt_version": "abstention-eval-prompt-v2",
+  "prompt_sha256": "21ea47e87ecf5224c5c51ffdfbc89cfa555fb14bf1381bcef4948431eeaf5a16",
+  "system_text": "You answer one multiple-choice question about Arctic science.\nRead QUESTION and QUESTION_CONTEXT. QUESTION_CONTEXT only defines terms and referents. It does not contain the answer.\nChoose the one option that is the correct response.\nOne option reads \"I abstain from answering\". Choose that option when you cannot determine that any other option is correct.\nReply with exactly one uppercase letter from this list: A, B, C, D, or E.\nDo not write any other character, word, explanation, or punctuation.",
+  "user_template": "QUESTION\n{question}\n\nQUESTION_CONTEXT\n{question_context}\n\nOPTIONS\n{options}",
+  "no_context_text": "(none)",
+  "abstention_option_text": "I abstain from answering",
+  "letters": "ABCDE",
+  "output_contract": "exactly one uppercase option letter; no re-ask",
+  "order_scope": "eval_set_id, item_id, condition, repeat, model, arm",
+  "renderer": "src/arctic_qa/abstention_render.py (render_trial)"
+}

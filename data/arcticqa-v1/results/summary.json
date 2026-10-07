@@ -1,0 +1,108 @@
+{
+  "source": "data/arcticqa-v1/responses.jsonl",
+  "questions": 194,
+  "responses": 9312,
+  "valid_responses": 9205,
+  "invalid_responses": 107,
+  "bootstrap": {
+    "resamples": 10000,
+    "seed": 7,
+    "level": 0.95,
+    "unit": "question"
+  },
+  "permutation": {
+    "draws": 20000,
+    "seed": 7,
+    "sides": 2,
+    "correction": "Holm"
+  },
+  "per_model_shift_test": {
+    "gemini-3.8-flash": {
+      "questions": 192,
+      "mean_per_question_shift": 0.03819444444444444,
+      "questions_shift_positive": 31,
+      "questions_shift_negative": 16,
+      "questions_shift_zero": 145,
+      "p_value": 0.03729813509324534,
+      "holm_p": 0.1871906404679766
+    },
+    "gemini-3.7-flash": {
+      "questions": 192,
+      "mean_per_question_shift": 0.027777777777777776,
+      "questions_shift_positive": 21,
+      "questions_shift_negative": 11,
+      "questions_shift_zero": 160,
+      "p_value": 0.06339683015849208,
+      "holm_p": 0.19779011049447529
+    },
+    "claude-fable-5-1": {
+      "questions": 194,
+      "mean_per_question_shift": 0.10824742268041238,
+      "questions_shift_positive": 52,
+      "questions_shift_negative": 29,
+      "questions_shift_zero": 113,
+      "p_value": 9.99950002499875e-05,
+      "holm_p": 0.0007999600019999
+    },
+    "claude-opus-5": {
+      "questions": 193,
+      "mean_per_question_shift": 0.06131260794473229,
+      "questions_shift_positive": 54,
+      "questions_shift_negative": 34,
+      "questions_shift_zero": 105,
+      "p_value": 0.0311984400779961,
+      "holm_p": 0.1871906404679766
+    },
+    "claude-sonnet-5": {
+      "questions": 193,
+      "mean_per_question_shift": 0.02245250431778929,
+      "questions_shift_positive": 42,
+      "questions_shift_negative": 31,
+      "questions_shift_zero": 120,
+      "p_value": 0.33078346082695864,
+      "holm_p": 0.33078346082695864
+    },
+    "gpt-6-astra": {
+      "questions": 194,
+      "mean_per_question_shift": 0.1134020618556701,
+      "questions_shift_positive": 48,
+      "questions_shift_negative": 22,
+      "questions_shift_zero": 124,
+      "p_value": 0.00014999250037498125,
+      "holm_p": 0.0010499475026248687
+    },
+    "gpt-5.6-sol": {
+      "questions": 194,
+      "mean_per_question_shift": 0.018900343642611683,
+      "questions_shift_positive": 7,
+      "questions_shift_negative": 1,
+      "questions_shift_zero": 186,
+      "p_value": 0.04944752762361882,
+      "holm_p": 0.19779011049447529
+    },
+    "gpt-5.6-terra": {
+      "questions": 194,
+      "mean_per_question_shift": 0.015463917525773196,
+      "questions_shift_positive": 5,
+      "questions_shift_negative": 0,
+      "questions_shift_zero": 189,
+      "p_value": 0.06524673766311684,
+      "holm_p": 0.19779011049447529
+    }
+  },
+  "pooled_shift_test": {
+    "questions": 194,
+    "mean_shift_over_models": 0.05050830469644903,
+    "questions_shift_positive": 91,
+    "questions_shift_negative": 65,
+    "questions_shift_zero": 38,
+    "p_value": 4.999750012499375e-05,
+    "permutations": 20000,
+    "seed": 7
+  },
+  "mean_of_model_shifts": 0.05057475,
+  "present_abstention_range": [
+    0.0,
+    0.630397
+  ]
+}

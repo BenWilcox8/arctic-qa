@@ -1,48 +1,141 @@
-# ArcticQA
+# Arctic Questions, Missing Answers
 
-ArcticQA builds source-supported scientific questions from Arctic research papers.
-It also measures whether a model abstains when none of the listed answers is correct.
+This repository holds the code, data and analysis behind the paper "Arctic Questions, Missing Answers: A Dataset and Benchmark for LLM Abstention in Arctic Science".
+**ArcticQA** is a dataset of 194 multiple-choice questions built from primary Arctic research papers.
+Each question has a gold answer and four distractors, and separate automated checks test them against a verbatim passage of the source paper.
+**ArcticAbstain** is a paired benchmark on those questions.
+It shows each question twice: once with the correct answer among the options, and once with the correct answer replaced by a distractor.
+Both versions also offer the option "I abstain from answering".
+A comparison of the two conditions shows whether a model abstains because no valid answer is available, or only abstains at a fixed rate.
 
-This repository contains the pipeline code, its tests, its fixed contracts, and the evidence record behind the paper.
-It does not contain copyrighted paper text, credentials, or live run state.
+## Status
 
-## Start here
+- **Machine-accepted, not expert-verified.** Every item carries the label `machine_accepted_unverified`. All automated gates passed, but no domain expert reviewed any item, and the residual error rate is not measured.
+- **Not publicly released.** The repository is private. The data is a frozen research record from the evaluation snapshot of 2026-09-17T18:02:42Z.
+- **Source evidence withheld.** The verbatim source passages behind the items are not in the repository. Their quotation rights were cleared only for private analysis. See [the data README](data/arcticqa-v1/README.md#what-is-withheld).
+
+## Headline result
+
+Eight models answered each of the 194 questions in both conditions, three times each, at high reasoning effort.
+This gives 9,312 recorded responses, of which 9,205 are valid.
+
+| Model | Abstention, answer present | Abstention, answer absent | Shift (pp) [95% CI] | Holm p |
+| --- | ---: | ---: | ---: | ---: |
+| Gemini 3.8 Flash | 6.4% | 10.3% | +3.9 [0.6, 7.4] | 0.187 |
+| Gemini 3.7 Flash | 6.0% | 8.6% | +2.5 [-0.1, 5.4] | 0.198 |
+| Claude Fable 5.1 | 36.1% | 46.9% | +10.8 [5.7, 16.1] | 0.0008 |
+| Claude Opus 5 | 41.3% | 47.5% | +6.2 [0.9, 11.6] | 0.187 |
+| Claude Sonnet 5 | 48.5% | 51.0% | +2.5 [-1.7, 6.9] | 0.331 |
+| ChatGPT Astra | 63.0% | 74.1% | +11.0 [5.7, 16.6] | 0.0010 |
+| ChatGPT 5.6 Sol | 0.2% | 2.1% | +1.9 [0.3, 4.0] | 0.198 |
+| ChatGPT 5.6 Terra | 0.0% | 1.5% | +1.5 [0.3, 3.3] | 0.198 |
+
+- Abstention with the correct answer present ranges from 0.0% to 63.0%. The baseline differs much more between models than the response to answer removal does.
+- The abstention point estimate rises for every model when the correct answer is removed. Averaged over the eight models, the mean per-question shift is +5.05 percentage points.
+- After Holm correction over the eight model tests, only Claude Fable 5.1 and ChatGPT Astra show a significant shift (adjusted p < 0.05).
+
+The table gives exact values, rounded. The paper prints each shift as the difference of the two rounded rates, so it shows +2.6 for Gemini 3.7 Flash and +11.1 for ChatGPT Astra. It also prints 0.0011 for the Holm p of ChatGPT Astra, whose exact value is 0.00105.
+[`data/arcticqa-v1/results/TABLES.md`](data/arcticqa-v1/results/TABLES.md) holds both paper tables with the p-values, and the data README explains each [difference in presentation](data/arcticqa-v1/README.md#how-the-numbers-relate-to-the-paper).
+
+## The data
+
+Everything the paper analyses is in [`data/arcticqa-v1/`](data/arcticqa-v1/README.md), as plain JSONL and CSV files.
+
+| File | Rows | Contents |
+| --- | ---: | --- |
+| [`items.jsonl`](data/arcticqa-v1/items.jsonl) | 194 | Question, context, gold answer, four ranked distractors, source paper DOI, and how each distractor was verified. |
+| [`conditions.jsonl`](data/arcticqa-v1/conditions.jsonl) | 388 | The answer-present and answer-absent option set of each question, with the correct action. |
+| [`responses.jsonl`](data/arcticqa-v1/responses.jsonl) | 9,312 | Every response: model, condition, trial, the exact prompt and option letters shown, the raw text, the chosen option, the outcome class (N0 to N5) and validity. |
+| [`responses.csv`](data/arcticqa-v1/responses.csv) | 9,312 | A flat copy of the main response fields. |
+| [`excluded-items.json`](data/arcticqa-v1/excluded-items.json) | 1 | The 195th accepted question, which is outside the analysis because 8 of its 48 responses were never collected. |
+| [`results/`](data/arcticqa-v1/results/) | | The paper tables, per-model rates, intervals, p-values and metrics. |
+
+The [data README](data/arcticqa-v1/README.md) gives the full schema, the outcome classes, the 107 invalid responses and their causes, and what is withheld.
+
+## Reproduce the paper tables
+
+One command recomputes every number of the two paper tables from `responses.jsonl`:
+
+```bash
+nix develop -c bash -c 'PYTHONPATH=src python -m arctic_qa.paper_tables'
+```
+
+It needs no network and no credential, and it takes about 15 seconds on an idle CPU.
+It writes `data/arcticqa-v1/results/`; add `--check` to compare with the committed files instead.
+`tests/test_paper_release.py` checks the counts, re-renders all 9,312 prompts from the items, and asserts every printed number of the paper tables.
+
+Without Nix, any Python 3.11 or later works: `PYTHONPATH=src python3 -m arctic_qa.paper_tables`.
+The package has no third-party dependency.
+
+## The code that matters most
+
+### Dataset construction (paper section 3)
+
+| Stage | Main code | What it does |
+| --- | --- | --- |
+| Corpus and access | `discovery.py`, `metadata_prefilter.py`, `source_pass.py`, `extraction.py` | Collects metadata, filters it, gets readable full text, and splits it into sections and chunks. |
+| Eligibility | `gemini_eligibility.py`, [`config/arctic-eligibility-policy-v3.json`](config/arctic-eligibility-policy-v3.json) | Screens each paper against five criteria, among them primary research and the 66.56 degrees north geography rule. |
+| Finding and question | `generation.py` | Selects one finding and its verbatim evidence, then writes a standalone question and its context. |
+| QA validation | `generation.py`, `validation.py` | A blind reconstruction of the answer, an answer verdict against the source, and rule-based gates. |
+| Distractors | `generation.py`, `validation.py`, `distractor_order.py` | Proposes candidates, checks each one for contradiction in the question's scope, and fixes a random order. |
+| Orchestration | `streaming.py`, `model_broker.py`, `db.py` | Runs one paper family at a time and records every paid call with an immutable receipt. |
+
+The writer model was Gemini 3.8 Flash, and the answer and option judges were Gemini 3.1 Pro Preview.
+Of the 776 distractors of the 194 items, 455 have a rule-based confirmation and 321 rest on the judge's verdict alone.
+The metadata prefilter kept 16,339 papers, of which 4,420 had full text and formed the frozen corpus ([JEV_PRESCREEN.md](docs/JEV_PRESCREEN.md)).
+The run screened a ranked part of that corpus, so the 194 items are not a random sample of Arctic research.
+
+### Abstention evaluation (paper section 4)
+
+| Step | Main code |
+| --- | --- |
+| Freeze the evaluation items | `abstention_set.py` |
+| Render the exact prompt, the two conditions and the per-call option order | [`abstention_render.py`](src/arctic_qa/abstention_render.py) |
+| Call the models: Gemini API, Claude Code CLI, Codex CLI | `abstention_providers.py`, `abstention_subscription.py` |
+| Run all eight models per question | `abstention_plan.py`, `abstention_watch.py` |
+| Map each letter to N0 to N5 and compute the metrics | [`abstention_score.py`](src/arctic_qa/abstention_score.py) |
+
+### Analysis and release (paper section 5)
+
+| File | What it does |
+| --- | --- |
+| [`src/arctic_qa/paper_tables.py`](src/arctic_qa/paper_tables.py) | Rates, shifts, bootstrap intervals, sign-flip tests, Holm correction and metrics, from the released responses. |
+| [`src/arctic_qa/paper_release.py`](src/arctic_qa/paper_release.py) | Builds `data/arcticqa-v1/` from the frozen evaluation snapshot and re-renders each call to prove it. |
+| [`tests/test_paper_release.py`](tests/test_paper_release.py) | Holds the counts, the rendering and the paper numbers. |
+
+## Limitations
+
+- ArcticAbstain is a geographically bounded case study. Its coverage follows the discovery queries, full-text availability and a model-guided processing order. It does not represent all Arctic research or other fields.
+- The items come from model-generated content and automated validation, with one model vendor for both writing and judging. No sample was reviewed by a domain expert.
+- 15 of the 194 questions are fully or partly in Russian (Cyrillic script).
+- The evaluation covers 194 questions, eight models, one prompt, one abstention option and high reasoning effort only.
+- The paired multiple-choice task measures rejection of an invalid option set, not spontaneous abstention in open scientific work.
+- The results do not establish training exposure, explain model policies, or show generalization outside this setting.
+
+[Methods](docs/METHODS.md) gives the research basis of each design choice and the limits of each claim.
+
+## Everything else
+
+### Start here
 
 | Your goal | Read this |
 | --- | --- |
-| Run the project from a clean checkout | [Reproduction guide](docs/REPRODUCTION.md) |
+| Use the dataset and responses | [Data README](data/arcticqa-v1/README.md) |
+| Run the pipeline from a clean checkout | [Reproduction guide](docs/REPRODUCTION.md) |
 | Understand the research method and its limits | [Methods](docs/METHODS.md) |
 | See every command-line stage | [CLI walkthrough](docs/CLI_WALKTHROUGH.md) |
+| Operate the abstention evaluation | [Abstention evaluation](docs/ABSTENTION_EVALUATION.md) |
 | Find a module | [Package guide](src/arctic_qa/README.md) |
 | Understand the tests and contracts | [Test guide](tests/README.md) |
 | Find a research record | [Research index](research/README.md) |
 | Find another operator document | [Documentation index](docs/README.md) |
 
-## What the pipeline does
+### A free end-to-end run
 
-The pipeline follows a paper from discovery to a released benchmark item.
-
-1. Discovery collects paper metadata from Crossref, OpenAlex, or a replay file.
-2. The metadata prefilter creates a bounded review queue without downloading full text.
-3. The source pass and access pass identify a readable article for each selected paper.
-4. Extraction converts each stored article into ordered sections and source chunks.
-5. Eligibility checks five scientific criteria and records the supporting source spans.
-6. Generation selects a finding, writes a question, builds distractors, and applies validation gates.
-7. Export writes accepted multiple-choice and short-answer records with provenance.
-8. The abstention benchmark tests each item with the correct answer present and absent.
-
-The strongest automated label is `machine_accepted_unverified`.
-This label means that all configured gates passed.
-It does not mean that a human confirmed the item.
-
-## Reproduce the work
-
-The fastest complete example uses synthetic input and a fake model provider.
+The fastest complete pipeline example uses synthetic input and a fake model provider.
 It makes no network call and costs nothing.
 
 ```bash
-git clone https://github.com/BenWilcox8/arctic-qa.git
-cd arctic-qa
 export ARCTIC_QA_DATA_ROOT="$HOME/arctic-qa-data"
 mkdir -p "$ARCTIC_QA_DATA_ROOT"
 nix develop -c bash -c 'PYTHONPATH=src python -m arctic_qa --json smoke \
@@ -50,16 +143,13 @@ nix develop -c bash -c 'PYTHONPATH=src python -m arctic_qa --json smoke \
 ```
 
 The [reproduction guide](docs/REPRODUCTION.md) continues from this free run.
-It covers setup without Nix, corpus access, calibration replay, generation, evaluation, and the cost guard.
+It covers setup without Nix, corpus access, calibration replay, generation, evaluation and the cost guard.
 It marks each paid command and gives the measured cost.
-
 The repository does not redistribute the paper corpus.
-The frozen source manifest records each DOI, retrieval URL, and file hash.
-A reader can run the same methods on those articles or on another corpus.
 
-## How a generation run flows
+### How a generation run flows
 
-1. Files in `config/` define the eligibility prompt, role assignments, budget, and reviewed execution gate.
+1. Files in `config/` define the eligibility prompt, role assignments, budget and reviewed execution gate.
 2. `src/arctic_qa/streaming.py` reads the frozen access run and processes one paper family at a time.
 3. `src/arctic_qa/model_broker.py` records each paid call in the shared ledger and writes an immutable receipt.
 4. `src/arctic_qa/generation.py` and `src/arctic_qa/validation.py` build and assess each candidate.
@@ -69,66 +159,52 @@ A reader can run the same methods on those articles or on another corpus.
 Read [Streaming dataset](docs/STREAMING_DATASET.md) for the call order and resume rules.
 Read [Shared model broker](docs/SHARED_MODEL_BROKER.md) for the paid-call safety contract.
 
-## How the abstention benchmark flows
+### How the abstention benchmark flows
 
 1. `abstention-eval --action build-set` reads accepted items and freezes `items.jsonl` with a hashed `manifest.json`.
 2. `src/arctic_qa/abstention_render.py` creates the exact prompt and a unique option order for every call.
 3. `src/arctic_qa/abstention_plan.py` runs all configured vendors and models for each question.
-4. Each vendor directory records its manifest, trial list, responses, receipts, and summary.
+4. Each vendor directory records its manifest, trial list, responses, receipts and summary.
 5. `src/arctic_qa/abstention_score.py` writes metric tables and confidence intervals.
 
 Read [Abstention evaluation](docs/ABSTENTION_EVALUATION.md) for the free and paid procedures.
+Read [Benchmark guard](docs/BENCHMARK_GUARD.md) for the cost and quota guard that ran beside the evaluator.
 
-## How the cost guard flows
-
-1. `src/arctic_qa/benchmark_guard.py` reads the benchmark journal, the shared ledger, and subscription quota reports.
-2. It compares the measurements with the rules in the guard code and the evaluation plan.
-3. If a rule fires, the guard writes one model to the pause file in `config/` or a run-specific control directory.
-4. The evaluator reads that file before each item and keeps paused trials pending.
-5. The guard writes its own events and cross-cycle memory inside its guard directory.
-
-The guard never stops an evaluator process.
-Read [Benchmark guard](docs/BENCHMARK_GUARD.md) before you operate it.
-
-## Repository map
+### Repository map
 
 | Path | Contents |
 | --- | --- |
-| [`src/arctic_qa/`](src/arctic_qa/README.md) | The Python package, command-line interface, pipeline, evaluator, guard, and viewers. |
+| [`data/`](data/arcticqa-v1/README.md) | The released items, conditions, responses and result tables. |
+| [`src/arctic_qa/`](src/arctic_qa/README.md) | The Python package, command-line interface, pipeline, evaluator, analysis, guard and viewers. |
 | [`tests/`](tests/README.md) | The executable contracts and end-to-end replay tests. |
-| [`schemas/`](schemas/README.md) | JSON Schemas for source records, progress records, provider answers, and exported items. |
-| [`config/`](config/README.md) | Versioned prompts, policies, prices, role maps, plans, and reviewed gates. |
-| [`fixtures/`](fixtures/README.md) | Small synthetic inputs, recorded quota samples, and labeled calibration sets. |
-| [`docs/`](docs/README.md) | Reproduction, operation, architecture, and method documents. |
+| [`schemas/`](schemas/README.md) | JSON Schemas for source records, progress records, provider answers and exported items. |
+| [`config/`](config/README.md) | Versioned prompts, policies, prices, role maps, plans and reviewed gates. |
+| [`fixtures/`](fixtures/README.md) | Small synthetic inputs, recorded quota samples and labeled calibration sets. |
+| [`docs/`](docs/README.md) | Reproduction, operation, architecture and method documents. |
 | [`research/`](research/README.md) | Historical reports and measurement files that support the paper. |
 | `flake.nix` and `flake.lock` | The pinned Nix development environment. |
 | `pyproject.toml` | The Python package metadata and test configuration. |
 | `CITATION.cff` | The machine-readable citation record. |
 | `LICENSE` | The MIT license. |
-| `.gitignore` | The exclusions for credentials, run state, caches, and local environments. |
-| `AGENTS.md`, `CLAUDE.md`, and `.claude/` | Contributor instructions for coding agents that do not affect the pipeline. |
+| `AGENTS.md`, `CLAUDE.md` | Contributor instructions for coding agents. They do not affect the pipeline. |
 
-## Data and credentials
+### Data root and credentials
 
-The code resolves its data root from `ARCTIC_QA_DATA_ROOT`.
-It resolves its credential directory from `ARCTIC_QA_CONFIG_DIR`.
-The defaults preserve the environment that produced the paper, but a new checkout can use any writable data root.
-
+The pipeline resolves its data root from `ARCTIC_QA_DATA_ROOT` and its credential directory from `ARCTIC_QA_CONFIG_DIR`.
+The defaults keep the environment that produced the paper, but a new checkout can use any writable data root.
 The pipeline writes only inside the `arctic-qa` namespace of that data root.
-The built-in example root must be a mounted drive.
-The CLI never falls back from that example root to the root disk.
+The built-in example root must be a mounted drive, and the CLI never falls back from it to the root disk.
+See [Reproduction: environment variables](docs/REPRODUCTION.md#3-environment-variables) for the complete list.
+The released data in `data/arcticqa-v1/` is not run state, and the pipeline never writes to it.
 
-See [Reproduction: environment variables](docs/REPRODUCTION.md#3-environment-variables) for the complete variable list.
-
-## Research limits
+### Research limits of the pipeline
 
 The system never emits `CERTAINLY_TRUE` or `CERTAINLY_FALSE`.
 It never converts model votes into a confidence probability.
 Source content is untrusted data, so provider prompts tell models not to obey instructions inside a paper.
 
-Read [Methods](docs/METHODS.md) for the evidence basis, label meanings, and claim limits.
-
 ## License and citation
 
 The code is available under the [MIT license](LICENSE).
+The data has no public license yet, because it is not released.
 Use [CITATION.cff](CITATION.cff) when you cite this repository.

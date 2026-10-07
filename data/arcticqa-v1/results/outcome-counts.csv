@@ -1,0 +1,9 @@
+model_id,model,responses,N0,N1,N2,N3,N4,N5
+gemini-3.8-flash,Gemini 3.8 Flash,1164,31,314,211,36,513,59
+gemini-3.7-flash,Gemini 3.7 Flash,1164,27,322,209,34,523,49
+claude-fable-5-1,Claude Fable 5.1,1164,10,256,111,207,308,272
+claude-opus-5,Claude Opus 5,1164,13,230,107,237,303,274
+claude-sonnet-5,Claude Sonnet 5,1164,13,175,120,278,283,295
+gpt-6-astra,ChatGPT Astra,1164,3,197,17,365,151,431
+gpt-5.6-sol,ChatGPT 5.6 Sol,1164,6,333,244,1,568,12
+gpt-5.6-terra,ChatGPT 5.6 Terra,1164,4,300,279,0,572,9

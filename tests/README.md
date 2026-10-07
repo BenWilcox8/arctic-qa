@@ -25,6 +25,7 @@ The package is not installed inside the Nix shell.
 Keep `PYTHONPATH=src` in each pytest command.
 
 Tests that need a private evidence bundle or the real corpus skip when its environment variable is absent.
+`test_paper_release.py` rebuilds `data/arcticqa-v1/` only when `ARCTIC_FINAL_SNAPSHOT_DIR` names the frozen evaluation snapshot.
 The [reproduction guide](../docs/REPRODUCTION.md#3-environment-variables) lists those variables.
 
 ## Test helpers

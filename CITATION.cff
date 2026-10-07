@@ -1,15 +1,19 @@
 cff-version: 1.2.0
-message: "If you use this software or the ArcticQA dataset, please cite it as below."
-title: "ArcticQA: a source-supported scientific question pipeline and abstention benchmark"
+message: "If you use this code, the ArcticQA dataset or the ArcticAbstain responses, please cite the paper below."
+title: "Arctic Questions, Missing Answers: code and data for the ArcticQA dataset and the ArcticAbstain benchmark"
 abstract: >-
-  ArcticQA builds source-supported multiple-choice and short-answer questions
-  from Arctic research papers, and measures how often a model abstains when no
-  listed option is correct. The pipeline records every paid model call in a
-  shared ledger, so each number in the paper has a receipt.
+  ArcticQA is a dataset of 194 multiple-choice questions built from primary
+  Arctic research papers, with automated checks of answer support and
+  distractor contradiction against source evidence. ArcticAbstain pairs each
+  question in an answer-present and an answer-absent condition, both with an
+  explicit abstention option. This repository holds the construction pipeline,
+  the evaluation code, the 9,312 recorded responses of eight models, and the
+  analysis that reproduces the paper tables. The items are machine-accepted and
+  not expert-verified.
 type: software
 authors:
   - family-names: Wilcox
-    given-names: Ben
+    given-names: Benjamin
 repository-code: "https://github.com/BenWilcox8/arctic-qa"
 license: MIT
 version: 0.1.0
@@ -20,3 +24,26 @@ keywords:
   - abstention
   - Arctic science
   - large language models
+preferred-citation:
+  type: article
+  title: "Arctic Questions, Missing Answers: A Dataset and Benchmark for LLM Abstention in Arctic Science"
+  year: 2026
+  authors:
+    - family-names: Wilcox
+      given-names: Benjamin
+      affiliation: "University of North Texas"
+    - family-names: Gao
+      given-names: Dawei
+      affiliation: "University of North Texas"
+    - family-names: Kathiravelu
+      given-names: Pradeeban
+      affiliation: "University of Alaska Anchorage"
+    - family-names: Causey
+      given-names: Douglas
+      affiliation: "University of Alaska Anchorage"
+    - family-names: Sha
+      given-names: Kewei
+      affiliation: "University of North Texas"
+    - family-names: Feng
+      given-names: Yunhe
+      affiliation: "University of North Texas"

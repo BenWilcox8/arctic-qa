@@ -1,0 +1,38 @@
+{
+  "release_id": "arcticqa-v1",
+  "snapshot_utc": "2026-09-17T18:02:42Z",
+  "builder": "src/arctic_qa/paper_release.py",
+  "builder_sha256": "42dd097462174af4b0ce66b1322e928515b44d807f2862abe91fa0df4d7fad44",
+  "renderer_sha256": "b9ca45124a24981870a872fb1f7322446f0429616f5f519c66c9a4b1b6ed406a",
+  "counts": {
+    "items": 194,
+    "condition_renderings": 388,
+    "responses": 9312,
+    "valid_responses": 9205,
+    "invalid_responses": 107,
+    "invalid_by_cause": {
+      "infrastructure_no_provider_answer": 100,
+      "model_format_violation": 3,
+      "provider_safeguard_refusal": 4
+    },
+    "models": 8,
+    "trials_per_condition": 3,
+    "excluded_items": 1
+  },
+  "source_files": 970,
+  "source_digest": "c9254bfaf002ab31db2b4456dd2cfc33866e503e730d4ed9e6d7caf8277bcccb",
+  "files": {
+    "conditions.jsonl": "6edfa49548df29c25194678352b156a5a7b142ad9f5e3b83c0f2fbdb9045ef1e",
+    "excluded-items.json": "5515df61e75f37b87e1c00162cd2c4f7d422fb7feb9d505996dcdf320bd2f532",
+    "items.jsonl": "0e3937ca19e2475e62bccd2148d33ca57536a7d0e36b544012fe217f4919aef1",
+    "prompt.json": "d042eafb31bfd635180905b64d938403d67875089a4b2755753fbba723c4db27",
+    "responses.csv": "d127e400bfe0a018317b4edcb0f430f34329522d989f28f56a8829e132d74f73",
+    "responses.jsonl": "078f8055db33095eaf82d1afebd112c18318c46b96512799b7fc6ee092c70efb",
+    "source-hashes.txt": "c9254bfaf002ab31db2b4456dd2cfc33866e503e730d4ed9e6d7caf8277bcccb"
+  },
+  "withheld": [
+    "source evidence passages and paper text (rights cleared only for private analysis)",
+    "provider receipts, request keys and harness command lines",
+    "credentials and absolute paths of the evaluation machine"
+  ]
+}
